@@ -385,8 +385,79 @@ test("edge: a quote, backslash or glob inside the script name does not hide an o
     assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
     assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
   }
+  // Found by the #62 security-reviewer: bun and deno run the script too (start-guard.mjs already counts them).
+  for (const cmd of [
+    "bun scripts/lanes/post-review.* owner ok x --pr 16",
+    "bun run scripts/lanes/p*.mjs owner ok x --pr 16",
+    "deno run -A scripts/lanes/post-revie?.mjs owner ok x --pr 16",
+    "deno.exe run scripts/lanes/post-$X.mjs $R --pr 16",
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
   // A glob that cannot match post-review.mjs is an ordinary argument, as in the project's own test command.
   for (const cmd of ['node --test "scripts/**/*.test.mjs"', "node --test scripts/*.test.mjs", "ls scripts/*.mjs", "node scripts/lanes/gate.mjs *"]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+// Found by the test-hunter (this round): NODE_RE only matched node/nodejs, so `bun`/`deno` running post-review.mjs
+// owner got no decision at all (a full bypass), and bun/deno's own `run` subcommand needed skipping to still find
+// the real script and reviewer behind it, mirroring start-guard.mjs's existing bun/deno coverage.
+test("edge: bun and deno run the owner command too, run subcommand included", () => {
+  for (const cmd of [
+    "bun scripts/lanes/post-review.mjs owner success x --pr 16",
+    "bun run scripts/lanes/post-review.mjs owner success x --pr 16",
+    "deno run scripts/lanes/post-review.mjs owner success x --pr 16",
+    "deno.exe run -A scripts/lanes/post-review.mjs owner success x --pr 16",
+    "bun run scripts/lanes/post-$X.mjs owner --pr 16",
+  ]) {
+    assert.ok(findOwnerInvocations(cmd).length >= 1, `not detected: ${cmd}`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  assert.deepEqual(findOwnerInvocations("bun run scripts/lanes/post-review.mjs owner success x --pr 16"), [{ pr: "16", standalone: false }]);
+  // Ordinary bun/deno commands, including its own `run` subcommand and flags, still get no decision.
+  for (const cmd of ["bun install", "bun run build", "bun run scripts/lanes/gate.mjs 16", "deno run --allow-read scripts/lanes/gate.mjs 16"]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+// Found by the test-hunter (this round): bash drops a `<`/`>` redirection target (and a bare fd number right before
+// it, as in `2>file`) from the program's argv. Before the fix, the lexer kept it as an ordinary word, so a target
+// placed before the reviewer word displaced "owner" out of the reviewer slot and the command got no decision at all.
+test("edge: a redirection target does not steal the reviewer slot and hide an owner command", () => {
+  for (const cmd of [
+    "node scripts/lanes/post-review.mjs > out.txt owner --pr 16",
+    "node scripts/lanes/post-review.mjs>out.txt owner --pr 16",
+    "node scripts/lanes/post-review.mjs 1> out.txt owner --pr 16",
+    "node scripts/lanes/post-review.mjs 2>/dev/null owner --pr 16",
+    "node scripts/lanes/post-review.mjs < in.txt owner --pr 16",
+    "node scripts/lanes/post-review.mjs >> out.txt owner --pr 16",
+    'node scripts/lanes/post-review.mjs > "out with space.txt" owner --pr 16',
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [{ pr: "16", standalone: false }], cmd);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // The target is dropped from the arguments but not from the scan: a command substitution in it runs, and a
+  // herestring feeds a shell its script.
+  for (const cmd of [
+    'echo x > "$(node scripts/lanes/post-review.mjs owner --pr 16)"',
+    "echo x > \"`node scripts/lanes/post-review.mjs owner --pr 16`\"",
+    'bash <<< "node scripts/lanes/post-review.mjs owner --pr 16"',
+    'bash <<< "node scripts/lanes/p*.mjs owner --pr 16"',
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  for (const cmd of ['echo x > "$OUT"', "gh pr list > $LOG 2>&1", "node scripts/lanes/gate.mjs 16 > \"$TMP/out file.txt\""]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+  // A redirection after the reviewer word already worked, and must keep working.
+  assert.deepEqual(findOwnerInvocations("node scripts/lanes/post-review.mjs owner --pr 16 > out.txt"), [{ pr: "16", standalone: false }]);
+  // Ordinary commands with a redirection (including a lone digit right before it, the fd-number form) still get no decision.
+  for (const cmd of ["gh pr view 2 > out.txt", "echo 2 > out.txt", "node scripts/lanes/gate.mjs --file a.json > out.txt"]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
     assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
   }
 });

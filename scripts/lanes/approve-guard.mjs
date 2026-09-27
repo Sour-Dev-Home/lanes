@@ -41,10 +41,40 @@ export function onUserPromptSubmit(input, now = Date.now()) {
 }
 
 /**
+ * The index just past a redirection target starting at `i` (after skipping leading whitespace). Quotes inside the
+ * target are skipped, not resolved.
+ */
+function skipRedirectTarget(cmd, i) {
+  let j = i;
+  while (j < cmd.length && /\s/.test(cmd[j])) j += 1;
+  while (j < cmd.length) {
+    const c = cmd[j];
+    if (c === "'") {
+      const end = cmd.indexOf("'", j + 1);
+      j = end === -1 ? cmd.length : end + 1;
+    } else if (c === '"') {
+      j += 1;
+      while (j < cmd.length && cmd[j] !== '"') j += cmd[j] === "\\" ? 2 : 1;
+      j += 1;
+    } else if (c === "\\") {
+      j += 2;
+    } else if (/[\s;&|()<>\n\r]/.test(c)) {
+      break;
+    } else {
+      j += 1;
+    }
+  }
+  return j;
+}
+
+/**
  * Shell-ish lexer: words (quotes and backslashes resolved, nothing expanded) grouped into simple commands split on
- * ; & | ( ) newlines and redirections. A segment whose output a `|` or `|&` feeds into the next one has `pipedOut` set
- * (`(echo …) | sh` marks the echo). Throws on an unterminated quote.
- * @returns {(string[] & { pipedOut?: true })[]}
+ * ; & | ( ) newlines and redirections. A redirection's target (and a bare fd number right before it, as in `2>file`)
+ * is never a word: bash does not pass it to the program, so it must not shift argument positions such as the
+ * reviewer word. Its raw text goes to the segment's `redirects` instead, since a `$(…)` in it still runs and a
+ * herestring (`bash <<< "…"`) is a script. A segment whose output a `|` or `|&` feeds into the next one has
+ * `pipedOut` set (`(echo …) | sh` marks the echo). Throws on an unterminated quote.
+ * @returns {(string[] & { pipedOut?: true, redirects?: { text: string, herestring: boolean }[] })[]}
  */
 function lex(cmd) {
   const segments = [[]];
@@ -91,14 +121,25 @@ function lex(cmd) {
       if (cmd[i + 1] === "&") i += 1;
     } else if (";&()\n\r".includes(c)) {
       endSegment();
-    } else if ("<>".includes(c) || /\s/.test(c)) {
+    } else if (c === "<" || c === ">") {
+      // A bare fd number immediately before `<`/`>` (as in `2>file`) is part of the operator, not a word.
+      if (word !== null && /^[0-9]+$/.test(word)) word = null;
+      else endWord();
+      let j = i + 1;
+      if (cmd[j] === c || cmd[j] === "&") j += 1; // >>, <<, >&, <&
+      const herestring = c === "<" && cmd[j] === "<";
+      if (herestring) j += 1;
+      const end = skipRedirectTarget(cmd, j);
+      (segments.at(-1).redirects ??= []).push({ text: cmd.slice(j, end), herestring });
+      i = end - 1;
+    } else if (/\s/.test(c)) {
       endWord();
     } else {
       word = (word ?? "") + c;
     }
   }
   endSegment();
-  return segments.filter((s) => s.length > 0);
+  return segments.filter((s) => s.length > 0 || s.redirects);
 }
 
 /** The reviewer and --pr of one post-review invocation, from the words after the script path. */
@@ -129,7 +170,10 @@ const ASSIGN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
 const VAR_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
 // What is left of a word after substitution that could still expand to anything.
 const UNRESOLVED_RE = /[$`]/;
-const NODE_RE = /^(node|nodejs)(\.exe)?$/i;
+// bun and deno run a script too (start-guard.mjs already counts them for the analogous concern); each takes a
+// `run` subcommand ahead of its options and script, which is not itself an option or the script.
+const NODE_RE = /^(node|nodejs|bun|deno)(\.exe)?$/i;
+const RUNS_VIA_RUN_RE = /^(bun|deno)(\.exe)?$/i;
 // Commands that only print, list or search their arguments: a "node" among them is never run. Every other command
 // word may be a wrapper (env, sudo, time, xargs, …), so a "node" behind it counts.
 const NON_RUNNING_COMMANDS = new Set(["echo", "printf", "grep", "egrep", "fgrep", "rg", "ls", "which", "where", "whereis", "type", "cat", "head", "tail", "wc", "file", "stat", "man"]);
@@ -233,6 +277,17 @@ const unquoted = (s) => s.replace(/['"\\]/g, "");
 /** The command word of a simple command, without its directory. */
 const commandName = (plain) => plain[0]?.split(/[\\/]/).at(-1);
 
+/**
+ * A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own. One that still holds
+ * `$` or a glob may splice a name inside it, so it is scanned too. True when `w` was such a script.
+ */
+function scanNested(w, depth, out) {
+  if (!/[\s;&|()<>]/.test(w) || !/post-review|[$`*?[{]/i.test(unquoted(w))) return false;
+  if (depth >= MAX_DEPTH) out.push({ pr: undefined, standalone: false });
+  else scan(w, depth + 1, out);
+  return true;
+}
+
 function scan(cmd, depth, out) {
   let segments;
   try {
@@ -259,14 +314,25 @@ function scan(cmd, depth, out) {
     }
     plain.forEach((p, at) => {
       if ((at > 0 && !runsArgs) || !NODE_RE.test(p.split(/[\\/]/).at(-1))) return;
-      for (let j = at + 1; j <= nodeScriptEnd(plain, at); j += 1) nodeRange.add(j);
+      // bun/deno's own `run` subcommand sits ahead of the options and script; skip over it before scanning those.
+      const start = RUNS_VIA_RUN_RE.test(p.split(/[\\/]/).at(-1)) && plain[at + 1] === "run" ? at + 1 : at;
+      for (let j = start + 1; j <= nodeScriptEnd(plain, start); j += 1) nodeRange.add(j);
     });
+    // A redirection target is no argument, but a herestring is a script and a quoted `$(…)` or backtick in any other
+    // target runs. A plain file target ("$TMP/out file.txt") is neither.
+    for (const { text, herestring } of segments[k].redirects ?? []) {
+      if (!herestring && !/\$\(|`/.test(text)) continue;
+      let words;
+      try {
+        words = lex(text).flat();
+      } catch {
+        words = [text];
+      }
+      for (const w of words) scanNested(w, depth, out);
+    }
     plain.forEach((w, i) => {
-      if (/[\s;&|()<>]/.test(w) && /post-review|[$`*?[{]/i.test(unquoted(w))) {
-        // A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own. One that still
-        // holds `$` or a glob may splice a name inside it, so it is scanned too.
-        if (depth >= MAX_DEPTH) out.push({ pr: undefined, standalone: false });
-        else scan(w, depth + 1, out);
+      if (scanNested(w, depth, out)) {
+        // Scanned as a command of its own.
       } else if (POST_REVIEW_RE.test(w)) {
         const { reviewer, pr } = readPostReviewArgs(plain.slice(i + 1));
         // Fail closed: a reviewer word that could expand to anything counts as the owner.
