@@ -245,8 +245,20 @@ test("edge: spliced and unresolved forms behind wrappers, empty values and odd r
     "X=review; sh -c 'sh -c \"node scripts/lanes/post-$X.mjs owner\"'",
   ];
   for (const cmd of denied) assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
-  // A later assignment overrides an earlier one, and a variable resolved to another script is not an owner command.
-  assert.deepEqual(findOwnerInvocations("X=review; X=gate; node scripts/lanes/post-$X.mjs 16"), []);
+  // A variable resolved to another script is not an owner command. One assigned the same value twice is still resolved.
+  assert.deepEqual(findOwnerInvocations("X=gate; X=gate; node scripts/lanes/$X.mjs 16"), []);
+  // Found by the #62 security-reviewer: the lexer cannot tell a sequence from exclusive branches, so a name given two
+  // different values is ambiguous and stays unresolved (fail closed), whichever comes last in the text.
+  for (const cmd of [
+    "X=review; X=gate; node scripts/lanes/post-$X.mjs 16",
+    "true && R=own || R=xyz; node scripts/lanes/post-review.mjs ${R}er --pr 16",
+    "if true; then R=own; else R=xyz; fi; node scripts/lanes/post-review.mjs ${R}er --pr 16",
+    "true && X=review || X=gate; node scripts/lanes/post-$X.mjs owner --pr 16",
+    "case a in a) S=scripts/lanes/post-review.mjs;; *) S=scripts/lanes/gate.mjs;; esac; node $S owner --pr 16",
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
   assert.deepEqual(findOwnerInvocations("X=review; node scripts/lanes/post-$X.mjs test-hunter skipped x"), []);
   // The plain owner command with a grant is still allowed: in-word substitution does not touch it.
   assert.equal(decidePreToolUse(bash(OWNER), grant(), NOW).decision, "allow");
@@ -457,6 +469,29 @@ test("edge: a redirection target does not steal the reviewer slot and hide an ow
   assert.deepEqual(findOwnerInvocations("node scripts/lanes/post-review.mjs owner --pr 16 > out.txt"), [{ pr: "16", standalone: false }]);
   // Ordinary commands with a redirection (including a lone digit right before it, the fd-number form) still get no decision.
   for (const cmd of ["gh pr view 2 > out.txt", "echo 2 > out.txt", "node scripts/lanes/gate.mjs --file a.json > out.txt"]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+// test-hunter (#62 review): process substitution `<(…)`/`>(…)` is not a case the redirect handling models on
+// purpose (skipRedirectTarget stops at the `(`), so its content falls through to the generic `(`/`)` segment
+// splitting and is scanned as a command of its own either way. An unrecognized node option that consumes the next
+// word as its value must not let that word's true position (the spliced script) fall outside the cumulative range
+// nodeScriptEnd feeds into nodeRange.
+test("edge: process substitution and an unrecognized valued node flag do not hide an owner command (#62 review)", () => {
+  for (const cmd of [
+    "diff <(node scripts/lanes/post-review.mjs owner --pr 16) other.txt",
+    "diff other.txt <(node scripts/lanes/post-review.mjs owner --pr 16)",
+    "tee >(node scripts/lanes/post-review.mjs owner --pr 16) < in.txt",
+    "node --not-a-real-flag scripts/lanes/post-$X.mjs owner --pr 16",
+    "node --not-a-real-flag scripts/lanes/post-review.mjs owner --pr 16",
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // Ordinary process substitution and an ordinary unrecognized flag still get no decision.
+  for (const cmd of ["diff <(sort a.txt) <(sort b.txt)", "node --not-a-real-flag scripts/lanes/gate.mjs 16"]) {
     assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
     assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
   }

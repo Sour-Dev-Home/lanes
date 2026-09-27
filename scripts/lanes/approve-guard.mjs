@@ -208,15 +208,23 @@ function nodeScriptEnd(plain, nodeAt) {
   return plain.length - 1;
 }
 
-/** `NAME=value` words anywhere in the command's segments, in order, so a later assignment overrides an earlier one. */
+/**
+ * `NAME=value` words anywhere in the command's segments. The lexer cannot tell a sequence from exclusive branches
+ * (`true && R=own || R=xyz`, if/else, case), so a name given two different values is left out: its references stay
+ * unresolved and fail closed.
+ */
 function collectAssignments(segments) {
   const assignments = {};
+  const ambiguous = new Set();
   for (const words of segments) {
     for (const w of words) {
       const m = ASSIGN_RE.exec(w);
-      if (m) assignments[m[1]] = m[2];
+      if (!m) continue;
+      if (Object.prototype.hasOwnProperty.call(assignments, m[1]) && assignments[m[1]] !== m[2]) ambiguous.add(m[1]);
+      assignments[m[1]] = m[2];
     }
   }
+  for (const name of ambiguous) delete assignments[name];
   return assignments;
 }
 
