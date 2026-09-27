@@ -58,24 +58,27 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [] } = {}) {
     // A cwd only the main checkout holds is a lane folder whose worktree is gone: that session stands alone below.
     if (!holder || holder.w.main) continue;
     placed.add(s);
-    sessionOf.set(holder.w, s);
+    // More than one session can share a worktree (a stale entry beside a fresh one); keep all of them so a
+    // still-working one is never shadowed by an idle one that happens to sort later.
+    if (!sessionOf.has(holder.w)) sessionOf.set(holder.w, []);
+    sessionOf.get(holder.w).push(s);
   }
 
   const plan = [];
   for (const w of worktrees) {
     const issue = Number(LANE_BRANCH.exec(w.branch ?? "")?.[1]);
     if (!issue) continue;
-    const session = sessionOf.get(w);
+    const sessionsHere = sessionOf.get(w) ?? [];
     const entry = { branch: w.branch, issue };
     const merge = mergedPr(prs.filter((p) => p.headRefName === w.branch), w.head);
     if (merge.skip) plan.push({ ...entry, skip: merge.skip });
     else if (w.main) plan.push({ ...entry, skip: "checked out in the main worktree" });
     else if (w.dirty === null) plan.push({ ...entry, skip: "cannot read worktree status" });
     else if (w.dirty) plan.push({ ...entry, skip: "dirty worktree" });
-    else if (session?.state === "working") plan.push({ ...entry, skip: "session still working" });
+    else if (sessionsHere.some((s) => s.state === "working")) plan.push({ ...entry, skip: "session still working" });
     else {
       const steps = [];
-      if (session) steps.push({ cmd: "claude", args: ["rm", session.id] });
+      for (const s of sessionsHere) steps.push({ cmd: "claude", args: ["rm", s.id] });
       // `claude rm` may already have removed the worktree, so these two run only if their target is still there.
       if (w.path) steps.push({ cmd: "git", args: ["worktree", "remove", w.path], onlyIf: { path: w.path } });
       steps.push({ cmd: "git", args: ["branch", "-D", w.branch], onlyIf: { branch: w.branch } });

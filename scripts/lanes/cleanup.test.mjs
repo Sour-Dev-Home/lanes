@@ -173,6 +173,33 @@ test("edge: a branch merged twice is cleaned when its tip equals either merged h
   assert.equal(entry.pr, 96);
 });
 
+test("edge: two sessions sharing a worktree: a working one blocks cleanup even when an idle one is listed later", () => {
+  const [entry] = planCleanup({
+    worktrees: [wt("issue-7-x")],
+    sessions: [session("s7a", "issue-7-x", { state: "working" }), session("s7b", "issue-7-x", { state: "idle" })],
+    prs: [merged("issue-7-x")],
+  });
+  assert.equal(entry.skip, "session still working");
+});
+
+test("edge: two idle sessions sharing a worktree are both removed with claude rm", () => {
+  const [entry] = planCleanup({
+    worktrees: [wt("issue-7-x")],
+    sessions: [session("s7a", "issue-7-x"), session("s7b", "issue-7-x")],
+    prs: [merged("issue-7-x")],
+  });
+  assert.deepEqual(cmds(entry), ["claude rm s7a", "claude rm s7b", `git worktree remove ${ROOT}/.claude/worktrees/issue-7-x`, "git branch -D issue-7-x"]);
+});
+
+test("edge: a session's cwd matches its worktree case-insensitively on a Windows drive path", () => {
+  const [entry] = planCleanup({
+    worktrees: [{ path: "C:/Repo/.claude/worktrees/issue-7-x", branch: "issue-7-x", head: HEAD, dirty: false }],
+    sessions: [{ id: "s7", cwd: "c:\\repo\\.claude\\worktrees\\issue-7-x", issue: 7, state: "working" }],
+    prs: [merged("issue-7-x")],
+  });
+  assert.equal(entry.skip, "session still working");
+});
+
 test("edge: empty inputs plan nothing", () => {
   assert.deepEqual(planCleanup({ worktrees: [], sessions: [], prs: [] }), []);
   assert.deepEqual(planCleanup({}), []);
