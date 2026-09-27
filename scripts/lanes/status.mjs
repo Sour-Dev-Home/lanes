@@ -1,6 +1,7 @@
 // /status and the nightly digest: what waits on the owner, what is in flight, what is ready, what merged.
 // Usage: node scripts/lanes/status.mjs [--since 24h] [--json]
 import { execFileSync } from "node:child_process";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GATE_CONTEXT, parseIssueForm, parsePrBody } from "./lib.mjs";
 
@@ -102,19 +103,76 @@ export function gateDescriptions(reply) {
   return out;
 }
 
+// A background session on a permission prompt reads, in `claude agents --json`:
+// { status: "waiting", waitingFor: "permission prompt", state: "blocked" }. A lane that ended its turn is also
+// `blocked`, without `waitingFor`, so both fields are checked.
+const PROMPT_STATE = "blocked";
+const PROMPT_WAITING_FOR = "permission prompt";
+
+const normalPath = (p) => {
+  const slashed = p.replace(/\\/g, "/").replace(/\/+$/, "");
+  return /^[a-z]:\//i.test(slashed) ? slashed.toLowerCase() : slashed;
+};
+
+// Issue N → `{ id, state, waiting }` for each background session whose cwd is inside a worktree of `repoRoot`
+// named `issue-<N>-…`. Two sessions on one issue: the most recently started wins.
+export function laneSessions(agents, repoRoot) {
+  const root = `${normalPath(repoRoot)}/`;
+  const found = new Map();
+  for (const a of agents) {
+    if (a?.kind !== "background" || typeof a.id !== "string" || typeof a.cwd !== "string") continue;
+    const cwd = normalPath(a.cwd);
+    if (!cwd.startsWith(root)) continue;
+    const number = cwd.slice(root.length).split("/").map((s) => /^issue-(\d+)-./.exec(s)?.[1]).find(Boolean);
+    if (!number) continue;
+    const previous = found.get(Number(number));
+    if (previous && previous.startedAt > (a.startedAt ?? 0)) continue;
+    found.set(Number(number), { startedAt: a.startedAt ?? 0, id: a.id, state: a.state, waiting: a.state === PROMPT_STATE && a.waitingFor === PROMPT_WAITING_FOR });
+  }
+  return new Map([...found].map(([n, { startedAt, ...s }]) => [n, s]));
+}
+
+const runClaudeAgents = () => execFileSync("claude", ["agents", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
+
+// `{ sessions }` from `claude agents --json`, or `{ sessions: empty, sessionsUnavailable: reason }` when it cannot be read.
+export function loadSessions(repoRoot, run = runClaudeAgents) {
+  let stdout;
+  try {
+    stdout = run();
+  } catch (err) {
+    const reason = err.code === "ENOENT" ? "claude not found" : typeof err.status === "number" ? `claude agents --json exited ${err.status}` : `claude agents --json failed: ${err.code ?? err.message}`;
+    return { sessions: new Map(), sessionsUnavailable: reason };
+  }
+  let agents;
+  try {
+    agents = JSON.parse(stdout);
+  } catch {}
+  if (!Array.isArray(agents)) return { sessions: new Map(), sessionsUnavailable: "claude agents --json printed invalid JSON" };
+  return { sessions: laneSessions(agents, repoRoot) };
+}
+
+const withSession = (item, session) => {
+  if (!session) return item;
+  const note = session.waiting ? `waiting on a prompt: claude attach ${session.id}` : [item.note, `session ${session.id}`].filter(Boolean).join(" — ");
+  return { ...item, note, session: { id: session.id, state: session.state } };
+};
+
 // `issues` is every open issue (with body); only those labelled `ready` are listed, the rest only block.
 // `mergeQueue` is the output of mergeQueueEntries (null or missing: no merge queue); `gateDescriptions` that of
-// gateDescriptions (missing: the rollup's own descriptions only).
-export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map() }) {
+// gateDescriptions (missing: the rollup's own descriptions only). `sessions` and `sessionsUnavailable` come from
+// loadSessions (missing: no sessions).
+export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map(), sessions = new Map(), sessionsUnavailable }) {
   const out = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
   const taken = new Set();
   const queuePosition = new Map((mergeQueue ?? []).map((e) => [e.number, e.position]));
   for (const pr of prs) {
-    for (const ref of pr.closingIssuesReferences ?? []) taken.add(ref.number);
+    const refs = (pr.closingIssuesReferences ?? []).map((ref) => ref.number);
+    for (const n of refs) taken.add(n);
+    const session = refs.map((n) => sessions.get(n)).find(Boolean);
     const { stage, note } = prStage(pr, queuePosition.get(pr.number), gateDescriptions.get(pr.number));
     const needs = (parsePrBody(pr.body).sections["needs the owner"] ?? "").trim();
-    const item = { number: pr.number, title: pr.title, stage, note };
-    if (stage === "owner") out.waitingOnOwner.push(item);
+    const item = withSession({ number: pr.number, title: pr.title, stage, note }, session);
+    if (stage === "owner" || session?.waiting) out.waitingOnOwner.push(item);
     else if (needs && !/^nothing\b/i.test(needs)) out.waitingOnOwner.push({ ...item, note: `needs: ${needs.split("\n")[0]}` });
     else out.inFlight.push(item);
   }
@@ -122,6 +180,12 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
   const blockedByOf = new Map([...formOf].map(([n, f]) => [n, f.blockedBy]));
   for (const issue of issues) {
     const labels = (issue.labels ?? []).map((l) => l.name);
+    const session = taken.has(issue.number) ? undefined : sessions.get(issue.number);
+    if (session) {
+      const item = withSession({ number: issue.number, title: issue.title, stage: "running", note: "" }, session);
+      (session.waiting ? out.waitingOnOwner : out.inFlight).push(item);
+      continue;
+    }
     if (taken.has(issue.number) || !labels.includes("ready")) continue;
     const tier = labels.find((n) => n.startsWith("tier:"))?.slice(5) ?? "?";
     const item = { number: issue.number, title: issue.title, stage: tier, note: "" };
@@ -131,6 +195,7 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
   }
   markParallel(out.ready, formOf);
   for (const pr of merged) out.merged.push({ number: pr.number, title: pr.title, stage: "merged", note: "" });
+  if (sessionsUnavailable) out.sessionsUnavailable = sessionsUnavailable;
   return out;
 }
 
@@ -143,6 +208,7 @@ export function render(summary, sinceLabel) {
     block("READY TO START", summary.ready, true, "(parallel is a heuristic read from each issue's Scope and Interface contract, not a guarantee)"),
     block("BLOCKED", summary.blocked ?? []),
     block(`MERGED, last ${sinceLabel}`, summary.merged, false),
+    ...(summary.sessionsUnavailable ? [`(background sessions unavailable: ${summary.sessionsUnavailable})`] : []),
   ].join("\n\n");
 }
 
@@ -169,6 +235,8 @@ function main(argv = process.argv.slice(2)) {
     merged: gh(["pr", "list", "--state", "merged", "--search", `merged:>=${since}`, "--limit", "100", "--json", "number,title"]),
     mergeQueue: mergeQueueEntries(reply),
     gateDescriptions: gateDescriptions(reply),
+    // Lanes run in worktrees of the main checkout, so the root is the common git dir's parent, not --show-toplevel.
+    ...loadSessions(dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim())),
   };
   // A blocker missing from a truncated list would read as closed, so refuse rather than list a blocked issue as ready.
   if (data.issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
