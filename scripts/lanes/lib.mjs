@@ -260,8 +260,35 @@ export function trustedStatuses(statuses) {
   return (Array.isArray(statuses) ? statuses : []).filter((s) => !(String(s?.context ?? "").startsWith("review/") && isBotStatus(s)));
 }
 
+const NEEDS_NOTHING = /^nothing\.?$/i;
+const BLOCKING = ["critical", "important"];
+
+/**
+ * Why a full-tier PR still needs the owner, or null when it may merge unattended. `verdicts` are the parsed verdict
+ * comments (`parseVerdictComment`) whose author already passed `authorCanWrite`, oldest first; only those bound to
+ * `headSha` count, and the newest per reviewer is its verdict for this head.
+ */
+function fullTierBlocker({ pr, cls, required, verdicts, headSha }) {
+  if (pr.contractChange === "breaking") return "breaking contract change";
+  if (cls.sensitive) return "sensitive path";
+  const head = typeof headSha === "string" ? headSha.toLowerCase() : null;
+  const forHead = (Array.isArray(verdicts) ? verdicts : []).filter((v) => head !== null && v?.sha === head && v.verdict);
+  for (const v of forHead) {
+    const findings = Array.isArray(v.verdict.findings) ? v.verdict.findings : [];
+    const unfixed = findings.find((f) => BLOCKING.includes(f?.severity) && f?.fixed !== true);
+    if (unfixed) return `unfixed ${unfixed.severity} finding from ${v.reviewer}`;
+  }
+  const newest = new Map(forHead.map((v) => [v.reviewer, v]));
+  for (const name of required) {
+    const v = newest.get(name);
+    if (!v) return `no verdict for head from ${name}`;
+    if (v.verdict.verdict !== "success") return `verdict from ${name} is not success`;
+  }
+  return null;
+}
+
 /** What `lanes/gate` should say for a PR head. Pure: every input is passed in. */
-export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, files, statuses, config }) {
+export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
@@ -292,7 +319,8 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
     return fail("a breaking contract change needs the issue label contract:breaking");
   }
   const latest = latestByContext(trustedStatuses(statuses));
-  for (const name of requiredReviewers(tier, cls)) {
+  const required = requiredReviewers(tier, cls);
+  for (const name of required) {
     const s = latest.get(reviewContext(name));
     if (!s) return { state: "pending", description: `waiting for review/${name}`, stage: "review" };
     if (s.state !== "success") return fail(`review/${name} is ${s.state}`, "review");
@@ -303,7 +331,12 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
   if (latest.get(reviewContext("owner"))?.state === "success") {
     return { state: "success", description: "approved by owner", stage: "ready" };
   }
-  const eligible = tier === "skip" || (tier === "quick" && !cls.contract && !cls.sensitive);
-  if (eligible) return { state: "success", description: `unattended-eligible (tier:${tier}), reviews in`, stage: "ready" };
-  return { state: "pending", description: "waiting on owner (/approve)", stage: "owner" };
+  const waitOwner = (reason) => ({ state: "pending", description: `waiting on owner (/approve) (${reason})`, stage: "owner" });
+  if (!NEEDS_NOTHING.test(pr.sections["needs the owner"] ?? "")) return waitOwner("needs the owner");
+  let blocker = null;
+  if (tier === "full") blocker = fullTierBlocker({ pr, cls, required, verdicts, headSha });
+  else if (tier === "quick" && cls.contract) blocker = "contract change";
+  else if (tier === "quick" && cls.sensitive) blocker = "sensitive path";
+  if (blocker) return waitOwner(blocker);
+  return { state: "success", description: `unattended-eligible (tier:${tier}), reviews in`, stage: "ready" };
 }

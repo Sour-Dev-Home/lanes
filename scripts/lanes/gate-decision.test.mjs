@@ -78,8 +78,125 @@ test("sensitive quick change waits on the owner, then passes with review/owner",
   assert.equal(run({ files, statuses: [...reviews, st("review/owner")] }).state, "success");
 });
 
-test("full tier always waits on the owner", () => {
+test("full tier without verdict comments waits on the owner", () => {
   assert.equal(run({ issueLabels: ["tier:full", "ready"], statuses: [st("review/test-hunter")] }).stage, "owner");
+});
+
+// #27: a clean full-tier PR merges unattended on trusted, head-bound verdicts
+const HEAD = "a".repeat(40);
+const OLD = "b".repeat(40);
+const verdict = (reviewer, { sha = HEAD, result = "success", findings = [] } = {}) => ({
+  reviewer,
+  sha,
+  verdict: { reviewer, verdict: result, summary: "s", criteria: [], findings },
+});
+const full = (over) =>
+  run({ issueLabels: ["tier:full", "ready"], headSha: HEAD, statuses: [st("review/test-hunter")], verdicts: [verdict("test-hunter")], ...over });
+const waits = (d, reason) => {
+  assert.equal(d.state, "pending");
+  assert.equal(d.stage, "owner");
+  assert.equal(d.description, `waiting on owner (/approve) (${reason})`);
+};
+
+test("a clean full PR passes unattended", () => {
+  assert.deepEqual(full({}), { state: "success", description: "unattended-eligible (tier:full), reviews in", stage: "ready" });
+});
+
+test("full: 'Needs the owner' accepts nothing case-insensitively with a trailing period", () => {
+  for (const v of ["Nothing", "NOTHING.", "nothing."]) {
+    assert.equal(full({ prBody: body().replace("## Needs the owner\nnothing", `## Needs the owner\n${v}`) }).state, "success", v);
+  }
+});
+
+test("full: anything else in 'Needs the owner' waits", () => {
+  waits(full({ prBody: body().replace("## Needs the owner\nnothing", "## Needs the owner\ndecide the name") }), "needs the owner");
+  waits(full({ prBody: body().replace("## Needs the owner\nnothing", "## Needs the owner\nnothing, but check X") }), "needs the owner");
+});
+
+test("full: a sensitive path waits", () => {
+  const files = [".github/workflows/x.yml"];
+  const statuses = [st("review/test-hunter"), st("review/security-reviewer")];
+  waits(full({ files, statuses, verdicts: [verdict("test-hunter"), verdict("security-reviewer")] }), "sensitive path");
+});
+
+test("full: a breaking contract change waits; additive passes", () => {
+  const files = ["contracts/x.ts"];
+  const statuses = [st("review/test-hunter"), st("review/architecture-advisor")];
+  const verdicts = [verdict("test-hunter"), verdict("architecture-advisor")];
+  const labels = ["tier:full", "ready", "contract:breaking"];
+  waits(full({ prBody: body("breaking"), issueLabels: labels, files, statuses, verdicts }), "breaking contract change");
+  assert.equal(full({ prBody: body("additive"), files, statuses, verdicts }).state, "success");
+});
+
+test("full: a required reviewer without a verdict for the head waits", () => {
+  waits(full({ verdicts: [] }), "no verdict for head from test-hunter");
+  waits(full({ verdicts: undefined }), "no verdict for head from test-hunter");
+});
+
+test("full: a failure verdict waits", () => {
+  waits(full({ verdicts: [verdict("test-hunter", { result: "failure" })] }), "verdict from test-hunter is not success");
+});
+
+test("full: an unfixed critical or important finding waits; minor or fixed ones do not", () => {
+  for (const severity of ["critical", "important"]) {
+    const findings = [{ severity, file: "a", line: 1, summary: "x", fixed: false }];
+    waits(full({ verdicts: [verdict("test-hunter", { findings })] }), `unfixed ${severity} finding from test-hunter`);
+  }
+  const ok = [
+    { severity: "minor", summary: "x", fixed: false },
+    { severity: "critical", summary: "x", fixed: true },
+  ];
+  assert.equal(full({ verdicts: [verdict("test-hunter", { findings: ok })] }).state, "success");
+});
+
+test("full: an unfixed finding in a non-required reviewer's head verdict also waits", () => {
+  const findings = [{ severity: "important", summary: "x", fixed: false }];
+  waits(full({ verdicts: [verdict("test-hunter"), verdict("ui-reviewer", { result: "failure", findings })] }), "unfixed important finding from ui-reviewer");
+});
+
+test("full: a verdict for an older SHA is ignored", () => {
+  waits(full({ verdicts: [verdict("test-hunter", { sha: OLD })] }), "no verdict for head from test-hunter");
+});
+
+test("full: an old-format verdict without a SHA is ignored", () => {
+  waits(full({ verdicts: [verdict("test-hunter", { sha: null })] }), "no verdict for head from test-hunter");
+});
+
+test("full: a head SHA compare is case-insensitive, and a missing head SHA matches nothing", () => {
+  assert.equal(full({ headSha: HEAD.toUpperCase() }).state, "success");
+  waits(full({ headSha: undefined, verdicts: [verdict("test-hunter", { sha: null })] }), "no verdict for head from test-hunter");
+});
+
+test("full: the newest verdict per reviewer for the head wins", () => {
+  const older = verdict("test-hunter", { result: "failure" });
+  assert.equal(full({ verdicts: [older, verdict("test-hunter")] }).state, "success");
+  waits(full({ verdicts: [verdict("test-hunter"), older] }), "verdict from test-hunter is not success");
+});
+
+test("full: a trusted success status is still required even with a verdict comment", () => {
+  assert.equal(full({ statuses: [] }).stage, "review");
+});
+
+test("full: review/owner success still passes a blocked PR", () => {
+  const d = full({ verdicts: [], statuses: [st("review/test-hunter"), st("review/owner")] });
+  assert.deepEqual(d, { state: "success", description: "approved by owner", stage: "ready" });
+});
+
+test("full: a blocked PR is never a failure", () => {
+  const prBody = body().replace("## Needs the owner\nnothing", "## Needs the owner\nyes");
+  assert.equal(full({ prBody, verdicts: [] }).state, "pending");
+});
+
+test("quick and skip PRs that need the owner wait", () => {
+  const prBody = body().replace("## Needs the owner\nnothing", "## Needs the owner\npick a name");
+  waits(run({ prBody, statuses: [st("review/test-hunter")] }), "needs the owner");
+  waits(run({ prBody, issueLabels: ["tier:skip", "ready"], files: ["docs/a.md"] }), "needs the owner");
+  assert.equal(run({ prBody, statuses: [st("review/test-hunter"), st("review/owner")] }).state, "success");
+});
+
+test("gateDecision does not mutate its verdicts input", () => {
+  const verdicts = Object.freeze([Object.freeze(verdict("test-hunter", { result: "failure" })), Object.freeze(verdict("test-hunter"))]);
+  assert.equal(full({ verdicts }).state, "success");
 });
 
 test("a new head without statuses has no owner approval", () => {
