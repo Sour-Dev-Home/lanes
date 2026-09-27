@@ -293,6 +293,18 @@ test("edge: a node flag that takes a value does not hide a spliced script word (
   assert.deepEqual(findOwnerInvocations("node -r ./setup.js scripts/lanes/gate.mjs $PR"), []);
 });
 
+// Found by the #62 test-hunter (round 2): an earlier word equal to "node" (a `sudo -u node` or `chown node` target)
+// must not stand in for the real interpreter and leave the spliced script word after it unchecked.
+test("edge: a wrapper argument that itself looks like the node binary must not hide a spliced script/reviewer word (#62 finding)", () => {
+  for (const cmd of [
+    "sudo -u node node scripts/lanes/post-$X.mjs $R --pr 16",
+    "chown node node scripts/lanes/post-$X.mjs $R --pr 16",
+  ]) {
+    assert.equal(findOwnerInvocations(cmd).length, 1, `not detected: ${cmd}`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+});
+
 test("the CLI answers deny, never crashes, when it cannot evaluate a PreToolUse call", () => {
   const cli = (event, input) => spawnSync(process.execPath, ["scripts/lanes/approve-guard.mjs", event], { input, encoding: "utf8" });
   for (const [event, input] of [["pre-tool-use", "{oops"], ["bogus-event", JSON.stringify(bash(OWNER))]]) {

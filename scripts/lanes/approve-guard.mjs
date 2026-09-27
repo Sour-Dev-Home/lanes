@@ -189,9 +189,13 @@ function scan(cmd, depth, out) {
     const words = resolveVars(rawWords, assignments);
     // The command word and the script node runs (also behind env, time or sudo), counted without `NAME=value` words.
     const plain = words.filter((w) => !ASSIGN_RE.test(w));
-    const nodeAt = plain.findIndex((p) => NODE_RE.test(p.split(/[\\/]/).at(-1)));
     // Node's options and the script: any of them that still holds `$` or a backtick could load or be post-review.mjs.
-    const scriptEnd = nodeAt === -1 ? -1 : nodeScriptEnd(plain, nodeAt);
+    // Every word that looks like node counts, since an earlier one may only be an argument (`sudo -u node node …`).
+    const nodeRange = new Set();
+    plain.forEach((p, at) => {
+      if (!NODE_RE.test(p.split(/[\\/]/).at(-1))) return;
+      for (let j = at + 1; j <= nodeScriptEnd(plain, at); j += 1) nodeRange.add(j);
+    });
     plain.forEach((w, i) => {
       if (/[\s;&|()<>]/.test(w) && /post-review|[$`]/i.test(w)) {
         // A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own. One that still
@@ -202,7 +206,7 @@ function scan(cmd, depth, out) {
         const { reviewer, pr } = readPostReviewArgs(plain.slice(i + 1));
         // Fail closed: a reviewer word that could expand to anything counts as the owner.
         if (reviewer === "owner" || (reviewer !== undefined && /[$`*?[]/.test(reviewer))) out.push({ pr, standalone: false });
-      } else if (UNRESOLVED_RE.test(w) && (i === 0 || (i > nodeAt && i <= scriptEnd))) {
+      } else if (UNRESOLVED_RE.test(w) && (i === 0 || nodeRange.has(i))) {
         // The command word, or a node option or the script node runs, that could still expand to post-review.mjs:
         // fail closed.
         out.push({ pr: undefined, standalone: false });
