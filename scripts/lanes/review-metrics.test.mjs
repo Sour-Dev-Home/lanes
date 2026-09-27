@@ -247,6 +247,28 @@ test("edge: a PR merged exactly at the window start is inside it", () => {
   assert.equal(collectVerdicts([pr], { now: NOW, days: 7 }).length, 1);
 });
 
+test("edge: a PR merged exactly at 'now' is inside the window", () => {
+  const pr = normalizePr(node([comment(verdict("test-hunter"))], { mergedAt: NOW.toISOString() }));
+  assert.equal(collectVerdicts([pr], { now: NOW, days: 7 }).length, 1);
+});
+
+// Not covered by the acceptance criteria or the listed edge cases above: a second review round on the same PR
+// posts a second verdict comment from the same reviewer, which the file's own header comment defines as a second
+// run. Nothing dedupes by reviewer, so it must count twice, not once.
+test("edge: two verdict comments from the same reviewer on one PR count as two separate runs", () => {
+  const v1 = verdict("test-hunter", { findings: [finding("critical")], metrics: { tier: "full", minutes: 10, tokens: 1000 } });
+  const v2 = verdict("test-hunter", { findings: [], metrics: { tier: "full", minutes: 5, tokens: 500 } });
+  const pr = normalizePr(node([comment(v1), comment(v2)]));
+  const entries = collectVerdicts([pr], { now: NOW, days: 7 });
+  assert.equal(entries.length, 2);
+  const r = group(summarize(entries), "full", "test-hunter");
+  assert.equal(r.runs, 2);
+  assert.equal(r.realFindings, 1);
+  assert.equal(r.runsWithNoRealFinding, 1);
+  assert.deepEqual(r.minutes, { median: 7.5, total: 15 });
+  assert.deepEqual(r.tokens, { median: 750, total: 1500 });
+});
+
 test("edge: parseGraphql never echoes the raw response", () => {
   assert.throws(() => parseGraphql("secret <html>"), (e) => !e.message.includes("secret"));
   assert.throws(() => parseGraphql('{"data":{}}'), /unexpected/);
