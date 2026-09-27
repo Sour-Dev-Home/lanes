@@ -600,3 +600,17 @@ test("edge: an issues event skips a PR whose issue cannot be read, and reads eac
   assert.equal(posted.length, 0);
   assert.equal(calls.filter((c) => c === "repos/o/r/issues/7").length, 1);
 });
+
+// Not named in the issue's acceptance criteria or its listed edge cases: a malformed "Blocked by" field (as opposed
+// to an issue the API cannot read at all) must also be skipped during re-evaluation, without ever touching the PR
+// itself. Its own next gate run still fails closed on the malformed field (see gate-decision.test.mjs).
+test("edge: an issues event skips a PR whose issue's Blocked by field is malformed, without evaluating the PR", () => {
+  const calls = [];
+  const { api, posted } = fakeApi({
+    [OPEN_PRS]: [prLine(5, 7)].join("\n") + "\n",
+    "repos/o/r/issues/7": { ...readyIssue("leo"), body: "### Goal\n\ng\n" }, // no "Blocked by" heading at all
+  });
+  main({ REPO: "o/r", EVENT_NAME: "issues", ISSUE_NUMBER: "3" }, (args) => (calls.push(args[0]), api(args)));
+  assert.equal(posted.length, 0);
+  assert.ok(!calls.includes("repos/o/r/pulls/5"), "the PR itself must never be fetched for a skipped entry");
+});
