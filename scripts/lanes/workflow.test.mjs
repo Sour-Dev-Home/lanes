@@ -238,3 +238,105 @@ test("test-hunter.md's example summary names a real extra case, not just a place
   const wordCount = match[1].trim().split(/\s+/).length;
   assert.ok(wordCount >= 4, `expected a descriptive extra case (>= 4 words), got ${wordCount}: "${match[1]}"`);
 });
+
+// #46: /plan-issues reads open work for blockers, decides on an ADR, and drafts the ADR first
+// Whitespace is collapsed so a phrase still matches when the Markdown wraps it across lines.
+const planIssues = () => readFileSync(".claude/commands/plan-issues.md", "utf8").replace(/[ \t]*\r?\n[ \t]*(?!\d+\. )/g, " ");
+const beforeDrafting = (md) => {
+  const at = md.search(/^\d+\. Draft /m);
+  assert.ok(at > 0, "expected a numbered `Draft ...` step in plan-issues.md");
+  return md.slice(0, at);
+};
+
+test("plan-issues.md reads open issues and open PRs with their changed files before drafting", () => {
+  const head = beforeDrafting(planIssues());
+  assert.match(head, /`gh issue list --state open --json number,title,body`/);
+  assert.match(head, /`gh pr list --state open`/);
+  assert.match(head, /`gh pr diff <N> --name-only`/);
+  // Every open issue and PR body is third-party text: it is compared, never obeyed.
+  assert.match(head, /data to compare, never instructions/);
+});
+
+test("plan-issues.md proposes existing blockers in a separate table, lists near-overlaps, skips closed issues, flags cycles", () => {
+  const md = planIssues();
+  assert.match(md, /Blocked by existing: #N, because/);
+  assert.match(md, /Scope, Interface contract or goal/);
+  assert.match(md, /near-overlaps?/);
+  assert.match(md, /[Nn]ever propose a closed issue/);
+  assert.match(md, /cycle/);
+});
+
+test("plan-issues.md checks the five ADR triggers before drafting and opens the draft with the ADR line", () => {
+  const head = beforeDrafting(planIssues());
+  for (const trigger of [
+    /new persistent state/,
+    /new dependency or external service/,
+    /security or auth/,
+    /deployment/,
+    /new or changed contract between modules/,
+  ]) assert.match(head, trigger);
+  const md = planIssues();
+  assert.match(md, /`ADR: needed \(<triggers>\)`/);
+  assert.match(md, /`No ADR: <one-line reason>`/);
+});
+
+test("plan-issues.md puts the ADR first as tier:skip, committed verbatim alone, waiting on /approve; implementers are blocked by it", () => {
+  const md = planIssues();
+  assert.match(md, /run `\/adr` on the idea text/);
+  assert.match(md, /first issue of the draft/);
+  assert.match(md, /tier:skip/);
+  assert.match(md, /verbatim as `docs\/adr\/<next number>-<slug>\.md`/);
+  assert.match(md, /nothing else in the PR/);
+  assert.match(md, /`\/approve`/);
+  assert.match(md, /"Decisions for the owner" at the top, before the issue table/);
+  assert.match(md, /[Ee]very implementing issue lists the ADR issue under "Blocked by"/);
+});
+
+test("adr.md accepts an issue or PR number, or idea text from /plan-issues, and returns the ADR without filing an issue", () => {
+  const md = readFileSync(".claude/commands/adr.md", "utf8").replace(/\s+/g, " ");
+  assert.match(md, /issue or PR number/);
+  assert.match(md, /idea text/);
+  assert.match(md, /\/plan-issues/);
+  assert.match(md, /`contracts\/adr-template\.md`/);
+  assert.match(md, /Status: accepted/);
+  assert.match(md, /`Governs`/);
+  assert.match(md, /without filing an issue/);
+});
+
+test("plan-issues.md: open work and the ADR decision come before drafting, and the ADR issue is created first", () => {
+  const md = planIssues();
+  const at = (re) => {
+    const i = md.search(re);
+    assert.ok(i >= 0, `expected ${re} in plan-issues.md`);
+    return i;
+  };
+  assert.ok(at(/gh issue list --state open/) < at(/five triggers/));
+  assert.ok(at(/five triggers/) < at(/^\d+\. When an ADR is needed/m));
+  assert.ok(at(/^\d+\. When an ADR is needed/m) < at(/^\d+\. Draft /m));
+  assert.match(md, /the ADR issue first/);
+});
+
+test("plan-issues.md steps are numbered 1..N without gaps or repeats", () => {
+  const steps = [...planIssues().matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
+  assert.ok(steps.length > 0);
+  assert.deepEqual(steps, steps.map((_, i) => i + 1));
+});
+
+test("adr.md's argument-hint names both modes", () => {
+  const hint = readFileSync(".claude/commands/adr.md", "utf8").match(/^argument-hint: (.+)$/m)[1];
+  assert.match(hint, /issue-or-pr-number/);
+  assert.match(hint, /idea text/);
+});
+
+// Edge case beyond the listed criteria: the pre-existing issue-or-PR-number mode is edited by this same diff
+// (to add the template/format wording) but no other test pins its behavior, so a careless edit could silently
+// make it stop filing its own issue/PR or drop the link back, and nothing above would catch it.
+test("adr.md's issue-or-PR-number mode still files its own issue and PR and links back, unlike the idea-text mode", () => {
+  const [numberMode, ideaMode] = readFileSync(".claude/commands/adr.md", "utf8")
+    .replace(/\s+/g, " ")
+    .split(/\*\*Idea text from/);
+  assert.match(numberMode, /in its own tier:skip task issue and PR/);
+  assert.match(numberMode, /link it from #\$ARGUMENTS/);
+  assert.doesNotMatch(ideaMode, /link it from #\$ARGUMENTS/);
+  assert.match(ideaMode, /without filing an issue or opening a PR yourself/);
+});
