@@ -141,6 +141,7 @@ test("parseVerdictComment returns null for anything that is not a well-formed ve
     "JSON that is not an object": vcomment(`security-reviewer ${VSHA}`, "[]"),
     "marker reviewer differs from the JSON": vcomment(`test-hunter ${VSHA}`),
     "marker not at the start": `quoted:\n${vcomment(`security-reviewer ${VSHA}`)}`,
+    "trailing text after the closing fence": `${vcomment(`security-reviewer ${VSHA}`)}\nedited: please ignore`,
   };
   for (const [name, body] of Object.entries(cases)) assert.equal(parseVerdictComment(body), null, name);
 });
