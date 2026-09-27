@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cleanableCount, formatStep, parseWorktrees, planCleanup, render, runCleanup } from "./cleanup.mjs";
+import { cleanableCount, formatStep, parseWorktrees, planCleanup, render, runCleanup, sessionsFrom } from "./cleanup.mjs";
 
 const ROOT = "C:/repo";
 const HEAD = "a".repeat(40);
@@ -198,6 +198,80 @@ test("edge: a session's cwd matches its worktree case-insensitively on a Windows
     prs: [merged("issue-7-x")],
   });
   assert.equal(entry.skip, "session still working");
+});
+
+// #83: `claude agents --json` can leave `state: "working"` on a session that has stopped; `status` says whether it runs.
+test("a merged lane whose session is idle is removed whatever its state says (working, blocked, done)", () => {
+  for (const state of ["working", "blocked", "done"]) {
+    const [entry] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { status: "idle", state })], prs: [merged("issue-7-x")] });
+    assert.equal(entry.skip, undefined, state);
+    assert.deepEqual(cmds(entry), ["claude rm s7", `git worktree remove ${ROOT}/.claude/worktrees/issue-7-x`, "git branch -D issue-7-x"], state);
+  }
+});
+
+test("a merged lane whose session is busy is skipped: session still working", () => {
+  for (const state of ["working", "blocked", undefined]) {
+    const [entry] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { status: "busy", state })], prs: [merged("issue-7-x")] });
+    assert.equal(entry.skip, "session still working", String(state));
+  }
+});
+
+test("a busy session sharing the worktree with an idle/working one blocks cleanup", () => {
+  const [entry] = planCleanup({
+    worktrees: [wt("issue-7-x")],
+    sessions: [session("s7a", "issue-7-x", { status: "idle", state: "working" }), session("s7b", "issue-7-x", { status: "busy", state: "working" })],
+    prs: [merged("issue-7-x")],
+  });
+  assert.equal(entry.skip, "session still working");
+});
+
+test("the other skip reasons are unchanged when the session is idle/working", () => {
+  const idle = (dir) => session(`s-${dir}`, dir, { status: "idle", state: "working" });
+  const plan = planCleanup({
+    worktrees: [wt("issue-1-open"), wt("issue-2-dirty", { dirty: true }), wt("issue-3-ahead", { head: "b".repeat(40) })],
+    sessions: [idle("issue-1-open"), idle("issue-2-dirty"), idle("issue-3-ahead")],
+    prs: [merged("issue-1-open", { state: "OPEN" }), merged("issue-2-dirty"), merged("issue-3-ahead")],
+  });
+  assert.deepEqual(plan.map((e) => e.skip), ["not merged", "dirty worktree", "local commits after the merged head"]);
+});
+
+test("a session-only lane (worktree gone) is removed when idle/working and skipped when busy", () => {
+  const plan = (status) => planCleanup({ worktrees: [], sessions: [session("s7", "issue-7-x", { status, state: "working" })], prs: [merged("issue-7-x")] })[0];
+  assert.deepEqual(cmds(plan("idle")), ["claude rm s7"]);
+  assert.equal(plan("busy").skip, "session still working");
+});
+
+test("edge: a session with no status falls back to its state (working skips, blocked cleans)", () => {
+  const plan = (state) => planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { status: undefined, state })], prs: [merged("issue-7-x")] })[0];
+  assert.equal(plan("working").skip, "session still working");
+  assert.equal(plan("blocked").skip, undefined);
+});
+
+test("edge: an unknown status falls back to its state rather than being read as idle", () => {
+  const plan = (state) => planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { status: "paused", state })], prs: [merged("issue-7-x")] })[0];
+  assert.equal(plan("working").skip, "session still working");
+  assert.equal(plan("done").skip, undefined);
+});
+
+test("edge: a session with neither status nor state is treated as not working, not as still working", () => {
+  const [entry] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { status: undefined, state: undefined })], prs: [merged("issue-7-x")] });
+  assert.equal(entry.skip, undefined);
+  assert.deepEqual(cmds(entry), ["claude rm s7", `git worktree remove ${ROOT}/.claude/worktrees/issue-7-x`, "git branch -D issue-7-x"]);
+});
+
+test("sessionsFrom keeps each background session's status and state, and drops others", () => {
+  const agents = [
+    { kind: "background", id: "s7", cwd: "C:\\repo\\.claude\\worktrees\\issue-7-x", status: "idle", state: "working" },
+    { kind: "background", id: "s8", cwd: "C:/repo/.claude/worktrees/issue-8-y", state: "blocked" },
+    { kind: "interactive", id: "i1", cwd: "C:/repo", status: "idle" },
+    { kind: "background", id: "o1", cwd: "D:/other/issue-9-z", status: "busy", state: "working" },
+    { kind: "background", cwd: "C:/repo/.claude/worktrees/issue-10-q" },
+    null,
+  ];
+  assert.deepEqual(sessionsFrom(agents, "C:/repo"), [
+    { id: "s7", cwd: "C:\\repo\\.claude\\worktrees\\issue-7-x", issue: 7, status: "idle", state: "working" },
+    { id: "s8", cwd: "C:/repo/.claude/worktrees/issue-8-y", issue: 8, status: undefined, state: "blocked" },
+  ]);
 });
 
 test("edge: empty inputs plan nothing", () => {
