@@ -113,7 +113,10 @@ function readPostReviewArgs(args) {
 }
 
 const ASSIGN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
-const VAR_REF_RE = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
+const VAR_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
+// What is left of a word after substitution that could still expand to anything.
+const UNRESOLVED_RE = /[$`]/;
+const NODE_RE = /^(node|nodejs)(\.exe)?$/i;
 
 /** `NAME=value` words anywhere in the command's segments, in order, so a later assignment overrides an earlier one. */
 function collectAssignments(segments) {
@@ -127,12 +130,18 @@ function collectAssignments(segments) {
   return assignments;
 }
 
-/** A bare `$NAME`/`${NAME}` word resolved to a same-command assignment's value; every other word is unchanged. */
+/**
+ * Every `$NAME`/`${NAME}` reference with a same-command assignment replaced by its value, whole word or spliced into
+ * one, so `S=…post-review.mjs; node $S` and `X=review; node scripts/lanes/post-$X.mjs` are both seen. Values are
+ * substituted once, not recursively: a value that still holds `$` stays unresolved.
+ */
 function resolveVars(words, assignments) {
-  return words.map((w) => {
-    const m = VAR_REF_RE.exec(w);
-    return m && Object.prototype.hasOwnProperty.call(assignments, m[1]) ? assignments[m[1]] : w;
-  });
+  return words.map((w) =>
+    w.replace(VAR_REF_RE, (ref, braced, bare) => {
+      const name = braced ?? bare;
+      return Object.prototype.hasOwnProperty.call(assignments, name) ? assignments[name] : ref;
+    }),
+  );
 }
 
 function scan(cmd, depth, out) {
@@ -148,15 +157,23 @@ function scan(cmd, depth, out) {
   const assignments = collectAssignments(segments);
   for (const rawWords of segments) {
     const words = resolveVars(rawWords, assignments);
-    words.forEach((w, i) => {
-      if (/[\s;&|()<>]/.test(w) && /post-review/i.test(w)) {
-        // A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own.
+    // The command word and the script node runs (also behind env, time or sudo), counted without `NAME=value` words.
+    const plain = words.filter((w) => !ASSIGN_RE.test(w));
+    const nodeAt = plain.findIndex((p) => NODE_RE.test(p.split(/[\\/]/).at(-1)));
+    const scriptAt = nodeAt === -1 ? -1 : plain.findIndex((p, i) => i > nodeAt && !p.startsWith("-"));
+    plain.forEach((w, i) => {
+      if (/[\s;&|()<>]/.test(w) && /post-review|[$`]/i.test(w)) {
+        // A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own. One that still
+        // holds `$` may splice a name inside it, so it is scanned too.
         if (depth >= MAX_DEPTH) out.push({ pr: undefined, standalone: false });
         else scan(w, depth + 1, out);
       } else if (POST_REVIEW_RE.test(w)) {
-        const { reviewer, pr } = readPostReviewArgs(words.slice(i + 1));
+        const { reviewer, pr } = readPostReviewArgs(plain.slice(i + 1));
         // Fail closed: a reviewer word that could expand to anything counts as the owner.
         if (reviewer === "owner" || (reviewer !== undefined && /[$`*?[]/.test(reviewer))) out.push({ pr, standalone: false });
+      } else if (UNRESOLVED_RE.test(w) && (i === 0 || i === scriptAt)) {
+        // The command word, or the script node runs, that could still expand to post-review.mjs: fail closed.
+        out.push({ pr: undefined, standalone: false });
       }
     });
   }
@@ -169,7 +186,8 @@ function scan(cmd, depth, out) {
  */
 export function findOwnerInvocations(command) {
   const cmd = String(command ?? "");
-  if (!/post-review/i.test(cmd)) return [];
+  // Without the name or a substitution that could splice it (`post-$X.mjs`), there is nothing to find.
+  if (!/post-review|[$`]/i.test(cmd)) return [];
   const out = [];
   scan(cmd, 0, out);
   // Deeper indirection (a variable built from another, `$(…)`, backticks) cannot be resolved statically: with an

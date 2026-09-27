@@ -196,6 +196,80 @@ test("deeper indirection with an owner word fails closed as an owner command", (
   ]) assert.deepEqual(findOwnerInvocations(cmd), [{ pr: undefined, standalone: false }], cmd);
 });
 
+test("a variable spliced into the script name or the reviewer word does not hide an owner command (#62)", () => {
+  for (const cmd of [
+    "X=review; node scripts/lanes/post-$X.mjs owner success x --pr 16",
+    "X=review && node scripts/lanes/post-${X}.mjs owner success x --pr 16",
+    'D=scripts/lanes; node "$D/post-review.mjs" owner success x --pr 16',
+    "R=own; node scripts/lanes/post-review.mjs ${R}er success x --pr 16",
+    "R=own; node scripts/lanes/post-review.mjs \"$R\"er success x --pr 16",
+    "X=review; bash -c \"node scripts/lanes/post-$X.mjs owner success x --pr 16\"",
+    "bash -c 'X=review; node scripts/lanes/post-$X.mjs owner success x --pr 16'",
+  ]) {
+    const found = findOwnerInvocations(cmd);
+    assert.equal(found.length, 1, `not detected: ${cmd}`);
+    assert.equal(found[0].standalone, false, cmd);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // Resolved fully, the spliced form is read like the plain one: its --pr is known.
+  assert.deepEqual(findOwnerInvocations("X=review; node scripts/lanes/post-$X.mjs owner success x --pr 16"), [{ pr: "16", standalone: false }]);
+});
+
+test("a script word still holding $ or a backtick after substitution counts as an owner command (#62)", () => {
+  for (const cmd of [
+    "node scripts/lanes/post-$X.mjs owner success x --pr 16",
+    "node scripts/lanes/post-$X.mjs test-hunter success x",
+    "node $SCRIPT success x --pr 16",
+    'node "${S}" --file v.json',
+    "node --no-warnings $S owner",
+    "node `echo s.mjs` success",
+    "$RUN success x --pr 16",
+    "cd x && ${NODE_SCRIPT} --pr 16",
+    "X=$Y; node scripts/lanes/post-$X.mjs owner",
+    "node scripts/lanes/post-$1.mjs owner",
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [{ pr: undefined, standalone: false }], cmd);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+});
+
+test("edge: spliced and unresolved forms behind wrappers, empty values and odd references (#62)", () => {
+  const denied = [
+    "env node $S owner",
+    "time node \"$S\" --pr 16",
+    "X=review; env FOO=1 node scripts/lanes/post-$X.mjs owner --pr 16",
+    "X=; node scripts/lanes/post-review$X.mjs owner --pr 16",
+    "X=review; Y=post-$X.mjs; node scripts/lanes/$Y owner --pr 16",
+    "node scripts/lanes/post-${X.mjs owner",
+    "(X=review; node scripts/lanes/post-$X.mjs owner --pr 16)",
+    "X=review; sh -c 'sh -c \"node scripts/lanes/post-$X.mjs owner\"'",
+  ];
+  for (const cmd of denied) assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  // A later assignment overrides an earlier one, and a variable resolved to another script is not an owner command.
+  assert.deepEqual(findOwnerInvocations("X=review; X=gate; node scripts/lanes/post-$X.mjs 16"), []);
+  assert.deepEqual(findOwnerInvocations("X=review; node scripts/lanes/post-$X.mjs test-hunter skipped x"), []);
+  // The plain owner command with a grant is still allowed: in-word substitution does not touch it.
+  assert.equal(decidePreToolUse(bash(OWNER), grant(), NOW).decision, "allow");
+});
+
+test("ordinary $ arguments get no decision (#62)", () => {
+  for (const cmd of [
+    'gh pr view "$PR"',
+    "gh pr view $PR --json state",
+    'node scripts/lanes/post-review.mjs --file "$F"',
+    "node scripts/lanes/gate.mjs $PR",
+    "node --test scripts/lanes/approve-guard.test.mjs $FILTER",
+    'X=review; echo "post-$X"',
+    'git commit -m "post-review: fix $X handling"',
+    'PR=16; gh pr checks "$PR" --watch',
+    "echo $HOME",
+    "npm test -- $ARGS",
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
 test("the CLI answers deny, never crashes, when it cannot evaluate a PreToolUse call", () => {
   const cli = (event, input) => spawnSync(process.execPath, ["scripts/lanes/approve-guard.mjs", event], { input, encoding: "utf8" });
   for (const [event, input] of [["pre-tool-use", "{oops"], ["bogus-event", JSON.stringify(bash(OWNER))]]) {
