@@ -12,11 +12,16 @@
    Faster: `/start <issue> [<issue> ...]` checks each issue the way `/lane` does and launches the rest as background
    sessions with `claude --bg "/lane <issue>"`, printing `#<issue> → <id>` for `claude attach` or `claude logs`. It
    refuses, with the reason, an issue that is not open, lacks `ready` or one `tier:*` label, has an open blocker or is
-   already in flight; both issues of a pair whose paths overlap (pick one and run `/start` again); and anything past 3
-   lanes in flight, counting open `issue-*` PRs and running sessions. Owner only: a lane or a schedule never runs it.
+   already in flight; both issues of a pair whose paths overlap (pick one and run `/start` again); and anything past
+   `start.maxLanes` in `lanes.config.json` (8) lanes in flight, counting open `issue-*` PRs and running sessions.
+   `/start --auto` picks for you: it prints which ready issues it would start and why it skips each of the rest (a
+   blocker, an overlap with another pick or with files running work already touches, the cap), and launches nothing.
+   `/start --auto --go` recomputes that plan and launches exactly its picks; the paths in `start.softPaths` (this file
+   and `README.md` by default) never count as overlaps. Owner only: a lane or a schedule never runs it.
    The start guard (`scripts/lanes/start-guard.mjs`, two hooks in `.claude/settings.json` next to the approve guard)
    enforces that: it lets `start.mjs` run once, for the same issue numbers, within 15 minutes of you typing
-   `/start <N ...>` in that session, and it denies a direct `claude --bg` in every session and permission mode.
+   `/start <N ...>` in that session (not yet `--auto`, see #76), and it denies a direct `claude --bg` in every session
+   and permission mode.
 3. **Watch with `/status`**: WAITING ON YOU, IN FLIGHT (each PR's stage), READY TO START, MERGED.
    A `Notification` hook (`scripts/lanes/notify-hook.mjs`) pops a notification when a lane stops at a permission
    prompt or needs input (with the `claude attach <id>` to reach it), or finishes with its PR waiting on you or failing.

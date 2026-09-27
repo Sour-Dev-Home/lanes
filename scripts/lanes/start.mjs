@@ -1,16 +1,49 @@
 // scripts/lanes/start.mjs
 // /start: checks each requested issue the way /lane does and launches the rest as background lanes.
 // Usage: node scripts/lanes/start.mjs <N> [<N> ...]. Exit 0: every requested issue launched. 1: something was
-// refused or failed to launch. 2: bad arguments, or the lanes in flight could not be counted (nothing launched).
+// refused or failed to launch. 2: bad arguments or config, or the lanes in flight could not be counted (nothing launched).
+// Or: node scripts/lanes/start.mjs --auto [--go]. Picks from every ready issue with pickStartable and prints the plan;
+// only --go launches it. Exit 0: printed (and, with --go, every pick launched). 1: a launch failed. 2: as above.
+// The cap and the soft paths come from the `start` block of lanes.config.json.
 import { execFileSync } from "node:child_process";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main as checkBlockers } from "./blockers.mjs";
 import { parseIssueForm } from "./lib.mjs";
+import { claimedPaths, pickStartable } from "./pick.mjs";
 import { issuePaths, pathsOverlap } from "./status.mjs";
 
-export const CAP = 8;
+export const START_DEFAULTS = Object.freeze({ maxLanes: 8, softPaths: Object.freeze(["^docs/USING\\.md$", "^README\\.md$"]) });
+const MAX_LANES_LIMIT = 10;
 const PR_LIMIT = 1000;
+const ISSUE_LIMIT = 1000;
+
+/**
+ * The `start` block of a parsed lanes.config.json, each missing key (or the whole block) filled from START_DEFAULTS.
+ * Throws when maxLanes is not a whole number from 1 to 10, or softPaths is not an array of valid regex strings.
+ * @returns {{ maxLanes: number, softPaths: string[] }}
+ */
+export function startConfig(raw) {
+  const start = raw?.start;
+  if (start === undefined) return { maxLanes: START_DEFAULTS.maxLanes, softPaths: [...START_DEFAULTS.softPaths] };
+  if (start === null || typeof start !== "object" || Array.isArray(start)) throw new Error("lanes.config.json: start must be an object");
+  // A key present as null is a typo, not an absent key, so only a missing key takes the default.
+  const maxLanes = start.maxLanes === undefined ? START_DEFAULTS.maxLanes : start.maxLanes;
+  if (!Number.isInteger(maxLanes) || maxLanes < 1 || maxLanes > MAX_LANES_LIMIT) {
+    throw new Error(`lanes.config.json: start.maxLanes must be a whole number from 1 to ${MAX_LANES_LIMIT}, got ${JSON.stringify(start.maxLanes)}`);
+  }
+  const softPaths = start.softPaths === undefined ? START_DEFAULTS.softPaths : start.softPaths;
+  if (!Array.isArray(softPaths) || softPaths.some((s) => typeof s !== "string")) throw new Error("lanes.config.json: start.softPaths must be an array of regex strings");
+  for (const source of softPaths) {
+    try {
+      new RegExp(source);
+    } catch {
+      throw new Error(`lanes.config.json: start.softPaths: invalid regex ${JSON.stringify(source)}`);
+    }
+  }
+  return { maxLanes, softPaths: [...softPaths] };
+}
 
 /** The claude arguments for one lane. No permission-mode flag: a lane runs under the owner's normal settings. */
 export const launchArgs = (n) => ["--bg", `/lane ${n}`];
@@ -56,10 +89,11 @@ function refusal(issue) {
  *   issues: { number: number, state?: string, labels?: string[], blockers?: { code: number, message: string }, error?: string }[],
  *   inFlight: number[],
  *   overlaps: (a: number, b: number) => boolean,
- * }} input issues in request order; `error` marks one that could not be read
+ *   maxLanes?: number,
+ * }} input issues in request order; `error` marks one that could not be read; `maxLanes` is start.maxLanes
  * @returns {{ launch: number[], refused: { number: number, reason: string }[] }} both in request order
  */
-export function planStart({ issues, inFlight, overlaps }) {
+export function planStart({ issues, inFlight, overlaps, maxLanes = START_DEFAULTS.maxLanes }) {
   const reasons = new Map();
   const busy = new Set(inFlight);
   for (const issue of issues) {
@@ -74,14 +108,14 @@ export function planStart({ issues, inFlight, overlaps }) {
     if (others.length) reasons.set(n, `overlaps ${others.map((m) => `#${m}`).join(", ")}`);
   }
 
-  let slots = CAP - busy.size;
+  let slots = maxLanes - busy.size;
   const launch = [];
   for (const n of candidates) {
     if (reasons.has(n)) continue;
     if (slots > 0) {
       launch.push(n);
       slots--;
-    } else reasons.set(n, `cap of ${CAP} lanes in flight`);
+    } else reasons.set(n, `cap of ${maxLanes} lanes in flight`);
   }
   const refused = issues.filter((i) => reasons.has(i.number)).map((i) => ({ number: i.number, reason: reasons.get(i.number) }));
   return { launch, refused };
@@ -89,23 +123,109 @@ export function planStart({ issues, inFlight, overlaps }) {
 
 const reason = (err) => String(err?.stderr || err?.message || err).trim().split("\n")[0];
 
+const USAGE = "usage: start.mjs <issue number> [<issue number> ...], or start.mjs --auto [--go]";
+
+// The open PRs (with `fields`) and the issues with a lane in flight. Throws when either cannot be read.
+function readInFlight(deps, fields) {
+  const root = deps.root();
+  const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", fields]));
+  // A truncated list could hide a lane in flight and let the cap be passed, so refuse instead.
+  if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to count lanes in flight`);
+  const sessions = JSON.parse(deps.claude(["agents", "--json", "--cwd", root], { cwd: root }));
+  return { prs, inFlight: inFlightIssues({ prs, sessions }) };
+}
+
+// Launches each issue from the repository root, one attempt each. Returns issue → line, and whether any failed.
+function launchAll(numbers, deps) {
+  const lines = new Map();
+  let failed = false;
+  const root = numbers.length ? deps.root() : null;
+  for (const n of numbers) {
+    // One attempt only: a launch that printed no id may still have started, and a retry could start it twice.
+    let id = null;
+    let why = "no session id in output";
+    try {
+      id = parseSessionId(deps.claude(launchArgs(n), { cwd: root }));
+    } catch (err) {
+      why = reason(err);
+    }
+    if (id) lines.set(n, `#${n} → ${id}`);
+    else {
+      lines.set(n, `#${n}: launch failed: ${why}, not retried`);
+      failed = true;
+    }
+  }
+  return { lines, failed };
+}
+
+// --auto: every ready issue is checked the way /lane does, then pickStartable chooses among the rest against the
+// paths open PRs change and running lanes claim. Prints the plan; launches it only with `go`.
+function autoStart(go, deps, { maxLanes, softPaths }) {
+  let prs, inFlight, openIssues;
+  try {
+    ({ prs, inFlight } = readInFlight(deps, "number,headRefName,files"));
+    openIssues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body"]));
+    // A blocker missing from a truncated list would not rank, and a running issue's claim would be lost.
+    if (openIssues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to plan from`);
+  } catch (err) {
+    return { code: 2, lines: [`cannot gather the plan, nothing launched: ${reason(err)}`] };
+  }
+
+  const labelsOf = (issue) => (issue.labels ?? []).map((l) => l.name);
+  const ready = openIssues.filter((i) => labelsOf(i).includes("ready"));
+  if (!ready.length) return { code: 0, lines: ["no ready issues to start"] };
+
+  const busy = new Set(inFlight);
+  const skipped = [];
+  const candidates = [];
+  for (const issue of ready) {
+    const why = busy.has(issue.number)
+      ? "already in flight"
+      : refusal({ state: "OPEN", labels: labelsOf(issue), blockers: checkBlockers([String(issue.number)], deps.gh) });
+    if (why) skipped.push({ number: issue.number, reason: why });
+    else candidates.push(issue);
+  }
+  const claimed = claimedPaths({ openPrs: prs, runningIssues: openIssues.filter((i) => busy.has(i.number)) });
+  const { start, skipped: notPicked } = pickStartable({ candidates, claimed, openIssues, maxLanes, inFlightCount: busy.size, softPaths });
+  const skipLines = [...skipped, ...notPicked].sort((a, b) => a.number - b.number).map((s) => `#${s.number}: skipped: ${s.reason}`);
+
+  if (!go) {
+    const trailer = start.length ? `dry run, nothing launched: /start --auto --go launches the ${start.length} marked would start` : "dry run: nothing to start";
+    return { code: 0, lines: [...start.map((n) => `#${n}: would start`), ...skipLines, trailer] };
+  }
+  const { lines, failed } = launchAll(start, deps);
+  return { code: failed ? 1 : 0, lines: [...start.map((n) => lines.get(n)), ...skipLines] };
+}
+
 /**
  * Reads the issues, plans and launches. `deps` holds fakes in tests: `gh(args)` and `claude(args, { cwd })` return
- * stdout, `root()` the main repository root. Returns the exit code and the lines to print.
+ * stdout, `root()` the main repository root, `config()` the parsed lanes.config.json (undefined when there is none).
+ * Returns the exit code and the lines to print.
  */
-export function main(argv, deps = { gh, claude, root: repoRoot }) {
+export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig }) {
   const args = argv.map((a) => String(a).replace(/^#/, ""));
-  if (!args.length || args.some((a) => !/^[1-9]\d*$/.test(a))) return { code: 2, lines: ["usage: start.mjs <issue number> [<issue number> ...]"] };
-  const numbers = [...new Set(args.map(Number))];
+  const auto = args[0] === "--auto";
+  if (auto ? args.length > 2 || (args.length === 2 && args[1] !== "--go") : !args.length || args.some((a) => !/^[1-9]\d*$/.test(a))) {
+    return { code: 2, lines: [USAGE] };
+  }
 
+  let config;
+  try {
+    const raw = deps.config();
+    try {
+      config = startConfig(raw);
+    } catch (err) {
+      return { code: 2, lines: [`nothing launched: ${err.message}`] };
+    }
+  } catch (err) {
+    return { code: 2, lines: [`cannot read lanes.config.json, nothing launched: ${reason(err)}`] };
+  }
+  if (auto) return autoStart(args[1] === "--go", deps, config);
+
+  const numbers = [...new Set(args.map(Number))];
   let inFlight;
   try {
-    const root = deps.root();
-    const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "headRefName"]));
-    // A truncated list could hide a lane in flight and let the cap be passed, so refuse instead.
-    if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to count lanes in flight`);
-    const sessions = JSON.parse(deps.claude(["agents", "--json", "--cwd", root], { cwd: root }));
-    inFlight = inFlightIssues({ prs, sessions });
+    ({ inFlight } = readInFlight(deps, "headRefName"));
   } catch (err) {
     return { code: 2, lines: [`cannot count lanes in flight, nothing launched: ${reason(err)}`] };
   }
@@ -127,32 +247,27 @@ export function main(argv, deps = { gh, claude, root: repoRoot }) {
   }
   const overlaps = (a, b) => pathsOf.has(a) && pathsOf.has(b) && pathsOverlap(pathsOf.get(a), pathsOf.get(b));
 
-  const { launch, refused } = planStart({ issues, inFlight, overlaps });
-  const lines = new Map(refused.map((r) => [r.number, `#${r.number}: refused: ${r.reason}`]));
-  let failed = refused.length > 0;
-  const root = launch.length ? deps.root() : null;
-  for (const n of launch) {
-    // One attempt only: a launch that printed no id may still have started, and a retry could start it twice.
-    let id = null;
-    let why = "no session id in output";
-    try {
-      id = parseSessionId(deps.claude(launchArgs(n), { cwd: root }));
-    } catch (err) {
-      why = reason(err);
-    }
-    if (id) lines.set(n, `#${n} → ${id}`);
-    else {
-      lines.set(n, `#${n}: launch failed: ${why}, not retried`);
-      failed = true;
-    }
-  }
-  return { code: failed ? 1 : 0, lines: numbers.map((n) => lines.get(n)) };
+  const { launch, refused } = planStart({ issues, inFlight, overlaps, maxLanes: config.maxLanes });
+  const launched = launchAll(launch, deps);
+  const lines = new Map([...refused.map((r) => [r.number, `#${r.number}: refused: ${r.reason}`]), ...launched.lines]);
+  return { code: refused.length || launched.failed ? 1 : 0, lines: numbers.map((n) => lines.get(n)) };
 }
 
 const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const claude = (args, { cwd }) => execFileSync("claude", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 // The main checkout, even when run from a worktree: the parent of the shared .git directory.
 const repoRoot = () => dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
+// The main checkout's lanes.config.json, parsed; undefined when it does not exist (the defaults apply).
+function readConfig() {
+  let text;
+  try {
+    text = readFileSync(join(repoRoot(), "lanes.config.json"), "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return undefined;
+    throw err;
+  }
+  return JSON.parse(text);
+}
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { code, lines } = main(process.argv.slice(2));

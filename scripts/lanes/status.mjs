@@ -4,6 +4,8 @@ import { execFileSync } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GATE_CONTEXT, parseIssueForm, parsePrBody } from "./lib.mjs";
+// pick.mjs imports this module too; the cycle is safe because neither calls the other at load time.
+import { claimedPaths } from "./pick.mjs";
 
 const ISSUE_LIMIT = 1000;
 const FAILED = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"]);
@@ -70,19 +72,25 @@ export function pathsOverlap(a, b) {
   return a.some((x) => b.some((y) => x === y || within(x, y) || within(y, x)));
 }
 
-// Marks each startable item `parallel` unless its paths overlap another startable item's, or its Scope names none.
-// An issue whose Scope names no paths is excluded from *other* issues' comparisons too (only itself is flagged),
-// since a scopeless issue's Interface contract alone would otherwise produce a one-sided overlap.
-function markParallel(ready, formOf) {
+// Marks each startable item `parallel` unless its paths overlap another startable item's or claimed work's (the
+// `{ path, by }` list from claimedPaths), or its Scope names none. An issue whose Scope names no paths is excluded
+// from *other* issues' comparisons too (only itself is flagged), since a scopeless issue's Interface contract alone
+// would otherwise produce a one-sided overlap.
+function markParallel(ready, formOf, claimed = []) {
   const paths = new Map(ready.map((i) => [i.number, issuePaths(formOf.get(i.number) ?? {})]));
   const isScoped = new Map(ready.map((i) => [i.number, issuePaths({ scope: formOf.get(i.number)?.scope }).length > 0]));
+  const list = (numbers) => numbers.map((n) => `#${n}`).join(", ");
   for (const item of ready) {
     const scoped = isScoped.get(item.number);
-    item.overlapsWith = scoped
-      ? ready.filter((o) => o !== item && isScoped.get(o.number) && pathsOverlap(paths.get(item.number), paths.get(o.number))).map((o) => o.number)
-      : [];
-    item.parallel = scoped && item.overlapsWith.length === 0;
-    item.note = !scoped ? "one at a time (scope names no paths)" : item.parallel ? "parallel" : `one at a time with ${item.overlapsWith.map((n) => `#${n}`).join(", ")}`;
+    const mine = paths.get(item.number);
+    item.overlapsWith = scoped ? ready.filter((o) => o !== item && isScoped.get(o.number) && pathsOverlap(mine, paths.get(o.number))).map((o) => o.number) : [];
+    item.overlapsRunning = scoped ? [...new Set(claimed.filter((c) => c.by !== item.number && pathsOverlap(mine, [c.path])).map((c) => c.by))] : [];
+    item.parallel = scoped && item.overlapsWith.length === 0 && item.overlapsRunning.length === 0;
+    const notes = [
+      ...(item.overlapsRunning.length ? [`one at a time with running ${list(item.overlapsRunning)}`] : []),
+      ...(item.overlapsWith.length ? [`one at a time with ${list(item.overlapsWith)}`] : []),
+    ];
+    item.note = !scoped ? "one at a time (scope names no paths)" : item.parallel ? "parallel" : notes.join("; ");
   }
 }
 
@@ -178,10 +186,12 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
   }
   const formOf = new Map(issues.map((i) => [i.number, parseIssueForm(i.body ?? "").fields]));
   const blockedByOf = new Map([...formOf].map(([n, f]) => [n, f.blockedBy]));
+  const runningIssues = [];
   for (const issue of issues) {
     const labels = (issue.labels ?? []).map((l) => l.name);
     const session = taken.has(issue.number) ? undefined : sessions.get(issue.number);
     if (session) {
+      runningIssues.push(issue);
       const item = withSession({ number: issue.number, title: issue.title, stage: "running", note: "" }, session);
       (session.waiting ? out.waitingOnOwner : out.inFlight).push(item);
       continue;
@@ -193,7 +203,7 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
     if (blockedBy.length === 0) out.ready.push(item);
     else out.blocked.push({ ...item, note: `blocked by ${blockedBy.map((n) => `#${n}`).join(", ")}`, blockedBy });
   }
-  markParallel(out.ready, formOf);
+  markParallel(out.ready, formOf, claimedPaths({ openPrs: prs, runningIssues }));
   for (const pr of merged) out.merged.push({ number: pr.number, title: pr.title, stage: "merged", note: "" });
   if (sessionsUnavailable) out.sessionsUnavailable = sessionsUnavailable;
   return out;
@@ -231,7 +241,7 @@ async function main(argv = process.argv.slice(2)) {
   const since = new Date(Date.now() - hours * 3600_000).toISOString().slice(0, 19);
   const reply = gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${STATUS_QUERY}`]);
   const data = {
-    prs: gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,statusCheckRollup,autoMergeRequest,closingIssuesReferences"]),
+    prs: gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefName,files"]),
     issues: gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,title,labels,body"]),
     merged: gh(["pr", "list", "--state", "merged", "--search", `merged:>=${since}`, "--limit", "100", "--json", "number,title"]),
     mergeQueue: mergeQueueEntries(reply),
