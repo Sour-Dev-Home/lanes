@@ -1,5 +1,6 @@
 // Pure logic for the lanes workflow: config, file classes, required reviewers, the task and PR contracts, and the gate
-// decision. No I/O except loadConfig; everything else is a plain function so it can be unit-tested.
+// decision. No I/O except loadConfig and the injected `api` in authorCanWrite; everything else is a plain function so
+// it can be unit-tested.
 import { readFileSync } from "node:fs";
 
 export const REVIEWERS = ["test-hunter", "ui-reviewer", "security-reviewer", "architecture-advisor"];
@@ -194,8 +195,23 @@ export function latestByContext(statuses) {
   return out;
 }
 
-/** The issue author associations trusted to hand a lane unattended-mergeable work (C1). */
-export const TRUSTED_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR"];
+const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+
+/**
+ * Whether `login` may hand a lane unattended-mergeable work (C1): write, maintain or admin permission on `repo`.
+ * Read from the collaborator permission endpoint, whose legacy `permission` maps maintain to write and triage to read.
+ * Not author_association, which reports a private org member as CONTRIBUTOR or NONE. `api` takes `gh api` arguments.
+ * Fails closed: a bad login, an API error or an unexpected reply all mean no.
+ */
+export function authorCanWrite(api, repo, login) {
+  if (typeof login !== "string" || !LOGIN.test(login)) return false;
+  try {
+    const permission = JSON.parse(api([`repos/${repo}/collaborators/${login}/permission`]))?.permission;
+    return permission === "admin" || permission === "write";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * A status posted by a bot (GitHub Actions' own token, or any other App), not a human running `gh` with their own
@@ -218,7 +234,7 @@ export function trustedStatuses(statuses) {
 }
 
 /** What `lanes/gate` should say for a PR head. Pure: every input is passed in. */
-export function gateDecision({ prBody, issueLabels, issueState, issueAuthorAssociation, issueIsPr, headRef, files, statuses, config }) {
+export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, files, statuses, config }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
@@ -232,8 +248,9 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorAssoc
   // C1: a stranger's issue must never reach the unattended merge path, whatever labels a lane later applies to the PR.
   if (!labels.includes("ready")) return fail(`issue #${pr.closes} is not labelled ready; a maintainer must approve it first`);
   if (issueState !== "open") return fail(`issue #${pr.closes} is not open`);
-  if (!TRUSTED_ASSOCIATIONS.includes(issueAuthorAssociation)) {
-    return fail(`issue #${pr.closes} was not opened by an owner, member or collaborator`);
+  // Fails closed: anything but a literal true (an unread or unknown permission included) is untrusted.
+  if (issueAuthorCanWrite !== true) {
+    return fail(`issue #${pr.closes} was not opened by someone with write access to the repository`);
   }
   // I4: a lane cannot choose its own tier by branching off any name it likes.
   if (!new RegExp(`^issue-${pr.closes}-`).test(headRef ?? "")) {

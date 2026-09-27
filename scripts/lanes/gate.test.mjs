@@ -7,7 +7,9 @@ const config = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^doc
 const SHA = "a".repeat(40);
 const body = "Closes #7\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\nnothing\n## Not done\nnothing";
 
-function fakeApi(routes) {
+// "leo" has write access unless a test overrides the route; any other login has no route, so its lookup throws.
+function fakeApi(testRoutes) {
+  const routes = { "repos/o/r/collaborators/leo/permission": { permission: "admin" }, ...testRoutes };
   const posted = [];
   const api = (args) => {
     if (args[0].endsWith(`/statuses/${args[0].split("/").pop()}`) && args.includes("-f")) {
@@ -35,12 +37,46 @@ test("evaluatePr posts lanes/gate on the PR head, using old and new names of ren
   assert.ok(posted[0].fields.includes("state=failure"));
 });
 
-test("evaluatePr wires the linked issue's state and author association, and the PR's head ref, into the gate decision", () => {
+const okBody = "Closes #7\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\nnothing\n## Not done\nnothing";
+const readyIssue = (login) => ({ state: "open", user: { login }, labels: [{ name: "tier:skip" }, { name: "ready" }] });
+const writeAccessRoutes = (login, permission) => ({
+  "repos/o/r/pulls/5": { state: "open", body: okBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
+  "repos/o/r/pulls/5/files": "docs/a.md\n",
+  "repos/o/r/issues/7": readyIssue(login),
+  [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
+  ...(permission === undefined ? {} : { [`repos/o/r/collaborators/${login}/permission`]: { permission } }),
+});
+
+test("evaluatePr rejects a ready issue whose author has only read or triage permission, or none", () => {
+  for (const permission of ["read", "none"]) {
+    const { api } = fakeApi(writeAccessRoutes("guest", permission));
+    const d = evaluatePr(api, "o/r", 5, config);
+    assert.equal(d.state, "failure", permission);
+    assert.match(d.description, /write access/, permission);
+  }
+});
+
+test("evaluatePr accepts a ready issue whose author has write, maintain or admin permission", () => {
+  for (const permission of ["write", "admin"]) {
+    const { api } = fakeApi(writeAccessRoutes("maint", permission));
+    assert.equal(evaluatePr(api, "o/r", 5, config).state, "success", permission);
+  }
+});
+
+test("evaluatePr fails closed when the issue author's permission cannot be read", () => {
+  const { api, posted } = fakeApi(writeAccessRoutes("ghost")); // no permission route: the lookup throws
+  const d = evaluatePr(api, "o/r", 5, config);
+  assert.equal(d.state, "failure");
+  assert.match(d.description, /write access/);
+  assert.ok(posted[0].fields.includes("state=failure"));
+});
+
+test("evaluatePr wires the linked issue's state and author's write access, and the PR's head ref, into the gate decision", () => {
   const readyBody = "Closes #7\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\nnothing\n## Not done\nnothing";
   const { api, posted } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", author_association: "OWNER", labels: [{ name: "tier:skip" }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   const d = evaluatePr(api, "o/r", 5, config);
@@ -53,7 +89,7 @@ test("evaluatePr fails a PR whose linked issue is not ready, even with a matchin
   const { api } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", author_association: "NONE", labels: [{ name: "tier:skip" }] },
+    "repos/o/r/issues/7": { state: "open", user: { login: "stranger" }, labels: [{ name: "tier:skip" }] },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   const d = evaluatePr(api, "o/r", 5, config);
@@ -76,7 +112,7 @@ test("evaluatePr rejects a linked issue number that is actually a pull request",
   const { api } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", author_association: "OWNER", labels: [{ name: "tier:skip" }, { name: "ready" }], pull_request: { url: "https://api.github.com/repos/o/r/pulls/7" } },
+    "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }], pull_request: { url: "https://api.github.com/repos/o/r/pulls/7" } },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   const d = evaluatePr(api, "o/r", 5, config);
@@ -95,7 +131,7 @@ test("main accepts pull_request_target, not just pull_request", () => {
   const { api, posted } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body, head: { sha: SHA, ref: "issue-7-x" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", author_association: "OWNER", labels: [{ name: "tier:skip" }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api);
@@ -115,7 +151,7 @@ test("carry re-decides for the queued PR and posts success on the merge-group co
   const { api, posted } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", author_association: "OWNER", labels: [{ name: "tier:skip" }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, group, config);
@@ -129,7 +165,7 @@ test("carry posts failure in the queue when the re-decision is not success, even
     // tier:quick on a non-skip file with no review posted: the real decision is "pending", never success.
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "src/a.ts\n",
-    "repos/o/r/issues/7": { state: "open", author_association: "OWNER", labels: [{ name: "tier:quick" }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: "tier:quick" }, { name: "ready" }] },
     // a forged lanes/gate success is present on the head; carry must not read or trust it.
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [{ context: "lanes/gate", state: "success", created_at: "2026-09-26T10:00:00Z" }],
   });
