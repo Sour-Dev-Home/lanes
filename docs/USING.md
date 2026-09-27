@@ -10,8 +10,10 @@
 2. **Start up to 3 lanes**: open a fresh Claude Code session per issue and run `/lane <issue>`. Each lane works in its
    own worktree, writes the failing tests first, runs its reviewers, opens the PR and turns auto-merge on, then ends.
 3. **Watch with `/status`**: WAITING ON YOU, IN FLIGHT (each PR's stage), READY TO START, MERGED.
-4. **Approve with `/approve <pr>`** when a PR waits on you: read its "Needs the owner" and the diff, then approve the
-   permission prompt. The merge queue does the rest.
+4. **Approve with `/approve <pr>`** when a PR waits on you: read its "Needs the owner" and the diff; typing the command
+   is the approval, and the merge queue does the rest. The approve guard (`scripts/lanes/approve-guard.mjs`, two hooks
+   in `.claude/settings.json`) lets `post-review.mjs owner` run without a prompt only for that PR, once, in the turn
+   where you typed `/approve <pr>`; it denies that command everywhere else, including lanes and auto mode.
 5. **At night** a scheduled cloud session runs `/night`: up to 3 skip or quick tasks, merged only if CI finds them
    unattended-eligible. In the morning read the digest comment on the "Lanes digest" issue, and `/approve` the rest.
 6. **Weekly `/health`** files issues for stale work, a red main and flaky checks.
@@ -53,7 +55,7 @@ cannot grant it to itself.
 - **Lanes are trusted; the gate stops mistakes and strangers, not a hostile lane.** Lanes, schedules and the owner all
   act as one GitHub account, and a lane can push branches and run code (tests, workflows). What the gate does stop:
   - honest mistakes: a missing review, a wrong tier, an incomplete contract, a lane posting the owner's approval by
-    accident (the permission prompt on `post-review.mjs owner`);
+    accident (the approve guard on `post-review.mjs owner`, below);
   - strangers: only issues opened by someone with write, maintain or admin permission on the repository ever become
     `ready`, and the gate rejects a PR linked to anyone else's issue, so outside text never reaches an unattended lane.
     Both checks read the author's permission from `repos/{repo}/collaborators/{login}/permission`, never

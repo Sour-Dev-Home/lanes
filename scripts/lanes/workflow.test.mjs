@@ -60,10 +60,14 @@ test("issue-contract concurrency group is keyed by issue number to serialize edi
   assert.match(yml, /group: issue-contract-\$\{\{ github\.event\.issue\.number \}\}/);
 });
 
-test("settings: the owner's approval always asks; reviewers are allowed; no force push", () => {
+test("settings: the owner's approval is guarded by hooks, never allowed by a rule; reviewers are allowed; no force push", () => {
   const s = JSON.parse(readFileSync(".claude/settings.json", "utf8"));
-  assert.ok(s.permissions.ask.includes("Bash(node scripts/lanes/post-review.mjs owner:*)"));
-  assert.ok(!s.permissions.allow.some((r) => r.includes("post-review.mjs owner")));
+  // A PreToolUse allow cannot skip an ask rule (#30), so approve-guard.mjs replaces the ask rule as the barrier.
+  const hook = (event, matcher) => s.hooks[event].find((h) => h.matcher === matcher)?.hooks.map((x) => x.command).join("\n") ?? "";
+  assert.match(hook("UserPromptSubmit", undefined), /scripts\/lanes\/approve-guard\.mjs" user-prompt-submit$/);
+  assert.match(hook("PreToolUse", "Bash"), /scripts\/lanes\/approve-guard\.mjs" pre-tool-use$/);
+  assert.ok(!(s.permissions.ask ?? []).some((r) => r.includes("post-review.mjs owner")));
+  assert.ok(!s.permissions.allow.some((r) => r.includes("post-review.mjs owner") || r.includes("post-review.mjs:")));
   assert.ok(s.permissions.allow.includes("Bash(node scripts/lanes/post-review.mjs --file:*)"));
   assert.ok(s.permissions.allow.includes("Bash(node scripts/lanes/post-review.mjs test-hunter:*)"));
   assert.ok(s.permissions.deny.includes("Bash(git push --force:*)"));

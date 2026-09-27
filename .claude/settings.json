@@ -38,8 +38,15 @@
       "Bash(git merge origin/main:*)",
       "Bash(git push:*)"
     ],
-    "ask": ["Bash(node scripts/lanes/post-review.mjs owner:*)"],
     "deny": ["Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git push --force-with-lease:*)"]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/approve-guard.mjs\" user-prompt-submit" }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/approve-guard.mjs\" pre-tool-use" }] }
+    ]
   },
   "enabledPlugins": {
     "superpowers@superpowers-marketplace": false
