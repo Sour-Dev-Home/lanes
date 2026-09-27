@@ -178,3 +178,25 @@ test("notification text never carries a path, output, secret or personal data", 
   assert.match(laneText(), /never a file\s+path, command or CI output, secret, token or personal data/);
   assert.match(readFileSync(".claude/commands/night.md", "utf8"), /never a path, output, secret or personal data/);
 });
+
+// #29: acceptance criteria are a minimum; lanes and the test-hunter test edge cases beyond them
+test("lane.md step 5 treats the criteria as a minimum and lists edge-case tests as `edge: <case>`", () => {
+  const step5 = laneText().match(/\n5\. [\s\S]*?\n6\. /)[0];
+  assert.match(step5, /criteria are a\s+minimum/);
+  assert.match(step5, /empty, boundary, malformed and\s+error inputs/);
+  assert.match(step5, /"Tests added" as `edge: <case>`/);
+});
+
+test("test-hunter.md adds a case beyond the criteria and listed edge cases, or says in the summary why none apply", () => {
+  const hunter = readFileSync(".claude/agents/test-hunter.md", "utf8");
+  const flat = hunter.replace(/\s+/g, " ");
+  assert.match(flat, /at least one test for a case not covered by the criteria or the listed `edge:` cases/);
+  assert.match(flat, /state in the verdict `summary` why none apply/);
+  const example = JSON.parse(hunter.match(/```json\n([\s\S]*?)\n```/)[1]);
+  assert.match(example.summary, /^Extra case: \S/);
+});
+
+test("the PR template's Tests added comment mentions `edge:` lines", () => {
+  const section = readFileSync(".github/pull_request_template.md", "utf8").match(/## Tests added\n([\s\S]*?)\n## /)[1];
+  assert.match(section, /edge: <case>/);
+});

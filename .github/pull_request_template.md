@@ -7,7 +7,7 @@ Closes #
 <!-- Start with exactly one word: none, additive or breaking. Breaking needs the issue label contract:breaking. -->
 
 ## Tests added
-<!-- Which tests, and which criterion each covers. -->
+<!-- Which tests, and which criterion each covers. Then one line per edge case tested beyond the criteria: edge: <case> -->
 
 ## Reviewer results
 <!-- One line per reviewer the tier required: verdict and what it found or fixed. -->

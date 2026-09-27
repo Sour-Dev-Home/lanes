@@ -27,7 +27,9 @@ path, command or CI output, secret, token or personal data (point to the PR or i
     `definition-of-done.md` and `testing-patterns.md`, the security reviewer `security-checklist.md`, the ui-reviewer
     `accessibility-checklist.md`.
 5. Tests first: one failing test per acceptance criterion. Run it narrowly (`node --test <file>` or the project's
-   equivalent) and watch it fail, then implement until it passes. Run the full suite once at the end.
+   equivalent) and watch it fail, then implement until it passes. The criteria are a minimum: after the
+   per-criterion tests, add tests for the edge cases you found while implementing (empty, boundary, malformed and
+   error inputs), and list each under "Tests added" as `edge: <case>`. Run the full suite once at the end.
 6. `node scripts/lanes/reviewers.mjs <tier>` lists the reviewers this diff needs. Spawn each as a fresh subagent,
    never a fork, with model sonnet: test-hunter (FULL for tier full, QUICK for tier quick), ui-reviewer,
    security-reviewer, architecture-advisor. Give each the issue's numbered acceptance criteria and require its final
