@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { GATE_CONTEXT, parseIssueForm, parsePrBody } from "./lib.mjs";
 
+const ISSUE_LIMIT = 1000;
 const FAILED = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"]);
 
 function prStage(pr) {
@@ -86,9 +87,11 @@ function main(argv = process.argv.slice(2)) {
   const since = new Date(Date.now() - hours * 3600_000).toISOString().slice(0, 19);
   const data = {
     prs: gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,statusCheckRollup,autoMergeRequest,closingIssuesReferences"]),
-    issues: gh(["issue", "list", "--state", "open", "--limit", "1000", "--json", "number,title,labels,body"]),
+    issues: gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,title,labels,body"]),
     merged: gh(["pr", "list", "--state", "merged", "--search", `merged:>=${since}`, "--limit", "100", "--json", "number,title"]),
   };
+  // A blocker missing from a truncated list would read as closed, so refuse rather than list a blocked issue as ready.
+  if (data.issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
   const summary = summarize(data);
   console.log(argv.includes("--json") ? JSON.stringify({ version: 0, generatedAt: new Date().toISOString(), since: sinceLabel, ...summary }, null, 2) : render(summary, sinceLabel));
 }
