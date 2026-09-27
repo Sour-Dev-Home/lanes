@@ -159,6 +159,18 @@ test("main reads the native list, POSTs each missing blocker by issue id, and DE
   assert.deepEqual(deletes(calls), ["repos/o/r/issues/9/dependencies/blocked_by/5005"]);
 });
 
+test("main edge: a Blocked by field naming only foreign issues still removes stale native relationships", () => {
+  // Nothing in the field resolves to a native blocker (both refs are foreign), so `wanted` is empty and every
+  // existing native relationship is stale and must be removed, same as if the field said `none`.
+  const { run, calls } = fakeMirror({ deps: [{ id: 3003, number: 3 }] });
+  main({ ...env, ISSUE_BODY: withBlocked(body, "other/repo#12, another/repo#7") }, run);
+  assert.deepEqual(posts(calls), []);
+  assert.deepEqual(deletes(calls), ["repos/o/r/issues/9/dependencies/blocked_by/3003"]);
+  const c = commentBody(calls);
+  assert.match(c, /other\/repo#12\b.*another repository/);
+  assert.match(c, /another\/repo#7\b.*another repository/);
+});
+
 test("main: Blocked by none removes every native relationship, including one in another repository", () => {
   const { run, calls } = fakeMirror({ deps: [{ id: 3003, number: 3 }, { id: 88, number: 3, repo: "x/y" }] });
   main(env, run);
