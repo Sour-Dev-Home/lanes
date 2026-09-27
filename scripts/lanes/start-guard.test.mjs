@@ -194,6 +194,14 @@ test("criterion 2: a direct claude --bg is denied in every session, even with a 
   assert.deepEqual(decidePreToolUse(bash('claude --bg "/lane 12"', { session_id: undefined }), null, NOW), deny);
 });
 
+test("#76 edge: a direct claude --bg is denied even with a fresh --auto or --auto --go grant", () => {
+  // Not covered above (that test only tries a numbered-issues grant): an auto grant must not create a second path
+  // around the always-on --bg denial.
+  const deny = { decision: "deny", reason: BG_DENY_REASON };
+  assert.deepEqual(decidePreToolUse(bash('claude --bg "/lane 12"'), autoGrant("dry"), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash('claude --bg "/lane 12"'), autoGrant("go"), NOW), deny);
+});
+
 test("anything else, and other tools, get no decision", () => {
   assert.equal(decidePreToolUse(bash("git status"), null, NOW), null);
   assert.equal(decidePreToolUse(bash("claude agents --json"), null, NOW), null);
@@ -300,6 +308,22 @@ test("#76 criterion 3: /start --auto --go then the go command is allowed once by
     assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(GO)), { dir, now: NOW + 1000 })).permissionDecision, "deny");
     assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(AUTO)), { dir, now: NOW + 1000 })).permissionDecision, "allow");
     assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(AUTO)), { dir, now: NOW + 2000 })).permissionDecision, "deny");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#76 edge: typing /start --auto after /start <N ...> replaces the numbered grant, not merges it", () => {
+  // Not covered above (those tests only move between the two auto forms): a numbered grant on disk must be fully
+  // overwritten, not merged, so the stale issue numbers cannot still unlock a numbered run.
+  const dir = tmp();
+  try {
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start 12 14" }), { dir, now: NOW });
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start --auto" }), { dir, now: NOW + 500 });
+    const onDisk = JSON.parse(readFileSync(join(dir, "s1.json"), "utf8"));
+    assert.deepEqual(onDisk, { sessionId: "s1", auto: "dry", at: new Date(NOW + 500).toISOString() });
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(START)), { dir, now: NOW + 1000 })).permissionDecision, "deny");
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(AUTO)), { dir, now: NOW + 1000 })).permissionDecision, "allow");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
