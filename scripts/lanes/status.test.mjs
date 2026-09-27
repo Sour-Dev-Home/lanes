@@ -77,6 +77,44 @@ test("a gate with no fetched description notes empty, not undefined", () => {
   assert.deepEqual(s.inFlight.map((i) => [i.stage, i.note]), [["review", ""], ["contract", ""]]);
 });
 
+// edge: queue membership is checked before the gate, so a PR already in the queue reads as queued even if its
+// gate is failing or a check is red (GitHub would not have queued it in that state, but the code should not trust that).
+test("a PR in the merge queue is queued even when its gate reports a contract failure or a check is red", () => {
+  const s = summarize({
+    prs: [pr(8, [gate("FAILURE", "contract check failed")]), pr(9, [{ __typename: "CheckRun", name: "verify", status: "COMPLETED", conclusion: "FAILURE" }])],
+    issues: [],
+    merged: [],
+    mergeQueue: [{ number: 8, position: 1 }, { number: 9, position: 2 }],
+  });
+  assert.deepEqual(s.inFlight.map((i) => [i.number, i.stage, i.note]), [
+    [8, "queued", "in merge queue, position 1"],
+    [9, "queued", "in merge queue, position 2"],
+  ]);
+});
+
+// edge: position 0 must not be mistaken for "not queued" (prStage checks `!== undefined`, not truthiness).
+test("a merge queue position of 0 is still queued, not read as absent", () => {
+  const s = summarize({ prs: [pr(8, [gate("SUCCESS", "ok")])], issues: [], merged: [], mergeQueue: [{ number: 8, position: 0 }] });
+  assert.deepEqual([stageOf(s, 8).stage, stageOf(s, 8).note], ["queued", "in merge queue, position 0"]);
+});
+
+// edge: a stray queue entry for a PR outside the open PR list (already merged, or listed by a different `gh pr
+// list` snapshot) is ignored rather than crashing summarize.
+test("a merge queue entry for a PR not in the open PR list does not crash and does not appear", () => {
+  const s = summarize({ prs: [pr(8, [gate("SUCCESS", "ok")])], issues: [], merged: [], mergeQueue: [{ number: 999, position: 1 }] });
+  assert.deepEqual([stageOf(s, 8).stage, stageOf(s, 8).note], ["ready", "auto-merge is off"]);
+  assert.equal(s.inFlight.length, 1);
+});
+
+// edge: a malformed or empty GraphQL reply (repository null, or the reply missing entirely) must not throw.
+test("mergeQueueEntries and gateDescriptions tolerate a missing or malformed GraphQL reply", () => {
+  assert.deepEqual(mergeQueueEntries(undefined), []);
+  assert.deepEqual(mergeQueueEntries({}), []);
+  assert.deepEqual(mergeQueueEntries({ data: { repository: null } }), []);
+  assert.deepEqual(gateDescriptions(undefined), new Map());
+  assert.deepEqual(gateDescriptions({}), new Map());
+});
+
 test("a PR whose body needs the owner is waiting on him even mid-review", () => {
   const s = summarize({ prs: [pr(6, [gate("PENDING", "waiting for review/test-hunter")], { body: body("pick a name for the package") })], issues: [], merged: [] });
   assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.note]), [[6, "needs: pick a name for the package"]]);
