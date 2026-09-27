@@ -117,6 +117,9 @@ const VAR_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
 // What is left of a word after substitution that could still expand to anything.
 const UNRESOLVED_RE = /[$`]/;
 const NODE_RE = /^(node|nodejs)(\.exe)?$/i;
+// Commands that only print, list or search their arguments: a "node" among them is never run. Every other command
+// word may be a wrapper (env, sudo, time, xargs, …), so a "node" behind it counts.
+const NON_RUNNING_COMMANDS = new Set(["echo", "printf", "grep", "egrep", "fgrep", "rg", "ls", "which", "where", "whereis", "type", "cat", "head", "tail", "wc", "file", "stat", "man"]);
 // Node options known to take no value. Any other bare option (no `=value`) may take the next word as its value, so
 // that word and the one after it are both treated as the script: an option missing here only costs a false deny.
 const NODE_BOOLEAN_FLAGS = new Set([
@@ -192,8 +195,9 @@ function scan(cmd, depth, out) {
     // Node's options and the script: any of them that still holds `$` or a backtick could load or be post-review.mjs.
     // Every word that looks like node counts, since an earlier one may only be an argument (`sudo -u node node …`).
     const nodeRange = new Set();
+    const runsArgs = !NON_RUNNING_COMMANDS.has(plain[0]?.split(/[\\/]/).at(-1));
     plain.forEach((p, at) => {
-      if (!NODE_RE.test(p.split(/[\\/]/).at(-1))) return;
+      if ((at > 0 && !runsArgs) || !NODE_RE.test(p.split(/[\\/]/).at(-1))) return;
       for (let j = at + 1; j <= nodeScriptEnd(plain, at); j += 1) nodeRange.add(j);
     });
     plain.forEach((w, i) => {

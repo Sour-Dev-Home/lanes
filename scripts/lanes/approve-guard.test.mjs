@@ -305,6 +305,27 @@ test("edge: a wrapper argument that itself looks like the node binary must not h
   }
 });
 
+// Found by the #62 test-hunter (final verification): a command that only prints or searches its arguments never runs
+// the "node" it mentions, so a later `$` word is not denied. Any other command word still fails closed.
+test("edge: the word 'node' as an argument of a command that never runs it is not a false deny (#62 review)", () => {
+  for (const cmd of [
+    "grep -n node $FILE",
+    "echo node $VAR",
+    "ls /opt/node $DIR",
+    "which node $X",
+    "rg -l node $DIR",
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+  // An unknown command word may be a wrapper that runs node: still denied.
+  for (const cmd of ["mywrap node scripts/lanes/post-$X.mjs $R", "docker run node $IMAGE"]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // A nested script inside a non-running command is still scanned as a command of its own.
+  assert.deepEqual(decidePreToolUse(bash('echo "x; node $S owner"'), grant(), NOW), { decision: "deny", reason: DENY_REASON });
+});
+
 test("the CLI answers deny, never crashes, when it cannot evaluate a PreToolUse call", () => {
   const cli = (event, input) => spawnSync(process.execPath, ["scripts/lanes/approve-guard.mjs", event], { input, encoding: "utf8" });
   for (const [event, input] of [["pre-tool-use", "{oops"], ["bogus-event", JSON.stringify(bash(OWNER))]]) {
