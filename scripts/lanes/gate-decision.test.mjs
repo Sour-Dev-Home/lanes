@@ -149,6 +149,14 @@ test("full: an unfixed critical or important finding waits; minor or fixed ones 
   assert.equal(full({ verdicts: [verdict("test-hunter", { findings: ok })] }).state, "success");
 });
 
+test("full: an unfixed finding with an odd-cased or unknown severity waits (fails closed)", () => {
+  for (const severity of ["Critical", "IMPORTANT", "blocker", undefined]) {
+    const findings = [{ severity, summary: "x", fixed: false }];
+    assert.equal(full({ verdicts: [verdict("test-hunter", { findings })] }).stage, "owner", String(severity));
+  }
+  assert.equal(full({ verdicts: [verdict("test-hunter", { findings: [{ severity: "Minor", summary: "x", fixed: false }] })] }).state, "success");
+});
+
 test("full: an unfixed finding in a non-required reviewer's head verdict also waits", () => {
   const findings = [{ severity: "important", summary: "x", fixed: false }];
   waits(full({ verdicts: [verdict("test-hunter"), verdict("ui-reviewer", { result: "failure", findings })] }), "unfixed important finding from ui-reviewer");
@@ -171,6 +179,14 @@ test("full: the newest verdict per reviewer for the head wins", () => {
   const older = verdict("test-hunter", { result: "failure" });
   assert.equal(full({ verdicts: [older, verdict("test-hunter")] }).state, "success");
   waits(full({ verdicts: [verdict("test-hunter"), older] }), "verdict from test-hunter is not success");
+});
+
+// No kept verdict may carry an unfixed finding: a finding cannot be fixed without a new commit, so a same-head re-post
+// that drops it goes to the owner rather than merging unattended.
+test("full: an unfixed finding in an earlier verdict for the same head still waits", () => {
+  const findings = [{ severity: "critical", file: "a", line: 1, summary: "x", fixed: false }];
+  const older = verdict("test-hunter", { result: "failure", findings });
+  waits(full({ verdicts: [older, verdict("test-hunter")] }), "unfixed critical finding from test-hunter");
 });
 
 test("full: a trusted success status is still required even with a verdict comment", () => {

@@ -261,7 +261,6 @@ export function trustedStatuses(statuses) {
 }
 
 const NEEDS_NOTHING = /^nothing\.?$/i;
-const BLOCKING = ["critical", "important"];
 
 /**
  * Why a full-tier PR still needs the owner, or null when it may merge unattended. `verdicts` are the parsed verdict
@@ -275,7 +274,8 @@ function fullTierBlocker({ pr, cls, required, verdicts, headSha }) {
   const forHead = (Array.isArray(verdicts) ? verdicts : []).filter((v) => head !== null && v?.sha === head && v.verdict);
   for (const v of forHead) {
     const findings = Array.isArray(v.verdict.findings) ? v.verdict.findings : [];
-    const unfixed = findings.find((f) => BLOCKING.includes(f?.severity) && f?.fixed !== true);
+    // Fails closed: any severity but minor (in any case, or unknown) blocks while unfixed.
+    const unfixed = findings.find((f) => String(f?.severity ?? "").toLowerCase() !== "minor" && f?.fixed !== true);
     if (unfixed) return `unfixed ${unfixed.severity} finding from ${v.reviewer}`;
   }
   const newest = new Map(forHead.map((v) => [v.reviewer, v]));
