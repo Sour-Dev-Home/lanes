@@ -48,7 +48,7 @@ const looksLikePath = (p) => p && !/\s/.test(p) && !/^(-|https?:)/.test(p) && (p
 // The file paths an issue names: backticked or bare tokens with a `/` or a file extension, read from its Interface
 // contract and the "In:" part of its Scope (anything after "Out:" is ignored). A trailing `*` glob reads as its directory.
 export function issuePaths({ contract = "", scope = "" }) {
-  const inPart = scope.split(/\bOut:/i)[0].replace(/^[\s\S]*?\bIn:/i, "");
+  const inPart = scope.split(/(?<![\w-])Out:/i)[0].replace(/^[\s\S]*?(?<![\w-])In:/i, "");
   const paths = [];
   for (const text of [contract, inPart]) {
     for (const [, quoted, bare] of text.matchAll(/`([^`]+)`|(\S+)/g)) {
@@ -66,11 +66,16 @@ export function pathsOverlap(a, b) {
 }
 
 // Marks each startable item `parallel` unless its paths overlap another startable item's, or its Scope names none.
+// An issue whose Scope names no paths is excluded from *other* issues' comparisons too (only itself is flagged),
+// since a scopeless issue's Interface contract alone would otherwise produce a one-sided overlap.
 function markParallel(ready, formOf) {
   const paths = new Map(ready.map((i) => [i.number, issuePaths(formOf.get(i.number) ?? {})]));
+  const isScoped = new Map(ready.map((i) => [i.number, issuePaths({ scope: formOf.get(i.number)?.scope }).length > 0]));
   for (const item of ready) {
-    const scoped = issuePaths({ scope: formOf.get(item.number)?.scope }).length > 0;
-    item.overlapsWith = scoped ? ready.filter((o) => o !== item && pathsOverlap(paths.get(item.number), paths.get(o.number))).map((o) => o.number) : [];
+    const scoped = isScoped.get(item.number);
+    item.overlapsWith = scoped
+      ? ready.filter((o) => o !== item && isScoped.get(o.number) && pathsOverlap(paths.get(item.number), paths.get(o.number))).map((o) => o.number)
+      : [];
     item.parallel = scoped && item.overlapsWith.length === 0;
     item.note = !scoped ? "one at a time (scope names no paths)" : item.parallel ? "parallel" : `one at a time with ${item.overlapsWith.map((n) => `#${n}`).join(", ")}`;
   }

@@ -124,6 +124,8 @@ test("issuePaths reads backticked and bare paths from the contract and Scope's I
   assert.deepEqual(paths, ["docs/contract.md", "scripts/lanes/status.mjs", "scripts/lanes/status.test.mjs"]);
   assert.deepEqual(issuePaths({ contract: "none", scope: "tidy up the wording" }), []);
   assert.deepEqual(issuePaths({ contract: "", scope: "In: `src/ui/` and ./README.md" }), ["src/ui/", "README.md"]);
+  // "Built-in:" and "Opt-out:" are not the In:/Out: labels.
+  assert.deepEqual(issuePaths({ scope: "Built-in: `x.mjs`. In: `a.mjs`, opt-out: `b.mjs`\nOut: `c.mjs`" }), ["a.mjs", "b.mjs"]);
 });
 
 test("paths overlap when equal or when one is a directory containing the other", () => {
@@ -168,6 +170,18 @@ test("a shared contract file overlaps even when the Scope files differ", () => {
 test("an issue whose Scope names no paths is one at a time", () => {
   const s = summarize({ prs: [], issues: [scoped(99, "tidy the docs", { contract: "`x/y.ts`" }), scoped(100, "In: `z.mjs`")], merged: [] });
   assert.deepEqual(hints(s), [[99, false, [], "one at a time (scope names no paths)"], [100, true, [], "parallel"]]);
+});
+
+test("a scopeless issue's Interface contract path never leaks into another issue's overlapsWith", () => {
+  const s = summarize({
+    prs: [],
+    issues: [scoped(110, "tidy the docs", { contract: "`shared/thing.mjs`" }), scoped(111, "In: `shared/thing.mjs`")],
+    merged: [],
+  });
+  assert.deepEqual(hints(s), [
+    [110, false, [], "one at a time (scope names no paths)"],
+    [111, true, [], "parallel"],
+  ]);
 });
 
 test("paths after Out: never cause an overlap", () => {
