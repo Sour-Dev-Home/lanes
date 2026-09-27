@@ -9,7 +9,7 @@ import { main as checkBlockers } from "./blockers.mjs";
 import { parseIssueForm } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./status.mjs";
 
-export const CAP = 3;
+export const CAP = 8;
 const PR_LIMIT = 1000;
 
 /** The claude arguments for one lane. No permission-mode flag: a lane runs under the owner's normal settings. */
