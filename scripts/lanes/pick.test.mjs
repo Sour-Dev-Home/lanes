@@ -173,3 +173,11 @@ test("edge: claimedPaths tolerates missing inputs and PRs without files", () => 
   assert.deepEqual(claimedPaths({}), []);
   assert.deepEqual(claimedPaths({ openPrs: [{ number: 1 }], runningIssues: [{ number: 2 }] }), []);
 });
+
+// Extra case beyond the criteria/edge list: a Scope naming only soft paths still has real (non-empty) paths, so it
+// is not "scope names no paths" (that check is on the raw, unfiltered Scope) - but since its only path is soft, it
+// can never overlap anything, including another candidate that names the very same soft path.
+test("extra: a Scope naming only a soft path still starts, and never overlaps another candidate on it", () => {
+  const r = pick({ candidates: [issue(1, ["CHANGELOG.md"]), issue(2, ["CHANGELOG.md"])], softPaths: ["^CHANGELOG\\.md$"] });
+  assert.deepEqual(r, { start: [1, 2], skipped: [] });
+});
