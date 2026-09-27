@@ -7,6 +7,8 @@ This is the owner's approval of PR #$ARGUMENTS. If you are a lane or were starte
 1. Show `gh pr view $ARGUMENTS --json title,body,headRefOid` (title, "Needs the owner", "Contract changes") and
    `gh pr diff $ARGUMENTS --name-only`. Note the `headRefOid` shown here.
 2. Run `node scripts/lanes/post-review.mjs owner success "approved by owner" --pr $ARGUMENTS --sha <the headRefOid
-   from step 1>`. This asks for permission on purpose: the owner's approval of the prompt is the approval. `--sha`
-   closes the race where a push lands between step 1 and step 2: the script refuses if the PR's head has moved.
+   from step 1>`, exactly in this form (nothing chained or wrapped). Run from `/approve <N>` this needs no permission
+   prompt: typing `/approve <N>` is the approval, and `scripts/lanes/approve-guard.mjs` allows this one command for
+   PR N, once, within 15 minutes; anywhere else, lanes and auto mode included, the hook denies it. `--sha` closes the
+   race where a push lands between step 1 and step 2: the script refuses if the PR's head has moved.
 3. Run `gh pr merge $ARGUMENTS --auto` and report the lanes/gate state.
