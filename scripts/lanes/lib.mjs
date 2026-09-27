@@ -2,6 +2,7 @@
 // decision. No I/O except loadConfig and the injected `api` in authorCanWrite; everything else is a plain function so
 // it can be unit-tested.
 import { readFileSync } from "node:fs";
+import { posix } from "node:path";
 
 export const REVIEWERS = ["test-hunter", "ui-reviewer", "security-reviewer", "architecture-advisor"];
 export const TIERS = ["skip", "quick", "full"];
@@ -218,6 +219,7 @@ const ADR_STATUS_RE = /^(proposed|accepted|superseded by (\d{4}))$/;
 /** Why a `Governs` entry is not a plain repo-relative path, or null when it is. */
 function governsPathError(p) {
   if (/^([/\\]|[A-Za-z]:)/.test(p)) return `Governs entry is absolute: ${p}`;
+  if (p.includes("`")) return `Governs entry has an unbalanced backtick: ${p}`;
   if (p.includes("\\")) return `Governs entry must use forward slashes: ${p}`;
   if (/[*?[\]{}!]/.test(p)) return `Governs entry is a glob, list the path or its directory: ${p}`;
   const segments = p.replace(/\/$/, "").split("/");
@@ -244,10 +246,12 @@ export function parseAdr(text) {
   const rawStatus = statusLine.slice("Status:".length).trim();
   const s = rawStatus.match(ADR_STATUS_RE);
   if (!s) return { error: `unknown status: ${rawStatus} (expected proposed, accepted or superseded by NNNN)` };
+  const dup = duplicateHeadings(body, "##");
+  if (dup.length) return { error: `duplicate section: ${dup.join(", ")}` };
   const governs = [];
   for (const line of (parseSections(body, "##").governs ?? "").split("\n")) {
     if (!line.trim()) continue;
-    const item = line.match(/^[-*]\s+(.+)$/);
+    const item = line.match(/^-\s+(.+)$/);
     if (!item) return { error: `Governs line is not a list item: ${line.trim()}` };
     const p = item[1].trim().replace(/^`(.*)`$/, "$1");
     const err = governsPathError(p);
@@ -262,7 +266,8 @@ export function parseAdr(text) {
 
 /** Numbers of the accepted ADRs whose Governs lists `file` exactly or a directory (trailing `/`) containing it. */
 export function adrGoverns(adrs, file) {
-  const f = String(file ?? "").replace(/\\/g, "/").replace(/^\.\//, "");
+  const f = posix.normalize(String(file ?? "").replace(/\\/g, "/"));
+  if (f.startsWith("../") || f.startsWith("/")) return [];
   const hits = (adrs ?? [])
     .filter((a) => a && !a.error && a.status === "accepted")
     .filter((a) => a.governs.some((g) => (g.endsWith("/") ? f.startsWith(g) : f === g)))

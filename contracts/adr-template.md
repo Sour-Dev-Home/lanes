@@ -22,9 +22,11 @@ ADR can't merge.
   a backslash, a `..`, `.` or empty segment, and a glob character (`* ? [ ] { } !`).
 
 `adrGoverns(adrs, file)` returns the numbers of the **accepted** ADRs whose `Governs` lists `file` exactly or a
-directory containing it. `scripts/lanes2/x.mjs` is not under `scripts/lanes/`.
+directory containing it. `scripts/lanes2/x.mjs` is not under `scripts/lanes/`. `file` is normalized first
+(`\` to `/`, `.` and `..` resolved); a path that resolves outside the repository matches nothing.
 
-HTML comments and anything inside a code fence are ignored when parsing.
+Each `## ` section appears once: a repeated heading is an error, so a second `## Governs` can't list paths the parser
+would drop. HTML comments and anything inside a code fence are ignored when parsing.
 
 ## Example
 

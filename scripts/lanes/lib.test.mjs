@@ -183,6 +183,8 @@ test("parseAdr names each error", () => {
     "empty governs": [adr({ governs: "" }), /governs/i],
     "missing governs section": [adr().replace(/## Governs[\s\S]*$/, ""), /governs/i],
     "governs with only prose": [adr({ governs: "the lanes scripts" }), /governs/i],
+    "governs with a * bullet": [adr({ governs: "* scripts/lanes/" }), /list item/],
+    "a second Governs section": [adr() + "\n## Governs\n\n- secrets/private.md\n", /duplicate section: governs/],
   };
   for (const [name, [text, re]] of Object.entries(cases)) {
     const r = parseAdr(text);
@@ -221,6 +223,9 @@ test("adrGoverns edges: error entries, normalized file spelling and duplicate en
   assert.deepEqual(adrGoverns([a], "./scripts/lanes/lib.mjs"), [4]);
   assert.deepEqual(adrGoverns([a], "scripts\\lanes\\lib.mjs"), [4]);
   assert.deepEqual(adrGoverns([a], "scripts/lanes"), []);
+  assert.deepEqual(adrGoverns([a], "scripts/lanes/../other/x.mjs"), [], "a .. that leaves the directory does not match");
+  assert.deepEqual(adrGoverns([a], "other/../scripts/lanes/x.mjs"), [4], "a .. that lands inside it does");
+  assert.deepEqual(adrGoverns([a], "../scripts/lanes/x.mjs"), []);
   assert.deepEqual(adrGoverns([], "scripts/lanes/lib.mjs"), []);
 });
 
@@ -231,4 +236,21 @@ test("adrGoverns ignores superseded and proposed ADRs", () => {
     parseAdr(adr({ title: "# 0003: New", governs: "- scripts/lanes/" })),
   ];
   assert.deepEqual(adrGoverns(adrs, "scripts/lanes/lib.mjs"), [3]);
+});
+
+// Extra case beyond the issue's listed edges: the title number must be exactly four digits, not fewer or more.
+test("parseAdr rejects a title number that is not exactly four digits", () => {
+  assert.match(parseAdr(adr({ title: "# 007: Three digits" })).error, /number/);
+  assert.match(parseAdr(adr({ title: "# 00007: Five digits" })).error, /number/);
+});
+
+// BUG: a Governs entry with a stray, unbalanced backtick (e.g. an author forgot to close it) is not
+// rejected. governsPathError only strips a *balanced* leading+trailing backtick pair and otherwise leaves
+// the raw text alone; a backtick is not in the glob-character set, so the literal backtick ends up baked
+// into the returned path. That path can never match a real repo file, so the Governs entry silently governs
+// nothing instead of failing to parse - the opposite of "a malformed ADR can't merge". This assertion
+// captures the currently-correct expectation and fails against the current implementation.
+test("parseAdr rejects a Governs entry with an unbalanced backtick", () => {
+  const r = parseAdr(adr({ governs: "- `scripts/lanes/" }));
+  assert.ok(r.error, `expected an error, got a parsed path: ${JSON.stringify(r)}`);
 });
