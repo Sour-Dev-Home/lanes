@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compileConfig, gateDecision, isBotStatus, loadConfig } from "./lib.mjs";
+import { compileConfig, gateDecision, isBotStatus, loadConfig, parseAdr } from "./lib.mjs";
 
 const config = compileConfig({
   requiredChecks: ["verify"],
@@ -402,4 +402,50 @@ test("the other owner reasons are unchanged on a sensitive, non-owner-only path"
 test("edge: a config without paths.owner never reports owner-only", () => {
   const legacy = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: ["^scripts/"], ui: [] } });
   assert.equal(full({ config: legacy, files: ["scripts/lanes/gate.mjs"], ...clean(["test-hunter", "security-reviewer"]) }).state, "success");
+});
+
+// ---- #45: accepted ADRs on the default branch that govern a changed file require the architecture-advisor ----
+
+const adrText = (n, status, governs) =>
+  `# ${String(n).padStart(4, "0")}: ADR ${n}\n\nStatus: ${status}\n\n## Context\n\nx\n\n## Decision\n\nx\n\n## Decisions for the owner\n\nnothing\n\n## Consequences\n\nx\n\n## Governs\n\n${governs.map((g) => `- ${g}`).join("\n")}\n`;
+const adrOf = (n, governs, status = "accepted") => parseAdr(adrText(n, status, governs));
+const ADRS = [adrOf(3, ["src/"])];
+
+test("a governed file makes the gate wait for the architecture-advisor, then pass once it is in", () => {
+  assert.deepEqual(full({ adrs: ADRS, files: ["src/a.ts"] }), { state: "pending", description: "waiting for review/architecture-advisor", stage: "review" });
+  assert.deepEqual(full({ adrs: ADRS, files: ["src/a.ts"], ...clean(["test-hunter", "architecture-advisor"]) }), READY("full"));
+  assert.equal(run({ adrs: ADRS, files: ["src/a.ts"], statuses: [st("review/test-hunter")] }).description, "waiting for review/architecture-advisor");
+});
+
+test("full: a governed diff also needs the architecture-advisor's verdict for the head", () => {
+  const statuses = [st("review/test-hunter"), st("review/architecture-advisor")];
+  waits(full({ adrs: ADRS, files: ["src/a.ts"], statuses, verdicts: [verdict("test-hunter")] }), "no verdict for head from architecture-advisor");
+});
+
+test("a diff touching only ungoverned files is unchanged", () => {
+  assert.deepEqual(full({ adrs: ADRS, files: ["lib/a.ts"] }), READY("full"));
+});
+
+test("a superseded ADR is ignored", () => {
+  assert.deepEqual(full({ adrs: [adrOf(3, ["src/"], "superseded by 0004")], files: ["src/a.ts"] }), READY("full"));
+});
+
+test("a PR adding an ADR that governs its own files does not require the advisor (not on the default branch yet)", () => {
+  // The gate's adrs come from the default branch; the PR's new docs/adr file is only in its file list.
+  const files = ["docs/adr/0003-new.md", "src/a.ts"];
+  assert.deepEqual(full({ adrs: [], files }), READY("full"));
+});
+
+test("tier skip on a governed file is unchanged: no reviewers", () => {
+  const governsDocs = [adrOf(3, ["docs/"])];
+  assert.deepEqual(run({ adrs: governsDocs, issueLabels: ["tier:skip", "ready"], files: ["docs/a.md"] }), READY("skip"));
+});
+
+test("a tier:skip PR adding an ADR still waits on the owner (ADR 0002 owner-only path)", () => {
+  const d = onReal("skip", ["docs/adr/0003-new.md"], [], { adrs: [adrOf(1, ["docs/adr/"])] });
+  assert.deepEqual(d, { state: "pending", description: "waiting on owner (/approve) (owner-only path)", stage: "owner" });
+});
+
+test("edge: without adrs the gate decides as before", () => {
+  assert.deepEqual(full({ files: ["src/a.ts"] }), READY("full"));
 });

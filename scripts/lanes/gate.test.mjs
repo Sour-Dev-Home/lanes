@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { carry, evaluatePr, main } from "./gate.mjs";
-import { compileConfig } from "./lib.mjs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { compileConfig, parseAdr } from "./lib.mjs";
 
 const config = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] } });
 const SHA = "a".repeat(40);
@@ -272,4 +275,54 @@ test("carry fails closed when the queued PR is no longer open", () => {
   const group = "b".repeat(40);
   const { api } = fakeApi({ "repos/o/r/pulls/5": { state: "closed", body, head: { sha: SHA } } });
   assert.equal(carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, group, config).state, "failure");
+});
+
+// #45: the gate loads accepted ADRs from its own working tree (the default branch's checkout) and passes them on.
+const adrMd = (n, governs) =>
+  `# ${String(n).padStart(4, "0")}: ADR ${n}\n\nStatus: accepted\n\n## Context\n\nx\n\n## Decision\n\nx\n\n## Decisions for the owner\n\nnothing\n\n## Consequences\n\nx\n\n## Governs\n\n- ${governs}\n`;
+const WAIT_ADVISOR = "waiting for review/architecture-advisor";
+
+test("evaluatePr and carry require the architecture-advisor for a file an accepted ADR governs", () => {
+  const adrs = [parseAdr(adrMd(3, "src/"))];
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  assert.equal(evaluatePr(api, "o/r", 5, config, adrs).description, WAIT_ADVISOR);
+  assert.ok(posted[0].fields.includes("state=pending"));
+  const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, "b".repeat(40), config, adrs);
+  assert.deepEqual(d, { state: "failure", description: WAIT_ADVISOR });
+});
+
+test("edge: evaluatePr without adrs decides as before", () => {
+  const { api } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
+});
+
+// main reads lanes.config.json and docs/adr from the directory it runs in, like the workflow's default-branch checkout.
+function inCheckout(adrFiles, fn) {
+  const root = mkdtempSync(join(tmpdir(), "lanes-gate-"));
+  const prev = process.cwd();
+  try {
+    writeFileSync(join(root, "lanes.config.json"), JSON.stringify({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] } }));
+    mkdirSync(join(root, "docs", "adr"), { recursive: true });
+    for (const [name, text] of Object.entries(adrFiles)) writeFileSync(join(root, "docs", "adr", name), text);
+    process.chdir(root);
+    return fn();
+  } finally {
+    process.chdir(prev);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+const descriptionOf = (post) => post.fields.find((f) => f.startsWith("description=")).slice("description=".length);
+
+test("main loads the default branch's ADRs: a governed file waits for the architecture-advisor", () => {
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  inCheckout({ "0003-src.md": adrMd(3, "src/") }, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
+  assert.equal(descriptionOf(posted[0]), WAIT_ADVISOR);
+});
+
+test("main ignores an ADR the PR itself adds: it is not on the default branch yet", () => {
+  const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+  routes["repos/o/r/pulls/5/files"] = "docs/adr/0003-src.md\nsrc/a.ts\n";
+  const { api, posted } = fakeApi(routes);
+  inCheckout({}, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
+  assert.equal(descriptionOf(posted[0]), "unattended-eligible (tier:full), reviews in");
 });

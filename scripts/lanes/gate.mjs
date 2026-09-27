@@ -2,7 +2,7 @@
 // Inputs (environment): REPO, EVENT_NAME, PR_NUMBER, STATUS_SHA, STATUS_CONTEXT, HEAD_REF, GROUP_SHA, GH_TOKEN.
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { authorCanWrite, GATE_CONTEXT, gateDecision, loadConfig, parsePrBody, parseVerdictComment } from "./lib.mjs";
+import { authorCanWrite, GATE_CONTEXT, gateDecision, loadAdrs, loadConfig, parsePrBody, parseVerdictComment } from "./lib.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -55,7 +55,7 @@ export function trustedVerdicts(api, repo, number) {
  * merge-group commit): the merge queue must re-decide from these same live inputs, never trust a `lanes/gate` status
  * already sitting on the head, since a lane-pushed workflow running in the queue with GITHUB_TOKEN could forge one (R3).
  */
-export function decideForPr(api, repo, number, config) {
+export function decideForPr(api, repo, number, config, adrs = []) {
   const pr = JSON.parse(api([`repos/${repo}/pulls/${number}`]));
   if (pr.state !== "open") return null;
   // Both names of a renamed file: moving code into docs/ must not make a diff look docs-only.
@@ -91,22 +91,23 @@ export function decideForPr(api, repo, number, config) {
     statuses: statusesOf(api, repo, pr.head.sha),
     verdicts: trustedVerdicts(api, repo, number),
     config,
+    adrs,
   });
   return { pr, decision };
 }
 
-export function evaluatePr(api, repo, number, config) {
-  const result = decideForPr(api, repo, number, config);
+export function evaluatePr(api, repo, number, config, adrs = []) {
+  const result = decideForPr(api, repo, number, config, adrs);
   if (result === null) return null;
   post(api, repo, result.pr.head.sha, result.decision);
   return result.decision;
 }
 
-export function carry(api, repo, headRef, groupSha, config) {
+export function carry(api, repo, headRef, groupSha, config, adrs = []) {
   const match = QUEUE_REF.exec(headRef ?? "");
   let decision = { state: "failure", description: "cannot tell which PR this queue entry is for" };
   if (match) {
-    const result = decideForPr(api, repo, Number(match[1]), config);
+    const result = decideForPr(api, repo, Number(match[1]), config, adrs);
     if (result === null) decision = { state: "failure", description: "the PR for this queue entry is not open" };
     // A non-success decision (pending or failure) always carries as failure: the merge queue needs a definite
     // answer now, and "pending" must never be treated as good enough to merge.
@@ -120,24 +121,26 @@ export function main(env = process.env, api = ghApi) {
   const repo = env.REPO ?? "";
   if (!REPO.test(repo)) throw new Error("REPO is missing or malformed");
   const config = loadConfig();
+  // #45: the ADRs in this checkout (the default branch), so a PR's own ADR edits never change its required reviewers.
+  const adrs = loadAdrs();
   switch (env.EVENT_NAME) {
     // pull_request_target (I3): the workflow trigger changed from pull_request so a PR cannot rewrite its own gate;
     // GitHub sets this exact event name on the resulting run, so both must be accepted here.
     case "pull_request":
     case "pull_request_target":
     case "workflow_dispatch":
-      return console.log(JSON.stringify(evaluatePr(api, repo, Number(env.PR_NUMBER), config)));
+      return console.log(JSON.stringify(evaluatePr(api, repo, Number(env.PR_NUMBER), config, adrs)));
     case "status": {
       // Intentionally duplicates the workflow's job-level if (defence in depth for manual runs).
       if (env.STATUS_CONTEXT === GATE_CONTEXT || !SHA.test(env.STATUS_SHA ?? "")) return;
       for (const pr of JSON.parse(api([`repos/${repo}/commits/${env.STATUS_SHA}/pulls`]))) {
-        if (pr.state === "open" && pr.head?.sha === env.STATUS_SHA) console.log(JSON.stringify(evaluatePr(api, repo, pr.number, config)));
+        if (pr.state === "open" && pr.head?.sha === env.STATUS_SHA) console.log(JSON.stringify(evaluatePr(api, repo, pr.number, config, adrs)));
       }
       return;
     }
     case "merge_group":
       if (!SHA.test(env.GROUP_SHA ?? "")) throw new Error("GROUP_SHA is missing or malformed");
-      return console.log(JSON.stringify(carry(api, repo, env.HEAD_REF, env.GROUP_SHA, config)));
+      return console.log(JSON.stringify(carry(api, repo, env.HEAD_REF, env.GROUP_SHA, config, adrs)));
     default:
       throw new Error(`unsupported event: ${env.EVENT_NAME}`);
   }

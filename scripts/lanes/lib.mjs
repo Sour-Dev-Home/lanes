@@ -1,8 +1,8 @@
 // Pure logic for the lanes workflow: config, file classes, required reviewers, the task and PR contracts, and the gate
 // decision. No I/O except loadConfig and the injected `api` in authorCanWrite; everything else is a plain function so
 // it can be unit-tested.
-import { readFileSync } from "node:fs";
-import { posix } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, posix } from "node:path";
 
 export const REVIEWERS = ["test-hunter", "ui-reviewer", "security-reviewer", "architecture-advisor"];
 export const TIERS = ["skip", "quick", "full"];
@@ -36,8 +36,30 @@ export function loadConfig(file = "lanes.config.json") {
 
 const matchesAny = (patterns, file) => patterns.some((re) => re.test(file));
 
-/** Which kinds of files a diff touches. Pass both the new and the old name of a renamed file. */
-export function classifyFiles(files, config) {
+/**
+ * Parses every `*.md` in `dir` with `parseAdr`, in file-name order. A malformed ADR stays in the list as `{ error }`
+ * (which governs nothing); a missing directory is `[]`. Callers read the working tree they run in, so the gate, which
+ * runs from the default branch, never sees a PR's own ADR edits.
+ */
+export function loadAdrs(dir = "docs/adr") {
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch (e) {
+    if (e.code === "ENOENT") return [];
+    throw e;
+  }
+  return names
+    .filter((n) => n.endsWith(".md"))
+    .sort()
+    .map((n) => parseAdr(readFileSync(join(dir, n), "utf8")));
+}
+
+/**
+ * Which kinds of files a diff touches. Pass both the new and the old name of a renamed file. `adr` lists the accepted
+ * ADRs (from `adrs`, default none) that govern any changed file.
+ */
+export function classifyFiles(files, config, adrs = []) {
   const { paths } = config;
   return {
     skipOnly: files.length > 0 && files.every((f) => matchesAny(paths.skip, f) && !matchesAny(paths.sensitive, f)),
@@ -45,6 +67,7 @@ export function classifyFiles(files, config) {
     sensitive: files.some((f) => matchesAny(paths.sensitive, f)),
     ui: files.some((f) => matchesAny(paths.ui, f)),
     owner: files.some((f) => matchesAny(paths.owner, f)),
+    adr: [...new Set(files.flatMap((f) => adrGoverns(adrs, f)))].sort((a, b) => a - b),
   };
 }
 
@@ -54,8 +77,19 @@ export function requiredReviewers(tier, cls) {
   const out = ["test-hunter"];
   if (cls.ui) out.push("ui-reviewer");
   if (cls.sensitive) out.push("security-reviewer");
-  if (cls.contract) out.push("architecture-advisor");
+  if (cls.contract || cls.adr?.length > 0) out.push("architecture-advisor");
   return out;
+}
+
+/** What `reviewers.mjs` prints: a skip warning if due, the reviewers (or `none`), then `ADRs: NNNN, ...` if any govern. */
+export function reviewersReport(tier, files, config, adrs = []) {
+  const cls = classifyFiles(files, config, adrs);
+  const lines = [];
+  if (tier === "skip" && !cls.skipOnly) lines.push("NOT SKIP: the diff changes files outside the skip paths; use quick or full");
+  const list = requiredReviewers(tier, cls);
+  lines.push(...(list.length ? list : ["none"]));
+  if (cls.adr.length) lines.push(`ADRs: ${cls.adr.map((n) => String(n).padStart(4, "0")).join(", ")}`);
+  return lines.join("\n");
 }
 
 // ---- Contracts: the task issue form and the PR template ----
@@ -363,7 +397,7 @@ function fullTierBlocker({ pr, required, verdicts, headSha }) {
 }
 
 /** What `lanes/gate` should say for a PR head. Pure: every input is passed in. */
-export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config }) {
+export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [] }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
@@ -387,7 +421,8 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
   }
   if (pr.missing.length > 0) return fail(`PR template sections missing: ${pr.missing.join(", ")}`);
   if (pr.contractChange === null) return fail("'Contract changes' must start with none, additive or breaking");
-  const cls = classifyFiles(files, config);
+  // #45: `adrs` come from the gate's own checkout of the default branch, never from the PR.
+  const cls = classifyFiles(files, config, adrs);
   if (tier === "skip" && !cls.skipOnly) return fail("tier:skip but the diff changes files outside the skip paths");
   if (pr.contractChange === "none" && cls.contract) return fail("contract files changed but 'Contract changes' says none");
   if (pr.contractChange === "breaking" && !labels.includes("contract:breaking")) {
