@@ -92,9 +92,14 @@ function lex(cmd) {
 }
 
 const ASSIGN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
-const VAR_REF_RE = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
+const VAR_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
+// What is left of a word after substitution that could still expand to anything.
+const UNRESOLVED_RE = /[$`]/;
 
-/** Same-command `NAME=value` assignments resolved into bare `$NAME`/`${NAME}` words, so `S=…start.mjs; node $S` is seen. */
+/**
+ * Same-command `NAME=value` assignments substituted into every `$NAME`/`${NAME}` reference, whole word or spliced
+ * into one, so `S=…start.mjs; node $S` and `X=start; node scripts/lanes/$X.mjs` are both seen.
+ */
 function resolveSegments(segments) {
   const assignments = {};
   for (const words of segments) {
@@ -104,10 +109,12 @@ function resolveSegments(segments) {
     }
   }
   return segments.map((words) =>
-    words.map((w) => {
-      const m = VAR_REF_RE.exec(w);
-      return m && Object.prototype.hasOwnProperty.call(assignments, m[1]) ? assignments[m[1]] : w;
-    }),
+    words.map((w) =>
+      w.replace(VAR_REF_RE, (ref, braced, bare) => {
+        const name = braced ?? bare;
+        return Object.prototype.hasOwnProperty.call(assignments, name) ? assignments[name] : ref;
+      }),
+    ),
   );
 }
 
@@ -151,10 +158,13 @@ export function findStartInvocations(command) {
     0,
     (words) => {
       const plain = words.filter((w) => !ASSIGN_RE.test(w));
+      const nodeAt = plain.findIndex((p) => NODE_RE.test(basename(p)));
+      const scriptAt = nodeAt === -1 ? -1 : plain.findIndex((p, i) => i > nodeAt && !p.startsWith("-"));
       plain.forEach((w, i) => {
         // Unquoted `scripts\lanes\start.mjs` loses its backslashes in the lexer, as in bash: match the word's end.
-        if (!START_WORD_RE.test(w)) return;
-        if (i === 0 || plain.slice(0, i).some((p) => NODE_RE.test(basename(p)))) out.push({ issues: undefined, standalone: false });
+        if (START_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i))) out.push({ issues: undefined, standalone: false });
+        // The command word, or the script node runs, that still holds `$` or a backtick could expand to start.mjs.
+        else if (UNRESOLVED_RE.test(w) && (i === 0 || i === scriptAt)) out.push({ issues: undefined, standalone: false });
       });
     },
     (text) => {
@@ -179,7 +189,11 @@ export function findBgLaunches(command) {
     0,
     (words) => {
       const at = words.findIndex((w) => CLAUDE_RE.test(basename(w)));
-      if (at !== -1 && words.slice(at + 1).some((w) => BG_FLAG_RE.test(w))) found = true;
+      // After claude, a word that still holds `$` or a backtick could expand to --bg: fail closed.
+      if (at !== -1 && words.slice(at + 1).some((w) => BG_FLAG_RE.test(w) || UNRESOLVED_RE.test(w))) found = true;
+      // `$C --$F`: a command word that could be claude, with a flag that could be --bg.
+      const cmdWord = words.find((w) => !ASSIGN_RE.test(w));
+      if (cmdWord !== undefined && UNRESOLVED_RE.test(cmdWord) && words.some((w) => w.startsWith("-") && UNRESOLVED_RE.test(w))) found = true;
     },
     (text) => {
       if (/--(bg|background)/.test(text)) found = true;

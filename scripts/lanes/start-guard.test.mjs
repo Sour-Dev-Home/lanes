@@ -85,6 +85,27 @@ test("edge: a quoted script that cannot be read and names start.mjs fails closed
   assert.deepEqual(findStartInvocations(`node scripts/lanes/start.mjs "12`), [{ issues: undefined, standalone: false }]);
 });
 
+test("edge: a variable spliced into start.mjs's name, or a script word that stays unresolved, is a start run", () => {
+  // Found by the test-hunter: bash expands `X=start; node scripts/lanes/$X.mjs 12` to the plain start command.
+  for (const cmd of ["X=start; node scripts/lanes/$X.mjs 12", "X=mjs; node scripts/lanes/start.$X 12", "X=star; node scripts/lanes/${X}t.mjs 12", "node scripts/lanes/$UNKNOWN.mjs 12", "node --inspect $SCRIPT 12", "$SCRIPT 12"]) {
+    assert.ok(findStartInvocations(cmd).length > 0, `bypass not caught: ${cmd}`);
+  }
+});
+
+test("edge: a variable spliced into the --bg flag, or left unresolved after claude, is a background launch", () => {
+  // Found by the test-hunter: bash expands `F=bg; claude --$F x` to `claude --bg x`.
+  for (const cmd of ["F=bg; claude --$F x", "F=--bg; claude $F x", "claude $FLAGS x", "C=claude; F=bg; $C --$F x", "$C --$F x"]) {
+    assert.ok(findBgLaunches(cmd), `bypass not caught: ${cmd}`);
+  }
+});
+
+test("edge: a $ in an ordinary argument is neither a start run nor a background launch", () => {
+  for (const cmd of ['node scripts/lanes/status.mjs --since "$D"', 'cd "$DIR" && git status', 'gh pr view "$PR"', "X=start; echo $X.mjs"]) {
+    assert.deepEqual(findStartInvocations(cmd), [], cmd);
+    assert.equal(findBgLaunches(cmd), false, cmd);
+  }
+});
+
 test("a direct claude --bg is detected behind any wrapper", () => {
   for (const cmd of [
     `claude --bg "/lane 12"`,
