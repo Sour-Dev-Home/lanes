@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { issuePaths, pathsOverlap, render, summarize } from "./status.mjs";
+import { issuePaths, mergeQueueEntries, pathsOverlap, render, summarize } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -21,6 +21,37 @@ test("stages come from lanes/gate and failing checks", () => {
   assert.deepEqual(s.waitingOnOwner.map((i) => i.number), [1]);
   assert.deepEqual(s.inFlight.map((i) => [i.number, i.stage]), [[2, "review"], [3, "queued"], [4, "failing"], [5, "starting"]]);
   assert.match(s.inFlight.find((i) => i.number === 4).note, /verify/);
+});
+
+const stageOf = (s, n) => s.inFlight.find((i) => i.number === n);
+
+test("a PR in the merge queue is queued with its position, even with autoMergeRequest null", () => {
+  const s = summarize({ prs: [pr(8, [gate("SUCCESS", "ok")])], issues: [], merged: [], mergeQueue: [{ number: 9, position: 1 }, { number: 8, position: 2 }] });
+  assert.deepEqual(stageOf(s, 8), { number: 8, title: "pr 8", stage: "queued", note: "in merge queue, position 2" });
+});
+
+test("auto-merge on and not yet in the queue still reads as queued, auto-merge on", () => {
+  const s = summarize({ prs: [pr(8, [gate("SUCCESS", "ok")], { autoMergeRequest: {} })], issues: [], merged: [], mergeQueue: [{ number: 9, position: 1 }] });
+  assert.deepEqual([stageOf(s, 8).stage, stageOf(s, 8).note], ["queued", "auto-merge on"]);
+});
+
+test("a green PR neither queued nor on auto-merge is ready, auto-merge is off", () => {
+  const s = summarize({ prs: [pr(8, [gate("SUCCESS", "ok")])], issues: [], merged: [], mergeQueue: [] });
+  assert.deepEqual([stageOf(s, 8).stage, stageOf(s, 8).note], ["ready", "auto-merge is off"]);
+});
+
+test("no merge queue on the branch behaves as before", () => {
+  const prs = [pr(8, [gate("SUCCESS", "ok")]), pr(9, [gate("SUCCESS", "ok")], { autoMergeRequest: {} })];
+  for (const mergeQueue of [undefined, null]) {
+    const s = summarize({ prs, issues: [], merged: [], mergeQueue });
+    assert.deepEqual(s.inFlight.map((i) => [i.number, i.stage, i.note]), [[8, "ready", "auto-merge is off"], [9, "queued", "auto-merge on"]]);
+  }
+});
+
+test("mergeQueueEntries reads PR numbers and positions from the GraphQL reply, [] when the branch has no queue", () => {
+  const reply = { data: { repository: { mergeQueue: { entries: { nodes: [{ state: "QUEUED", position: 1, pullRequest: { number: 7 } }] } } } } };
+  assert.deepEqual(mergeQueueEntries(reply), [{ number: 7, position: 1 }]);
+  assert.deepEqual(mergeQueueEntries({ data: { repository: { mergeQueue: null } } }), []);
 });
 
 test("a PR whose body needs the owner is waiting on him even mid-review", () => {
