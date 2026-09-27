@@ -112,6 +112,29 @@ function readPostReviewArgs(args) {
   return { reviewer, pr: prCount === 1 ? pr : undefined };
 }
 
+const ASSIGN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
+const VAR_REF_RE = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
+
+/** `NAME=value` words anywhere in the command's segments, in order, so a later assignment overrides an earlier one. */
+function collectAssignments(segments) {
+  const assignments = {};
+  for (const words of segments) {
+    for (const w of words) {
+      const m = ASSIGN_RE.exec(w);
+      if (m) assignments[m[1]] = m[2];
+    }
+  }
+  return assignments;
+}
+
+/** A bare `$NAME`/`${NAME}` word resolved to a same-command assignment's value; every other word is unchanged. */
+function resolveVars(words, assignments) {
+  return words.map((w) => {
+    const m = VAR_REF_RE.exec(w);
+    return m && Object.prototype.hasOwnProperty.call(assignments, m[1]) ? assignments[m[1]] : w;
+  });
+}
+
 function scan(cmd, depth, out) {
   let segments;
   try {
@@ -120,7 +143,11 @@ function scan(cmd, depth, out) {
     if (/post-review/i.test(cmd)) out.push({ pr: undefined, standalone: false });
     return;
   }
-  for (const words of segments) {
+  // `S=scripts/lanes/post-review.mjs; node $S owner … --pr N` must be caught too: resolve same-command
+  // `NAME=value` assignments into later `$NAME`/`${NAME}` references before looking for the script and its args.
+  const assignments = collectAssignments(segments);
+  for (const rawWords of segments) {
+    const words = resolveVars(rawWords, assignments);
     words.forEach((w, i) => {
       if (/[\s;&|()<>]/.test(w) && /post-review/i.test(w)) {
         // A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own.
@@ -145,6 +172,9 @@ export function findOwnerInvocations(command) {
   if (!/post-review/i.test(cmd)) return [];
   const out = [];
   scan(cmd, 0, out);
+  // Deeper indirection (a variable built from another, `$(…)`, backticks) cannot be resolved statically: with an
+  // `owner` word and a substitution anywhere, fail closed and count it as an owner command.
+  if (out.length === 0 && /[$`]/.test(cmd) && /(^|[\s'"`(])owner($|[\s'"`)])/.test(cmd)) out.push({ pr: undefined, standalone: false });
   if (out.length === 1 && out[0].pr !== undefined && cmd.startsWith(PLAIN_PREFIX) && !SHELL_META_RE.test(cmd)) {
     const segments = lex(cmd); // scan() lexed this cmd already, so it cannot throw here
     if (segments.length === 1 && segments[0][1] === "scripts/lanes/post-review.mjs" && segments[0][2] === "owner") out[0].standalone = true;
@@ -226,6 +256,13 @@ export function runHook(event, raw, { dir, now = Date.now() }) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const dir = fileURLToPath(new URL("../../.lanes/approve/", import.meta.url));
-  process.stdout.write(runHook(process.argv[2], readFileSync(0, "utf8"), { dir }));
+  // A hook that crashes is a non-blocking error and the tool call proceeds, so every failure here must answer deny.
+  let out;
+  try {
+    const dir = fileURLToPath(new URL("../../.lanes/approve/", import.meta.url));
+    out = runHook(process.argv[2], readFileSync(0, "utf8"), { dir });
+  } catch {
+    out = process.argv[2] === "user-prompt-submit" ? "" : preToolUseOutput("deny", DENY_REASON);
+  }
+  process.stdout.write(out);
 }

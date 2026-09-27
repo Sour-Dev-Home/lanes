@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findOwnerInvocations, onUserPromptSubmit, parseApprovePrompt, runHook } from "./approve-guard.mjs";
@@ -72,6 +73,19 @@ test("unbalanced quotes around a post-review command are treated as an owner com
   assert.equal(findOwnerInvocations(`node scripts/lanes/post-review.mjs owner "oops`).length, 1);
 });
 
+test("a same-command variable indirection does not hide an owner command (regression)", () => {
+  for (const cmd of [
+    "S=scripts/lanes/post-review.mjs; node $S owner success x --pr 16",
+    "S=scripts/lanes/post-review.mjs && node $S owner success x --pr 16",
+    'export S=scripts/lanes/post-review.mjs; node $S owner success x --pr 16',
+    'S="scripts/lanes/post-review.mjs"; node ${S} owner success x --pr 16',
+  ]) {
+    const found = findOwnerInvocations(cmd);
+    assert.ok(found.length >= 1, `not detected: ${cmd}`);
+    assert.ok(!found[0].standalone, `variable-indirected form counted as standalone: ${cmd}`);
+  }
+});
+
 test("reviewer forms and unrelated commands are not owner commands", () => {
   for (const cmd of [
     "node scripts/lanes/post-review.mjs --file .lanes/verdicts/test-hunter.json",
@@ -108,6 +122,7 @@ test("PreToolUse denies every other owner command with the reason", () => {
     ["two owner commands in one", bash(`${OWNER} && ${OWNER}`), grant()],
     ["a wrapped owner command", bash(`bash -c '${OWNER}'`), grant()],
     ["a chained owner command", bash(`${OWNER}; rm -rf .`), grant()],
+    ["a same-command variable indirection", bash(`S=scripts/lanes/post-review.mjs; node $S owner success x --pr 16`), grant()],
     ["no session id", bash(OWNER, { session_id: undefined }), grant()],
   ];
   for (const [name, input, g] of cases) assert.deepEqual(decidePreToolUse(input, g, NOW), { decision: "deny", reason: DENY_REASON }, name);
@@ -164,3 +179,23 @@ test("hook flow: input that is not valid JSON denies, and a non-owner command pa
   assert.equal(runHook("pre-tool-use", JSON.stringify(bash("npm test")), { dir, now: NOW }), "");
   assert.equal(runHook("user-prompt-submit", "{oops", { dir, now: NOW }), "");
 }));
+
+test("deeper indirection with an owner word fails closed as an owner command", () => {
+  for (const cmd of [
+    "A=post-review.mjs; S=scripts/lanes/$A; node $S owner success x --pr 16",
+    "node $(echo scripts/lanes/post-review.mjs) owner success x --pr 16",
+    "node `echo scripts/lanes/post-review.mjs` owner success x --pr 16",
+  ]) assert.deepEqual(findOwnerInvocations(cmd), [{ pr: undefined, standalone: false }], cmd);
+});
+
+test("the CLI answers deny, never crashes, when it cannot evaluate a PreToolUse call", () => {
+  const cli = (event, input) => spawnSync(process.execPath, ["scripts/lanes/approve-guard.mjs", event], { input, encoding: "utf8" });
+  for (const [event, input] of [["pre-tool-use", "{oops"], ["bogus-event", JSON.stringify(bash(OWNER))]]) {
+    const r = cli(event, input);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision, "deny");
+  }
+  const ok = cli("user-prompt-submit", "{oops");
+  assert.equal(ok.status, 0);
+  assert.equal(ok.stdout, "");
+});
