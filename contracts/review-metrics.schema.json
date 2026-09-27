@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-metrics.schema.json",
+  "title": "Reviewer metrics",
+  "description": "The optional `metrics` object in a reviewer verdict (post-review.mjs --file): what one reviewer run cost. validateVerdict enforces the same rules; contracts.test.mjs keeps the two in agreement.",
+  "type": "object",
+  "required": ["tier", "minutes", "tokens"],
+  "additionalProperties": false,
+  "properties": {
+    "tier": { "description": "The review depth the run used.", "enum": ["skip", "quick", "full"] },
+    "minutes": { "description": "Wall-clock minutes the run took.", "type": "number", "minimum": 0 },
+    "tokens": { "description": "Tokens the run used.", "type": "integer", "minimum": 0 }
+  }
+}

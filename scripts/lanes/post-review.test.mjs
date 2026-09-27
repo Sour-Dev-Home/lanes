@@ -145,3 +145,35 @@ test("the verdict comment builder refuses a SHA that is not 40 hex characters", 
 test("the verdict comment builder refuses an unknown reviewer", () => {
   assert.throws(() => buildVerdictComment({ ...commentVerdict, reviewer: "owner" }, SHA), /reviewer must be one of/);
 });
+
+// Reviewer metrics (contracts/review-metrics.schema.json): optional, validated when present.
+const metrics = (over = {}) => ({ tier: "full", minutes: 12.5, tokens: 48000, ...over });
+
+test("a verdict without metrics is accepted exactly as before", () => {
+  const r = validateVerdict(verdict(), { criteriaCount: 2 });
+  assert.equal(r.ok, true, r.errors.join("; "));
+  assert.equal(r.status.description, "1/2 criteria pass, 1 fixed: 4 tests added, 1 bug fixed");
+});
+
+test("broken metrics are refused, naming the field", () => {
+  const errors = (m) => validateVerdict(verdict({ metrics: m }), { criteriaCount: 2 }).errors.join();
+  assert.match(errors(metrics({ minutes: -1 })), /metrics\.minutes/);
+  assert.match(errors(metrics({ tokens: 1.5 })), /metrics\.tokens/);
+  assert.match(errors(metrics({ tier: "huge" })), /metrics\.tier/);
+  assert.match(errors(metrics({ extra: 1 })), /metrics\.extra/);
+  assert.match(errors({ minutes: 1, tokens: 1 }), /metrics\.tier/);
+  for (const m of [null, [], "fast"]) assert.match(errors(m), /metrics must be an object/, JSON.stringify(m));
+});
+
+test("metrics do not change the status", () => {
+  const without = validateVerdict(verdict(), { criteriaCount: 2 });
+  const withMetrics = validateVerdict(verdict({ metrics: metrics() }), { criteriaCount: 2 });
+  assert.equal(withMetrics.ok, true, withMetrics.errors.join("; "));
+  assert.deepEqual(withMetrics.status, without.status);
+});
+
+test("the verdict comment carries the whole verdict, metrics included", () => {
+  const v = verdict({ metrics: metrics() });
+  const body = buildVerdictComment(v, SHA);
+  assert.deepEqual(JSON.parse(body.split("```json\n")[1].split("\n```")[0]), v);
+});

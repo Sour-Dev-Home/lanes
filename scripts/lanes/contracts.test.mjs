@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parseIssueForm, parsePrBody, parseSections, duplicateHeadings, parseVerdictComment } from "./lib.mjs";
-import { buildVerdictComment } from "./post-review.mjs";
+import { buildVerdictComment, validateVerdict } from "./post-review.mjs";
 
 const issue = (over = {}) => {
   const f = { Goal: "Add the snapshot schema", "Acceptance criteria": "- [ ] schema validates a sample\n- [ ] rejects a missing id", "Interface contract": "contracts/snapshot.ts", Scope: "In: contracts/. Out: UI.", "Blocked by": "none", Tier: "quick", ...over };
@@ -139,6 +139,62 @@ test("a verdict comment round-trips through the builder and the parser", () => {
     findings: [{ severity: "important", file: "a.mjs", line: 3, summary: "bug", fixed: false }],
   };
   assert.deepEqual(parseVerdictComment(buildVerdictComment(verdict, sha)), { reviewer: "test-hunter", sha, verdict });
+});
+
+// The reviewer metrics contract: contracts/review-metrics.schema.json and validateVerdict must agree.
+const metricsSchema = JSON.parse(readFileSync("contracts/review-metrics.schema.json", "utf8"));
+
+/** The JSON Schema subset the metrics schema uses (type, enum, minimum, required, properties, additionalProperties). */
+function schemaAccepts(schema, value) {
+  const types = [].concat(schema.type ?? []);
+  const isType = (t) =>
+    t === "object" ? value !== null && typeof value === "object" && !Array.isArray(value)
+    : t === "integer" ? Number.isInteger(value)
+    : t === "number" ? typeof value === "number" && Number.isFinite(value)
+    : typeof value === t;
+  if (types.length && !types.some(isType)) return false;
+  if (schema.enum && !schema.enum.includes(value)) return false;
+  if (schema.minimum !== undefined && !(value >= schema.minimum)) return false;
+  if (types.includes("object")) {
+    if ((schema.required ?? []).some((k) => !Object.hasOwn(value, k))) return false;
+    for (const [k, v] of Object.entries(value)) {
+      const sub = schema.properties?.[k];
+      if (sub ? !schemaAccepts(sub, v) : schema.additionalProperties === false) return false;
+    }
+  }
+  return true;
+}
+
+test("the metrics schema defines tier, minutes and tokens, all required, no other keys", () => {
+  assert.equal(metricsSchema.type, "object");
+  assert.deepEqual([...metricsSchema.required].sort(), ["minutes", "tier", "tokens"]);
+  assert.equal(metricsSchema.additionalProperties, false);
+  const { tier, minutes, tokens } = metricsSchema.properties;
+  assert.deepEqual(Object.keys(metricsSchema.properties).sort(), ["minutes", "tier", "tokens"]);
+  assert.deepEqual(tier.enum, ["skip", "quick", "full"]);
+  assert.deepEqual([minutes.type, minutes.minimum], ["number", 0]);
+  assert.deepEqual([tokens.type, tokens.minimum], ["integer", 0]);
+});
+
+test("the metrics schema and validateVerdict agree", () => {
+  const valid = { tier: "quick", minutes: 3.5, tokens: 1200 };
+  const without = (k) => Object.fromEntries(Object.entries(valid).filter(([key]) => key !== k));
+  const cases = [
+    ["a valid object", valid, true],
+    ["zero minutes and tokens", { tier: "skip", minutes: 0, tokens: 0 }, true],
+    ["missing tier", without("tier"), false],
+    ["missing minutes", without("minutes"), false],
+    ["missing tokens", without("tokens"), false],
+    ["a negative minutes", { ...valid, minutes: -0.5 }, false],
+    ["a fractional tokens", { ...valid, tokens: 10.5 }, false],
+    ["an unknown tier", { ...valid, tier: "huge" }, false],
+    ["an extra key", { ...valid, cost: 1 }, false],
+  ];
+  const verdict = (metrics) => ({ reviewer: "security-reviewer", verdict: "success", summary: "ok", criteria: [], findings: [], metrics });
+  for (const [name, metrics, expected] of cases) {
+    assert.equal(schemaAccepts(metricsSchema, metrics), expected, `schema: ${name}`);
+    assert.equal(validateVerdict(verdict(metrics), { criteriaCount: 1 }).ok, expected, `validateVerdict: ${name}`);
+  }
 });
 
 test("4 backticks are not closed by 3 backticks", () => {
