@@ -284,6 +284,65 @@ test("a scopeless issue's Interface contract path never leaks into another issue
   ]);
 });
 
+// #54 criterion 6: a ready issue that overlaps claimed work (claimedPaths) is one at a time with that running work.
+const running = (s) => s.ready.map((i) => [i.number, i.parallel, i.overlapsRunning, i.note]);
+
+test("a ready issue overlapping an open PR's changed files is one at a time with running #PR", () => {
+  const s = summarize({
+    prs: [pr(40, [], { headRefName: "issue-9-x", files: [{ path: "a/x.mjs" }] })],
+    issues: [scoped(120, "In: `a/x.mjs`"), scoped(121, "In: `b/y.mjs`")],
+    merged: [],
+  });
+  assert.deepEqual(running(s), [
+    [120, false, [40], "one at a time with running #40"],
+    [121, true, [], "parallel"],
+  ]);
+});
+
+test("a ready issue overlapping a running lane with no PR yet is one at a time with running #N", () => {
+  const s = summarize({
+    prs: [],
+    issues: [scoped(10, "In: `src/`"), scoped(122, "In: `src/app/main.ts`")],
+    merged: [],
+    sessions: laneSessions([agent("aaaa0001", wt("issue-10-x"))], ROOT),
+  });
+  assert.deepEqual(running(s), [[122, false, [10], "one at a time with running #10"]]);
+});
+
+test("a running overlap is noted next to today's ready-vs-ready note", () => {
+  const s = summarize({
+    prs: [pr(41, [], { headRefName: "issue-8-x", files: ["c.md"] })],
+    issues: [scoped(123, "In: `a.mjs`, `c.md`"), scoped(124, "In: `a.mjs`")],
+    merged: [],
+  });
+  assert.deepEqual(running(s), [
+    [123, false, [41], "one at a time with running #41; one at a time with #124"],
+    [124, false, [], "one at a time with #123"],
+  ]);
+});
+
+test("edge: a running issue with an open PR claims the PR's files, not its own Scope", () => {
+  const s = summarize({
+    prs: [pr(42, [], { headRefName: "issue-10-x", files: [{ path: "other.mjs" }] })],
+    issues: [scoped(10, "In: `a.mjs`"), scoped(125, "In: `a.mjs`")],
+    merged: [],
+    sessions: laneSessions([agent("aaaa0001", wt("issue-10-x"))], ROOT),
+  });
+  assert.deepEqual(running(s), [[125, true, [], "parallel"]]);
+});
+
+test("edge: a PR without files claims nothing, and a scopeless ready issue is never flagged running", () => {
+  const s = summarize({
+    prs: [pr(43, [], { headRefName: "issue-7-x" }), pr(44, [], { headRefName: "issue-6-x", files: [{ path: "x/y.ts" }] })],
+    issues: [scoped(126, "tidy the docs", { contract: "`x/y.ts`" }), scoped(127, "In: `q.mjs`")],
+    merged: [],
+  });
+  assert.deepEqual(running(s), [
+    [126, false, [], "one at a time (scope names no paths)"],
+    [127, true, [], "parallel"],
+  ]);
+});
+
 test("paths after Out: never cause an overlap", () => {
   const s = summarize({ prs: [], issues: [scoped(101, "In: `a.mjs`\nOut: `b.mjs`"), scoped(102, "In: `b.mjs`")], merged: [] });
   assert.deepEqual(hints(s).map((h) => h[1]), [true, true]);

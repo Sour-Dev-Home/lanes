@@ -2,7 +2,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { CAP, inFlightIssues, launchArgs, main, parseSessionId, planStart } from "./start.mjs";
+import { START_DEFAULTS, inFlightIssues, launchArgs, main, parseSessionId, planStart, startConfig } from "./start.mjs";
+
+const CAP = START_DEFAULTS.maxLanes;
 
 const ok = { code: 0, message: "no open blockers" };
 const issue = (number, over = {}) => ({ number, state: "OPEN", labels: ["ready", "tier:quick"], blockers: ok, ...over });
@@ -20,8 +22,8 @@ test("start.md stops when run by a lane or a schedule", () => {
 test("start.md's description and step 1 name the cap", () => {
   const md = readFileSync(new URL("../../.claude/commands/start.md", import.meta.url), "utf8");
   const [frontMatter, ...bodyParts] = md.split(/^---\s*$/m).filter(Boolean);
-  assert.match(frontMatter, new RegExp(`caps at ${CAP}\\b`));
-  assert.match(bodyParts.join(""), new RegExp(`past ${CAP} lanes in flight`));
+  assert.match(frontMatter, new RegExp(`caps at ${CAP} by default\\b`));
+  assert.match(bodyParts.join(""), new RegExp(`past \`start\\.maxLanes\` lanes in flight \\(from\\s+\`lanes\\.config\\.json\`, ${CAP} by default`));
 });
 
 // #64 criterion 3: docs/USING.md tells the owner how many lanes /start allows.
@@ -102,7 +104,7 @@ test("an issue refused for another reason does not make its overlap partner refu
 // Criterion 5: the cap counts lanes already in flight.
 const busy = (n) => Array.from({ length: n }, (_, i) => 101 + i);
 
-test("CAP is 8", () => assert.equal(CAP, 8));
+test("the default start.maxLanes is 8", () => assert.equal(CAP, 8));
 
 test("refuses requests beyond a total of 8 lanes in flight", () => {
   const { launch, refused } = plan([issue(1), issue(2), issue(3)], busy(6));
@@ -190,15 +192,19 @@ test("parseSessionId returns null when no id is printed", () => {
 const form = ({ scope = "In: `a.mjs`.", blockedBy = "none" } = {}) =>
   ["### Goal", "g", "### Acceptance criteria", "- [ ] a", "### Interface contract", "none", "### Scope", scope, "### Blocked by", blockedBy, "### Tier", "quick"].join("\n\n");
 
-function fakes({ issues = {}, prs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false } = {}) {
+function fakes({ issues = {}, prs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config } = {}) {
   const launches = [];
+  const view = (n) => {
+    const i = issues[n];
+    return { number: n, state: i.state ?? "OPEN", labels: (i.labels ?? ["ready", "tier:quick"]).map((name) => ({ name })), body: i.body ?? form() };
+  };
   const gh = (args) => {
     if (args[0] === "issue" && args[1] === "view") {
       const n = Number(args[2]);
       if (!(n in issues)) throw new Error("gh: Could not resolve to an issue");
-      const i = issues[n];
-      return JSON.stringify({ number: n, state: i.state ?? "OPEN", labels: (i.labels ?? ["ready", "tier:quick"]).map((name) => ({ name })), body: i.body ?? form() });
+      return JSON.stringify(view(n));
     }
+    if (args[0] === "issue" && args[1] === "list") return JSON.stringify(Object.keys(issues).map(Number).map(view).filter((i) => i.state === "OPEN"));
     if (args[0] === "api") return JSON.stringify({ state: "closed" });
     if (args[0] === "pr" && args[1] === "list") return JSON.stringify(prs);
     throw new Error(`unexpected gh call: ${args.join(" ")}`);
@@ -213,7 +219,7 @@ function fakes({ issues = {}, prs = [], sessions = [], launchOut = {}, launchFai
     if (launchFail.includes(n)) throw new Error("claude: spawn failed");
     return launchOut[n] ?? `backgrounded · id${n}`;
   };
-  return { deps: { gh, claude, root: () => "/repo" }, launches };
+  return { deps: { gh, claude, root: () => "/repo", config: () => config }, launches };
 }
 
 test("main launches from the repository root and prints #N → id", () => {
@@ -304,4 +310,247 @@ test("main rejects bad arguments and ignores duplicates", () => {
 test("docs/USING.md describes /start", () => {
   const doc = readFileSync(new URL("../../docs/USING.md", import.meta.url), "utf8");
   assert.match(doc, /`\/start/);
+});
+
+// #54 criterion 1: the start block in lanes.config.json, its defaults and its bounds.
+test("lanes.config.json has the start block with maxLanes 8 and the two soft paths", () => {
+  const raw = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
+  assert.deepEqual(raw.start, { maxLanes: 8, softPaths: ["^docs/USING\\.md$", "^README\\.md$"] });
+  assert.deepEqual(startConfig(raw), raw.start);
+});
+
+test("startConfig falls back to the defaults when the start block or a key is missing", () => {
+  const defaults = { maxLanes: 8, softPaths: ["^docs/USING\\.md$", "^README\\.md$"] };
+  assert.deepEqual(START_DEFAULTS, defaults);
+  assert.deepEqual(startConfig(undefined), defaults);
+  assert.deepEqual(startConfig({}), defaults);
+  assert.deepEqual(startConfig({ start: {} }), defaults);
+  assert.deepEqual(startConfig({ start: { maxLanes: 3 } }), { maxLanes: 3, softPaths: defaults.softPaths });
+  assert.deepEqual(startConfig({ start: { softPaths: [] } }), { maxLanes: 8, softPaths: [] });
+});
+
+test("startConfig accepts maxLanes 1 and 10 and refuses anything outside 1 to 10", () => {
+  assert.equal(startConfig({ start: { maxLanes: 1 } }).maxLanes, 1);
+  assert.equal(startConfig({ start: { maxLanes: 10 } }).maxLanes, 10);
+  for (const bad of [0, 11, -1, 2.5, "8", null, Number.NaN, Infinity]) {
+    assert.throws(() => startConfig({ start: { maxLanes: bad } }), /start\.maxLanes must be a whole number from 1 to 10/, String(bad));
+  }
+});
+
+test("edge: startConfig refuses a malformed start block or softPaths", () => {
+  assert.throws(() => startConfig({ start: 8 }), /start must be an object/);
+  assert.throws(() => startConfig({ start: null }), /start must be an object/);
+  assert.throws(() => startConfig({ start: [] }), /start must be an object/);
+  assert.throws(() => startConfig({ start: { softPaths: "^README\\.md$" } }), /start\.softPaths must be an array of regex strings/);
+  assert.throws(() => startConfig({ start: { softPaths: [1] } }), /start\.softPaths must be an array of regex strings/);
+  assert.throws(() => startConfig({ start: { softPaths: ["("] } }), /start\.softPaths: invalid regex/);
+});
+
+test("main launches nothing when start.maxLanes is out of bounds, in either mode", () => {
+  for (const argv of [["1"], ["--auto"], ["--auto", "--go"]]) {
+    const { deps, launches } = fakes({ issues: { 1: {} }, config: { start: { maxLanes: 11 } } });
+    const { code, lines } = main(argv, deps);
+    assert.equal(code, 2, argv.join(" "));
+    assert.match(lines[0], /nothing launched: lanes\.config\.json: start\.maxLanes/);
+    assert.equal(launches.length, 0);
+  }
+});
+
+test("edge: main launches nothing when lanes.config.json cannot be read", () => {
+  const { deps, launches } = fakes({ issues: { 1: {} } });
+  deps.config = () => {
+    throw new Error("Unexpected token } in JSON");
+  };
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 2);
+  assert.match(lines[0], /cannot read lanes\.config\.json, nothing launched: Unexpected token/);
+  assert.equal(launches.length, 0);
+});
+
+// #54 criterion 2: the cap comes from start.maxLanes, for explicit /start and --auto.
+test("planStart takes its cap from maxLanes", () => {
+  const { launch, refused } = planStart({ issues: [issue(1), issue(2), issue(3)], inFlight: [101], overlaps: never, maxLanes: 3 });
+  assert.deepEqual(launch, [1, 2]);
+  assert.deepEqual(refused, [{ number: 3, reason: "cap of 3 lanes in flight" }]);
+});
+
+test("explicit /start uses start.maxLanes from the config", () => {
+  const { deps, launches } = fakes({
+    issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } },
+    prs: [{ number: 50, headRefName: "issue-9-x" }],
+    config: { start: { maxLanes: 2 } },
+  });
+  const { code, lines } = main(["1", "2"], deps);
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ["#1 → id1", "#2: refused: cap of 2 lanes in flight"]);
+  assert.equal(launches.length, 1);
+});
+
+test("--auto uses start.maxLanes from the config", () => {
+  const { deps } = fakes({
+    issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) }, 3: { body: form({ scope: "In: `c.mjs`." }) } },
+    config: { start: { maxLanes: 1 } },
+  });
+  const { lines } = main(["--auto"], deps);
+  assert.deepEqual(lines.slice(0, 3), ["#1: would start", "#2: skipped: cap of 1 lanes reached", "#3: skipped: cap of 1 lanes reached"]);
+});
+
+// #54 criterion 3: --auto is a dry run that prints the plan and launches nothing.
+const autoIssues = () => ({
+  1: {},
+  2: { body: form({ scope: "In: `b.mjs`." }) },
+  3: {}, // overlaps #1 on a.mjs
+  4: { labels: ["tier:quick"], body: form({ scope: "In: `d.mjs`." }) }, // not ready: not a candidate at all
+  5: { labels: ["ready"], body: form({ scope: "In: `e.mjs`." }) },
+  6: { body: form({ scope: "In: `f.mjs`." }) }, // in flight
+  7: { body: form({ scope: "Nothing here." }) },
+});
+
+test("--auto prints one line per pick and per skipped ready issue, and launches nothing", () => {
+  const { deps, launches } = fakes({ issues: autoIssues(), sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-6-y" }] });
+  const { code, lines } = main(["--auto"], deps);
+  assert.equal(code, 0);
+  assert.equal(launches.length, 0);
+  assert.deepEqual(lines, [
+    "#1: would start",
+    "#2: would start",
+    "#3: skipped: overlaps #1 on a.mjs",
+    "#5: skipped: no single tier:* label",
+    "#6: skipped: already in flight",
+    "#7: skipped: scope names no paths",
+    "dry run, nothing launched: /start --auto --go launches the 2 marked would start",
+  ]);
+});
+
+test("--auto skips a ready issue with an open blocker", () => {
+  const { deps } = fakes({ issues: { 1: { body: form({ blockedBy: "#9" }) } } });
+  deps.gh = ((inner) => (args) => (args[0] === "api" ? JSON.stringify({ state: "open" }) : inner(args)))(deps.gh);
+  assert.deepEqual(main(["--auto"], deps).lines[0], "#1: skipped: blocked by #9 (open)");
+});
+
+test("--auto skips an issue whose paths an open PR already changes", () => {
+  const { deps } = fakes({
+    issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } },
+    prs: [{ number: 40, headRefName: "issue-9-x", files: [{ path: "a.mjs" }] }],
+  });
+  assert.deepEqual(main(["--auto"], deps).lines.slice(0, 2), ["#2: would start", "#1: skipped: overlaps running #40 on a.mjs"]);
+});
+
+test("--auto skips an issue that overlaps a running lane with no PR yet", () => {
+  const { deps } = fakes({
+    issues: { 1: {}, 9: { body: form({ scope: "In: `a.mjs`, `z.mjs`." }) } },
+    sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-9-y" }],
+  });
+  assert.deepEqual(main(["--auto"], deps).lines.slice(0, 2), ["#1: skipped: overlaps running #9 on a.mjs", "#9: skipped: already in flight"]);
+});
+
+test("--auto does not count a soft path from the config as an overlap", () => {
+  const issues = { 1: { body: form({ scope: "In: `a.mjs`, `docs/USING.md`." }) }, 2: { body: form({ scope: "In: `b.mjs`, `docs/USING.md`." }) } };
+  assert.deepEqual(main(["--auto"], fakes({ issues }).deps).lines.slice(0, 2), ["#1: would start", "#2: would start"]);
+  const strict = fakes({ issues, config: { start: { softPaths: [] } } });
+  assert.deepEqual(main(["--auto"], strict.deps).lines.slice(0, 2), ["#1: would start", "#2: skipped: overlaps #1 on docs/USING.md"]);
+});
+
+test("edge: --auto with no ready issues says so and launches nothing", () => {
+  const { deps, launches } = fakes({ issues: { 4: { labels: ["tier:quick"] } } });
+  const { code, lines } = main(["--auto", "--go"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["no ready issues to start"]);
+  assert.equal(launches.length, 0);
+});
+
+// Extra case: not in the criteria or the edge cases above. Ready issues exist but every one of them is skipped
+// (none reach pickStartable as a candidate), so nothing is picked; the dry run must still say so explicitly rather
+// than printing only the skip lines, and --go must launch nothing without printing a stray trailer.
+test("edge: --auto is a dry run that says so when every ready issue is skipped", () => {
+  const { deps, launches } = fakes({ issues: { 1: { body: form({ blockedBy: "#9" }) } } });
+  deps.gh = ((inner) => (args) => (args[0] === "api" ? JSON.stringify({ state: "open" }) : inner(args)))(deps.gh);
+  const { code, lines } = main(["--auto"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1: skipped: blocked by #9 (open)", "dry run: nothing to start"]);
+  assert.equal(launches.length, 0);
+});
+
+test("edge: --auto --go launches nothing when every ready issue is skipped", () => {
+  const { deps, launches } = fakes({ issues: { 1: { body: form({ blockedBy: "#9" }) } } });
+  deps.gh = ((inner) => (args) => (args[0] === "api" ? JSON.stringify({ state: "open" }) : inner(args)))(deps.gh);
+  const { code, lines } = main(["--auto", "--go"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1: skipped: blocked by #9 (open)"]);
+  assert.equal(launches.length, 0);
+});
+
+test("edge: --auto launches nothing when it cannot gather the plan", () => {
+  for (const failing of ["agents", "issue list", "pr list"]) {
+    const { deps, launches } = fakes({ issues: { 1: {} }, agentsFail: failing === "agents" });
+    const gh = deps.gh;
+    deps.gh = (args) => {
+      if (`${args[0]} ${args[1]}` === failing) throw new Error("gh: rate limited");
+      return gh(args);
+    };
+    const { code, lines } = main(["--auto", "--go"], deps);
+    assert.equal(code, 2, failing);
+    assert.match(lines[0], /cannot gather the plan, nothing launched/);
+    assert.equal(launches.length, 0);
+  }
+});
+
+test("edge: --auto launches nothing when the open-issue list may be truncated", () => {
+  const { deps, launches } = fakes();
+  const gh = deps.gh;
+  deps.gh = (args) => (args[0] === "issue" && args[1] === "list" ? JSON.stringify(Array.from({ length: 1000 }, (_, i) => ({ number: i + 1, state: "OPEN", labels: [], body: "" }))) : gh(args));
+  const { code, lines } = main(["--auto", "--go"], deps);
+  assert.equal(code, 2);
+  assert.match(lines[0], /1000\+ open issues/);
+  assert.equal(launches.length, 0);
+});
+
+test("edge: --auto and --go take no other arguments", () => {
+  for (const argv of [["--go"], ["--auto", "1"], ["1", "--auto"], ["--auto", "--go", "--go"], ["--auto", "--bogus"], ["--go", "--auto"]]) {
+    const { deps, launches } = fakes({ issues: { 1: {} } });
+    const { code, lines } = main(argv, deps);
+    assert.equal(code, 2, argv.join(" "));
+    assert.match(lines[0], /^usage:/);
+    assert.equal(launches.length, 0);
+  }
+});
+
+// #54 criterion 4: --go recomputes the plan and launches exactly its picks, as explicit /start does.
+test("--auto --go launches exactly the dry run's picks, from the repository root, and prints #N → id", () => {
+  const sessions = [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-6-y" }];
+  const dry = main(["--auto"], fakes({ issues: autoIssues(), sessions }).deps);
+  const picks = dry.lines.filter((l) => l.endsWith(": would start")).map((l) => Number(l.slice(1, l.indexOf(":"))));
+  assert.deepEqual(picks, [1, 2]);
+  const { deps, launches } = fakes({ issues: autoIssues(), sessions });
+  const { code, lines } = main(["--auto", "--go"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(launches, picks.map((n) => ({ args: launchArgs(n), cwd: "/repo" })));
+  assert.deepEqual(lines, [...picks.map((n) => `#${n} → id${n}`), ...dry.lines.filter((l) => l.includes(": skipped: "))]);
+});
+
+test("edge: --auto --go reports a failed launch, does not retry it, and exits 1", () => {
+  const { deps, launches } = fakes({ issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } }, launchFail: [1] });
+  const { code, lines } = main(["--auto", "--go"], deps);
+  assert.equal(code, 1);
+  assert.equal(launches.length, 2);
+  assert.deepEqual(lines, ["#1: launch failed: claude: spawn failed, not retried", "#2 → id2"]);
+});
+
+// #54 criterion 5: start.md documents --auto and --go and stays owner-only.
+test("start.md documents --auto and --go and still stops for a lane or a schedule", () => {
+  const md = readFileSync(new URL("../../.claude/commands/start.md", import.meta.url), "utf8");
+  const [frontMatter, ...bodyParts] = md.split(/^---\s*$/m).filter(Boolean);
+  const body = bodyParts.join("");
+  assert.match(frontMatter, /argument-hint: .*--auto \[--go\]/);
+  assert.match(body, /node scripts\/lanes\/start\.mjs --auto`/);
+  assert.match(body, /node scripts\/lanes\/start\.mjs --auto --go`/);
+  assert.match(body.trimStart().split("\n")[0], /If you are a lane or were started by a schedule, stop now\./);
+});
+
+// #54 criterion 8.
+test("docs/USING.md's /start paragraph describes --auto", () => {
+  const doc = readFileSync(new URL("../../docs/USING.md", import.meta.url), "utf8");
+  const paragraph = doc.slice(doc.indexOf("Faster: `/start"), doc.indexOf("\n3. "));
+  assert.match(paragraph, /`\/start --auto`/);
+  assert.match(paragraph, /`\/start --auto --go`/);
 });
