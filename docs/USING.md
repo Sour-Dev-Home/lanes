@@ -100,16 +100,32 @@ cannot grant it to itself.
 
 ## Adopting it in another repository
 
-Prerequisites:
+A new project, in one command (owner), run from this lanes clone:
+
+`node scripts/lanes/new-project.mjs <name> [--private] [--license mit] [--dry-run]`
+
+It creates `<org>/<name>` in the organisation that owns this lanes clone (public by default), clones it next to lanes,
+installs the template (including `.claude/skills/` and `vendor/agent-skills/`), writes a starter `lanes.config.json`,
+`verify.yml` (pull_request, merge_group, push to main), `package.json` scripts and an MIT `LICENSE` naming the same
+copyright holder as lanes' own LICENSE. It runs `npm run setup`, commits once (signed if your git config signs) and
+pushes `main` before any ruleset exists. Then it stops and prints the exact `gh secret set PII_PATTERNS -R <org>/<name>`
+command; type `done` once the secret is set and it checks the secret exists, then runs `setup-repo.mjs`. If you stop
+there, run `node scripts/lanes/setup-repo.mjs <org>/<name>` from the new clone later. `--dry-run` prints every step
+and changes nothing. `--private` is refused unless the org shows an Enterprise Cloud plan (the merge queue) and
+Advanced Security for new repositories (CodeQL); unknown counts as missing. Afterwards, edit the new
+`lanes.config.json` paths for its layout.
+
+Prerequisites (for either route):
 
 - An organisation-owned repository (the merge queue rule needs one).
 - Public, or private with GitHub Advanced Security enabled (CodeQL default setup needs one or the other).
 - Your own `verify` workflow's job must be named `verify`: a required status check matches the check run's name
   (the job name by default), not the workflow file's name.
 - On Windows, git does not track the executable bit: after cloning, run
-  `git update-index --chmod=+x .githooks/pre-push` so the pre-push hook can actually run.
+  `git update-index --chmod=+x .githooks/pre-push` so the pre-push hook can actually run (`new-project.mjs` does this
+  for its own first commit).
 
-`node scripts/lanes/install.mjs <target>`, copy `.claude/skills/` and `vendor/agent-skills/` too if `lane.md` is kept
-as is (it names them directly; see `vendor/agent-skills/VENDORED.md`), edit the target's `lanes.config.json`, add
-`setup` and `preflight` npm scripts and a `verify` workflow for the project's own tests (with the push-to-main trigger
-above), push to `main`, then (owner) set the `PII_PATTERNS` secret and run `node scripts/lanes/setup-repo.mjs <owner/repo>`.
+An existing repository: `node scripts/lanes/install.mjs <target>` (it also copies `.claude/skills/` and
+`vendor/agent-skills/`, which `lane.md` names directly), edit the target's `lanes.config.json`, add `setup` and
+`preflight` npm scripts and a `verify` workflow for the project's own tests (with the push-to-main trigger above), push
+to `main`, then (owner) set the `PII_PATTERNS` secret and run `node scripts/lanes/setup-repo.mjs <owner/repo>`.
