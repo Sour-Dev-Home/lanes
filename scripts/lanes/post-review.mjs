@@ -76,6 +76,16 @@ export function validateVerdict(v, { criteriaCount }) {
   };
 }
 
+/**
+ * The verdict comment (the contract parseVerdictComment in lib.mjs reads back): a marker naming the reviewer and the
+ * commit the status was posted on, then the verdict as a JSON fence. Pure, so the round-trip test needs no `gh`.
+ */
+export function buildVerdictComment(verdict, sha) {
+  if (!REVIEWERS.includes(verdict?.reviewer)) throw new Error(`reviewer must be one of ${REVIEWERS.join(", ")}`);
+  if (typeof sha !== "string" || !SHA_RE.test(sha)) throw new Error("the head SHA must be a 40-character hex commit SHA");
+  return `<!-- lanes:verdict ${verdict.reviewer} ${sha} -->\n\`\`\`json\n${JSON.stringify(verdict, null, 2)}\n\`\`\``;
+}
+
 const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
 const VALUED_FLAGS = new Set(["--file", "--pr", "--sha"]);
@@ -144,7 +154,7 @@ function main(argv = process.argv.slice(2)) {
     const result = validateVerdict(verdict, { criteriaCount: parseIssueForm(issue.body).fields.criteria.length });
     if (!result.ok) throw new Error(`verdict refused:\n- ${result.errors.join("\n- ")}`);
     status = result.status;
-    comment = `<!-- lanes:verdict ${verdict.reviewer} -->\n\`\`\`json\n${JSON.stringify(verdict, null, 2)}\n\`\`\``;
+    comment = buildVerdictComment(verdict, pr.headRefOid);
   } else {
     status = buildStatus(...parsed.positional);
   }

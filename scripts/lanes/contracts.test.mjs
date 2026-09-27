@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { parseIssueForm, parsePrBody, parseSections, duplicateHeadings } from "./lib.mjs";
+import { parseIssueForm, parsePrBody, parseSections, duplicateHeadings, parseVerdictComment } from "./lib.mjs";
+import { buildVerdictComment } from "./post-review.mjs";
 
 const issue = (over = {}) => {
   const f = { Goal: "Add the snapshot schema", "Acceptance criteria": "- [ ] schema validates a sample\n- [ ] rejects a missing id", "Interface contract": "contracts/snapshot.ts", Scope: "In: contracts/. Out: UI.", "Blocked by": "none", Tier: "quick", ...over };
@@ -125,6 +126,19 @@ test("``` fence is not closed by ~~~ and vice versa", () => {
   assert.equal(parsePrBody(body).closes, null);
   const body2 = "~~~\nCloses #2\n```\n\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\nnothing\n## Not done\nnothing\n";
   assert.equal(parsePrBody(body2).closes, null);
+});
+
+// The verdict comment contract: post-review.mjs builds it, parseVerdictComment reads it back.
+test("a verdict comment round-trips through the builder and the parser", () => {
+  const sha = "fedcba9876543210fedcba9876543210fedcba98";
+  const verdict = {
+    reviewer: "test-hunter",
+    verdict: "failure",
+    summary: "a summary with ``` backticks, <!-- a comment --> and\na newline",
+    criteria: [{ index: 1, result: "fail", evidence: "see `x`" }],
+    findings: [{ severity: "important", file: "a.mjs", line: 3, summary: "bug", fixed: false }],
+  };
+  assert.deepEqual(parseVerdictComment(buildVerdictComment(verdict, sha)), { reviewer: "test-hunter", sha, verdict });
 });
 
 test("4 backticks are not closed by 3 backticks", () => {
