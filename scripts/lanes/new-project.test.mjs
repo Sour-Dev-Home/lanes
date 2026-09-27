@@ -13,6 +13,7 @@ import {
   hasVerifyTriggers,
   planProject,
   runPlan,
+  shellWord,
   SECRET_NAME,
 } from "./new-project.mjs";
 
@@ -190,6 +191,27 @@ test("a dry run prints every step and calls no effect", async () => {
   assert.equal(r.completed, true);
   for (const s of steps) assert.ok(lines.some((l) => l.includes(s.say)), s.say);
   assert.ok(!lines.join("\n").includes(HOLDER));
+  // the exact secret command must be visible in the dry run output too, not just the step's short "say" summary
+  assert.ok(lines.some((l) => l.includes(`gh secret set ${SECRET_NAME} -R acme/demo`)));
+});
+
+// Criterion 4 (printed output, not just step data): the owner actually sees the exact secret command on a real run
+test("a real run logs the exact secret command before asking the owner to confirm", async () => {
+  const { effects } = fakeEffects();
+  const lines = [];
+  effects.log = (l) => lines.push(l);
+  const r = await runPlan(plan(), { dryRun: false, effects });
+  assert.equal(r.completed, true);
+  assert.ok(lines.some((l) => l.includes(`gh secret set ${SECRET_NAME} -R acme/demo`)));
+});
+
+// The Windows npm-shim path shells out; only plain words may reach it, or a future dynamic argument could inject.
+test("shellWord passes plain words through and refuses shell metacharacters", () => {
+  assert.equal(shellWord("run"), "run");
+  assert.equal(shellWord("setup"), "setup");
+  assert.throws(() => shellWord("run; rm -rf /"), /refusing/);
+  assert.throws(() => shellWord("$(whoami)"), /refusing/);
+  assert.throws(() => shellWord("a && b"), /refusing/);
 });
 
 // Criterion 6: docs/USING.md "Adopting it" leads with the one command

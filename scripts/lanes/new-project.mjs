@@ -174,13 +174,20 @@ export async function runPlan(steps, { dryRun, effects }) {
   return { completed: true };
 }
 
+/** An argument safe to pass through a shell unquoted, or a throw. */
+export function shellWord(arg) {
+  if (!/^[A-Za-z0-9_.:=-]+$/.test(arg)) throw new Error(`refusing to pass "${arg}" through a shell`);
+  return arg;
+}
+
 const gh = (args, cwd) => execFileSync("gh", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
 const realEffects = {
   run: (s) =>
-    // npm is a .cmd shim on Windows, which execFile cannot start without a shell; its arguments here are fixed.
+    // npm is a .cmd shim on Windows, which execFile cannot start without a shell. Only plain words may reach that
+    // shell, so a future step with dynamic arguments fails loudly instead of becoming an injection.
     s.cmd === "npm" && process.platform === "win32"
-      ? execFileSync(`npm ${s.args.join(" ")}`, { cwd: s.cwd, stdio: "inherit", shell: true })
+      ? execFileSync(`npm ${s.args.map(shellWord).join(" ")}`, { cwd: s.cwd, stdio: "inherit", shell: true })
       : execFileSync(s.cmd, s.args, { cwd: s.cwd, stdio: "inherit" }),
   install: (s) => install(s.source, s.target, { force: true }),
   write: (s) => {
