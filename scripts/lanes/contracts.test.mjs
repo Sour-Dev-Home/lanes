@@ -189,6 +189,13 @@ test("the metrics schema and validateVerdict agree", () => {
     ["a fractional tokens", { ...valid, tokens: 10.5 }, false],
     ["an unknown tier", { ...valid, tier: "huge" }, false],
     ["an extra key", { ...valid, cost: 1 }, false],
+    ["negative zero minutes", { ...valid, minutes: -0 }, true],
+    ["NaN minutes", { ...valid, minutes: NaN }, false],
+    ["Infinity minutes", { ...valid, minutes: Infinity }, false],
+    ["a string minutes", { ...valid, minutes: "3.5" }, false],
+    ["NaN tokens", { ...valid, tokens: NaN }, false],
+    ["Infinity tokens", { ...valid, tokens: Infinity }, false],
+    ["a string tokens", { ...valid, tokens: "1200" }, false],
   ];
   const verdict = (metrics) => ({ reviewer: "security-reviewer", verdict: "success", summary: "ok", criteria: [], findings: [], metrics });
   for (const [name, metrics, expected] of cases) {
