@@ -195,7 +195,8 @@ function scan(cmd, depth, out) {
     // Node's options and the script: any of them that still holds `$` or a backtick could load or be post-review.mjs.
     // Every word that looks like node counts, since an earlier one may only be an argument (`sudo -u node node …`).
     const nodeRange = new Set();
-    const runsArgs = !NON_RUNNING_COMMANDS.has(plain[0]?.split(/[\\/]/).at(-1));
+    // Not once a pipe is anywhere in the command: `echo node … | bash` runs what echo prints.
+    const runsArgs = cmd.includes("|") || !NON_RUNNING_COMMANDS.has(plain[0]?.split(/[\\/]/).at(-1));
     plain.forEach((p, at) => {
       if ((at > 0 && !runsArgs) || !NODE_RE.test(p.split(/[\\/]/).at(-1))) return;
       for (let j = at + 1; j <= nodeScriptEnd(plain, at); j += 1) nodeRange.add(j);

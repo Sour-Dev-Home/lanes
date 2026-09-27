@@ -326,6 +326,19 @@ test("edge: the word 'node' as an argument of a command that never runs it is no
   assert.deepEqual(decidePreToolUse(bash('echo "x; node $S owner"'), grant(), NOW), { decision: "deny", reason: DENY_REASON });
 });
 
+// Found by the #62 test-hunter (recheck): echo or grep output piped into a shell is run, so the exemption for
+// commands that never run their arguments does not apply once the command has a pipe.
+test("edge: a non-running command piped into a shell still counts its spliced node script (#62 review)", () => {
+  for (const cmd of [
+    "echo node scripts/lanes/post-$X.mjs $R --pr 16 | bash",
+    "echo node scripts/lanes/post-$X.mjs $R --pr 16 | sh",
+    "bash -c 'echo node scripts/lanes/post-$X.mjs $R | sh'",
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+});
+
 test("the CLI answers deny, never crashes, when it cannot evaluate a PreToolUse call", () => {
   const cli = (event, input) => spawnSync(process.execPath, ["scripts/lanes/approve-guard.mjs", event], { input, encoding: "utf8" });
   for (const [event, input] of [["pre-tool-use", "{oops"], ["bogus-event", JSON.stringify(bash(OWNER))]]) {
