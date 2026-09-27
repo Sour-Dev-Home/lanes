@@ -28,6 +28,23 @@ export function buildStatus(reviewer, verdict, summary) {
   };
 }
 
+const METRIC_TIERS = ["skip", "quick", "full"];
+const METRIC_KEYS = ["tier", "minutes", "tokens"];
+
+/**
+ * The optional `metrics` object, by the rules of contracts/review-metrics.schema.json (checked in code, not read from
+ * the file, so an installed copy of this script needs no contracts/ folder; contracts.test.mjs keeps them in step).
+ */
+function metricsErrors(m) {
+  if (m === null || typeof m !== "object" || Array.isArray(m)) return ["metrics must be an object"];
+  const errors = [];
+  for (const key of Object.keys(m)) if (!METRIC_KEYS.includes(key)) errors.push(`metrics.${key} is not a known field`);
+  if (!METRIC_TIERS.includes(m.tier)) errors.push(`metrics.tier must be ${METRIC_TIERS.join(", ")}`);
+  if (typeof m.minutes !== "number" || !Number.isFinite(m.minutes) || m.minutes < 0) errors.push("metrics.minutes must be a number >= 0");
+  if (!Number.isInteger(m.tokens) || m.tokens < 0) errors.push("metrics.tokens must be an integer >= 0");
+  return errors;
+}
+
 export function validateVerdict(v, { criteriaCount }) {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return { ok: false, errors: ["verdict must be a JSON object"], status: null };
   const errors = [];
@@ -58,6 +75,7 @@ export function validateVerdict(v, { criteriaCount }) {
     if (typeof f?.summary !== "string" || !f.summary.trim()) errors.push(`finding ${i + 1}: summary is required`);
     if (typeof f?.fixed !== "boolean") errors.push(`finding ${i + 1}: fixed must be true or false`);
   });
+  if (v.metrics !== undefined) errors.push(...metricsErrors(v.metrics));
   if (v.verdict === "success") {
     if (criteria.some((c) => c?.result === "fail")) errors.push("success is refused: a criterion fails");
     if (findings.some((f) => (f?.severity === "critical" || f?.severity === "important") && f?.fixed !== true)) {

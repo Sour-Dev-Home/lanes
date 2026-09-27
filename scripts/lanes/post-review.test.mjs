@@ -145,3 +145,59 @@ test("the verdict comment builder refuses a SHA that is not 40 hex characters", 
 test("the verdict comment builder refuses an unknown reviewer", () => {
   assert.throws(() => buildVerdictComment({ ...commentVerdict, reviewer: "owner" }, SHA), /reviewer must be one of/);
 });
+
+// Reviewer metrics (contracts/review-metrics.schema.json): optional, validated when present.
+const metrics = (over = {}) => ({ tier: "full", minutes: 12.5, tokens: 48000, ...over });
+
+test("a verdict without metrics is accepted exactly as before", () => {
+  const r = validateVerdict(verdict(), { criteriaCount: 2 });
+  assert.equal(r.ok, true, r.errors.join("; "));
+  assert.equal(r.status.description, "1/2 criteria pass, 1 fixed: 4 tests added, 1 bug fixed");
+});
+
+test("broken metrics are refused, naming the field", () => {
+  const errors = (m) => validateVerdict(verdict({ metrics: m }), { criteriaCount: 2 }).errors.join();
+  assert.match(errors(metrics({ minutes: -1 })), /metrics\.minutes/);
+  assert.match(errors(metrics({ tokens: 1.5 })), /metrics\.tokens/);
+  assert.match(errors(metrics({ tier: "huge" })), /metrics\.tier/);
+  assert.match(errors(metrics({ extra: 1 })), /metrics\.extra/);
+  assert.match(errors({ minutes: 1, tokens: 1 }), /metrics\.tier/);
+  for (const m of [null, [], "fast"]) assert.match(errors(m), /metrics must be an object/, JSON.stringify(m));
+});
+
+test("metrics rejects NaN, Infinity and string numbers, but accepts -0 as zero", () => {
+  const errors = (m) => validateVerdict(verdict({ metrics: m }), { criteriaCount: 2 }).errors.join();
+  assert.match(errors(metrics({ minutes: NaN })), /metrics\.minutes/);
+  assert.match(errors(metrics({ minutes: Infinity })), /metrics\.minutes/);
+  assert.match(errors(metrics({ minutes: "3.5" })), /metrics\.minutes/);
+  assert.match(errors(metrics({ tokens: NaN })), /metrics\.tokens/);
+  assert.match(errors(metrics({ tokens: Infinity })), /metrics\.tokens/);
+  assert.match(errors(metrics({ tokens: "1200" })), /metrics\.tokens/);
+  const r = validateVerdict(verdict({ metrics: metrics({ minutes: -0, tokens: -0 }) }), { criteriaCount: 2 });
+  assert.equal(r.ok, true, r.errors.join("; "));
+});
+
+test("a __proto__ key read back from a verdict file is refused as an unknown field, not silently accepted", () => {
+  // Parsing untrusted JSON with a literal "__proto__" key creates an own property (not a prototype write), but
+  // metricsErrors must still treat it as an unrecognized field rather than skip it.
+  const text = JSON.stringify(verdict({})).slice(0, -1) + `,"metrics":{"tier":"quick","minutes":1,"tokens":1,"__proto__":{"polluted":true}}}`;
+  const parsed = JSON.parse(text);
+  assert.deepEqual(Object.keys(parsed.metrics), ["tier", "minutes", "tokens", "__proto__"]);
+  const r = validateVerdict(parsed, { criteriaCount: 2 });
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join(), /metrics\.__proto__ is not a known field/);
+  assert.equal(({}).polluted, undefined);
+});
+
+test("metrics do not change the status", () => {
+  const without = validateVerdict(verdict(), { criteriaCount: 2 });
+  const withMetrics = validateVerdict(verdict({ metrics: metrics() }), { criteriaCount: 2 });
+  assert.equal(withMetrics.ok, true, withMetrics.errors.join("; "));
+  assert.deepEqual(withMetrics.status, without.status);
+});
+
+test("the verdict comment carries the whole verdict, metrics included", () => {
+  const v = verdict({ metrics: metrics() });
+  const body = buildVerdictComment(v, SHA);
+  assert.deepEqual(JSON.parse(body.split("```json\n")[1].split("\n```")[0]), v);
+});
