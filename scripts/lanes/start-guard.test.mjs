@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BG_DENY_REASON, DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findStartInvocations, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, runHook } from "./start-guard.mjs";
+import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON,GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findStartInvocations, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, runHook } from "./start-guard.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const START = "node scripts/lanes/start.mjs 12 14";
@@ -83,8 +83,8 @@ test("commands that only mention start.mjs, or run its tests, are not start runs
 });
 
 test("edge: a quoted script that cannot be read and names start.mjs fails closed", () => {
-  assert.deepEqual(findStartInvocations(`git commit -m "don't run start.mjs"`), [{ issues: undefined, standalone: false }]);
-  assert.deepEqual(findStartInvocations(`node scripts/lanes/start.mjs "12`), [{ issues: undefined, standalone: false }]);
+  assert.deepEqual(findStartInvocations(`git commit -m "don't run start.mjs"`), [{ issues: undefined, standalone: false, unparsed: true }]);
+  assert.deepEqual(findStartInvocations(`node scripts/lanes/start.mjs "12`), [{ issues: undefined, standalone: false, unparsed: true }]);
 });
 
 test("edge: a variable spliced into start.mjs's name, or a script word that stays unresolved, is a start run", () => {
@@ -445,4 +445,90 @@ test("settings: both start-guard hooks are wired next to the approve guard, and 
   assert.ok(commands("UserPromptSubmit", undefined).some((c) => /scripts\/lanes\/start-guard\.mjs" user-prompt-submit$/.test(c)));
   assert.ok(commands("PreToolUse", "Bash").some((c) => /scripts\/lanes\/start-guard\.mjs" pre-tool-use$/.test(c)));
   assert.ok(!s.permissions.allow.some((r) => /start\.mjs|claude --bg/.test(r)));
+});
+
+// --- Heredocs (#86) -----------------------------------------------------------------------------------------------
+
+const COMMIT_HEREDOC = `git add -A && git commit -m "$(cat <<'MSG'
+start-guard: read heredocs (#86)
+
+The guard did not read a heredoc (it said "lanes are launched only from /start").
+Adds \`decidePreToolUse\` tests; see scripts/lanes/start-guard.mjs, not start.mjs --bg.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+MSG
+)"`;
+
+test("#86 criterion 1: a heredoc commit message that runs neither start.mjs nor claude --bg gets no decision", () => {
+  for (const cmd of [COMMIT_HEREDOC, `git commit -m "$(cat <<'EOF'\nFix it\n\nCo-Authored-By: x\nEOF\n)"`, `git commit -m "$(cat <<EOF\nFix it\nEOF\n)"`]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+    assert.deepEqual(findStartInvocations(cmd), [], cmd);
+    assert.equal(findBgLaunches(cmd), false, cmd);
+  }
+});
+
+test("#86 criterion 2: a heredoc that runs start.mjs or claude --bg is still denied", () => {
+  for (const [cmd, reason] of [
+    ["bash <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF", DENY_REASON],
+    ["cat <<'EOF' | sh\nnode scripts/lanes/start.mjs 12\nEOF", DENY_REASON],
+    [`bash -c "$(cat <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF\n)"`, DENY_REASON],
+    ["cat <<EOF\n$(node scripts/lanes/start.mjs 12)\nEOF", DENY_REASON],
+    ["bash <<'EOF'\nclaude --bg '/lane 12'\nEOF", BG_DENY_REASON],
+    [`sh -c "$(cat <<'EOF'\nclaude --bg x\nEOF\n)"`, BG_DENY_REASON],
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason }, cmd);
+  }
+});
+
+test("#86 criterion 3: a command that cannot be parsed fails closed with a could-not-parse reason", () => {
+  for (const cmd of [`git commit -m "don't run start.mjs"`, `claude --bg "unterminated`, `git commit -m "$(cat <<'EOF'\nit's start.mjs\nEOF\n)"`]) {
+    const d = decidePreToolUse(bash(cmd), grant(), NOW);
+    assert.deepEqual(d, { decision: "deny", reason: PARSE_DENY_REASON }, cmd);
+    assert.match(d.reason, /could not be parsed/);
+    assert.doesNotMatch(d.reason, /launched only from \/start/);
+  }
+});
+
+test("edge: heredoc commit messages that are empty, CRLF, or name Claude and --bg in prose get no decision", () => {
+  for (const cmd of [
+    `git commit -m "$(cat <<'EOF'\nEOF\n)"`,
+    `git commit -m "$(cat <<'EOF'\r\nFix it\r\nEOF\r\n)"`,
+    `git commit -m "$(cat <<'EOF'\nCo-Authored-By: Claude\nmentions --bg mode\nEOF\n)"`,
+    `git commit -m "$(cat <<-'EOF'\n\tFix it\n\tEOF\n)"`,
+    `git commit -m $(cat <<'EOF'\nFix\nEOF\n)`,
+    "cat <<'EOF' > notes.txt\nsome notes\nEOF",
+    "cat <<-EOF\n\thello\n\tEOF",
+    "cat <<EOF\nno delimiter line",
+  ]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, JSON.stringify(cmd));
+  }
+});
+
+test("edge: heredoc forms that still run start.mjs are start runs, never standalone", () => {
+  for (const cmd of [
+    "cat <<-EOF | bash\n\tnode scripts/lanes/start.mjs 12\n\tEOF",
+    "bash <<EOF\nnode scripts/lanes/start.mjs 12",
+    `bash <<< "node scripts/lanes/start.mjs 12"`,
+    "cat <<'EOF' > notes.txt\nhello\nEOF\nnode scripts/lanes/start.mjs 12",
+    "cat <<A <<B\nx\nA\nnode scripts/lanes/start.mjs 12\nB",
+    `"$(cat <<'E'\nnode\nE\n)" scripts/lanes/start.mjs 12`,
+    `git commit -m "$(cat <<EOF\n$(node scripts/lanes/start.mjs 12)\nEOF\n)"`,
+    // A quoted heredoc message reads like a single-quoted one: a line that is the start command is still denied.
+    `git commit -m "$(cat <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF\n)"`,
+  ]) {
+    const found = findStartInvocations(cmd);
+    assert.ok(found.length > 0 && found.every((f) => !f.standalone), JSON.stringify(cmd));
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, JSON.stringify(cmd));
+  }
+});
+
+test("edge: the hook itself passes a heredoc commit and gives the could-not-parse reason end to end", () => {
+  const dir = tmp();
+  try {
+    assert.equal(runHook("pre-tool-use", JSON.stringify(bash(COMMIT_HEREDOC)), { dir, now: NOW }), "");
+    const o = out(runHook("pre-tool-use", JSON.stringify(bash(`git commit -m "don't run start.mjs"`)), { dir, now: NOW }));
+    assert.deepEqual(o, { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: PARSE_DENY_REASON });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
