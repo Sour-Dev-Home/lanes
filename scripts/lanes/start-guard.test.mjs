@@ -94,7 +94,7 @@ test("edge: a variable spliced into start.mjs's name, or a script word that stay
 
 test("edge: a variable spliced into the --bg flag, or left unresolved after claude, is a background launch", () => {
   // Found by the test-hunter: bash expands `F=bg; claude --$F x` to `claude --bg x`.
-  for (const cmd of ["F=bg; claude --$F x", "F=--bg; claude $F x", "claude $FLAGS x", "C=claude; F=bg; $C --$F x", "$C --$F x"]) {
+  for (const cmd of ["F=bg; claude --$F x", "F=--bg; claude $F x", "claude $FLAGS x", "C=claude; F=bg; $C --$F x", "$C --$F x", "$CLAUDE --bg x", "claude$UNDEFINED --bg x"]) {
     assert.ok(findBgLaunches(cmd), `bypass not caught: ${cmd}`);
   }
 });
@@ -102,6 +102,19 @@ test("edge: a variable spliced into the --bg flag, or left unresolved after clau
 test("edge: a $ in an ordinary argument is neither a start run nor a background launch", () => {
   for (const cmd of ['node scripts/lanes/status.mjs --since "$D"', 'cd "$DIR" && git status', 'gh pr view "$PR"', "X=start; echo $X.mjs"]) {
     assert.deepEqual(findStartInvocations(cmd), [], cmd);
+    assert.equal(findBgLaunches(cmd), false, cmd);
+  }
+});
+
+test("edge: an everyday git/gh command that merely mentions start.mjs or --bg in text, alongside an unrelated $VAR elsewhere in the same call, is not a start run or a background launch", () => {
+  // Found by the test-hunter: the whole-string fail-closed fallback (for real indirection like `$(...)`) also fires
+  // on a commit message or --body that just names start.mjs/--bg, as soon as the command has an unrelated $VAR
+  // anywhere else (e.g. a quoted "$FILE" used for something else entirely). That denies routine lane work such as a
+  // commit describing a fix to this very guard.
+  for (const cmd of [`git commit -m "fix start.mjs typo" && echo "$X"`, `gh pr comment 12 --body "see start.mjs" && cat "$FILE"`, `echo "$VAR" && git log --oneline -- start.mjs`, `grep -n "\\$X" scripts/lanes/start.mjs`]) {
+    assert.deepEqual(findStartInvocations(cmd), [], cmd);
+  }
+  for (const cmd of [`git commit -m "mention --bg mode in docs" && echo "$DONE"`]) {
     assert.equal(findBgLaunches(cmd), false, cmd);
   }
 });

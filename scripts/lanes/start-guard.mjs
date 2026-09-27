@@ -171,9 +171,8 @@ export function findStartInvocations(command) {
       if (/start\.mjs/i.test(text)) out.push({ issues: undefined, standalone: false });
     },
   );
-  // Substitution (`$(…)`, backticks, `$VAR` from elsewhere) cannot be resolved statically: with start.mjs named
-  // anywhere in such a command, fail closed and count it as a run.
-  if (out.length === 0 && /[$`]/.test(cmd) && /start\.mjs/i.test(cmd)) out.push({ issues: undefined, standalone: false });
+  // No raw-text fallback: `node $(echo …start.mjs)` and backticks leave `$` or a backtick in the script word, which
+  // the visitor above already counts, and one would deny `git commit -m "…start.mjs" && echo "$X"`.
   // A trailing newline the model appends to a Bash command must not turn the plain command into a wrapped one.
   const m = PLAIN_RE.exec(cmd.trim());
   if (out.length === 1 && m) out[0] = { issues: m[1].trim().split(" ").map(Number), standalone: true };
@@ -191,16 +190,17 @@ export function findBgLaunches(command) {
       const at = words.findIndex((w) => CLAUDE_RE.test(basename(w)));
       // After claude, a word that still holds `$` or a backtick could expand to --bg: fail closed.
       if (at !== -1 && words.slice(at + 1).some((w) => BG_FLAG_RE.test(w) || UNRESOLVED_RE.test(w))) found = true;
-      // `$C --$F`: a command word that could be claude, with a flag that could be --bg.
+      // `$C --bg`, `claude$X --bg`, `$C --$F`, backticks: a command word that could be claude, with a flag that could be --bg.
       const cmdWord = words.find((w) => !ASSIGN_RE.test(w));
-      if (cmdWord !== undefined && UNRESOLVED_RE.test(cmdWord) && words.some((w) => w.startsWith("-") && UNRESOLVED_RE.test(w))) found = true;
+      if (cmdWord !== undefined && UNRESOLVED_RE.test(cmdWord) && words.some((w) => BG_FLAG_RE.test(w) || (w.startsWith("-") && UNRESOLVED_RE.test(w)))) found = true;
     },
     (text) => {
       if (/--(bg|background)/.test(text)) found = true;
     },
   );
-  // `$(which claude) --bg`, backticks: the claude word and its flag land in different pieces; fail closed.
-  if (!found && /[$`]/.test(cmd) && /(^|[\s'"])--(bg|background)([=\s'"]|$)/.test(cmd)) found = true;
+  // `$(which claude) --bg`: the lexer splits the substitution off, so claude and its flag land in different simple
+  // commands. Only a `$(` that names claude, with a --bg word in the same call, fails closed; an unrelated "$VAR" does not.
+  if (!found && /\$\([^)]*claude/i.test(cmd) && /(^|[\s'"])--(bg|background)([=\s'"]|$)/.test(cmd)) found = true;
   return found;
 }
 
