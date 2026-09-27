@@ -326,3 +326,159 @@ test("main ignores an ADR the PR itself adds: it is not on the default branch ye
   inCheckout({}, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
   assert.equal(descriptionOf(posted[0]), "unattended-eligible (tier:full), reviews in");
 });
+
+// #25: reuse a test-hunter success from an earlier commit when the PR's own diff is unchanged
+const OLD = "e".repeat(40);
+const MID = "f".repeat(40);
+const FIRST = "1".repeat(40);
+const ownDiff = (index, hunk, line = "+y") => `diff --git a/src/a.ts b/src/a.ts\nindex ${index}..9999999 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ ${hunk} @@\n-x\n${line}\n`;
+const statusesRoute = (sha) => `repos/o/r/commits/${sha}/statuses?per_page=100`;
+const compareRoute = (sha) => `repos/o/r/compare/main...${sha}`;
+const WAIT_HUNTER = "waiting for review/test-hunter";
+// A full PR at head SHA whose test-hunter reviewed OLD; since then main was merged in, moving the diff's line numbers.
+function reuseRoutes({ tier = "full", headDiff = ownDiff("2222222", "-40,1 +41,1"), oldStatuses = [{ ...reviewStatus }], commits = [FIRST, OLD, SHA], comments } = {}) {
+  const routes = {
+    ...fullRoutes(comments ?? [verdictComment("leo", "test-hunter", OLD)]),
+    "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" }, base: { ref: "main", sha: "0".repeat(40) } },
+    "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: `tier:${tier}` }, { name: "ready" }] },
+    "repos/o/r/pulls/5/commits": commits.join("\n") + "\n",
+    [statusesRoute(SHA)]: [],
+    [statusesRoute(OLD)]: oldStatuses,
+    [statusesRoute(MID)]: [],
+    [statusesRoute(FIRST)]: [],
+    [compareRoute(OLD)]: ownDiff("1111111", "-1,1 +1,1"),
+  };
+  if (headDiff !== null) routes[compareRoute(SHA)] = headDiff;
+  return routes;
+}
+const REUSED = `unattended-eligible (tier:full), reviews in, test-hunter reused from ${OLD.slice(0, 7)}`;
+
+test("evaluatePr reuses a test-hunter success after a merge from main that left the PR's own diff unchanged", () => {
+  const { api, posted } = fakeApi(reuseRoutes());
+  const d = evaluatePr(api, "o/r", 5, config);
+  assert.equal(d.state, "success");
+  assert.equal(d.description, REUSED);
+  assert.equal(descriptionOf(posted[0]), REUSED);
+});
+
+test("evaluatePr fetches each commit's own diff from the three-dot compare API with the diff media type", () => {
+  const { api } = fakeApi(reuseRoutes());
+  const calls = [];
+  evaluatePr((a) => (calls.push(a), api(a)), "o/r", 5, config);
+  const compares = calls.filter((a) => a[0].startsWith("repos/o/r/compare/"));
+  assert.deepEqual(compares.map((a) => a[0]).sort(), [compareRoute(OLD), compareRoute(SHA)].sort());
+  for (const a of compares) assert.ok(a.includes("Accept: application/vnd.github.diff"), a.join(" "));
+});
+
+test("evaluatePr does not reuse when the PR's own diff changed", () => {
+  const { api } = fakeApi(reuseRoutes({ headDiff: ownDiff("2222222", "-40,1 +41,1", "+z") }));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_HUNTER);
+});
+
+test("evaluatePr does not reuse a failure or a pending on the reviewed commit", () => {
+  for (const state of ["failure", "pending", "error"]) {
+    const { api } = fakeApi(reuseRoutes({ oldStatuses: [{ ...reviewStatus, state }] }));
+    assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_HUNTER, state);
+  }
+});
+
+test("evaluatePr does not reuse an older success when a newer commit's test-hunter failed", () => {
+  const routes = reuseRoutes({ commits: [OLD, MID, SHA] });
+  routes[statusesRoute(MID)] = [{ ...reviewStatus, state: "failure" }];
+  routes[compareRoute(MID)] = routes[compareRoute(OLD)];
+  const { api } = fakeApi(routes);
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_HUNTER);
+});
+
+test("evaluatePr never reuses a bot-posted success", () => {
+  const bot = { ...reviewStatus, creator: { type: "Bot", login: "github-actions[bot]" } };
+  const { api } = fakeApi(reuseRoutes({ oldStatuses: [bot] }));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_HUNTER);
+});
+
+test("evaluatePr lets any trusted test-hunter status on the head win over reuse, without fetching diffs", () => {
+  const routes = reuseRoutes();
+  routes[statusesRoute(SHA)] = [{ ...reviewStatus, state: "failure" }];
+  const { api } = fakeApi(routes);
+  const calls = [];
+  const d = evaluatePr((a) => (calls.push(a[0]), api(a)), "o/r", 5, config);
+  assert.equal(d.description, "review/test-hunter is failure");
+  assert.ok(!calls.some((c) => c.startsWith("repos/o/r/compare/") || c === "repos/o/r/pulls/5/commits"));
+});
+
+test("evaluatePr does not reuse when a diff cannot be fetched", () => {
+  const { api } = fakeApi(reuseRoutes({ headDiff: null })); // no route: the API call throws
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_HUNTER);
+});
+
+test("carry passes the merge queue on a reused test-hunter verdict", () => {
+  const group = "b".repeat(40);
+  const { api, posted } = fakeApi(reuseRoutes());
+  const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, group, config);
+  assert.equal(d.state, "success");
+  assert.equal(d.description, REUSED);
+  assert.equal(posted[0].sha, group);
+});
+
+test("evaluatePr reuses only review/test-hunter, never another reviewer or the owner", () => {
+  const ui = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: ["^src/"] } });
+  const others = [{ ...reviewStatus }, { ...reviewStatus, context: "review/ui-reviewer" }, { ...reviewStatus, context: "review/owner" }];
+  const { api } = fakeApi(reuseRoutes({ oldStatuses: others, comments: [verdictComment("leo", "test-hunter", OLD), verdictComment("leo", "ui-reviewer", OLD)] }));
+  assert.equal(evaluatePr(api, "o/r", 5, ui).description, "waiting for review/ui-reviewer");
+  const { api: api2 } = fakeApi(reuseRoutes({ oldStatuses: others }));
+  assert.equal(evaluatePr(api2, "o/r", 5, config).description, REUSED); // the old review/owner is not an approval
+});
+
+test("edge: a reused full-tier status still needs the test-hunter's verdict comment bound to the reused commit", () => {
+  const { api } = fakeApi(reuseRoutes({ comments: [verdictComment("leo", "test-hunter", FIRST)] }));
+  const d = evaluatePr(api, "o/r", 5, config);
+  assert.equal(d.state, "pending");
+  assert.match(d.description, /no verdict for head from test-hunter/);
+});
+
+test("edge: a quick-tier PR passes on a reused status alone", () => {
+  const { api } = fakeApi(reuseRoutes({ tier: "quick", comments: [] }));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, `unattended-eligible (tier:quick), reviews in, test-hunter reused from ${OLD.slice(0, 7)}`);
+});
+
+test("edge: a skip-tier PR never looks for a reusable verdict", () => {
+  const routes = reuseRoutes({ tier: "skip" });
+  routes["repos/o/r/pulls/5/files"] = "docs/a.md\n";
+  const { api } = fakeApi(routes);
+  const calls = [];
+  assert.equal(evaluatePr((a) => (calls.push(a[0]), api(a)), "o/r", 5, config).state, "success");
+  assert.ok(!calls.includes("repos/o/r/pulls/5/commits"));
+});
+
+test("edge: the walk stops after the 20 newest commits", () => {
+  const filler = Array.from({ length: 19 }, (_, i) => (i + 2).toString(16).padStart(2, "0").repeat(20));
+  const routes = reuseRoutes({ commits: [OLD, ...filler, SHA] });
+  for (const sha of filler) routes[statusesRoute(sha)] = [];
+  const { api } = fakeApi(routes);
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_HUNTER);
+  const { api: api2 } = fakeApi({ ...routes, "repos/o/r/pulls/5/commits": [OLD, ...filler.slice(1), SHA].join("\n") });
+  assert.equal(evaluatePr(api2, "o/r", 5, config).description, REUSED);
+});
+
+test("edge: no reuse when the commit list cannot be read or does not end at the head", () => {
+  const unreadable = reuseRoutes();
+  delete unreadable["repos/o/r/pulls/5/commits"];
+  const stale = reuseRoutes({ commits: [FIRST, OLD] });
+  for (const routes of [unreadable, stale]) {
+    const { api } = fakeApi(routes);
+    assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_HUNTER);
+  }
+});
+
+test("edge: no reuse when both own diffs are empty, or the base ref is missing or malformed", () => {
+  const empty = reuseRoutes({ headDiff: "" });
+  empty[compareRoute(OLD)] = "";
+  const noBase = reuseRoutes();
+  noBase["repos/o/r/pulls/5"] = { ...noBase["repos/o/r/pulls/5"], base: undefined };
+  const dotted = reuseRoutes();
+  dotted["repos/o/r/pulls/5"] = { ...dotted["repos/o/r/pulls/5"], base: { ref: "main..evil" } };
+  for (const routes of [empty, noBase, dotted]) {
+    const { api } = fakeApi(routes);
+    assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_HUNTER);
+  }
+});

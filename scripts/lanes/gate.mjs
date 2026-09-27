@@ -2,7 +2,21 @@
 // Inputs (environment): REPO, EVENT_NAME, PR_NUMBER, STATUS_SHA, STATUS_CONTEXT, HEAD_REF, GROUP_SHA, GH_TOKEN.
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { authorCanWrite, GATE_CONTEXT, gateDecision, loadAdrs, loadConfig, parsePrBody, parseVerdictComment } from "./lib.mjs";
+import {
+  authorCanWrite,
+  diffFingerprint,
+  GATE_CONTEXT,
+  gateDecision,
+  latestByContext,
+  loadAdrs,
+  loadConfig,
+  parsePrBody,
+  parseVerdictComment,
+  REUSABLE_REVIEWER,
+  reviewContext,
+  testHunterReusable,
+  trustedStatuses,
+} from "./lib.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -49,6 +63,43 @@ export function trustedVerdicts(api, repo, number) {
   return out;
 }
 
+const REUSE_WALK = 20;
+// A branch name safe to put before `...` in a compare URL: no `..` and nothing outside a plain ref's characters.
+const BASE_REF = /^(?!.*\.\.)[A-Za-z0-9_./-]+$/;
+
+/**
+ * A trusted review/test-hunter success to reuse on PR `number`'s head (#25), as `{ sha, status }`, or null. Walks the
+ * PR's newest `REUSE_WALK` commits from newest to oldest to the most recent one with a trusted review/test-hunter
+ * status, and reuses it only if it is a success and that commit's own diff (three-dot compare against the base branch,
+ * so merged-in main changes drop out) has the head's `diffFingerprint`. Fails closed: any API error, an empty diff,
+ * or a commit list that does not end at the head means no reuse.
+ */
+export function reusableTestHunter(api, repo, number, pr) {
+  const head = pr?.head?.sha;
+  const base = pr?.base?.ref;
+  if (!SHA.test(head ?? "") || !BASE_REF.test(base ?? "")) return null;
+  const ownDiff = (sha) => {
+    const diff = api([`repos/${repo}/compare/${base}...${sha}`, "-H", "Accept: application/vnd.github.diff"]);
+    if (typeof diff !== "string" || diff === "") throw new Error(`no diff for ${sha}`);
+    return diffFingerprint(diff);
+  };
+  try {
+    const shas = api([`repos/${repo}/pulls/${number}/commits`, "--paginate", "--jq", ".[].sha"]).split("\n").filter(Boolean);
+    // A push landed between reading the PR and its commits: decide on the next event instead.
+    if (shas.at(-1) !== head) return null;
+    for (const sha of shas.slice(-REUSE_WALK).reverse()) {
+      if (sha === head || !SHA.test(sha)) continue;
+      const status = latestByContext(trustedStatuses(statusesOf(api, repo, sha))).get(reviewContext(REUSABLE_REVIEWER));
+      if (!status) continue;
+      if (status.state !== "success") return null;
+      return ownDiff(sha) === ownDiff(head) ? { sha, status } : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 /**
  * Gathers every input `gateDecision` needs for PR `number` from the API and returns its verdict, without posting
  * anything. Returns `null` for a closed PR. Shared by `evaluatePr` (posts on the PR head) and `carry` (posts on the
@@ -79,6 +130,8 @@ export function decideForPr(api, repo, number, config, adrs = []) {
       issueLabels = []; // unknown issue: the decision then fails on the missing tier label
     }
   }
+  const statuses = statusesOf(api, repo, pr.head.sha);
+  const reused = testHunterReusable({ issueLabels, files, statuses, config, adrs }) ? reusableTestHunter(api, repo, number, pr) : null;
   const decision = gateDecision({
     prBody: pr.body,
     issueLabels,
@@ -88,10 +141,11 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     headRef: pr.head.ref,
     headSha: pr.head.sha,
     files,
-    statuses: statusesOf(api, repo, pr.head.sha),
+    statuses,
     verdicts: trustedVerdicts(api, repo, number),
     config,
     adrs,
+    reused,
   });
   return { pr, decision };
 }
