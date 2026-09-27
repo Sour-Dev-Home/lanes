@@ -89,6 +89,14 @@ test("a skip PR on a sensitive path still fails", () => {
   assert.match(run({ issueLabels: ["tier:skip", "ready"], files: [".github/pull_request_template.md"] }).description, /skip paths/);
 });
 
+// edge: an owner-only file that is also outside the skip paths must still fail tier:skip, not wait on the owner.
+// gateDecision checks skipOnly before cls.owner, so "never failing" for owner-only cannot mask this earlier failure.
+test("edge: a skip PR on an owner-only, non-skip path fails (not owner-only pending)", () => {
+  const d = run({ issueLabels: ["tier:skip", "ready"], files: ["scripts/lanes/gate.mjs"] });
+  assert.equal(d.state, "failure");
+  assert.match(d.description, /skip paths/);
+});
+
 test("full tier without verdict comments waits on the owner", () => {
   assert.equal(run({ issueLabels: ["tier:full", "ready"], statuses: [st("review/test-hunter")] }).stage, "owner");
 });
