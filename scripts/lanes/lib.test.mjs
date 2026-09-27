@@ -1,6 +1,7 @@
 // scripts/lanes/lib.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, loadConfig, parseAdr, parseVerdictComment, requiredReviewers, reviewContext } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
@@ -61,8 +62,81 @@ test("compileConfig rejects empty requiredChecks", () => {
   assert.throws(() => compileConfig({ requiredChecks: [], paths: { skip: [], contract: [], sensitive: [], ui: [] } }), /requiredChecks/);
 });
 
+test("compileConfig defaults paths.owner to [] and rejects a non-array one", () => {
+  const paths = { skip: [], contract: [], sensitive: [], ui: [] };
+  assert.deepEqual(compileConfig({ requiredChecks: ["verify"], paths }).paths.owner, []);
+  assert.equal(classifyFiles(["scripts/lanes/gate.mjs"], compileConfig({ requiredChecks: ["verify"], paths })).owner, false);
+  for (const owner of ["^docs/adr/", { a: 1 }, null, 3]) {
+    assert.throws(() => compileConfig({ requiredChecks: ["verify"], paths: { ...paths, owner } }), /paths\.owner/, String(owner));
+  }
+});
+
+test("compileConfig rejects an owner entry that is not a valid regex string", () => {
+  const paths = { skip: [], contract: [], sensitive: [], ui: [] };
+  assert.throws(() => compileConfig({ requiredChecks: ["verify"], paths: { ...paths, owner: ["^docs/("] } }));
+});
+
+test("classifyFiles reports owner when any file matches paths.owner", () => {
+  const withOwner = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [], owner: ["^docs/adr/"] } });
+  assert.equal(classifyFiles(["docs/adr/0003-x.md"], withOwner).owner, true);
+  assert.equal(classifyFiles(["docs/a.md", "docs/adr/0003-x.md"], withOwner).owner, true);
+  assert.equal(classifyFiles(["docs/a.md"], withOwner).owner, false);
+  assert.equal(classifyFiles([], withOwner).owner, false);
+  // An owner-only file that is also a skip path stays skipOnly: owner-only makes a PR wait, it never fails skip.
+  assert.equal(classifyFiles(["docs/adr/0003-x.md"], withOwner).skipOnly, true);
+});
+
+// ADR 0002: every regex in the real paths.owner, with a path it must match and a near-miss that is not owner-only.
+const OWNER_SAMPLES = {
+  "^scripts/lanes/(gate|lib|approve-guard|post-review|issue-contract)(\\.test)?\\.mjs$": ["scripts/lanes/approve-guard.test.mjs", "scripts/lanes/gatekeeper.mjs"],
+  "^scripts/lanes/gate-decision\\.test\\.mjs$": ["scripts/lanes/gate-decision.test.mjs", "scripts/lanes/gate-decision.mjs"],
+  "^scripts/lanes/workflow\\.test\\.mjs$": ["scripts/lanes/workflow.test.mjs", "scripts/lanes/workflow.mjs"],
+  "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$": ["scripts/lanes/setup-repo.mjs", "scripts/lanes/new-project-x.mjs"],
+  "^\\.claude/settings\\.json$": [".claude/settings.json", ".claude/settings.local.json"],
+  "^\\.github/": [".github/workflows/verify.yml", "docs/github/x.md"],
+  "^\\.githooks/": [".githooks/pre-push", "scripts/githooks/x.mjs"],
+  "^lanes\\.config\\.json$": ["lanes.config.json", "templates/lanes.config.json"],
+  "^\\.claude/agents/": [".claude/agents/test-hunter.md", ".claude/agents.md"],
+  "^\\.claude/commands/(lane|night|approve)\\.md$": [".claude/commands/night.md", ".claude/commands/lanes.md"],
+  "^docs/adr/": ["docs/adr/0003-x.md", "docs/adrs.md"],
+  "^package(-lock)?\\.json$": ["package-lock.json", "frontend/package.json"],
+  "(^|/)(pnpm-lock\\.yaml|yarn\\.lock)$": ["frontend/yarn.lock", "pnpm-lock.yaml.bak"],
+  "^vendor/": ["vendor/agent-skills/VENDORED.md", "src/vendor/x.ts"],
+  "(^|/)CLAUDE\\.md$": ["backend/CLAUDE.md", "docs/NOTCLAUDE.md"],
+  "^\\.gitattributes$": [".gitattributes", "src/.gitattributes"],
+  "^scripts/preflight\\.mjs$": ["scripts/preflight.mjs", "scripts/preflight.test.mjs"],
+  "(^|/)\\.env": [".env.local", "src/environment.ts"],
+  "(^|/)auth/": ["src/auth/login.ts", "src/oauth/x.ts"],
+  "(^|/)secrets?/": ["secrets/key.txt", "src/secretsauce/x.ts"],
+  "^deploy/": ["deploy/prod.sh", "docs/deploy/x.md"],
+};
+
+test("every regex in lanes.config.json paths.owner matches its sample and not its near-miss", () => {
+  const raw = JSON.parse(readFileSync("lanes.config.json", "utf8"));
+  const real = loadConfig();
+  assert.ok(raw.paths.owner.includes("^docs/adr/"), "docs/adr/ is owner-only");
+  assert.deepEqual([...raw.paths.owner].sort(), Object.keys(OWNER_SAMPLES).sort(), "each owner regex has a sample row");
+  for (const source of raw.paths.owner) {
+    const [sample, nearMiss] = OWNER_SAMPLES[source];
+    const re = new RegExp(source);
+    assert.equal(re.test(sample), true, `${source} should match ${sample}`);
+    assert.equal(re.test(nearMiss), false, `${source} should not match ${nearMiss}`);
+    assert.equal(classifyFiles([sample], real).owner, true, sample);
+    assert.equal(classifyFiles([nearMiss], real).owner, false, nearMiss);
+  }
+});
+
+test("the real config: tooling scripts and non-lane commands are sensitive but not owner-only", () => {
+  const real = loadConfig();
+  for (const file of ["scripts/lanes/status.mjs", "scripts/lanes/blockers.mjs", ".claude/commands/status.md", ".claude/hooks/notify.mjs"]) {
+    const cls = classifyFiles([file], real);
+    assert.equal(cls.sensitive, true, file);
+    assert.equal(cls.owner, false, file);
+  }
+});
+
 test("docs and tests only are skipOnly", () => {
-  assert.deepEqual(classifyFiles(["docs/a.md", "src/x.test.ts"], config), { skipOnly: true, contract: false, sensitive: false, ui: false });
+  assert.deepEqual(classifyFiles(["docs/a.md", "src/x.test.ts"], config), { skipOnly: true, contract: false, sensitive: false, ui: false, owner: false });
 });
 
 test("a sensitive markdown file is not skipOnly", () => {
@@ -76,12 +150,14 @@ test("no files is not skipOnly", () => {
 
 test("code plus docs is not skipOnly; contract and ui are detected", () => {
   const cls = classifyFiles(["docs/a.md", "contracts/snapshot.ts", "frontend/src/App.tsx"], config);
-  assert.deepEqual(cls, { skipOnly: false, contract: true, sensitive: false, ui: true });
+  assert.deepEqual(cls, { skipOnly: false, contract: true, sensitive: false, ui: true, owner: false });
 });
 
 test("required reviewers by tier and class", () => {
-  const none = { skipOnly: false, contract: false, sensitive: false, ui: false };
+  const none = { skipOnly: false, contract: false, sensitive: false, ui: false, owner: false };
   assert.deepEqual(requiredReviewers("skip", none), []);
+  // Owner-only adds no reviewer at any tier.
+  for (const tier of ["skip", "quick", "full"]) assert.deepEqual(requiredReviewers(tier, { ...none, owner: true }), requiredReviewers(tier, none), tier);
   assert.deepEqual(requiredReviewers("quick", none), ["test-hunter"]);
   assert.deepEqual(requiredReviewers("quick", { ...none, ui: true }), ["test-hunter", "ui-reviewer"]);
   assert.deepEqual(requiredReviewers("full", { ...none, sensitive: true, contract: true }), ["test-hunter", "security-reviewer", "architecture-advisor"]);

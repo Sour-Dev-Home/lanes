@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compileConfig, gateDecision, isBotStatus } from "./lib.mjs";
+import { compileConfig, gateDecision, isBotStatus, loadConfig } from "./lib.mjs";
 
 const config = compileConfig({
   requiredChecks: ["verify"],
-  paths: { skip: ["^docs/", "\\.md$"], contract: ["^contracts/"], sensitive: ["^\\.github/"], ui: ["^frontend/"] },
+  paths: { skip: ["^docs/", "\\.md$"], contract: ["^contracts/"], sensitive: ["^\\.github/"], ui: ["^frontend/"], owner: ["^scripts/lanes/gate\\.mjs$"] },
 });
 const body = (contract = "none") =>
   `Closes #7\n\n## What changed\nx\n## Contract changes\n${contract}\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\nnothing\n## Not done\nnothing\n`;
@@ -71,11 +71,22 @@ test("the newest status per context wins", () => {
   assert.equal(run({ statuses }).state, "success");
 });
 
-test("sensitive quick change waits on the owner, then passes with review/owner", () => {
+test("a reviewed sensitive quick change merges unattended (ADR 0002)", () => {
   const files = [".github/workflows/x.yml"];
   const reviews = [st("review/test-hunter"), st("review/security-reviewer")];
-  assert.deepEqual(run({ files, statuses: reviews }).stage, "owner");
+  assert.deepEqual(run({ files, statuses: [st("review/test-hunter")] }), { state: "pending", description: "waiting for review/security-reviewer", stage: "review" });
+  assert.deepEqual(run({ files, statuses: reviews }), { state: "success", description: "unattended-eligible (tier:quick), reviews in", stage: "ready" });
+});
+
+test("an owner-only quick change waits on the owner, then passes with review/owner", () => {
+  const files = ["scripts/lanes/gate.mjs"];
+  const reviews = [st("review/test-hunter")];
+  assert.deepEqual(run({ files, statuses: reviews }), { state: "pending", description: "waiting on owner (/approve) (owner-only path)", stage: "owner" });
   assert.equal(run({ files, statuses: [...reviews, st("review/owner")] }).state, "success");
+});
+
+test("a skip PR on a sensitive path still fails", () => {
+  assert.match(run({ issueLabels: ["tier:skip", "ready"], files: [".github/pull_request_template.md"] }).description, /skip paths/);
 });
 
 test("full tier without verdict comments waits on the owner", () => {
@@ -113,10 +124,20 @@ test("full: anything else in 'Needs the owner' waits", () => {
   waits(full({ prBody: body().replace("## Needs the owner\nnothing", "## Needs the owner\nnothing, but check X") }), "needs the owner");
 });
 
-test("full: a sensitive path waits", () => {
+test("full: a reviewed sensitive path passes unattended (ADR 0002)", () => {
   const files = [".github/workflows/x.yml"];
   const statuses = [st("review/test-hunter"), st("review/security-reviewer")];
-  waits(full({ files, statuses, verdicts: [verdict("test-hunter"), verdict("security-reviewer")] }), "sensitive path");
+  assert.equal(full({ files, statuses, verdicts: [verdict("test-hunter"), verdict("security-reviewer")] }).state, "success");
+});
+
+test("full: a sensitive path still needs the security-reviewer's status and head verdict", () => {
+  const files = [".github/workflows/x.yml"];
+  assert.equal(full({ files }).description, "waiting for review/security-reviewer");
+  waits(full({ files, statuses: [st("review/test-hunter"), st("review/security-reviewer")] }), "no verdict for head from security-reviewer");
+});
+
+test("full: an owner-only path waits even when every review is clean", () => {
+  waits(full({ files: ["scripts/lanes/gate.mjs"] }), "owner-only path");
 });
 
 test("full: a breaking contract change waits; additive passes", () => {
@@ -300,4 +321,77 @@ test("gateDecision fails on duplicate PR template sections", () => {
   assert.equal(run({ prBody: bodyWithDups }).state, "failure");
   assert.match(run({ prBody: bodyWithDups }).description, /repeated/);
   assert.equal(run({ prBody: bodyWithDups }).stage, "contract");
+});
+
+// ---- #48 / ADR 0002: owner-only paths, against the repo's real lanes.config.json ----
+
+const real = loadConfig();
+const clean = (names) => ({ statuses: names.map((n) => st(`review/${n}`)), verdicts: names.map((n) => verdict(n)) });
+const onReal = (tier, files, reviewers, over = {}) =>
+  run({ config: real, issueLabels: [`tier:${tier}`, "ready"], headSha: HEAD, files, ...clean(reviewers), ...over });
+const READY = (tier) => ({ state: "success", description: `unattended-eligible (tier:${tier}), reviews in`, stage: "ready" });
+
+test("real config: a reviewed full PR on scripts/lanes/status.mjs merges unattended", () => {
+  assert.deepEqual(onReal("full", ["scripts/lanes/status.mjs"], ["test-hunter", "security-reviewer"]), READY("full"));
+});
+
+test("real config: the same full PR on scripts/lanes/gate.mjs waits (owner-only path)", () => {
+  waits(onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"]), "owner-only path");
+});
+
+test("real config: a reviewed quick PR on .claude/commands/status.md merges unattended", () => {
+  assert.deepEqual(onReal("quick", [".claude/commands/status.md"], ["test-hunter", "security-reviewer"]), READY("quick"));
+});
+
+test("real config: a PR editing .claude/commands/lane.md waits at quick and full", () => {
+  for (const tier of ["quick", "full"]) waits(onReal(tier, [".claude/commands/lane.md"], ["test-hunter", "security-reviewer"]), "owner-only path");
+});
+
+test("real config: a skip PR adding docs/adr/0003-x.md waits, never fails", () => {
+  waits(onReal("skip", ["docs/adr/0003-x.md"], []), "owner-only path");
+});
+
+test("real config: one owner-only file among tooling files makes the whole PR wait", () => {
+  waits(onReal("full", ["scripts/lanes/status.mjs", "docs/USING.md", "lanes.config.json"], ["test-hunter", "security-reviewer"]), "owner-only path");
+});
+
+test("real config: a sensitive full PR whose security verdict has an unfixed important finding waits", () => {
+  const findings = [{ severity: "important", file: "scripts/lanes/status.mjs", line: 1, summary: "x", fixed: false }];
+  const verdicts = [verdict("test-hunter"), verdict("security-reviewer", { findings })];
+  waits(onReal("full", ["scripts/lanes/status.mjs"], ["test-hunter", "security-reviewer"], { verdicts }), "unfixed important finding from security-reviewer");
+});
+
+test("real config: review/owner success still passes anything, owner-only included", () => {
+  const withOwner = (reviewers) => ({ statuses: [...reviewers.map((n) => st(`review/${n}`)), st("review/owner")], verdicts: [] });
+  assert.deepEqual(onReal("full", ["scripts/lanes/gate.mjs", "lanes.config.json"], [], withOwner(["test-hunter", "security-reviewer"])), { state: "success", description: "approved by owner", stage: "ready" });
+  assert.equal(onReal("skip", ["docs/adr/0003-x.md"], [], withOwner([])).state, "success");
+});
+
+test("owner-only is reported before the other owner reasons", () => {
+  const prBody = body("breaking").replace("## Needs the owner\nnothing", "## Needs the owner\npick a name");
+  const d = onReal("full", ["scripts/lanes/gate.mjs", "contracts/x.ts"], ["test-hunter", "security-reviewer", "architecture-advisor"], {
+    prBody,
+    issueLabels: ["tier:full", "ready", "contract:breaking"],
+  });
+  waits(d, "owner-only path");
+});
+
+test("the other owner reasons are unchanged on a sensitive, non-owner-only path", () => {
+  const files = ["scripts/lanes/status.mjs"];
+  const reviewers = ["test-hunter", "security-reviewer"];
+  const needs = body().replace("## Needs the owner\nnothing", "## Needs the owner\npick a name");
+  waits(onReal("full", files, reviewers, { prBody: needs }), "needs the owner");
+  waits(onReal("quick", files, reviewers, { prBody: needs }), "needs the owner");
+  const breaking = { prBody: body("breaking"), issueLabels: ["tier:full", "ready", "contract:breaking"] };
+  waits(onReal("full", [...files, "contracts/x.ts"], [...reviewers, "architecture-advisor"], breaking), "breaking contract change");
+  waits(onReal("quick", [...files, "contracts/x.ts"], [...reviewers, "architecture-advisor"], { prBody: body("additive") }), "contract change");
+  waits(onReal("full", files, reviewers, { verdicts: [verdict("test-hunter")] }), "no verdict for head from security-reviewer");
+  const failed = [verdict("test-hunter"), verdict("security-reviewer", { result: "failure" })];
+  waits(onReal("full", files, reviewers, { verdicts: failed }), "verdict from security-reviewer is not success");
+  assert.equal(onReal("full", [...files, "contracts/x.ts"], [...reviewers, "architecture-advisor"], { prBody: body("additive") }).state, "success");
+});
+
+test("edge: a config without paths.owner never reports owner-only", () => {
+  const legacy = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: ["^scripts/"], ui: [] } });
+  assert.equal(full({ config: legacy, files: ["scripts/lanes/gate.mjs"], ...clean(["test-hunter", "security-reviewer"]) }).state, "success");
 });

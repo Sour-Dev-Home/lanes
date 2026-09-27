@@ -18,6 +18,11 @@ export function compileConfig(raw) {
     if (!Array.isArray(list)) throw new Error(`lanes.config.json: paths.${key} must be an array of regex strings`);
     paths[key] = list.map((source) => new RegExp(source));
   }
+  // ADR 0002: owner-only paths force /approve at every tier. Optional so older installed configs still load.
+  // A present but null owner list is a typo, not an absent key, so it is rejected rather than read as [].
+  const owner = raw?.paths?.owner === undefined ? [] : raw.paths.owner;
+  if (!Array.isArray(owner)) throw new Error("lanes.config.json: paths.owner must be an array of regex strings");
+  paths.owner = owner.map((source) => new RegExp(source));
   const requiredChecks = raw?.requiredChecks;
   if (!Array.isArray(requiredChecks) || requiredChecks.length === 0) {
     throw new Error("lanes.config.json: requiredChecks must be a non-empty array");
@@ -39,6 +44,7 @@ export function classifyFiles(files, config) {
     contract: files.some((f) => matchesAny(paths.contract, f)),
     sensitive: files.some((f) => matchesAny(paths.sensitive, f)),
     ui: files.some((f) => matchesAny(paths.ui, f)),
+    owner: files.some((f) => matchesAny(paths.owner, f)),
   };
 }
 
@@ -337,9 +343,8 @@ const NEEDS_NOTHING = /^nothing\.?$/i;
  * comments (`parseVerdictComment`) whose author already passed `authorCanWrite`, oldest first; only those bound to
  * `headSha` count, and the newest per reviewer is its verdict for this head.
  */
-function fullTierBlocker({ pr, cls, required, verdicts, headSha }) {
+function fullTierBlocker({ pr, required, verdicts, headSha }) {
   if (pr.contractChange === "breaking") return "breaking contract change";
-  if (cls.sensitive) return "sensitive path";
   const head = typeof headSha === "string" ? headSha.toLowerCase() : null;
   const forHead = (Array.isArray(verdicts) ? verdicts : []).filter((v) => head !== null && v?.sha === head && v.verdict);
   for (const v of forHead) {
@@ -402,11 +407,13 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
     return { state: "success", description: "approved by owner", stage: "ready" };
   }
   const waitOwner = (reason) => ({ state: "pending", description: `waiting on owner (/approve) (${reason})`, stage: "owner" });
+  // ADR 0002: the files that decide what gets checked and who approves always need the owner, at every tier. A
+  // sensitive path only adds the security-reviewer (requiredReviewers); it no longer sends a PR to the owner.
+  if (cls.owner) return waitOwner("owner-only path");
   if (!NEEDS_NOTHING.test(pr.sections["needs the owner"] ?? "")) return waitOwner("needs the owner");
   let blocker = null;
-  if (tier === "full") blocker = fullTierBlocker({ pr, cls, required, verdicts, headSha });
+  if (tier === "full") blocker = fullTierBlocker({ pr, required, verdicts, headSha });
   else if (tier === "quick" && cls.contract) blocker = "contract change";
-  else if (tier === "quick" && cls.sensitive) blocker = "sensitive path";
   if (blocker) return waitOwner(blocker);
   return { state: "success", description: `unattended-eligible (tier:${tier}), reviews in`, stage: "ready" };
 }
