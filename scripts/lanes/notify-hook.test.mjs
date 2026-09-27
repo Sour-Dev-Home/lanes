@@ -7,8 +7,8 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { laneIssue, notification, deliveryCommand, lookupPr, runHook } from "./notify-hook.mjs";
 
-const LANE = "/home/o/repo/.claude/worktrees/issue-37-notify-hook";
-const WIN_LANE = "C:\\Users\\o\\repo\\.claude\\worktrees\\issue-37-notify-hook";
+const LANE = "/srv/o/repo/.claude/worktrees/issue-37-notify-hook";
+const WIN_LANE = "D:\\work\\o\\repo\\.claude\\worktrees\\issue-37-notify-hook";
 const SID = "abcdef12-3456-7890-abcd-ef1234567890";
 const input = (over = {}) => ({ session_id: SID, cwd: LANE, hook_event_name: "Notification", ...over });
 
@@ -21,9 +21,9 @@ test("laneIssue reads the issue number from a lane worktree, with either separat
 });
 
 test("a cwd that is not a lane worktree gives null", () => {
-  assert.equal(notification(input({ cwd: "/home/o/repo", notification_type: "permission_prompt" })), null);
-  assert.equal(notification(input({ cwd: "/home/o/repo/.claude/worktrees/feature-x", notification_type: "permission_prompt" })), null);
-  assert.equal(notification(input({ cwd: "/home/o/issue-37-x", notification_type: "permission_prompt" })), null);
+  assert.equal(notification(input({ cwd: "/srv/o/repo", notification_type: "permission_prompt" })), null);
+  assert.equal(notification(input({ cwd: "/srv/o/repo/.claude/worktrees/feature-x", notification_type: "permission_prompt" })), null);
+  assert.equal(notification(input({ cwd: "/srv/o/issue-37-x", notification_type: "permission_prompt" })), null);
 });
 
 // edge: no digits, a zero and a non-string cwd are not lanes
@@ -90,9 +90,9 @@ test("edge: a session id with unexpected characters is not echoed", () => {
 // --- criterion 4: nothing but the issue number, type, short id and the harness's message ---
 
 test("the notification carries no path, transcript or tool input from the hook input", () => {
-  const n = notification(input({ notification_type: "permission_prompt", transcript_path: "/home/o/.claude/secret.jsonl", tool_input: { command: "cat .env" } }));
+  const n = notification(input({ notification_type: "permission_prompt", transcript_path: "/srv/o/.claude/secret.jsonl", tool_input: { command: "cat .env" } }));
   const text = `${n.title}\n${n.body}`;
-  assert.doesNotMatch(text, /home|worktrees|secret|\.env|notify-hook|abcdef12-/);
+  assert.doesNotMatch(text, /srv|worktrees|secret|\.env|notify-hook|abcdef12-/);
 });
 
 // --- criterion 5 and 7: delivery through execFileSync with no shell, text only in env ---
@@ -147,7 +147,7 @@ test("runHook delivers through execFileSync with no shell option", () => {
 
 test("runHook stays silent outside a lane", () => {
   const calls = [];
-  runHook(JSON.stringify(input({ cwd: "/home/o/repo", notification_type: "permission_prompt" })), { platform: "linux", exec: (...a) => calls.push(a), log: (l) => calls.push(l) });
+  runHook(JSON.stringify(input({ cwd: "/srv/o/repo", notification_type: "permission_prompt" })), { platform: "linux", exec: (...a) => calls.push(a), log: (l) => calls.push(l) });
   assert.equal(calls.length, 0);
 });
 
@@ -321,6 +321,6 @@ test("runHook: the 5-second budget is shared, so a slow first call leaves the ne
 
 test("the script never writes the log when nothing went wrong", () => {
   const dir = mkdtempSync(join(tmpdir(), "notify-hook-"));
-  execFileSync(process.execPath, [script], { input: JSON.stringify(input({ cwd: "/home/o/repo" })), encoding: "utf8", env: { ...process.env, LANES_NOTIFY_LOG_DIR: dir } });
+  execFileSync(process.execPath, [script], { input: JSON.stringify(input({ cwd: "/srv/o/repo" })), encoding: "utf8", env: { ...process.env, LANES_NOTIFY_LOG_DIR: dir } });
   assert.equal(existsSync(join(dir, "notify-hook.log")), false);
 });
