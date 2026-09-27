@@ -55,6 +55,38 @@ test("lanes-gate concurrency group is keyed by head commit, not PR number, so pu
   assert.match(yml, /group: lanes-gate-\$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.event\.sha/);
 });
 
+// #36: closing an issue re-evaluates the PRs it was blocking, under the workflow's existing rules.
+test("lanes-gate also runs on issues closed, passing the issue number to the gate", () => {
+  const yml = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
+  assert.match(yml, /\n  issues:\n    types: \[closed\]\n/);
+  assert.match(yml, /ISSUE_NUMBER: \$\{\{ github\.event\.issue\.number \}\}/);
+});
+
+test("lanes-gate keeps its permissions to reading plus posting statuses, with no new ones for the issues trigger", () => {
+  const yml = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
+  const perms = /\npermissions:\n((?: {2}\S.*\n)+)/.exec(yml);
+  assert.ok(perms, "expected a top-level permissions block");
+  assert.deepEqual(perms[1].trim().split("\n").map((l) => l.trim()).sort(), ["contents: read", "issues: read", "pull-requests: read", "statuses: write"]);
+  assert.equal((yml.match(/permissions:/g) ?? []).length, 1, "no job-level permissions");
+});
+
+test("lanes-gate checks out only the default branch and runs only gate.mjs, for every trigger", () => {
+  const yml = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
+  assert.equal((yml.match(/actions\/checkout@/g) ?? []).length, 1);
+  assert.deepEqual(yml.match(/- run: .*/g), ["- run: node scripts/lanes/gate.mjs"]);
+});
+
+test("USING.md's Lane → lane row says the gate enforces Blocked by, not only /lane", () => {
+  const row = readFileSync("docs/USING.md", "utf8").split("\n").find((l) => l.startsWith("| Lane → lane |"));
+  assert.ok(row, "expected the Lane → lane row");
+  assert.match(row, /`lanes\/gate` enforces "Blocked by"/);
+});
+
+test("lanes-gate concurrency group has a key for issues events", () => {
+  const yml = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
+  assert.match(yml, /group: lanes-gate-.*github\.event\.issue\.number/);
+});
+
 test("issue-contract concurrency group is keyed by issue number to serialize edits on the same issue", () => {
   const yml = readFileSync(".github/workflows/issue-contract.yml", "utf8");
   assert.match(yml, /group: issue-contract-\$\{\{ github\.event\.issue\.number \}\}/);

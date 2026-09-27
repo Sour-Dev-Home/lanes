@@ -1,5 +1,5 @@
 // Posts the `lanes/gate` commit status. Run by .github/workflows/lanes-gate.yml, always from the default branch.
-// Inputs (environment): REPO, EVENT_NAME, PR_NUMBER, STATUS_SHA, STATUS_CONTEXT, HEAD_REF, GROUP_SHA, GH_TOKEN.
+// Inputs (environment): REPO, EVENT_NAME, PR_NUMBER, STATUS_SHA, STATUS_CONTEXT, HEAD_REF, GROUP_SHA, ISSUE_NUMBER, GH_TOKEN.
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
@@ -10,6 +10,7 @@ import {
   latestByContext,
   loadAdrs,
   loadConfig,
+  parseIssueForm,
   parsePrBody,
   parseVerdictComment,
   REUSABLE_REVIEWER,
@@ -17,6 +18,7 @@ import {
   testHunterReusable,
   trustedStatuses,
 } from "./lib.mjs";
+import { blockerReport } from "./blockers.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -118,6 +120,8 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   let issueState = null;
   let issueAuthorCanWrite = false;
   let issueIsPr = false;
+  // Fails closed until the issue's "Blocked by" has been read.
+  let blockers = { ok: false, open: [], unreadable: [], error: "issue unreadable" };
   if (closes !== null) {
     try {
       const issue = JSON.parse(api([`repos/${repo}/issues/${closes}`]));
@@ -126,6 +130,7 @@ export function decideForPr(api, repo, number, config, adrs = []) {
       // E2: the issues API also returns pull requests; only a `pull_request` key set means it is actually a PR.
       issueIsPr = issue.pull_request !== undefined && issue.pull_request !== null;
       issueAuthorCanWrite = authorCanWrite(api, repo, issue.user?.login);
+      blockers = readBlockers(api, repo, issue.body);
     } catch {
       issueLabels = []; // unknown issue: the decision then fails on the missing tier label
     }
@@ -146,8 +151,69 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     config,
     adrs,
     reused,
+    blockers,
   });
   return { pr, decision };
+}
+
+/** The linked task issue's "Blocked by" issue numbers, or `{ error }` when the field is missing or malformed. */
+function blockedByOf(issueBody) {
+  const form = parseIssueForm(issueBody);
+  // Only the "Blocked by" field matters here, as in blockers.mjs; the issue contract check owns the rest of the form.
+  const errors = form.errors.filter((e) => /blocked by/.test(e));
+  return errors.length ? { error: errors.join("; ") } : { blockedBy: [...new Set(form.fields.blockedBy)] };
+}
+
+/**
+ * #36: `blockerReport` for a task issue's body, reading each blocker's state with one API call. A blocker that cannot
+ * be read, or has any state but open or closed, is unreadable, so the gate fails closed on it.
+ */
+export function readBlockers(api, repo, issueBody) {
+  const { blockedBy, error } = blockedByOf(issueBody);
+  if (error) return { ok: false, open: [], unreadable: [], error };
+  const states = new Map();
+  for (const b of blockedBy) {
+    try {
+      // The issues API also answers for a PR, so a PR used as a blocker counts by its own state.
+      const state = JSON.parse(api([`repos/${repo}/issues/${b}`])).state;
+      states.set(b, state === "open" || state === "closed" ? state : null);
+    } catch {
+      states.set(b, null);
+    }
+  }
+  return blockerReport(blockedBy, states);
+}
+
+/**
+ * #36: after issue #`closed` closes, re-evaluates each open PR whose linked issue ("Closes #N") lists it in "Blocked
+ * by", and no other. A PR whose issue cannot be read is skipped: its own next gate run fails closed on it anyway.
+ */
+export function reevaluateBlocked(api, repo, closed, config, adrs = []) {
+  const prs = api([`repos/${repo}/pulls?state=open&per_page=100`, "--paginate", "--jq", ".[] | {number, body} | @json"]).split("\n").filter(Boolean);
+  const lists = new Map();
+  const listsClosed = (n) => {
+    if (!lists.has(n)) {
+      try {
+        lists.set(n, blockedByOf(JSON.parse(api([`repos/${repo}/issues/${n}`])).body).blockedBy?.includes(closed) === true);
+      } catch {
+        lists.set(n, false);
+      }
+    }
+    return lists.get(n);
+  };
+  const out = [];
+  for (const line of prs) {
+    let pr;
+    try {
+      pr = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const closes = parsePrBody(pr?.body).closes;
+    if (closes === null || !Number.isInteger(pr.number) || !listsClosed(closes)) continue;
+    out.push(evaluatePr(api, repo, pr.number, config, adrs));
+  }
+  return out;
 }
 
 export function evaluatePr(api, repo, number, config, adrs = []) {
@@ -190,6 +256,11 @@ export function main(env = process.env, api = ghApi) {
       for (const pr of JSON.parse(api([`repos/${repo}/commits/${env.STATUS_SHA}/pulls`]))) {
         if (pr.state === "open" && pr.head?.sha === env.STATUS_SHA) console.log(JSON.stringify(evaluatePr(api, repo, pr.number, config, adrs)));
       }
+      return;
+    }
+    case "issues": {
+      if (!/^[1-9][0-9]{0,8}$/.test(env.ISSUE_NUMBER ?? "")) throw new Error("ISSUE_NUMBER is missing or malformed");
+      for (const d of reevaluateBlocked(api, repo, Number(env.ISSUE_NUMBER), config, adrs)) console.log(JSON.stringify(d));
       return;
     }
     case "merge_group":

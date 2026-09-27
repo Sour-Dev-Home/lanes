@@ -8,6 +8,8 @@ import { compileConfig, parseAdr } from "./lib.mjs";
 
 const config = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] } });
 const SHA = "a".repeat(40);
+// The linked task issue's form; #36 reads its "Blocked by" field.
+const issueBody = "### Goal\n\ng\n\n### Blocked by\n\nnone\n";
 const body = "Closes #7\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\nnothing\n## Not done\nnothing";
 
 // "leo" has write access unless a test overrides the route; any other login has no route, so its lookup throws.
@@ -41,7 +43,7 @@ test("evaluatePr posts lanes/gate on the PR head, using old and new names of ren
 });
 
 const okBody = "Closes #7\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\nnothing\n## Not done\nnothing";
-const readyIssue = (login) => ({ state: "open", user: { login }, labels: [{ name: "tier:skip" }, { name: "ready" }] });
+const readyIssue = (login) => ({ state: "open", body: issueBody, user: { login }, labels: [{ name: "tier:skip" }, { name: "ready" }] });
 const writeAccessRoutes = (login, permission) => ({
   "repos/o/r/pulls/5": { state: "open", body: okBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
   "repos/o/r/pulls/5/files": "docs/a.md\n",
@@ -79,7 +81,7 @@ test("evaluatePr wires the linked issue's state and author's write access, and t
   const { api, posted } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   const d = evaluatePr(api, "o/r", 5, config);
@@ -92,7 +94,7 @@ test("evaluatePr fails a PR whose linked issue is not ready, even with a matchin
   const { api } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", user: { login: "stranger" }, labels: [{ name: "tier:skip" }] },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "stranger" }, labels: [{ name: "tier:skip" }] },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   const d = evaluatePr(api, "o/r", 5, config);
@@ -115,7 +117,7 @@ test("evaluatePr rejects a linked issue number that is actually a pull request",
   const { api } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }], pull_request: { url: "https://api.github.com/repos/o/r/pulls/7" } },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }], pull_request: { url: "https://api.github.com/repos/o/r/pulls/7" } },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   const d = evaluatePr(api, "o/r", 5, config);
@@ -134,7 +136,7 @@ test("main accepts pull_request_target, not just pull_request", () => {
   const { api, posted } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body, head: { sha: SHA, ref: "issue-7-x" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api);
@@ -142,7 +144,7 @@ test("main accepts pull_request_target, not just pull_request", () => {
 });
 
 test("main still rejects a truly unsupported event", () => {
-  assert.throws(() => main({ REPO: "o/r", EVENT_NAME: "issues" }, () => "{}"), /unsupported event/);
+  assert.throws(() => main({ REPO: "o/r", EVENT_NAME: "push" }, () => "{}"), /unsupported event/);
 });
 
 // R3: carry() must re-decide from the same live inputs evaluatePr uses, never trust the head's own posted lanes/gate
@@ -154,7 +156,7 @@ test("carry re-decides for the queued PR and posts success on the merge-group co
   const { api, posted } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, group, config);
@@ -168,7 +170,7 @@ test("carry posts failure in the queue when the re-decision is not success, even
     // tier:quick on a non-skip file with no review posted: the real decision is "pending", never success.
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "src/a.ts\n",
-    "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: "tier:quick" }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:quick" }, { name: "ready" }] },
     // a forged lanes/gate success is present on the head; carry must not read or trust it.
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [{ context: "lanes/gate", state: "success", created_at: "2026-09-26T10:00:00Z" }],
   });
@@ -188,7 +190,7 @@ const reviewStatus = { context: "review/test-hunter", state: "success", descript
 const fullRoutes = (comments) => ({
   "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
   "repos/o/r/pulls/5/files": "src/a.ts\n",
-  "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: "tier:full" }, { name: "ready" }] },
+  "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:full" }, { name: "ready" }] },
   [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [reviewStatus],
   "repos/o/r/issues/5/comments": commentsOut(comments),
 });
@@ -340,7 +342,7 @@ function reuseRoutes({ tier = "full", headDiff = ownDiff("2222222", "-40,1 +41,1
   const routes = {
     ...fullRoutes(comments ?? [verdictComment("leo", "test-hunter", OLD)]),
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" }, base: { ref: "main", sha: "0".repeat(40) } },
-    "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: `tier:${tier}` }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: `tier:${tier}` }, { name: "ready" }] },
     "repos/o/r/pulls/5/commits": commits.join("\n") + "\n",
     [statusesRoute(SHA)]: [],
     [statusesRoute(OLD)]: oldStatuses,
@@ -481,4 +483,120 @@ test("edge: no reuse when both own diffs are empty, or the base ref is missing o
     const { api } = fakeApi(routes);
     assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_HUNTER);
   }
+});
+
+// #36: the gate waits while the linked issue's "Blocked by" names an open issue.
+const blockedIssue = (blockedBy) => ({ ...readyIssue("leo"), body: `### Goal\n\ng\n\n### Blocked by\n\n${blockedBy}\n` });
+const blockerRoutes = (blockedBy, states) => ({
+  ...writeAccessRoutes("leo"),
+  "repos/o/r/issues/7": blockedIssue(blockedBy),
+  ...Object.fromEntries(Object.entries(states).map(([n, state]) => [`repos/o/r/issues/${n}`, { state }])),
+});
+
+test("evaluatePr with no blockers passes as before", () => {
+  const { api } = fakeApi(blockerRoutes("none", {}));
+  assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
+});
+
+test("evaluatePr waits while a blocker is open, reading each blocker once", () => {
+  const { api, posted } = fakeApi(blockerRoutes("#3, #4", { 3: "open", 4: "closed" }));
+  const calls = [];
+  const d = evaluatePr((args) => (calls.push(args[0]), api(args)), "o/r", 5, config);
+  assert.deepEqual(d, { state: "pending", description: "waiting for blocker #3 (open)", stage: "blocked" });
+  assert.ok(posted[0].fields.includes("state=pending"));
+  assert.equal(calls.filter((c) => c === "repos/o/r/issues/3").length, 1);
+  assert.equal(calls.filter((c) => c === "repos/o/r/issues/4").length, 1);
+});
+
+test("evaluatePr passes when every blocker is closed", () => {
+  const { api } = fakeApi(blockerRoutes("#3\n#4", { 3: "closed", 4: "closed" }));
+  assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
+});
+
+test("evaluatePr fails closed on an unreadable or nonexistent blocker", () => {
+  const { api } = fakeApi(blockerRoutes("#3, #9", { 3: "closed" })); // no route for #9: the read throws
+  assert.deepEqual(evaluatePr(api, "o/r", 5, config), { state: "failure", description: "cannot check blockers of #7: #9 unreadable", stage: "blocked" });
+});
+
+test("carry fails a queue entry whose PR has an open blocker", () => {
+  const group = "b".repeat(40);
+  const { api, posted } = fakeApi(blockerRoutes("#3", { 3: "open" }));
+  const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, group, config);
+  assert.deepEqual(d, { state: "failure", description: "waiting for blocker #3 (open)" });
+  assert.equal(posted[0].sha, group);
+  assert.ok(posted[0].fields.includes("state=failure"));
+});
+
+test("edge: a blocker with an unexpected state counts as unreadable", () => {
+  const { api } = fakeApi(blockerRoutes("#3", { 3: "weird" }));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, "cannot check blockers of #7: #3 unreadable");
+});
+
+test("edge: an issue without a readable Blocked by field fails closed", () => {
+  for (const issueBody of [undefined, "### Goal\n\ng\n", "### Blocked by\n\nsoon\n"]) {
+    const { api } = fakeApi({ ...writeAccessRoutes("leo"), "repos/o/r/issues/7": { ...readyIssue("leo"), body: issueBody } });
+    const d = evaluatePr(api, "o/r", 5, config);
+    assert.equal(d.state, "failure", String(issueBody));
+    assert.match(d.description, /^cannot check blockers of #7: blocked by|^cannot check blockers of #7: missing: blocked by/, String(issueBody));
+  }
+});
+
+test("edge: a repeated blocker is read once", () => {
+  const { api } = fakeApi(blockerRoutes("#3, #3", { 3: "open" }));
+  const calls = [];
+  evaluatePr((args) => (calls.push(args[0]), api(args)), "o/r", 5, config);
+  assert.equal(calls.filter((c) => c === "repos/o/r/issues/3").length, 1);
+});
+
+// #36: closing an issue re-evaluates the open PRs whose linked issue lists it in "Blocked by", and only those.
+const OPEN_PRS = "repos/o/r/pulls?state=open&per_page=100";
+const prLine = (number, closes) => JSON.stringify({ number, body: `Closes #${closes}\n## What changed\nx` });
+
+test("main on an issues event re-evaluates only the PRs whose issue lists the closed one", () => {
+  const sha = (c) => c.repeat(40);
+  const prRoute = (n, closes, c) => ({ state: "open", body: okBody.replace("#7", `#${closes}`), head: { sha: sha(c), ref: `issue-${closes}-x` } });
+  const issue = (blockedBy) => ({ ...readyIssue("leo"), body: `### Blocked by\n\n${blockedBy}\n` });
+  const { api, posted } = fakeApi({
+    [OPEN_PRS]: [prLine(5, 7), prLine(6, 8), prLine(10, 11), JSON.stringify({ number: 12, body: "no closes line" })].join("\n") + "\n",
+    "repos/o/r/issues/7": issue("#3"),
+    "repos/o/r/issues/8": issue("none"),
+    "repos/o/r/issues/11": issue("#4, #3"),
+    "repos/o/r/issues/3": { state: "closed" },
+    "repos/o/r/issues/4": { state: "open" },
+    "repos/o/r/pulls/5": prRoute(5, 7, "d"),
+    "repos/o/r/pulls/5/files": "docs/a.md\n",
+    [`repos/o/r/commits/${sha("d")}/statuses?per_page=100`]: [],
+    "repos/o/r/pulls/10": prRoute(10, 11, "e"),
+    "repos/o/r/pulls/10/files": "docs/a.md\n",
+    [`repos/o/r/commits/${sha("e")}/statuses?per_page=100`]: [],
+  });
+  main({ REPO: "o/r", EVENT_NAME: "issues", ISSUE_NUMBER: "3" }, api);
+  assert.deepEqual(posted.map((p) => [p.sha, p.fields.find((f) => f.startsWith("state="))]), [
+    [sha("d"), "state=success"],
+    [sha("e"), "state=pending"],
+  ]);
+});
+
+test("main on an issues event lists open PRs with pagination, one JSON line each", () => {
+  const calls = [];
+  const api = (args) => (calls.push(args), "");
+  main({ REPO: "o/r", EVENT_NAME: "issues", ISSUE_NUMBER: "3" }, api);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], OPEN_PRS);
+  assert.ok(calls[0].includes("--paginate"));
+  assert.ok(calls[0].includes("--jq"));
+});
+
+test("edge: an issues event with a malformed issue number is rejected without calling the API", () => {
+  for (const n of [undefined, "", "0", "3; rm", "-1"]) {
+    assert.throws(() => main({ REPO: "o/r", EVENT_NAME: "issues", ISSUE_NUMBER: n }, () => assert.fail("api called")), /ISSUE_NUMBER/, String(n));
+  }
+});
+
+test("edge: an issues event skips a PR whose issue cannot be read, and reads each issue once", () => {
+  const calls = [];
+  const { api, posted } = fakeApi({ [OPEN_PRS]: [prLine(5, 7), prLine(6, 7), prLine(9, 99)].join("\n") + "\n", "repos/o/r/issues/7": blockedIssue("none") });
+  main({ REPO: "o/r", EVENT_NAME: "issues", ISSUE_NUMBER: "3" }, (args) => (calls.push(args[0]), api(args)));
+  assert.equal(posted.length, 0);
+  assert.equal(calls.filter((c) => c === "repos/o/r/issues/7").length, 1);
 });

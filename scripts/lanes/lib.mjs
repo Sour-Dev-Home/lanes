@@ -440,12 +440,31 @@ export function testHunterReusable({ issueLabels, files, statuses, config, adrs 
   return !latestByContext(trustedStatuses(statuses)).has(reviewContext(REUSABLE_REVIEWER));
 }
 
+const NO_BLOCKERS = Object.freeze({ ok: true, open: [], unreadable: [] });
+const isIssueList = (xs) => Array.isArray(xs) && xs.every((x) => Number.isInteger(x) && x > 0);
+
 /**
- * What `lanes/gate` should say for a PR head. Pure: every input is passed in. `reused` (#25) is `{ sha, status }`: a
+ * #36: the gate's answer for the linked issue #`closes`'s blockers (`blockerReport`'s `{ ok, open, unreadable }`, plus
+ * an optional `error` when the "Blocked by" field itself cannot be read), or null when none is open. Fails closed: an
+ * unreadable blocker, an error, or a report that is not exactly ok-with-nothing-open is never treated as clear.
+ */
+function blockerStatus(blockers, closes) {
+  const cannot = (why) => ({ state: "failure", description: `cannot check blockers of #${closes}: ${why}`, stage: "blocked" });
+  if (blockers === null || typeof blockers !== "object" || !isIssueList(blockers.open) || !isIssueList(blockers.unreadable)) return cannot("no blocker report");
+  if (typeof blockers.error === "string" && blockers.error) return cannot(blockers.error);
+  if (blockers.unreadable.length > 0) return cannot(`${blockers.unreadable.map((b) => `#${b}`).join(", ")} unreadable`);
+  if (blockers.open.length > 0) return { state: "pending", description: `waiting for blocker ${blockers.open.map((b, i) => (i === 0 ? `#${b} (open)` : `#${b}`)).join(", ")}`, stage: "blocked" };
+  if (blockers.ok !== true) return cannot("blocker report is not ok");
+  return null;
+}
+
+/**
+ * What `lanes/gate` should say for a PR head. Pure: every input is passed in. `blockers` (#36) is the linked issue's
+ * `blockerReport` (from blockers.mjs); omitted, the issue has none. `reused` (#25) is `{ sha, status }`: a
  * trusted review/test-hunter success from an earlier commit of the PR whose own diff matches the head's. It counts only
  * when the head has no trusted test-hunter status of its own, and brings along the test-hunter verdict for that `sha`.
  */
-export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], reused = null }) {
+export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], reused = null, blockers = NO_BLOCKERS }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
@@ -475,6 +494,8 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
   if (pr.contractChange === "breaking" && !labels.includes("contract:breaking")) {
     return fail("a breaking contract change needs the issue label contract:breaking");
   }
+  const blocked = blockerStatus(blockers, pr.closes);
+  if (blocked) return blocked;
   const latest = latestByContext(trustedStatuses(statuses));
   const hunter = reviewContext(REUSABLE_REVIEWER);
   // Defence in depth: the reused status must itself be a trusted test-hunter success on a real commit SHA.

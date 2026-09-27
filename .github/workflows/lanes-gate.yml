@@ -7,6 +7,10 @@ on:
   pull_request_target:
     types: [opened, edited, synchronize, reopened, ready_for_review]
   status:
+  # #36: a closed issue may unblock PRs whose task issue lists it in "Blocked by"; gate.mjs re-evaluates those.
+  # Same rules as every other trigger: default-branch code only, no PR code, and no permission beyond the above.
+  issues:
+    types: [closed]
   merge_group:
   workflow_dispatch:
     inputs:
@@ -19,7 +23,7 @@ permissions:
   issues: read
   statuses: write
 concurrency:
-  group: lanes-gate-${{ github.event.pull_request.head.sha || github.event.sha || github.event.merge_group.head_sha || github.event.inputs.pr }}
+  group: lanes-gate-${{ github.event.pull_request.head.sha || github.event.sha || github.event.merge_group.head_sha || github.event.inputs.pr || format('issue-{0}', github.event.issue.number) }}
   cancel-in-progress: false
 jobs:
   gate:
@@ -43,3 +47,4 @@ jobs:
           STATUS_CONTEXT: ${{ github.event.context }}
           HEAD_REF: ${{ github.event.merge_group.head_ref }}
           GROUP_SHA: ${{ github.event.merge_group.head_sha }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
