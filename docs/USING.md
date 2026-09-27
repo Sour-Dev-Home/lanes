@@ -14,6 +14,9 @@
    refuses, with the reason, an issue that is not open, lacks `ready` or one `tier:*` label, has an open blocker or is
    already in flight; both issues of a pair whose paths overlap (pick one and run `/start` again); and anything past 3
    lanes in flight, counting open `issue-*` PRs and running sessions. Owner only: a lane or a schedule never runs it.
+   The start guard (`scripts/lanes/start-guard.mjs`, two hooks in `.claude/settings.json` next to the approve guard)
+   enforces that: it lets `start.mjs` run once, for the same issue numbers, within 15 minutes of you typing
+   `/start <N ...>` in that session, and it denies a direct `claude --bg` in every session and permission mode.
 3. **Watch with `/status`**: WAITING ON YOU, IN FLIGHT (each PR's stage), READY TO START, MERGED.
    A `Notification` hook (`scripts/lanes/notify-hook.mjs`) pops a notification when a lane stops at a permission
    prompt or needs input (with the `claude attach <id>` to reach it), or finishes with its PR waiting on you or failing.

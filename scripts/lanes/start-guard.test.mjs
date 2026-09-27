@@ -1,0 +1,269 @@
+// scripts/lanes/start-guard.test.mjs
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { BG_DENY_REASON, DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findStartInvocations, onUserPromptSubmit, parseStartPrompt, runHook } from "./start-guard.mjs";
+
+const NOW = Date.parse("2026-09-27T12:00:00Z");
+const START = "node scripts/lanes/start.mjs 12 14";
+const grant = (over = {}) => ({ sessionId: "s1", issues: [12, 14], at: new Date(NOW - 60_000).toISOString(), ...over });
+const bash = (command, over = {}) => ({ hook_event_name: "PreToolUse", session_id: "s1", tool_name: "Bash", tool_input: { command }, ...over });
+
+// --- UserPromptSubmit ---------------------------------------------------------------------------------------------
+
+test("only a prompt that is exactly /start <N ...> names issues", () => {
+  assert.deepEqual(parseStartPrompt("/start 12"), [12]);
+  assert.deepEqual(parseStartPrompt("/start 12 14\n"), [12, 14]);
+  assert.deepEqual(parseStartPrompt("  /start   12   14  "), [12, 14]);
+  for (const p of ["/start", "/start ", "/start #12", "/start 12,14", "/start abc", "please /start 12", "/start 12; rm", "/start 0", "/start -1", "/start 1e3", "/start 99999999999999999999", "/starting 12", "/start 12 x", undefined, 12]) {
+    assert.equal(parseStartPrompt(p), null, JSON.stringify(p));
+  }
+});
+
+test("UserPromptSubmit /start N M grants { sessionId, issues, at }", () => {
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: "/start 12 14" }, NOW), { action: "grant", sessionId: "s1", grant: { sessionId: "s1", issues: [12, 14], at: new Date(NOW).toISOString() } });
+});
+
+test("UserPromptSubmit of any other prompt clears the session's grant", () => {
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: "/lane 12" }, NOW), { action: "clear", sessionId: "s1" });
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: "/approve 12" }, NOW), { action: "clear", sessionId: "s1" });
+});
+
+test("UserPromptSubmit with an unsafe or missing session id does nothing", () => {
+  for (const id of ["../x", "a/b", "", undefined, "a".repeat(200)]) assert.deepEqual(onUserPromptSubmit({ session_id: id, prompt: "/start 12" }, NOW), { action: "none" });
+});
+
+// --- detection ----------------------------------------------------------------------------------------------------
+
+test("the plain start command is detected with its issues", () => {
+  assert.deepEqual(findStartInvocations(START), [{ issues: [12, 14], standalone: true }]);
+  assert.deepEqual(findStartInvocations(`${START}\n`), [{ issues: [12, 14], standalone: true }]);
+});
+
+test("wrapped, chained or indirect start.mjs runs are detected and never standalone", () => {
+  for (const cmd of [
+    `bash -c "${START}"`,
+    `sh -c '${START}'`,
+    `env X=1 ${START}`,
+    `echo hi; ${START}`,
+    `true && ${START}`,
+    `${START} | cat`,
+    `${START} > out.txt`,
+    `cd . && ${START}`,
+    `node ./scripts/lanes/start.mjs 12`,
+    `node scripts\\lanes\\start.mjs 12`,
+    `node "scripts/lanes/start.mjs" 12`,
+    `node scripts/lanes/sta""rt.mjs 12`,
+    `node /abs/repo/scripts/lanes/start.mjs 12`,
+    `node.exe scripts/lanes/start.mjs 12`,
+    `S=scripts/lanes/start.mjs; node $S 12`,
+    `node $(echo scripts/lanes/start.mjs) 12`,
+    `node scripts/lanes/start.mjs $N`,
+    `node scripts/lanes/start.mjs 12 --dry-run`,
+    `node --inspect scripts/lanes/start.mjs 12`,
+    `node -e "import('./scripts/lanes/start.mjs')"`,
+    `scripts/lanes/start.mjs 12`,
+    `eval "node scripts/lanes/start.mjs 12"`,
+  ]) {
+    const found = findStartInvocations(cmd);
+    assert.ok(found.length > 0, `not detected: ${cmd}`);
+    assert.ok(found.every((f) => !f.standalone), `standalone: ${cmd}`);
+  }
+});
+
+test("commands that only mention start.mjs, or run its tests, are not start runs", () => {
+  for (const cmd of ["node --test scripts/lanes/start.test.mjs", "git diff scripts/lanes/start.mjs", "cat scripts/lanes/start.mjs", "grep -n claude scripts/lanes/start.mjs", "npm start", "node scripts/lanes/status.mjs", 'git commit -m "the guard on start.mjs"', "", undefined]) {
+    assert.deepEqual(findStartInvocations(cmd), [], String(cmd));
+  }
+});
+
+test("edge: a quoted script that cannot be read and names start.mjs fails closed", () => {
+  assert.deepEqual(findStartInvocations(`git commit -m "don't run start.mjs"`), [{ issues: undefined, standalone: false }]);
+  assert.deepEqual(findStartInvocations(`node scripts/lanes/start.mjs "12`), [{ issues: undefined, standalone: false }]);
+});
+
+test("a direct claude --bg is detected behind any wrapper", () => {
+  for (const cmd of [
+    `claude --bg "/lane 12"`,
+    `claude "/lane 12" --bg`,
+    `claude --bg=true "/lane 12"`,
+    `claude --background "/lane 12"`,
+    `claude.exe --bg "/lane 12"`,
+    `claude.cmd --bg x`,
+    `/usr/local/bin/claude --bg x`,
+    `npx claude --bg x`,
+    `npx @anthropic-ai/claude-code --bg x`,
+    `env A=1 claude --bg x`,
+    `cd .. && claude --bg "/lane 12"`,
+    `bash -c 'claude --bg "/lane 12"'`,
+    `powershell -Command "claude --bg '/lane 12'"`,
+    `cla""ude --bg x`,
+    `C=claude; $C --bg x`,
+    `$(which claude) --bg x`,
+    "`which claude` --bg x",
+    `claude --bg "unterminated`,
+    `nohup claude --bg x &`,
+  ]) {
+    assert.ok(findBgLaunches(cmd), `not detected: ${cmd}`);
+  }
+});
+
+test("claude without --bg, or --bg without claude, is not a background launch", () => {
+  for (const cmd of ["claude agents --json", "claude attach abc", "claude logs abc", "claude --version", "echo --bg", "git log --oneline", 'git commit -m "docs: claude attach"', `git commit -m "don't run claude attach"`, "", undefined]) {
+    assert.equal(findBgLaunches(cmd), false, String(cmd));
+  }
+});
+
+// --- PreToolUse (criteria 1-3) ------------------------------------------------------------------------------------
+
+test("criterion 1: /start in this session allows the plain start command once, for the same issues", () => {
+  assert.deepEqual(decidePreToolUse(bash(START), grant(), NOW), { decision: "allow", reason: "owner launch from /start 12 14 in this session", consumeGrant: true });
+});
+
+test("criterion 1: a lane (no grant) is denied start.mjs", () => {
+  assert.deepEqual(decidePreToolUse(bash(START), null, NOW), { decision: "deny", reason: DENY_REASON });
+  assert.deepEqual(decidePreToolUse(bash(START), { unreadable: true }, NOW), { decision: "deny", reason: DENY_REASON });
+});
+
+test("criterion 1: an expired, future or mismatched grant is denied", () => {
+  const deny = { decision: "deny", reason: DENY_REASON };
+  assert.deepEqual(decidePreToolUse(bash(START), grant({ at: new Date(NOW - GRANT_TTL_MS).toISOString() }), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash(START), grant({ at: new Date(NOW - GRANT_TTL_MS + 1).toISOString() }), NOW).decision, "allow");
+  assert.deepEqual(decidePreToolUse(bash(START), grant({ at: new Date(NOW + 60_000).toISOString() }), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash(START), grant({ issues: [12] }), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash(START), grant({ issues: [12, 14, 15] }), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash(START), grant({ issues: [12, 15] }), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash(START), grant({ sessionId: "s2" }), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash(START, { session_id: "../x" }), grant({ sessionId: "../x" }), NOW), deny);
+});
+
+test("criterion 1: the same issues in another order are still the same grant", () => {
+  assert.equal(decidePreToolUse(bash("node scripts/lanes/start.mjs 14 12"), grant(), NOW).decision, "allow");
+});
+
+test("criterion 1: a granted session still cannot wrap or chain start.mjs", () => {
+  for (const cmd of [`${START}; echo done`, `bash -c "${START}"`, `${START} && claude --bg x`, `node scripts/lanes/start.mjs 12 14 --x`]) {
+    assert.equal(decidePreToolUse(bash(cmd), grant(), NOW).decision, "deny", cmd);
+  }
+});
+
+test("criterion 2: a direct claude --bg is denied in every session, even with a /start grant", () => {
+  const deny = { decision: "deny", reason: BG_DENY_REASON };
+  assert.deepEqual(decidePreToolUse(bash('claude --bg "/lane 12"'), null, NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash('claude --bg "/lane 12"'), grant(), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash('claude --bg "/lane 12"', { permission_mode: "bypassPermissions" }), grant(), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash('claude --bg "/lane 12"', { session_id: undefined }), null, NOW), deny);
+});
+
+test("anything else, and other tools, get no decision", () => {
+  assert.equal(decidePreToolUse(bash("git status"), null, NOW), null);
+  assert.equal(decidePreToolUse(bash("claude agents --json"), null, NOW), null);
+  assert.equal(decidePreToolUse({ tool_name: "Read", tool_input: { file_path: "scripts/lanes/start.mjs" } }, null, NOW), null);
+  assert.equal(decidePreToolUse(bash(undefined), null, NOW), null);
+  assert.equal(decidePreToolUse(null, null, NOW), null);
+});
+
+// --- the hook end to end (criterion 3: allowed /start run, denied lane, denied claude --bg, expired grant) ---------
+
+const tmp = () => mkdtempSync(join(tmpdir(), "start-guard-"));
+const out = (s) => (s === "" ? null : JSON.parse(s).hookSpecificOutput);
+
+test("criterion 3: /start then start.mjs is allowed once, and the grant is consumed", () => {
+  const dir = tmp();
+  try {
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start 12 14" }), { dir, now: NOW });
+    assert.ok(existsSync(join(dir, "s1.json")));
+    assert.deepEqual(out(runHook("pre-tool-use", JSON.stringify(bash(START)), { dir, now: NOW + 1000 })), { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "owner launch from /start 12 14 in this session" });
+    assert.ok(!existsSync(join(dir, "s1.json")));
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(START)), { dir, now: NOW + 2000 })).permissionDecision, "deny");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("criterion 3: a lane's start.mjs run is denied", () => {
+  const dir = tmp();
+  try {
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "lane", prompt: "/lane 51" }), { dir, now: NOW });
+    assert.deepEqual(out(runHook("pre-tool-use", JSON.stringify(bash(START, { session_id: "lane" })), { dir, now: NOW })), { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: DENY_REASON });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("criterion 3: a direct claude --bg is denied by the hook", () => {
+  const dir = tmp();
+  try {
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start 12" }), { dir, now: NOW });
+    assert.deepEqual(out(runHook("pre-tool-use", JSON.stringify(bash('claude --bg "/lane 12"')), { dir, now: NOW })), { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: BG_DENY_REASON });
+    assert.ok(existsSync(join(dir, "s1.json")), "a denied claude --bg does not consume the /start grant");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("criterion 3: an expired or mismatched grant is denied by the hook, and a later prompt clears the grant", () => {
+  const dir = tmp();
+  try {
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start 12 14" }), { dir, now: NOW });
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(START)), { dir, now: NOW + GRANT_TTL_MS })).permissionDecision, "deny");
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash("node scripts/lanes/start.mjs 12")), { dir, now: NOW })).permissionDecision, "deny");
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "ok thanks" }), { dir, now: NOW });
+    assert.ok(!existsSync(join(dir, "s1.json")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("edge: an unreadable or malformed grant file denies", () => {
+  const dir = tmp();
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "s1.json"), "{not json");
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(START)), { dir, now: NOW })).permissionDecision, "deny");
+    for (const g of [{ sessionId: "s1", issues: [], at: new Date(NOW).toISOString() }, { sessionId: "s1", issues: [12, "14"], at: new Date(NOW).toISOString() }, { sessionId: "s1", issues: [12, 14], at: "never" }, { sessionId: "s1", issues: [12, 12, 14], at: new Date(NOW).toISOString() }]) {
+      writeFileSync(join(dir, "s1.json"), JSON.stringify(g));
+      assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(START)), { dir, now: NOW })).permissionDecision, "deny", JSON.stringify(g));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("edge: malformed hook input denies on pre-tool-use and never blocks a prompt", () => {
+  const dir = tmp();
+  try {
+    assert.equal(out(runHook("pre-tool-use", "{not json", { dir, now: NOW })).permissionDecision, "deny");
+    assert.equal(runHook("user-prompt-submit", "{not json", { dir, now: NOW }), "");
+    assert.equal(runHook("pre-tool-use", JSON.stringify(bash("git status")), { dir, now: NOW }), "");
+    assert.throws(() => runHook("other", "{}", { dir }), /usage/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("edge: the script run as a hook denies claude --bg from stdin and writes a /start grant under .lanes/start", () => {
+  const r = spawnSync(process.execPath, ["scripts/lanes/start-guard.mjs", "pre-tool-use"], { input: JSON.stringify(bash("claude --bg x", { session_id: "cli-test" })), encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.equal(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision, "deny");
+  const bad = spawnSync(process.execPath, ["scripts/lanes/start-guard.mjs", "pre-tool-use"], { input: "garbage", encoding: "utf8" });
+  assert.equal(JSON.parse(bad.stdout).hookSpecificOutput.permissionDecision, "deny");
+  const file = join(".lanes", "start", "cli-test-grant.json");
+  try {
+    spawnSync(process.execPath, ["scripts/lanes/start-guard.mjs", "user-prompt-submit"], { input: JSON.stringify({ session_id: "cli-test-grant", prompt: "/start 9" }), encoding: "utf8" });
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).issues, [9]);
+  } finally {
+    rmSync(file, { force: true });
+  }
+});
+
+test("settings: both start-guard hooks are wired next to the approve guard, and start.mjs is never allow-listed", () => {
+  const s = JSON.parse(readFileSync(".claude/settings.json", "utf8"));
+  const commands = (event, matcher) => s.hooks[event].filter((h) => h.matcher === matcher).flatMap((h) => h.hooks.map((x) => x.command));
+  assert.ok(commands("UserPromptSubmit", undefined).some((c) => /scripts\/lanes\/start-guard\.mjs" user-prompt-submit$/.test(c)));
+  assert.ok(commands("PreToolUse", "Bash").some((c) => /scripts\/lanes\/start-guard\.mjs" pre-tool-use$/.test(c)));
+  assert.ok(!s.permissions.allow.some((r) => /start\.mjs|claude --bg/.test(r)));
+});
