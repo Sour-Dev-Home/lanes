@@ -48,27 +48,34 @@ export function startConfig(raw) {
 /** The claude arguments for one lane. No permission-mode flag: a lane runs under the owner's normal settings. */
 export const launchArgs = (n) => ["--bg", `/lane ${n}`];
 
-/** The session id from `claude --bg` output (`backgrounded · <id>`), or null when none was printed. */
+// ANSI escape sequences: CSI (colours, cursor moves) and OSC (e.g. hyperlinks), ended by BEL or ESC \.
+const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+/** The session id from `claude --bg` output (`backgrounded · <id>`), or null when none was printed. Colour is ignored. */
 export function parseSessionId(output) {
-  return String(output ?? "").match(/backgrounded · ([\w-]+)/)?.[1] ?? null;
+  return String(output ?? "").replace(ANSI, "").match(/backgrounded · ([\w-]+)/)?.[1] ?? null;
 }
+
+const branchIssue = (name) => String(name ?? "").match(/^issue-(\d+)-/)?.[1];
+const sessionIssue = (s) => (s.kind === "background" ? String(s.cwd ?? "").match(/(?:^|[\\/])issue-(\d+)-[^\\/]*(?:[\\/]|$)/)?.[1] : undefined);
 
 /**
  * The issues with a lane in flight: open PRs from `issue-<N>-` branches, plus background sessions whose cwd is
- * (inside) an `issue-<N>-` worktree. Each issue counts once.
- * @param {{ prs: { headRefName: string }[], sessions: { kind: string, cwd: string }[] }} input
+ * (inside) an `issue-<N>-` worktree, except sessions of a `finished` issue (its PR merged or the issue closed), which
+ * are idle leftovers. Each issue counts once.
+ * @param {{ prs: { headRefName: string }[], sessions: { kind: string, cwd: string }[], finished?: number[] }} input
  * @returns {number[]} ascending
  */
-export function inFlightIssues({ prs, sessions }) {
+export function inFlightIssues({ prs, sessions, finished = [] }) {
+  const done = new Set(finished);
   const found = new Set();
   for (const pr of prs) {
-    const m = String(pr.headRefName ?? "").match(/^issue-(\d+)-/);
-    if (m) found.add(Number(m[1]));
+    const n = branchIssue(pr.headRefName);
+    if (n) found.add(Number(n));
   }
   for (const s of sessions) {
-    if (s.kind !== "background") continue;
-    const m = String(s.cwd ?? "").match(/(?:^|[\\/])issue-(\d+)-[^\\/]*(?:[\\/]|$)/);
-    if (m) found.add(Number(m[1]));
+    const n = sessionIssue(s);
+    if (n && !done.has(Number(n))) found.add(Number(n));
   }
   return [...found].sort((a, b) => a - b);
 }
@@ -132,7 +139,26 @@ function readInFlight(deps, fields) {
   // A truncated list could hide a lane in flight and let the cap be passed, so refuse instead.
   if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to count lanes in flight`);
   const sessions = JSON.parse(deps.claude(["agents", "--json", "--cwd", root], { cwd: root }));
-  return { prs, inFlight: inFlightIssues({ prs, sessions }) };
+  return { prs, inFlight: inFlightIssues({ prs, sessions, finished: finishedIssues(deps, prs, sessions) }) };
+}
+
+// The issues of sessions with no open PR whose lane is finished: a merged `issue-<N>-` PR, or the issue closed.
+// Throws when the merged PRs cannot be read. An issue that cannot be read is not finished, so it keeps its slot.
+function finishedIssues(deps, prs, sessions) {
+  const open = new Set(prs.map((pr) => Number(branchIssue(pr.headRefName))));
+  const idle = [...new Set(sessions.map(sessionIssue).filter(Boolean).map(Number))].filter((n) => !open.has(n));
+  if (!idle.length) return [];
+  // A truncated list only misses merged PRs; the issue's own state is still checked below.
+  const merged = JSON.parse(deps.gh(["pr", "list", "--state", "merged", "--limit", String(PR_LIMIT), "--json", "headRefName"]));
+  const mergedIssues = new Set(merged.map((pr) => Number(branchIssue(pr.headRefName))));
+  return idle.filter((n) => {
+    if (mergedIssues.has(n)) return true;
+    try {
+      return JSON.parse(deps.gh(["issue", "view", String(n), "--json", "state"])).state === "CLOSED";
+    } catch {
+      return false;
+    }
+  });
 }
 
 // Launches each issue from the repository root, one attempt each. Returns issue → line, and whether any failed.

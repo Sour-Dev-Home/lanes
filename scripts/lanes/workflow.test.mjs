@@ -171,6 +171,12 @@ test("lane.md step 9 notifies `CI failed twice` before stopping", () => {
   assert.match(step9, /CI failed twice: <cause>, see #<PR>/);
 });
 
+test("lane.md prefixes gh pr create, gh pr edit and gh issue create with MSYS_NO_PATHCONV=1 for --title or --body", () => {
+  const line = laneText().split("\n").find((l) => l.includes("MSYS_NO_PATHCONV=1"));
+  assert.ok(line, "lane.md names MSYS_NO_PATHCONV=1");
+  for (const cmd of ["`gh pr create`", "`gh pr edit`", "`gh issue create`", "`--title`", "`--body`", "Git Bash"]) assert.ok(line.includes(cmd), `missing ${cmd}`);
+});
+
 test("lane.md steps 1-2 refusals notify `cannot start`", () => {
   const steps12 = laneText().match(/\n1\. [\s\S]*?\n3\. /)[0];
   assert.match(steps12, /cannot start: <reason>/);
