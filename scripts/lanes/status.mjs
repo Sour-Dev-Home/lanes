@@ -209,6 +209,7 @@ export function render(summary, sinceLabel) {
     block("BLOCKED", summary.blocked ?? []),
     block(`MERGED, last ${sinceLabel}`, summary.merged, false),
     ...(summary.sessionsUnavailable ? [`(background sessions unavailable: ${summary.sessionsUnavailable})`] : []),
+    ...(summary.toCleanUp > 0 ? [`${summary.toCleanUp} merged lane${summary.toCleanUp === 1 ? "" : "s"} to clean up: node scripts/lanes/cleanup.mjs`] : []),
   ].join("\n\n");
 }
 
@@ -222,7 +223,7 @@ const STATUS_QUERY =
   "mergeQueue { entries(first:100){ nodes { state position pullRequest { number } } } } " +
   `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description } } } } } } } } }`;
 
-function main(argv = process.argv.slice(2)) {
+async function main(argv = process.argv.slice(2)) {
   const sinceIdx = argv.indexOf("--since");
   const sinceLabel = sinceIdx >= 0 ? argv[sinceIdx + 1] : "24h";
   const hours = Number(/^(\d+)h$/.exec(sinceLabel)?.[1]);
@@ -241,7 +242,12 @@ function main(argv = process.argv.slice(2)) {
   // A blocker missing from a truncated list would read as closed, so refuse rather than list a blocked issue as ready.
   if (data.issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
   const summary = summarize(data);
+  // Only a hint: when cleanup.mjs is not installed or its inputs cannot be read, /status stays silent rather than failing.
+  try {
+    const { cleanableCount, loadCleanupInputs, planCleanup } = await import("./cleanup.mjs");
+    summary.toCleanUp = cleanableCount(planCleanup(loadCleanupInputs()));
+  } catch {}
   console.log(argv.includes("--json") ? JSON.stringify({ version: 0, generatedAt: new Date().toISOString(), since: sinceLabel, ...summary }, null, 2) : render(summary, sinceLabel));
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) main();
+if (process.argv[1] === fileURLToPath(import.meta.url)) await main();
