@@ -208,6 +208,14 @@ test("render prints the five sections with counts, BLOCKED after READY TO START"
   assert.match(text, /READY TO START \(0\)\n\nBLOCKED \(1\)\n  #4 \[full\] One-command setup — blocked by #3\n\nMERGED, last 24h \(0\)/);
 });
 
+test("render prints one hint line when merged lanes wait for cleanup, and none otherwise", () => {
+  const empty = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
+  assert.match(render({ ...empty, toCleanUp: 2 }, "24h"), /\n\n2 merged lanes to clean up: node scripts\/lanes\/cleanup\.mjs$/);
+  assert.match(render({ ...empty, toCleanUp: 1 }, "24h"), /\n\n1 merged lane to clean up: node scripts\/lanes\/cleanup\.mjs$/);
+  assert.doesNotMatch(render({ ...empty, toCleanUp: 0 }, "24h"), /clean up/);
+  assert.doesNotMatch(render(empty, "24h"), /clean up/);
+});
+
 test("issuePaths reads backticked and bare paths from the contract and Scope's In: part, ignoring Out:", () => {
   const paths = issuePaths({
     contract: "none (additive `--json` fields on `ready` items), see docs/contract.md",
