@@ -174,6 +174,93 @@ test("carry posts failure in the queue when the re-decision is not success, even
   assert.equal(posted[0].sha, group);
 });
 
+// #27: decideForPr reads the PR's verdict comments and keeps only those whose author has write access
+const verdictComment = (login, reviewer, sha = SHA) => ({
+  login,
+  body: `<!-- lanes:verdict ${reviewer} ${sha} -->\n\`\`\`json\n${JSON.stringify({ reviewer, verdict: "success", summary: "s", criteria: [], findings: [] }, null, 2)}\n\`\`\``,
+});
+// The gh --jq filter emits one @json line per comment.
+const commentsOut = (comments) => comments.map((c) => JSON.stringify(c)).join("\n") + "\n";
+const reviewStatus = { context: "review/test-hunter", state: "success", description: "ok", created_at: "2026-09-26T10:00:00Z", creator: { type: "User", login: "leo" } };
+const fullRoutes = (comments) => ({
+  "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
+  "repos/o/r/pulls/5/files": "src/a.ts\n",
+  "repos/o/r/issues/7": { state: "open", user: { login: "leo" }, labels: [{ name: "tier:full" }, { name: "ready" }] },
+  [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [reviewStatus],
+  "repos/o/r/issues/5/comments": commentsOut(comments),
+});
+
+test("evaluatePr passes a clean full PR on a trusted verdict comment for its head", () => {
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const d = evaluatePr(api, "o/r", 5, config);
+  assert.equal(d.state, "success");
+  assert.equal(d.description, "unattended-eligible (tier:full), reviews in");
+  assert.ok(posted[0].fields.includes("state=success"));
+});
+
+test("evaluatePr ignores a verdict comment from an author without write access", () => {
+  const routes = { ...fullRoutes([verdictComment("guest", "test-hunter")]), "repos/o/r/collaborators/guest/permission": { permission: "read" } };
+  const { api } = fakeApi(routes);
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, "waiting on owner (/approve) (no verdict for head from test-hunter)");
+});
+
+test("evaluatePr ignores a verdict comment from a bot login (fails closed without a lookup)", () => {
+  const { api } = fakeApi(fullRoutes([verdictComment("github-actions[bot]", "test-hunter")]));
+  assert.equal(evaluatePr(api, "o/r", 5, config).state, "pending");
+});
+
+test("evaluatePr ignores a verdict comment for an older SHA, and an old-format one without a SHA", () => {
+  const oldFormat = { login: "leo", body: verdictComment("leo", "test-hunter").body.replace(` ${SHA} -->`, " -->") };
+  for (const c of [verdictComment("leo", "test-hunter", "d".repeat(40)), oldFormat]) {
+    const { api } = fakeApi(fullRoutes([c]));
+    assert.equal(evaluatePr(api, "o/r", 5, config).description, "waiting on owner (/approve) (no verdict for head from test-hunter)");
+  }
+});
+
+test("evaluatePr looks up each comment author's permission once", () => {
+  const { api } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter"), verdictComment("leo", "ui-reviewer"), verdictComment("leo", "test-hunter")]));
+  let lookups = 0;
+  const counting = (args) => {
+    if (args[0] === "repos/o/r/collaborators/leo/permission") lookups++;
+    return api(args);
+  };
+  assert.equal(evaluatePr(counting, "o/r", 5, config).state, "success");
+  assert.equal(lookups, 2); // one for the issue author, one for the comment author
+});
+
+test("evaluatePr fetches comments with pagination and a filter that emits one JSON line per comment", () => {
+  const { api } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  let args;
+  const spy = (a) => {
+    if (a[0] === "repos/o/r/issues/5/comments") args = a;
+    return api(a);
+  };
+  evaluatePr(spy, "o/r", 5, config);
+  assert.ok(args.includes("--paginate"));
+  assert.ok(args.includes("--jq"));
+});
+
+test("evaluatePr waits on the owner when the comments cannot be read", () => {
+  const routes = fullRoutes([]);
+  delete routes["repos/o/r/issues/5/comments"];
+  const { api } = fakeApi(routes);
+  assert.equal(evaluatePr(api, "o/r", 5, config).stage, "owner");
+});
+
+test("carry passes a clean full PR in the merge queue", () => {
+  const group = "b".repeat(40);
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, group, config);
+  assert.equal(d.state, "success");
+  assert.equal(posted[0].sha, group);
+});
+
+test("carry fails a full PR in the queue when its verdict comment is untrusted", () => {
+  const group = "b".repeat(40);
+  const { api } = fakeApi({ ...fullRoutes([verdictComment("guest", "test-hunter")]), "repos/o/r/collaborators/guest/permission": { permission: "read" } });
+  assert.equal(carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, group, config).state, "failure");
+});
+
 test("carry fails closed on an unknown queue ref, without calling the API", () => {
   const group = "b".repeat(40);
   const { api, posted } = fakeApi({});

@@ -20,10 +20,18 @@
 
 ## What merges without you
 
-A PR merges on green checks alone only when its issue is `tier:skip` and it touches only skip paths, or `tier:quick`
-with no contract file and nothing under `.github/`, `.claude/`, `.githooks/`, `scripts/lanes/`, `lanes.config.json`,
-auth, secrets, deploy or `.env` paths. Everything else waits for `/approve`. CI decides this from the diff; a lane
-cannot grant it to itself.
+A PR merges on green checks alone only when its "Needs the owner" says `nothing` and one of these holds:
+
+- its issue is `tier:skip` and it touches only skip paths;
+- its issue is `tier:quick` with no contract file and nothing on a sensitive path (`.github/`, `.claude/`,
+  `.githooks/`, `scripts/lanes/`, `lanes.config.json`, auth, secrets, deploy or `.env` paths);
+- its issue is `tier:full`, it touches no sensitive path, its "Contract changes" is `none` or `additive`, and every
+  required reviewer has both a success `review/*` status and a verdict comment for the PR's current head commit that
+  says `success`, posted by someone with write access, with no critical or important finding left unfixed. A verdict
+  for an older commit, or in the old format without a commit, does not count.
+
+Everything else waits for `/approve`, and the `lanes/gate` status says why. CI decides this from the diff and the PR's
+comments; a lane cannot grant it to itself.
 
 ## Contracts, in one place
 
