@@ -1,0 +1,72 @@
+// scripts/lanes/blockers.mjs
+// Checks that a task issue's "Blocked by" issues are all closed, failing closed on anything it cannot read.
+// Usage: node scripts/lanes/blockers.mjs <issue>. Exit 0: no open blockers. 1: open blockers. 2: cannot check.
+// /lane step 2 runs it; unlike /status, which only hints, a blocker it cannot read stops the lane.
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { parseIssueForm } from "./lib.mjs";
+
+/**
+ * @param {number[]} blockedBy the issue's blocker numbers
+ * @param {Record<number, "open"|"closed"|null> | Map<number, "open"|"closed"|null>} states each blocker's state;
+ *   null (or a missing entry) means not found or unreadable
+ * @returns {{ ok: boolean, open: number[], unreadable: number[] }} ok only when every blocker is "closed"
+ */
+export function blockerReport(blockedBy, states) {
+  const get = (b) => (states instanceof Map ? states.get(b) : states?.[b]);
+  const open = [];
+  const unreadable = [];
+  for (const b of new Set(blockedBy)) {
+    const state = get(b);
+    if (state === "open") open.push(b);
+    else if (state !== "closed") unreadable.push(b);
+  }
+  return { ok: open.length === 0 && unreadable.length === 0, open, unreadable };
+}
+
+const reason = (err) => String(err?.stderr || err?.message || err).trim().split("\n")[0];
+
+/** `run` takes full `gh` arguments and returns stdout; tests pass a fake. Returns the exit code and the line to print. */
+export function main(argv, run = gh) {
+  const arg = String(argv[0] ?? "").replace(/^#/, "");
+  if (!/^[1-9]\d*$/.test(arg)) return { code: 2, message: `#?: cannot check blockers: usage: blockers.mjs <issue number>` };
+  const n = arg;
+  const cannot = (why) => ({ code: 2, message: `#${n}: cannot check blockers: ${why}` });
+
+  let body;
+  try {
+    body = JSON.parse(run(["issue", "view", n, "--json", "body"])).body;
+  } catch (err) {
+    return cannot(`issue #${n} not found or unreadable (${reason(err)})`);
+  }
+
+  // Only the "Blocked by" field matters here; the issue contract check owns the rest of the form.
+  const form = parseIssueForm(body);
+  const fieldErrors = form.errors.filter((e) => /blocked by/.test(e));
+  if (fieldErrors.length) return cannot(fieldErrors.join("; "));
+  const blockedBy = [...new Set(form.fields.blockedBy)];
+
+  const states = new Map();
+  for (const b of blockedBy) {
+    try {
+      // The issues API also answers for a PR, so a PR used as a blocker counts by its own state.
+      const state = JSON.parse(run(["api", `repos/{owner}/{repo}/issues/${b}`])).state;
+      states.set(b, state === "open" || state === "closed" ? state : null);
+    } catch {
+      states.set(b, null);
+    }
+  }
+
+  const report = blockerReport(blockedBy, states);
+  if (report.unreadable.length) return cannot(`${report.unreadable.map((b) => `#${b}`).join(", ")} not found or unreadable`);
+  if (report.open.length) return { code: 1, message: `#${n}: blocked by ${report.open.map((b) => `#${b} (open)`).join(", ")}` };
+  return { code: 0, message: `#${n}: no open blockers` };
+}
+
+const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const { code, message } = main(process.argv.slice(2));
+  console.log(message);
+  process.exitCode = code;
+}

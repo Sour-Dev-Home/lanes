@@ -14,7 +14,8 @@ path, command or CI output, secret, token or personal data (point to the PR or i
 
 1. `gh issue view $ARGUMENTS --json title,body,labels,state`. Stop and report if it is not open, lacks the `ready`
    label, or lacks exactly one `tier:*` label.
-2. For each issue under "Blocked by": `gh issue view <N> --json state`. Stop and report if any is OPEN. A refusal in
+2. Run `node scripts/lanes/blockers.mjs $ARGUMENTS`, and stop and report its line on any non-zero exit (1: a
+   blocker is open; 2: the blockers cannot be checked, which also stops the lane). A refusal in
    step 1 or 2 notifies `lanes #$ARGUMENTS: cannot start: <reason>`.
 3. `git fetch origin`, then work in a new worktree on branch `issue-$ARGUMENTS-<short-slug>` from `origin/main`
    (use the EnterWorktree tool when available, otherwise `git worktree add`). Run `npm run setup` in it.
