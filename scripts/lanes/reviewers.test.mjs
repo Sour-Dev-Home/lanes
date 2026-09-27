@@ -140,6 +140,30 @@ test("edge: non-ASCII and spaced paths are classified unquoted", () => {
   });
 });
 
+// AC1 (the bug in #17 itself): before the lane's first commit, HEAD equals origin/main, so the committed diff
+// is empty and only the uncommitted change may report a reviewer.
+test("edge: before the first commit, an uncommitted change alone is classified", () => {
+  const root = mkdtempSync(join(tmpdir(), "lanes-reviewers-"));
+  const git = (...args) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd: root, env: GIT_ENV, encoding: "utf8" });
+  const write = (file, text = "x\n") => {
+    mkdirSync(dirname(join(root, file)), { recursive: true });
+    writeFileSync(join(root, file), text);
+  };
+  try {
+    git("init", "-q", "-b", "main");
+    write("lanes.config.json", JSON.stringify(CONFIG));
+    write("src/style.css", "a{}\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    git("update-ref", "refs/remotes/origin/main", "HEAD");
+    write("auth/new.js");
+    git("add", "auth/new.js");
+    assert.deepEqual(reviewers(root), ["test-hunter", "security-reviewer"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("edge: an unknown tier is refused", () => {
   inRepo(({ root }) => {
     const r = run(root, "huge");
