@@ -47,6 +47,12 @@
     ],
     "PreToolUse": [
       { "matcher": "Bash", "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/approve-guard.mjs\" pre-tool-use" }] }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|agent_needs_input|elicitation_dialog|agent_completed",
+        "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/notify-hook.mjs\"" }]
+      }
     ]
   },
   "enabledPlugins": {

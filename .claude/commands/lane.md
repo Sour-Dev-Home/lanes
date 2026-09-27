@@ -44,8 +44,8 @@ path, command or CI output, secret, token or personal data (point to the PR or i
 7. `npm run preflight`, push, then `gh pr create` with the PR template filled in completely: "Closes #$ARGUMENTS",
    every acceptance criterion mapped under "What changed", "Contract changes" starting with none, additive or
    breaking, and "Needs the owner" saying exactly what he must decide, or "nothing". Then `gh pr merge <N> --auto`.
-   Once its checks settle (`gh pr checks <N> --watch`), notify once: `lanes #<N>: queued to merge` if `lanes/gate`
-   passed, else `lanes #<N>: needs /approve: <the lanes/gate reason>` (the status's description).
+   Once its checks settle (`gh pr checks <N> --watch`), notify only if `lanes/gate` did not pass:
+   `lanes #<N>: needs /approve: <the lanes/gate reason>` (the status's description). A passing gate needs no notification.
 8. Follow-up work becomes new issues from the Task form: write the body to a file in the form's layout (`### Goal`,
    `### Acceptance criteria`, `### Interface contract`, `### Scope`, `### Blocked by`, `### Tier`, every field
    filled), then `gh issue create --title "<title>" --label lane-filed --body-file <file>` (not `--template`, which
