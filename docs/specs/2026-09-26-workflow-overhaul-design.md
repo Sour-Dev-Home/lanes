@@ -179,8 +179,8 @@ Committed in the repository:
    `pr-contract` and `merge-approval` jobs, `post-review.sh`, the `.claude/` commands and
    settings, and the ruleset script. A later project adopts the workflow by copying it and
    running the ruleset script.
-3. Publish `lanes` (public, under the organisation, AGPL like satisfactory-dash, with the
-   PII check from the first commit) after the owner's go-ahead.
+3. Publish `lanes` (public, under the organisation, MIT-licensed by the owner's decision of
+   2026-09-27, with the PII check from the first commit) after the owner's go-ahead.
 4. A dedicated session brainstorms the dashboard's own spec from a short brief. Its first
    issue is the contract: the snapshot schema.
 5. Trial about two weeks, including a few unattended nights. Then `/health` and the
