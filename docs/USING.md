@@ -19,9 +19,9 @@
    `/start --auto --go` recomputes that plan and launches exactly its picks; the paths in `start.softPaths` (this file
    and `README.md` by default) never count as overlaps. Owner only: a lane or a schedule never runs it.
    The start guard (`scripts/lanes/start-guard.mjs`, two hooks in `.claude/settings.json` next to the approve guard)
-   enforces that: it lets `start.mjs` run once, for the same issue numbers, within 15 minutes of you typing
-   `/start <N ...>` in that session (not yet `--auto`, see #76), and it denies a direct `claude --bg` in every session
-   and permission mode.
+   enforces that: it lets `start.mjs` run once, for the same issue numbers or the same `--auto` form, within 15 minutes
+   of you typing `/start <N ...>`, `/start --auto` or `/start --auto --go` in that session (a `/start --auto` never
+   allows `--go`), and it denies a direct `claude --bg` in every session and permission mode.
 3. **Watch with `/status`**: WAITING ON YOU, IN FLIGHT (each PR's stage), READY TO START, MERGED.
    A `Notification` hook (`scripts/lanes/notify-hook.mjs`) pops a notification when a lane stops at a permission
    prompt or needs input (with the `claude attach <id>` to reach it), or finishes with its PR waiting on you or failing.

@@ -2,10 +2,12 @@
 // Wired in .claude/settings.json next to approve-guard.mjs, as two hooks:
 //   UserPromptSubmit: node scripts/lanes/start-guard.mjs user-prompt-submit
 //     a prompt that is exactly `/start <N> [<N> ...]` writes a grant { sessionId, issues, at } to
-//     .lanes/start/<session>.json; any other prompt in that session deletes it.
+//     .lanes/start/<session>.json, and one that is exactly `/start --auto` or `/start --auto --go` writes
+//     { sessionId, auto: "dry" | "go", at } (#76); any other prompt in that session deletes it.
 //   PreToolUse (Bash): node scripts/lanes/start-guard.mjs pre-tool-use
-//     `start.mjs` is allowed once, only as the plain `node scripts/lanes/start.mjs <N ...>`, only with a grant from this
-//     session under 15 minutes old for the same issue numbers. Every other start.mjs run is denied. A direct
+//     `start.mjs` is allowed once, only as the plain `node scripts/lanes/start.mjs <N ...>` or
+//     `node scripts/lanes/start.mjs --auto [--go]`, only with a grant from this session under 15 minutes old for the
+//     same issue numbers or the same auto form (a dry-run grant never allows --go). Every other start.mjs run is denied. A direct
 //     `claude --bg` is always denied: start.mjs launches lanes itself (execFileSync, not a Bash tool call), so no
 //     session ever needs it. Anything else gets no decision. A deny holds in every permission mode.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -19,6 +21,9 @@ const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const START_PROMPT_RE = /^\/start((?:\s+[1-9][0-9]{0,8})+)$/;
 // The only form that may be allowed: the plain command with plain issue numbers, nothing chained, wrapped or redirected.
 const PLAIN_RE = /^node scripts\/lanes\/start\.mjs((?: [1-9][0-9]{0,8})+)$/;
+const AUTO_PROMPT_RE = /^\/start\s+--auto(\s+--go)?$/;
+const AUTO_PLAIN_RE = /^node scripts\/lanes\/start\.mjs --auto( --go)?$/;
+const AUTO_FORMS = { dry: "--auto", go: "--auto --go" };
 const START_WORD_RE = /start\.mjs$/i;
 const NODE_RE =/^(node|nodejs|bun|deno)(\.exe)?$/i;
 const CLAUDE_RE = /^claude(-code)?(\.exe|\.cmd|\.ps1)?$/i;
@@ -34,13 +39,26 @@ export function parseStartPrompt(prompt) {
   return m ? m[1].trim().split(/\s+/).map(Number) : null;
 }
 
-/** UserPromptSubmit: grant for `/start <N ...>`, clear for any other prompt, nothing for a session id unsafe as a file name. */
+/** "dry" for a prompt that is exactly `/start --auto`, "go" for exactly `/start --auto --go`, else null. */
+export function parseAutoPrompt(prompt) {
+  if (typeof prompt !== "string") return null;
+  const m = AUTO_PROMPT_RE.exec(prompt.trim());
+  return m ? (m[1] ? "go" : "dry") : null;
+}
+
+/**
+ * UserPromptSubmit: grant for `/start <N ...>` or `/start --auto [--go]`, clear for any other prompt, nothing for a
+ * session id unsafe as a file name.
+ */
 export function onUserPromptSubmit(input, now = Date.now()) {
   const sessionId = input?.session_id;
   if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId)) return { action: "none" };
+  const at = new Date(now).toISOString();
+  const auto = parseAutoPrompt(input.prompt);
+  if (auto !== null) return { action: "grant", sessionId, grant: { sessionId, auto, at } };
   const issues = parseStartPrompt(input.prompt);
   if (issues === null) return { action: "clear", sessionId };
-  return { action: "grant", sessionId, grant: { sessionId, issues, at: new Date(now).toISOString() } };
+  return { action: "grant", sessionId, grant: { sessionId, issues, at } };
 }
 
 /**
@@ -147,8 +165,9 @@ function walk(cmd, depth, visit, onOpaque) {
 /**
  * Every run of `start.mjs` in a Bash command: the script as the command itself, or as an argument of node, including
  * runs behind env, chains, subshells or `bash -c`. `standalone` is true only for the plain
- * `node scripts/lanes/start.mjs <N ...>` with nothing around it. Merely naming the file (cat, git diff) is not a run.
- * @returns {{ issues: number[] | undefined, standalone: boolean }[]}
+ * `node scripts/lanes/start.mjs <N ...>` (with its `issues`) or `node scripts/lanes/start.mjs --auto [--go]` (with its
+ * `auto` form) with nothing around it. Merely naming the file (cat, git diff) is not a run.
+ * @returns {({ issues: number[] | undefined, standalone: boolean } | { auto: "dry" | "go", standalone: true })[]}
  */
 export function findStartInvocations(command) {
   const cmd = String(command ?? "");
@@ -176,6 +195,8 @@ export function findStartInvocations(command) {
   // A trailing newline the model appends to a Bash command must not turn the plain command into a wrapped one.
   const m = PLAIN_RE.exec(cmd.trim());
   if (out.length === 1 && m) out[0] = { issues: m[1].trim().split(" ").map(Number), standalone: true };
+  const a = AUTO_PLAIN_RE.exec(cmd.trim());
+  if (out.length === 1 && a) out[0] = { auto: a[1] ? "go" : "dry", standalone: true };
   return out;
 }
 
@@ -204,17 +225,16 @@ export function findBgLaunches(command) {
   return found;
 }
 
+/** A grant names either issues or one auto form, never both. */
 function validGrant(grant) {
+  if (grant === null || typeof grant !== "object" || typeof grant.sessionId !== "string") return false;
+  if (typeof grant.at !== "string" || Number.isNaN(Date.parse(grant.at))) return false;
+  if ("auto" in grant) return !("issues" in grant) && Object.hasOwn(AUTO_FORMS, grant.auto);
   return (
-    grant !== null &&
-    typeof grant === "object" &&
-    typeof grant.sessionId === "string" &&
     Array.isArray(grant.issues) &&
     grant.issues.length > 0 &&
     grant.issues.every((n) => Number.isSafeInteger(n) && n > 0) &&
-    new Set(grant.issues).size === grant.issues.length &&
-    typeof grant.at === "string" &&
-    !Number.isNaN(Date.parse(grant.at))
+    new Set(grant.issues).size === grant.issues.length
   );
 }
 
@@ -222,7 +242,7 @@ const sameIssues = (a, b) => a.length === b.length && [...a].sort((x, y) => x - 
 
 /**
  * PreToolUse: null (no decision) unless the command runs `claude --bg` or `start.mjs`. `claude --bg` is always denied;
- * start.mjs is allowed only with this session's fresh grant for the same issues, and denied otherwise.
+ * start.mjs is allowed only with this session's fresh grant for the same issues or the same auto form, and denied otherwise.
  * @param grant the session's grant file as parsed, null when there is none, or { unreadable: true }
  * @returns {null | { decision: "allow", reason: string, consumeGrant: true } | { decision: "deny", reason: string }}
  */
@@ -236,9 +256,13 @@ export function decidePreToolUse(input, grant, now = Date.now()) {
   const sessionId = input.session_id;
   if (found.length !== 1 || !found[0].standalone) return deny;
   if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId) || !validGrant(grant)) return deny;
-  if (grant.sessionId !== sessionId || !sameIssues(grant.issues, found[0].issues)) return deny;
+  if (grant.sessionId !== sessionId) return deny;
+  const run = found[0];
+  const matches = run.auto !== undefined ? grant.auto === run.auto : grant.auto === undefined && sameIssues(grant.issues, run.issues);
+  if (!matches) return deny;
   const age = now - Date.parse(grant.at);
   if (age < 0 || age >= GRANT_TTL_MS) return deny;
+  if (run.auto !== undefined) return { decision: "allow", reason: `owner run of /start ${AUTO_FORMS[run.auto]} in this session`, consumeGrant: true };
   return { decision: "allow", reason: `owner launch from /start ${grant.issues.join(" ")} in this session`, consumeGrant: true };
 }
 

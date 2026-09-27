@@ -5,12 +5,14 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BG_DENY_REASON, DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findStartInvocations, onUserPromptSubmit, parseStartPrompt, runHook } from "./start-guard.mjs";
+import { BG_DENY_REASON, DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findStartInvocations, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, runHook } from "./start-guard.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const START = "node scripts/lanes/start.mjs 12 14";
 const grant = (over = {}) => ({ sessionId: "s1", issues: [12, 14], at: new Date(NOW - 60_000).toISOString(), ...over });
 const bash = (command, over = {}) => ({ hook_event_name: "PreToolUse", session_id: "s1", tool_name: "Bash", tool_input: { command }, ...over });
+const tmp = () => mkdtempSync(join(tmpdir(), "start-guard-"));
+const out = (s) => (s === "" ? null : JSON.parse(s).hookSpecificOutput);
 
 // --- UserPromptSubmit ---------------------------------------------------------------------------------------------
 
@@ -192,6 +194,14 @@ test("criterion 2: a direct claude --bg is denied in every session, even with a 
   assert.deepEqual(decidePreToolUse(bash('claude --bg "/lane 12"', { session_id: undefined }), null, NOW), deny);
 });
 
+test("#76 edge: a direct claude --bg is denied even with a fresh --auto or --auto --go grant", () => {
+  // Not covered above (that test only tries a numbered-issues grant): an auto grant must not create a second path
+  // around the always-on --bg denial.
+  const deny = { decision: "deny", reason: BG_DENY_REASON };
+  assert.deepEqual(decidePreToolUse(bash('claude --bg "/lane 12"'), autoGrant("dry"), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash('claude --bg "/lane 12"'), autoGrant("go"), NOW), deny);
+});
+
 test("anything else, and other tools, get no decision", () => {
   assert.equal(decidePreToolUse(bash("git status"), null, NOW), null);
   assert.equal(decidePreToolUse(bash("claude agents --json"), null, NOW), null);
@@ -200,10 +210,145 @@ test("anything else, and other tools, get no decision", () => {
   assert.equal(decidePreToolUse(null, null, NOW), null);
 });
 
-// --- the hook end to end (criterion 3: allowed /start run, denied lane, denied claude --bg, expired grant) ---------
+// --- /start --auto (#76) ------------------------------------------------------------------------------------------
 
-const tmp = () => mkdtempSync(join(tmpdir(), "start-guard-"));
-const out = (s) => (s === "" ? null : JSON.parse(s).hookSpecificOutput);
+const AUTO = "node scripts/lanes/start.mjs --auto";
+const GO = "node scripts/lanes/start.mjs --auto --go";
+const autoGrant = (auto, over = {}) => ({ sessionId: "s1", auto, at: new Date(NOW - 60_000).toISOString(), ...over });
+
+test("#76 criterion 1: only a prompt that is exactly /start --auto or /start --auto --go names an auto form", () => {
+  assert.equal(parseAutoPrompt("/start --auto"), "dry");
+  assert.equal(parseAutoPrompt("/start --auto --go"), "go");
+  assert.equal(parseAutoPrompt("  /start   --auto   --go \n"), "go");
+  for (const p of ["/start", "/start --go", "/start --go --auto", "/start --auto --go --go", "/start --auto 12", "/start 12 --auto", "/start --auto=go", "/start --autogo", "/start --auto --gone", "/start --AUTO", "please /start --auto", "/start --auto; rm", "/starting --auto", undefined, 12]) {
+    assert.equal(parseAutoPrompt(p), null, JSON.stringify(p));
+  }
+  assert.equal(parseStartPrompt("/start --auto"), null);
+});
+
+test("#76 criterion 1: UserPromptSubmit grants each auto form and records which one was typed", () => {
+  const at = new Date(NOW).toISOString();
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: "/start --auto" }, NOW), { action: "grant", sessionId: "s1", grant: { sessionId: "s1", auto: "dry", at } });
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: "/start --auto --go" }, NOW), { action: "grant", sessionId: "s1", grant: { sessionId: "s1", auto: "go", at } });
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: "/start --go" }, NOW), { action: "clear", sessionId: "s1" });
+  assert.deepEqual(onUserPromptSubmit({ session_id: "../x", prompt: "/start --auto" }, NOW), { action: "none" });
+});
+
+test("#76: the plain auto commands are detected as standalone with their form", () => {
+  assert.deepEqual(findStartInvocations(AUTO), [{ auto: "dry", standalone: true }]);
+  assert.deepEqual(findStartInvocations(`${GO}\n`), [{ auto: "go", standalone: true }]);
+});
+
+test("#76 criterion 2: each auto form is allowed with a fresh grant for that exact form", () => {
+  assert.deepEqual(decidePreToolUse(bash(AUTO), autoGrant("dry"), NOW), { decision: "allow", reason: "owner run of /start --auto in this session", consumeGrant: true });
+  assert.deepEqual(decidePreToolUse(bash(GO), autoGrant("go"), NOW), { decision: "allow", reason: "owner run of /start --auto --go in this session", consumeGrant: true });
+});
+
+test("#76 criterion 2: a dry-run grant never allows --go, and no grant crosses forms", () => {
+  const deny = { decision: "deny", reason: DENY_REASON };
+  assert.deepEqual(decidePreToolUse(bash(GO), autoGrant("dry"), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash(AUTO), autoGrant("go"), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash(AUTO), grant(), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash(GO), grant(), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash(START), autoGrant("go"), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash(AUTO), null, NOW), deny);
+});
+
+test("#76 criterion 2: a stale, future or other-session auto grant is refused", () => {
+  const deny = { decision: "deny", reason: DENY_REASON };
+  for (const [cmd, form] of [[AUTO, "dry"], [GO, "go"]]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), autoGrant(form, { at: new Date(NOW - GRANT_TTL_MS).toISOString() }), NOW), deny);
+    assert.equal(decidePreToolUse(bash(cmd), autoGrant(form, { at: new Date(NOW - GRANT_TTL_MS + 1).toISOString() }), NOW).decision, "allow");
+    assert.deepEqual(decidePreToolUse(bash(cmd), autoGrant(form, { at: new Date(NOW + 60_000).toISOString() }), NOW), deny);
+    assert.deepEqual(decidePreToolUse(bash(cmd), autoGrant(form, { sessionId: "s2" }), NOW), deny);
+  }
+});
+
+test("#76 criterion 2: chained, wrapped or altered auto forms are denied even with a grant", () => {
+  for (const [cmd, form] of [
+    [`${AUTO}; echo done`, "dry"],
+    [`${GO} && echo done`, "go"],
+    [`bash -c "${GO}"`, "go"],
+    [`sh -c '${AUTO}'`, "dry"],
+    [`env X=1 ${GO}`, "go"],
+    [`${GO} | cat`, "go"],
+    [`${AUTO} > plan.txt`, "dry"],
+    [`${GO} && claude --bg x`, "go"],
+    [`node ./scripts/lanes/start.mjs --auto --go`, "go"],
+    [`node scripts/lanes/start.mjs --go --auto`, "go"],
+    [`node scripts/lanes/start.mjs --auto --go --go`, "go"],
+    [`node scripts/lanes/start.mjs --auto 12`, "dry"],
+    [`node scripts/lanes/start.mjs --auto=go`, "go"],
+    [`node scripts/lanes/start.mjs  --auto  --go`, "go"],
+    [`node scripts/lanes/start.mjs "--auto" --go`, "go"],
+    [`F=--go; node scripts/lanes/start.mjs --auto $F`, "go"],
+    [`${AUTO}; ${GO}`, "go"],
+  ]) {
+    assert.equal(decidePreToolUse(bash(cmd), autoGrant(form), NOW).decision, "deny", cmd);
+  }
+});
+
+test("#76 edge: a grant holding both issues and an auto form, or an unknown form, is malformed and denies", () => {
+  const deny = { decision: "deny", reason: DENY_REASON };
+  assert.deepEqual(decidePreToolUse(bash(GO), autoGrant("go", { issues: [12] }), NOW), deny);
+  assert.deepEqual(decidePreToolUse(bash(START), grant({ auto: "go" }), NOW), deny);
+  for (const auto of ["GO", "", "go ", null, 1, true]) assert.deepEqual(decidePreToolUse(bash(GO), autoGrant(auto), NOW), deny, JSON.stringify(auto));
+});
+
+test("#76 criterion 3: /start --auto --go then the go command is allowed once by the hook; a dry-run grant refuses --go", () => {
+  const dir = tmp();
+  try {
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start --auto --go" }), { dir, now: NOW });
+    assert.equal(JSON.parse(readFileSync(join(dir, "s1.json"), "utf8")).auto, "go");
+    assert.deepEqual(out(runHook("pre-tool-use", JSON.stringify(bash(GO)), { dir, now: NOW + 1000 })), { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "owner run of /start --auto --go in this session" });
+    assert.ok(!existsSync(join(dir, "s1.json")));
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(GO)), { dir, now: NOW + 2000 })).permissionDecision, "deny");
+
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start --auto" }), { dir, now: NOW });
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(GO)), { dir, now: NOW + 1000 })).permissionDecision, "deny");
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(AUTO)), { dir, now: NOW + 1000 })).permissionDecision, "allow");
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(AUTO)), { dir, now: NOW + 2000 })).permissionDecision, "deny");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#76 edge: typing /start --auto after /start <N ...> replaces the numbered grant, not merges it", () => {
+  // Not covered above (those tests only move between the two auto forms): a numbered grant on disk must be fully
+  // overwritten, not merged, so the stale issue numbers cannot still unlock a numbered run.
+  const dir = tmp();
+  try {
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start 12 14" }), { dir, now: NOW });
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start --auto" }), { dir, now: NOW + 500 });
+    const onDisk = JSON.parse(readFileSync(join(dir, "s1.json"), "utf8"));
+    assert.deepEqual(onDisk, { sessionId: "s1", auto: "dry", at: new Date(NOW + 500).toISOString() });
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(START)), { dir, now: NOW + 1000 })).permissionDecision, "deny");
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(AUTO)), { dir, now: NOW + 1000 })).permissionDecision, "allow");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#76 criterion 3: another session's auto grant is refused by the hook", () => {
+  const dir = tmp();
+  try {
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "owner", prompt: "/start --auto --go" }), { dir, now: NOW });
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(GO, { session_id: "lane" })), { dir, now: NOW })).permissionDecision, "deny");
+    assert.ok(existsSync(join(dir, "owner.json")), "another session's denied run does not consume the owner's grant");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#76 criterion 4: start.md and USING.md no longer say the guard denies --auto", () => {
+  for (const file of [".claude/commands/start.md", "docs/USING.md"]) {
+    const text = readFileSync(file, "utf8");
+    assert.doesNotMatch(text, /not (yet )?allow the `--auto`|not yet `--auto`|#76/, file);
+    assert.match(text, /\/start --auto/, file);
+  }
+});
+
+// --- the hook end to end (criterion 3:allowed /start run, denied lane, denied claude --bg, expired grant) ---------
 
 test("criterion 3: /start then start.mjs is allowed once, and the grant is consumed", () => {
   const dir = tmp();
