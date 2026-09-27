@@ -253,6 +253,12 @@ test("edge: an unknown status falls back to its state rather than being read as 
   assert.equal(plan("done").skip, undefined);
 });
 
+test("edge: a session with neither status nor state is treated as not working, not as still working", () => {
+  const [entry] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { status: undefined, state: undefined })], prs: [merged("issue-7-x")] });
+  assert.equal(entry.skip, undefined);
+  assert.deepEqual(cmds(entry), ["claude rm s7", `git worktree remove ${ROOT}/.claude/worktrees/issue-7-x`, "git branch -D issue-7-x"]);
+});
+
 test("sessionsFrom keeps each background session's status and state, and drops others", () => {
   const agents = [
     { kind: "background", id: "s7", cwd: "C:\\repo\\.claude\\worktrees\\issue-7-x", status: "idle", state: "working" },
