@@ -42,8 +42,9 @@ export function onUserPromptSubmit(input, now = Date.now()) {
 
 /**
  * Shell-ish lexer: words (quotes and backslashes resolved, nothing expanded) grouped into simple commands split on
- * ; & | ( ) newlines and redirections. Throws on an unterminated quote.
- * @returns {string[][]}
+ * ; & | ( ) newlines and redirections. A segment whose output a `|` or `|&` feeds into the next one has `pipedOut` set
+ * (`(echo …) | sh` marks the echo). Throws on an unterminated quote.
+ * @returns {(string[] & { pipedOut?: true })[]}
  */
 function lex(cmd) {
   const segments = [[]];
@@ -55,6 +56,12 @@ function lex(cmd) {
   const endSegment = () => {
     endWord();
     if (segments.at(-1).length > 0) segments.push([]);
+  };
+  const markPiped = () => {
+    endWord();
+    const last = segments.at(-1).length > 0 ? segments.at(-1) : segments.at(-2);
+    if (last) last.pipedOut = true;
+    endSegment();
   };
   for (let i = 0; i < cmd.length; i += 1) {
     const c = cmd[i];
@@ -76,7 +83,13 @@ function lex(cmd) {
     } else if (c === "\\") {
       if (cmd[i + 1] !== "\n") word = (word ?? "") + (cmd[i + 1] ?? "");
       i += 1;
-    } else if (";&|()\n\r".includes(c)) {
+    } else if (c === "|" && cmd[i + 1] === "|") {
+      endSegment();
+      i += 1;
+    } else if (c === "|") {
+      markPiped();
+      if (cmd[i + 1] === "&") i += 1;
+    } else if (";&()\n\r".includes(c)) {
       endSegment();
     } else if ("<>".includes(c) || /\s/.test(c)) {
       endWord();
@@ -177,47 +190,94 @@ function resolveVars(words, assignments) {
   );
 }
 
+const GLOB_RE = /[*?[{]/;
+
+/**
+ * Whether a word bash would glob- or brace-expand could expand to post-review.mjs: its last path component, as a
+ * pattern, matches the name. A brace holding a `/` or a pattern that cannot be read counts as a match.
+ */
+function mayExpandToPostReview(w) {
+  if (!GLOB_RE.test(w)) return false;
+  if (/\{[^}]*\//.test(w)) return true;
+  const name = w.slice(w.lastIndexOf("/") + 1);
+  let re = "";
+  let braces = 0;
+  for (let i = 0; i < name.length; i += 1) {
+    const c = name[i];
+    if (c === "*") re += ".*";
+    else if (c === "?") re += ".";
+    else if (c === "[") {
+      const end = name.indexOf("]", i + 2);
+      if (end === -1) re += "\\[";
+      else {
+        re += ".";
+        i = end;
+      }
+    } else if (c === "{") {
+      re += "(?:";
+      braces += 1;
+    } else if (c === "}" && braces > 0) {
+      re += ")";
+      braces -= 1;
+    } else if (c === "," && braces > 0) re += "|";
+    else re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  if (braces > 0) return true;
+  const pattern = new RegExp(`^${re}$`, "i");
+  return pattern.test("post-review.mjs") || pattern.test("post-review");
+}
+
+/** Text with every quote and backslash dropped, so a name split by quoting (pos"t-review) reads whole. */
+const unquoted = (s) => s.replace(/['"\\]/g, "");
+
+/** The command word of a simple command, without its directory. */
+const commandName = (plain) => plain[0]?.split(/[\\/]/).at(-1);
+
 function scan(cmd, depth, out) {
   let segments;
   try {
     segments = lex(cmd);
   } catch {
-    if (/post-review/i.test(cmd)) out.push({ pr: undefined, standalone: false });
+    // An unterminated quote: bash will not run it, but fail closed on the name with any quoting removed.
+    if (/post-review/i.test(unquoted(cmd))) out.push({ pr: undefined, standalone: false });
     return;
   }
   // `S=scripts/lanes/post-review.mjs; node $S owner … --pr N` must be caught too: resolve same-command
   // `NAME=value` assignments into later `$NAME`/`${NAME}` references before looking for the script and its args.
   const assignments = collectAssignments(segments);
-  for (const rawWords of segments) {
-    const words = resolveVars(rawWords, assignments);
-    // The command word and the script node runs (also behind env, time or sudo), counted without `NAME=value` words.
-    const plain = words.filter((w) => !ASSIGN_RE.test(w));
+  // The command word and the script node runs (also behind env, time or sudo), counted without `NAME=value` words.
+  const plains = segments.map((rawWords) => resolveVars(rawWords, assignments).filter((w) => !ASSIGN_RE.test(w)));
+  plains.forEach((plain, k) => {
     // Node's options and the script: any of them that still holds `$` or a backtick could load or be post-review.mjs.
     // Every word that looks like node counts, since an earlier one may only be an argument (`sudo -u node node …`).
     const nodeRange = new Set();
-    // Not once a pipe is anywhere in the command: `echo node … | bash` runs what echo prints.
-    const runsArgs = cmd.includes("|") || !NON_RUNNING_COMMANDS.has(plain[0]?.split(/[\\/]/).at(-1));
+    // A command that only prints or searches its arguments runs none of them, unless its output flows down a pipe
+    // into anything else: `echo node … | bash` runs what echo prints, `grep node … | wc -l` does not.
+    let runsArgs = !NON_RUNNING_COMMANDS.has(commandName(plain));
+    for (let m = k; !runsArgs && segments[m]?.pipedOut; m += 1) {
+      runsArgs = !NON_RUNNING_COMMANDS.has(commandName(plains[m + 1] ?? []));
+    }
     plain.forEach((p, at) => {
       if ((at > 0 && !runsArgs) || !NODE_RE.test(p.split(/[\\/]/).at(-1))) return;
       for (let j = at + 1; j <= nodeScriptEnd(plain, at); j += 1) nodeRange.add(j);
     });
     plain.forEach((w, i) => {
-      if (/[\s;&|()<>]/.test(w) && /post-review|[$`]/i.test(w)) {
+      if (/[\s;&|()<>]/.test(w) && /post-review|[$`*?[{]/i.test(unquoted(w))) {
         // A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own. One that still
-        // holds `$` may splice a name inside it, so it is scanned too.
+        // holds `$` or a glob may splice a name inside it, so it is scanned too.
         if (depth >= MAX_DEPTH) out.push({ pr: undefined, standalone: false });
         else scan(w, depth + 1, out);
       } else if (POST_REVIEW_RE.test(w)) {
         const { reviewer, pr } = readPostReviewArgs(plain.slice(i + 1));
         // Fail closed: a reviewer word that could expand to anything counts as the owner.
-        if (reviewer === "owner" || (reviewer !== undefined && /[$`*?[]/.test(reviewer))) out.push({ pr, standalone: false });
-      } else if (UNRESOLVED_RE.test(w) && (i === 0 || nodeRange.has(i))) {
+        if (reviewer === "owner" || (reviewer !== undefined && /[$`*?[{]/.test(reviewer))) out.push({ pr, standalone: false });
+      } else if ((UNRESOLVED_RE.test(w) || mayExpandToPostReview(w)) && (i === 0 || nodeRange.has(i))) {
         // The command word, or a node option or the script node runs, that could still expand to post-review.mjs:
         // fail closed.
         out.push({ pr: undefined, standalone: false });
       }
     });
-  }
+  });
 }
 
 /**
@@ -227,13 +287,13 @@ function scan(cmd, depth, out) {
  */
 export function findOwnerInvocations(command) {
   const cmd = String(command ?? "");
-  // Without the name or a substitution that could splice it (`post-$X.mjs`), there is nothing to find.
-  if (!/post-review|[$`]/i.test(cmd)) return [];
+  // No raw-text pre-filter: the name can be split by quotes (pos"t-review.mjs) or matched by a glob, so only the
+  // lexed words can tell.
   const out = [];
   scan(cmd, 0, out);
   // Deeper indirection (a variable built from another, `$(…)`, backticks) cannot be resolved statically: with an
   // `owner` word and a substitution anywhere, fail closed and count it as an owner command.
-  if (out.length === 0 && /[$`]/.test(cmd) && /(^|[\s'"`(])owner($|[\s'"`)])/.test(cmd)) out.push({ pr: undefined, standalone: false });
+  if (out.length === 0 && /[$`]/.test(cmd) && /(^|[\s`(])owner($|[\s`)])/.test(unquoted(cmd))) out.push({ pr: undefined, standalone: false });
   // Leading/trailing whitespace (a trailing newline the model appends to a Bash command is common) must not turn the
   // plain command into a "wrapped" one: trim before checking the exact prefix and for embedded shell metacharacters.
   const trimmedCmd = cmd.trim();

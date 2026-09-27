@@ -337,6 +337,58 @@ test("edge: a non-running command piped into a shell still counts its spliced no
     assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
     assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
   }
+  // Anything downstream that is not itself a non-running command may run what it reads.
+  for (const cmd of [
+    "echo node $VAR | cat | bash",
+    "(echo node $VAR) | bash",
+    "echo node $VAR |& bash",
+    "echo node $VAR | env bash",
+    "echo node $VAR | xargs node",
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+});
+
+// Found by the #62 test-hunter (round 3): the pipe check voided the exemption for any pipe anywhere in the command.
+test("edge: a pipe into another non-running command, or elsewhere in the command, keeps the exemption (#62 review)", () => {
+  for (const cmd of [
+    "grep -n node $FILE | wc -l",
+    "echo node $VAR | cat",
+    "grep node $F | head -5 | wc -l",
+    "gh pr list | head; echo node $VAR",
+    "echo node $VAR || echo failed",
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+// Found by the #62 test-hunter (round 3): the raw-text pre-filter ran before quotes were resolved, so a quote or a
+// backslash inside the literal name hid it. A glob matches the name without spelling it at all.
+test("edge: a quote, backslash or glob inside the script name does not hide an owner command (#62 review)", () => {
+  for (const cmd of [
+    `node scripts/lanes/pos"t-review.mjs" owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/"post-revi""ew".mjs owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/p"o"s"t"-review.mjs owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/pos't-rev'iew.mjs owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/pos\\t-review.mjs owner success ok --pr 16 --sha ${SHA}`,
+    `bash -c 'node scripts/lanes/pos"t-review.mjs" owner --pr 16'`,
+    `node scripts/lanes/post-revie?.mjs owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/p*.mjs owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/post-[r]eview.mjs owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/* owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/post-{review,x}.mjs owner --pr 16`,
+    `node {scripts/lanes/post-review.mjs,} owner --pr 16`,
+    `node scripts/lanes/post-review.mjs o{wner,} success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/pos"t-review.mjs" o"wn"er --pr 16`,
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // A glob that cannot match post-review.mjs is an ordinary argument, as in the project's own test command.
+  for (const cmd of ['node --test "scripts/**/*.test.mjs"', "node --test scripts/*.test.mjs", "ls scripts/*.mjs", "node scripts/lanes/gate.mjs *"]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
 });
 
 test("the CLI answers deny, never crashes, when it cannot evaluate a PreToolUse call", () => {
