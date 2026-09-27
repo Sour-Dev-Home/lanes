@@ -459,6 +459,27 @@ test("edge: --auto with no ready issues says so and launches nothing", () => {
   assert.equal(launches.length, 0);
 });
 
+// Extra case: not in the criteria or the edge cases above. Ready issues exist but every one of them is skipped
+// (none reach pickStartable as a candidate), so nothing is picked; the dry run must still say so explicitly rather
+// than printing only the skip lines, and --go must launch nothing without printing a stray trailer.
+test("edge: --auto is a dry run that says so when every ready issue is skipped", () => {
+  const { deps, launches } = fakes({ issues: { 1: { body: form({ blockedBy: "#9" }) } } });
+  deps.gh = ((inner) => (args) => (args[0] === "api" ? JSON.stringify({ state: "open" }) : inner(args)))(deps.gh);
+  const { code, lines } = main(["--auto"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1: skipped: blocked by #9 (open)", "dry run: nothing to start"]);
+  assert.equal(launches.length, 0);
+});
+
+test("edge: --auto --go launches nothing when every ready issue is skipped", () => {
+  const { deps, launches } = fakes({ issues: { 1: { body: form({ blockedBy: "#9" }) } } });
+  deps.gh = ((inner) => (args) => (args[0] === "api" ? JSON.stringify({ state: "open" }) : inner(args)))(deps.gh);
+  const { code, lines } = main(["--auto", "--go"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1: skipped: blocked by #9 (open)"]);
+  assert.equal(launches.length, 0);
+});
+
 test("edge: --auto launches nothing when it cannot gather the plan", () => {
   for (const failing of ["agents", "issue list", "pr list"]) {
     const { deps, launches } = fakes({ issues: { 1: {} }, agentsFail: failing === "agents" });
