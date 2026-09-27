@@ -84,6 +84,21 @@ test("an issue with no body or no Blocked by field is ready", () => {
   assert.deepEqual(sections(s), { ready: [70, 71], blocked: [] });
 });
 
+test("an issue with a null body is ready, same as no body", () => {
+  const s = summarize({ prs: [], issues: [{ number: 72, title: "t", body: null, labels: [{ name: "ready" }] }], merged: [] });
+  assert.deepEqual(sections(s), { ready: [72], blocked: [] });
+});
+
+test("an issue closed by an open PR still counts as an open blocker for others", () => {
+  const s = summarize({
+    prs: [pr(80, [], { closingIssuesReferences: [{ number: 81 }] })],
+    issues: [issue(81), issue(82, "#81")],
+    merged: [],
+  });
+  // #81 itself stays out of both sections (its PR is open), but it still blocks #82 until that PR merges.
+  assert.deepEqual(sections(s), { ready: [], blocked: [[82, [81]]] });
+});
+
 test("render prints the five sections with counts, BLOCKED after READY TO START", () => {
   const text = render(
     {
