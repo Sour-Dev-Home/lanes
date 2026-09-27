@@ -51,6 +51,8 @@ path, command or CI output, secret, token or personal data (point to the PR or i
    breaking, and "Needs the owner" saying exactly what he must decide, or "nothing". Then `gh pr merge <N> --auto`.
    Once its checks settle (`gh pr checks <N> --watch`), notify only if `lanes/gate` did not pass:
    `lanes #<N>: needs /approve: <the lanes/gate reason>` (the status's description). A passing gate needs no notification.
+   After merging main into the branch with no other change, do not re-run the test-hunter: check that `lanes/gate`
+   says `reused`, and run the test-hunter again only if it does not.
 8. Follow-up work becomes new issues from the Task form: write the body to a file in the form's layout (`### Goal`,
    `### Acceptance criteria`, `### Interface contract`, `### Scope`, `### Blocked by`, `### Tier`, every field
    filled), then `gh issue create --title "<title>" --label lane-filed --body-file <file>` (not `--template`, which

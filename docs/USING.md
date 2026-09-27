@@ -61,6 +61,11 @@ and its tier's rule holds:
   with write access, with no critical or important finding left unfixed. A verdict for an older commit, or in the
   old format without a commit, does not count.
 
+One exception (#25): when the head has no test-hunter status, the gate reuses the most recent test-hunter success from
+an earlier commit of the PR if the PR's own diff is unchanged since (so merging main in needs no new review), and
+says `test-hunter reused from <sha>`; a failure is never reused, nor any other reviewer or the owner's approval. A
+rebase or force-push drops the earlier commits, so it always needs a fresh test-hunter review.
+
 Everything else waits for `/approve`, and the `lanes/gate` status says why (for example
 `waiting on owner (/approve) (owner-only path)`). CI decides this from the diff and the PR's
 comments; a lane cannot grant it to itself.

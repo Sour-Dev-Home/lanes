@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, loadAdrs, loadConfig, parseAdr, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport } from "./lib.mjs";
+import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, loadAdrs, loadConfig, parseAdr, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -436,4 +436,103 @@ test("reviewersReport prints no ADR line when none govern the diff", () => {
 test("edge: reviewersReport at tier skip warns on code, prints none, and still names governing ADRs", () => {
   const out = reviewersReport("skip", ["src/a.ts"], config, [governing(3, "- src/a.ts")]);
   assert.equal(out, "NOT SKIP: the diff changes files outside the skip paths; use quick or full\nnone\nADRs: 0003");
+});
+
+// #25: diffFingerprint identifies a PR's own diff across merges from main
+const fileA = (idx, hunk, line) => `diff --git a/a.js b/a.js\nindex ${idx}..1111111 100644\n--- a/a.js\n+++ b/a.js\n@@ ${hunk} @@ function f() {\n ctx\n-old\n+${line}\n`;
+const fileB = (idx) => `diff --git a/b.js b/b.js\nindex ${idx}..2222222 100644\n--- a/b.js\n+++ b/b.js\n@@ -1,1 +1,1 @@\n-x\n+y\n`;
+
+test("diffFingerprint returns a SHA-256 hex digest", () => {
+  assert.match(diffFingerprint(fileA("0000000", "-1,2 +1,2", "new")), /^[0-9a-f]{64}$/);
+});
+
+test("diffFingerprint ignores index lines, hunk line numbers and file order", () => {
+  const one = fileA("0000000", "-1,2 +1,2", "new") + fileB("3333333");
+  const two = fileB("4444444") + fileA("5555555", "-40,2 +41,2", "new").replace("function f() {", "class C {");
+  assert.equal(diffFingerprint(one), diffFingerprint(two));
+});
+
+test("diffFingerprint changes when an added or removed line changes, whitespace included", () => {
+  const base = diffFingerprint(fileA("0000000", "-1,2 +1,2", "new"));
+  assert.notEqual(diffFingerprint(fileA("0000000", "-1,2 +1,2", "newer")), base);
+  assert.notEqual(diffFingerprint(fileA("0000000", "-1,2 +1,2", "new ")), base);
+  assert.notEqual(diffFingerprint(fileA("0000000", "-1,2 +1,2", "\tnew")), base);
+  assert.notEqual(diffFingerprint(fileA("0000000", "-1,2 +1,2", "new").replace("-old", "-older")), base);
+});
+
+test("edge: diffFingerprint of an empty or non-string diff is stable and differs from a real diff", () => {
+  assert.equal(diffFingerprint(""), diffFingerprint(undefined));
+  assert.notEqual(diffFingerprint(""), diffFingerprint(fileB("0000000")));
+});
+
+test("edge: diffFingerprint keeps the same change in a different file apart", () => {
+  assert.notEqual(diffFingerprint(fileB("0000000")), diffFingerprint(fileB("0000000").replaceAll("b.js", "c.js")));
+});
+
+test("edge: diffFingerprint tells a duplicated file block from a single one", () => {
+  assert.notEqual(diffFingerprint(fileB("0000000")), diffFingerprint(fileB("0000000") + fileB("0000000")));
+});
+
+test("edge: diffFingerprint treats a CRLF added line as different from an LF one", () => {
+  assert.notEqual(diffFingerprint(fileB("0000000")), diffFingerprint(fileB("0000000").replace("+y\n", "+y\r\n")));
+});
+
+const human = { type: "User", login: "leo" };
+const hunterOk = { context: "review/test-hunter", state: "success", description: "ok", created_at: "2026-09-26T10:00:00Z", creator: human };
+
+test("testHunterReusable only when the tier requires the test-hunter and the head has no trusted status for it", () => {
+  const base = { issueLabels: ["tier:quick", "ready"], files: ["src/a.ts"], statuses: [], config };
+  assert.equal(testHunterReusable(base), true);
+  assert.equal(testHunterReusable({ ...base, statuses: [{ ...hunterOk, creator: { type: "Bot", login: "x[bot]" } }] }), true);
+  assert.equal(testHunterReusable({ ...base, statuses: [{ ...hunterOk, state: "failure" }] }), false);
+  assert.equal(testHunterReusable({ ...base, issueLabels: ["tier:skip"] }), false);
+  assert.equal(testHunterReusable({ ...base, issueLabels: ["tier:quick", "tier:full"] }), false);
+  assert.equal(testHunterReusable({ ...base, issueLabels: undefined }), false);
+});
+
+// edge: not named by the acceptance criteria or the lane's edge: cases, which only test a head failure winning over
+// reuse; a pending or errored head status is "any status" too and must equally block reuse consideration.
+test("edge: testHunterReusable treats a pending or errored head status as a status too, not only a failure", () => {
+  const base = { issueLabels: ["tier:quick", "ready"], files: ["src/a.ts"], statuses: [], config };
+  assert.equal(testHunterReusable({ ...base, statuses: [{ ...hunterOk, state: "pending" }] }), false);
+  assert.equal(testHunterReusable({ ...base, statuses: [{ ...hunterOk, state: "error" }] }), false);
+});
+
+const quickPr = {
+  prBody: "Closes #7\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\nnothing\n## Not done\nnothing",
+  issueLabels: ["tier:quick", "ready"],
+  issueState: "open",
+  issueAuthorCanWrite: true,
+  issueIsPr: false,
+  headRef: "issue-7-x",
+  headSha: "a".repeat(40),
+  files: ["src/a.ts"],
+  statuses: [],
+  verdicts: [],
+  config,
+};
+
+test("edge: gateDecision refuses a reused status that is not a trusted test-hunter success on a real SHA", () => {
+  const sha = "e".repeat(40);
+  assert.match(gateDecision({ ...quickPr, reused: { sha, status: hunterOk } }).description, /test-hunter reused from eeeeeee$/);
+  for (const reused of [
+    { sha, status: { ...hunterOk, creator: { type: "Bot", login: "github-actions[bot]" } } },
+    { sha, status: { ...hunterOk, state: "failure" } },
+    { sha, status: { ...hunterOk, context: "review/ui-reviewer" } },
+    { sha: "not-a-sha", status: hunterOk },
+    { sha },
+  ]) {
+    assert.equal(gateDecision({ ...quickPr, reused }).description, "waiting for review/test-hunter", JSON.stringify(reused));
+  }
+});
+
+test("edge: gateDecision ignores a reused status when the head has its own trusted test-hunter status", () => {
+  const d = gateDecision({ ...quickPr, statuses: [{ ...hunterOk, state: "failure" }], reused: { sha: "e".repeat(40), status: hunterOk } });
+  assert.equal(d.description, "review/test-hunter is failure");
+});
+
+test("edge: diffFingerprint keeps a hunk boundary: one hunk split in two is a different diff", () => {
+  const one = "diff --git a/b.js b/b.js\n--- a/b.js\n+++ b/b.js\n@@ -1,2 +1,2 @@\n-x\n+y\n-p\n+q\n";
+  const two = "diff --git a/b.js b/b.js\n--- a/b.js\n+++ b/b.js\n@@ -1,1 +1,1 @@\n-x\n+y\n@@ -9,1 +9,1 @@\n-p\n+q\n";
+  assert.notEqual(diffFingerprint(one), diffFingerprint(two));
 });

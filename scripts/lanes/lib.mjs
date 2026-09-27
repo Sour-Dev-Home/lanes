@@ -1,6 +1,7 @@
 // Pure logic for the lanes workflow: config, file classes, required reviewers, the task and PR contracts, and the gate
 // decision. No I/O except loadConfig and the injected `api` in authorCanWrite; everything else is a plain function so
 // it can be unit-tested.
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 
@@ -322,6 +323,28 @@ export function adrGoverns(adrs, file) {
 
 // ---- The gate decision ----
 
+const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@.*$/;
+
+/**
+ * SHA-256 (hex) of a unified diff that survives a merge from main when the PR's own change did not change (#25): it
+ * drops `index` lines, reduces each hunk header to `@@` (line numbers and the function heading both move with code
+ * above the hunk) and sorts the per-file blocks. Every other byte counts, whitespace and CR included, unlike
+ * `git patch-id`: whitespace can change behaviour, so a whitespace-only change must invalidate a review.
+ */
+export function diffFingerprint(diffText) {
+  const blocks = [];
+  const lines = String(diffText ?? "").split("\n");
+  // The diff's final newline belongs to whichever file comes last; dropping it keeps blocks order-independent.
+  if (lines.at(-1) === "") lines.pop();
+  for (const line of lines) {
+    if (line.startsWith("diff --git ") || blocks.length === 0) blocks.push([]);
+    if (line.startsWith("index ")) continue;
+    blocks.at(-1).push(HUNK_HEADER.test(line) ? "@@" : line);
+  }
+  const normalized = blocks.map((b) => b.join("\n")).sort();
+  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
 /** Newest status per context (GitHub keeps every status ever posted on a commit). */
 export function latestByContext(statuses) {
   const out = new Map();
@@ -377,10 +400,12 @@ const NEEDS_NOTHING = /^nothing\.?$/i;
  * comments (`parseVerdictComment`) whose author already passed `authorCanWrite`, oldest first; only those bound to
  * `headSha` count, and the newest per reviewer is its verdict for this head.
  */
-function fullTierBlocker({ pr, required, verdicts, headSha }) {
+function fullTierBlocker({ pr, required, verdicts, headSha, reusedSha }) {
   if (pr.contractChange === "breaking") return "breaking contract change";
   const head = typeof headSha === "string" ? headSha.toLowerCase() : null;
-  const forHead = (Array.isArray(verdicts) ? verdicts : []).filter((v) => head !== null && v?.sha === head && v.verdict);
+  // #25: a reused test-hunter status brings along the test-hunter's verdict comment for the same commit, and only that.
+  const bound = (v) => (head !== null && v.sha === head) || (reusedSha !== null && v.reviewer === REUSABLE_REVIEWER && v.sha === reusedSha);
+  const forHead = (Array.isArray(verdicts) ? verdicts : []).filter((v) => v?.verdict && bound(v));
   for (const v of forHead) {
     const findings = Array.isArray(v.verdict.findings) ? v.verdict.findings : [];
     // Fails closed: any severity but minor (in any case, or unknown) blocks while unfixed.
@@ -396,16 +421,38 @@ function fullTierBlocker({ pr, required, verdicts, headSha }) {
   return null;
 }
 
-/** What `lanes/gate` should say for a PR head. Pure: every input is passed in. */
-export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [] }) {
+/** The issue's one valid tier, or null when it has none or several. */
+function tierOf(issueLabels) {
+  const tiers = (Array.isArray(issueLabels) ? issueLabels : []).filter((l) => l.startsWith("tier:")).map((l) => l.slice(5)).filter((t) => TIERS.includes(t));
+  return tiers.length === 1 ? tiers[0] : null;
+}
+
+/** The only reviewer whose status may be reused from an earlier commit (#25). */
+export const REUSABLE_REVIEWER = "test-hunter";
+
+/**
+ * Whether the gate should look for a test-hunter success on an earlier commit (#25): only when the tier requires the
+ * test-hunter and the head has no trusted review/test-hunter status. Any status on the head, a failure included, wins.
+ */
+export function testHunterReusable({ issueLabels, files, statuses, config, adrs = [] }) {
+  const tier = tierOf(issueLabels);
+  if (tier === null || !requiredReviewers(tier, classifyFiles(files, config, adrs)).includes(REUSABLE_REVIEWER)) return false;
+  return !latestByContext(trustedStatuses(statuses)).has(reviewContext(REUSABLE_REVIEWER));
+}
+
+/**
+ * What `lanes/gate` should say for a PR head. Pure: every input is passed in. `reused` (#25) is `{ sha, status }`: a
+ * trusted review/test-hunter success from an earlier commit of the PR whose own diff matches the head's. It counts only
+ * when the head has no trusted test-hunter status of its own, and brings along the test-hunter verdict for that `sha`.
+ */
+export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], reused = null }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
   if (pr.closes === null) return fail("PR body must say 'Closes #N' for its task issue");
   if (pr.duplicates.length > 0) return fail(`PR template sections repeated: ${pr.duplicates.join(", ")}`);
-  const tiers = labels.filter((l) => l.startsWith("tier:")).map((l) => l.slice(5)).filter((t) => TIERS.includes(t));
-  if (tiers.length !== 1) return fail(`issue #${pr.closes} needs exactly one tier:skip|quick|full label`);
-  const tier = tiers[0];
+  const tier = tierOf(labels);
+  if (tier === null) return fail(`issue #${pr.closes} needs exactly one tier:skip|quick|full label`);
   // E2: the GitHub issues API also returns pull requests; "Closes #N" must name a real task issue, not a PR.
   if (issueIsPr) return fail(`issue #${pr.closes} is a pull request, not a task issue`);
   // C1: a stranger's issue must never reach the unattended merge path, whatever labels a lane later applies to the PR.
@@ -429,6 +476,14 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
     return fail("a breaking contract change needs the issue label contract:breaking");
   }
   const latest = latestByContext(trustedStatuses(statuses));
+  const hunter = reviewContext(REUSABLE_REVIEWER);
+  // Defence in depth: the reused status must itself be a trusted test-hunter success on a real commit SHA.
+  const reuse =
+    !latest.has(hunter) && COMMIT_SHA_RE.test(reused?.sha ?? "") && reused.status?.context === hunter && reused.status.state === "success" && trustedStatuses([reused.status]).length === 1
+      ? { sha: reused.sha.toLowerCase(), status: reused.status }
+      : null;
+  if (reuse) latest.set(hunter, reuse.status);
+  const note = reuse ? `, test-hunter reused from ${reuse.sha.slice(0, 7)}` : "";
   const required = requiredReviewers(tier, cls);
   for (const name of required) {
     const s = latest.get(reviewContext(name));
@@ -439,16 +494,16 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
     }
   }
   if (latest.get(reviewContext("owner"))?.state === "success") {
-    return { state: "success", description: "approved by owner", stage: "ready" };
+    return { state: "success", description: `approved by owner${note}`, stage: "ready" };
   }
-  const waitOwner = (reason) => ({ state: "pending", description: `waiting on owner (/approve) (${reason})`, stage: "owner" });
+  const waitOwner = (reason) => ({ state: "pending", description: `waiting on owner (/approve) (${reason})${note}`, stage: "owner" });
   // ADR 0002: the files that decide what gets checked and who approves always need the owner, at every tier. A
   // sensitive path only adds the security-reviewer (requiredReviewers); it no longer sends a PR to the owner.
   if (cls.owner) return waitOwner("owner-only path");
   if (!NEEDS_NOTHING.test(pr.sections["needs the owner"] ?? "")) return waitOwner("needs the owner");
   let blocker = null;
-  if (tier === "full") blocker = fullTierBlocker({ pr, required, verdicts, headSha });
+  if (tier === "full") blocker = fullTierBlocker({ pr, required, verdicts, headSha, reusedSha: reuse?.sha ?? null });
   else if (tier === "quick" && cls.contract) blocker = "contract change";
   if (blocker) return waitOwner(blocker);
-  return { state: "success", description: `unattended-eligible (tier:${tier}), reviews in`, stage: "ready" };
+  return { state: "success", description: `unattended-eligible (tier:${tier}), reviews in${note}`, stage: "ready" };
 }
