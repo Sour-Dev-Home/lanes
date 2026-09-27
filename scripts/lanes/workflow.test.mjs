@@ -200,3 +200,14 @@ test("the PR template's Tests added comment mentions `edge:` lines", () => {
   const section = readFileSync(".github/pull_request_template.md", "utf8").match(/## Tests added\n([\s\S]*?)\n## /)[1];
   assert.match(section, /edge: <case>/);
 });
+
+// edge: the example summary's "Extra case:" prefix alone would still match `/^Extra case: \S/` even if shrunk to a
+// single non-descriptive character, so a later edit could gut the example without failing the check above.
+test("test-hunter.md's example summary names a real extra case, not just a placeholder character", () => {
+  const hunter = readFileSync(".claude/agents/test-hunter.md", "utf8");
+  const example = JSON.parse(hunter.match(/```json\n([\s\S]*?)\n```/)[1]);
+  const match = example.summary.match(/^Extra case: (.+?)\s\.\.\.$/);
+  assert.ok(match, `expected "Extra case: <description> ..."; got: ${example.summary}`);
+  const wordCount = match[1].trim().split(/\s+/).length;
+  assert.ok(wordCount >= 4, `expected a descriptive extra case (>= 4 words), got ${wordCount}: "${match[1]}"`);
+});
