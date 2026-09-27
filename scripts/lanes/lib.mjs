@@ -2,6 +2,7 @@
 // decision. No I/O except loadConfig and the injected `api` in authorCanWrite; everything else is a plain function so
 // it can be unit-tested.
 import { readFileSync } from "node:fs";
+import { posix } from "node:path";
 
 export const REVIEWERS = ["test-hunter", "ui-reviewer", "security-reviewer", "architecture-advisor"];
 export const TIERS = ["skip", "quick", "full"];
@@ -208,6 +209,75 @@ export function parseVerdictComment(body) {
   }
   if (verdict === null || typeof verdict !== "object" || Array.isArray(verdict) || verdict.reviewer !== reviewer) return null;
   return { reviewer, sha: sha === undefined ? null : sha.toLowerCase(), verdict };
+}
+
+// ---- Architecture decision records (contracts/adr-template.md) ----
+
+const ADR_TITLE_RE = /^#\s+(\d{4})\s*:\s*(.*)$/;
+const ADR_STATUS_RE = /^(proposed|accepted|superseded by (\d{4}))$/;
+
+/** Why a `Governs` entry is not a plain repo-relative path, or null when it is. */
+function governsPathError(p) {
+  if (/^([/\\]|[A-Za-z]:)/.test(p)) return `Governs entry is absolute: ${p}`;
+  if (p.includes("`")) return `Governs entry has an unbalanced backtick: ${p}`;
+  if (p.includes("\\")) return `Governs entry must use forward slashes: ${p}`;
+  if (/[*?[\]{}!]/.test(p)) return `Governs entry is a glob, list the path or its directory: ${p}`;
+  const segments = p.replace(/\/$/, "").split("/");
+  if (segments.includes("..")) return `Governs entry contains ..: ${p}`;
+  if (segments.some((s) => s === "" || s === ".")) return `Governs entry is not a normalized path: ${p}`;
+  return null;
+}
+
+/**
+ * Parses an ADR in the contracts/adr-template.md format.
+ * @returns {{ number: number, title: string, status: "proposed" | "accepted" | "superseded", supersededBy?: number, governs: string[] } | { error: string }}
+ */
+export function parseAdr(text) {
+  // Strip HTML comments until none remain, so a nested `<!-<!-- -->-` can't reassemble one after a single pass.
+  let body = String(text ?? "").replace(/\r\n/g, "\n");
+  for (let prev = null; prev !== body; ) {
+    prev = body;
+    body = body.replace(/<!--[\s\S]*?-->/g, "");
+  }
+  const lines = scanFences(body).filter((l) => !l.inFence).map((l) => l.line);
+  const titleLine = lines.find((l) => l.startsWith("# "));
+  if (!titleLine) return { error: "missing title line `# NNNN: <title>`" };
+  const t = titleLine.match(ADR_TITLE_RE);
+  if (!t) return { error: `title has no NNNN number: ${titleLine}` };
+  const title = t[2].trim();
+  if (!title) return { error: "missing title after the number" };
+  const statusLine = lines.find((l) => /^Status:/.test(l));
+  if (!statusLine) return { error: "missing status line `Status: proposed | accepted | superseded by NNNN`" };
+  const rawStatus = statusLine.slice("Status:".length).trim();
+  const s = rawStatus.match(ADR_STATUS_RE);
+  if (!s) return { error: `unknown status: ${rawStatus} (expected proposed, accepted or superseded by NNNN)` };
+  const dup = duplicateHeadings(body, "##");
+  if (dup.length) return { error: `duplicate section: ${dup.join(", ")}` };
+  const governs = [];
+  for (const line of (parseSections(body, "##").governs ?? "").split("\n")) {
+    if (!line.trim()) continue;
+    const item = line.match(/^-\s+(.+)$/);
+    if (!item) return { error: `Governs line is not a list item: ${line.trim()}` };
+    const p = item[1].trim().replace(/^`(.*)`$/, "$1");
+    const err = governsPathError(p);
+    if (err) return { error: err };
+    governs.push(p);
+  }
+  if (governs.length === 0) return { error: "empty Governs: list at least one repo-relative path" };
+  const adr = { number: Number(t[1]), title, status: s[2] ? "superseded" : s[1], governs };
+  if (s[2]) adr.supersededBy = Number(s[2]);
+  return adr;
+}
+
+/** Numbers of the accepted ADRs whose Governs lists `file` exactly or a directory (trailing `/`) containing it. */
+export function adrGoverns(adrs, file) {
+  const f = posix.normalize(String(file ?? "").replace(/\\/g, "/"));
+  if (f.startsWith("../") || f.startsWith("/")) return [];
+  const hits = (adrs ?? [])
+    .filter((a) => a && !a.error && a.status === "accepted")
+    .filter((a) => a.governs.some((g) => (g.endsWith("/") ? f.startsWith(g) : f === g)))
+    .map((a) => a.number);
+  return [...new Set(hits)].sort((a, b) => a - b);
 }
 
 // ---- The gate decision ----

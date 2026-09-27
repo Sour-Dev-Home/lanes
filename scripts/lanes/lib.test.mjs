@@ -1,7 +1,7 @@
 // scripts/lanes/lib.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { authorCanWrite, classifyFiles, compileConfig, loadConfig, parseVerdictComment, requiredReviewers, reviewContext } from "./lib.mjs";
+import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, loadConfig, parseAdr, parseVerdictComment, requiredReviewers, reviewContext } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -148,4 +148,116 @@ test("parseVerdictComment returns null for anything that is not a well-formed ve
 
 test("an old-format marker without a SHA parses with sha null", () => {
   assert.deepEqual(parseVerdictComment(vcomment("security-reviewer")), { reviewer: "security-reviewer", sha: null, verdict: vjson });
+});
+
+// The ADR format contract: contracts/adr-template.md.
+const adr = ({ title = "# 0007: Cache the snapshot", status = "Status: accepted", governs = "- scripts/lanes/\n- contracts/adr-template.md" } = {}) =>
+  `${title}\n\n${status}\n\n## Context\n\nWhy.\n\n## Decision\n\nWhat.\n\n## Decisions for the owner\n\nnothing\n\n## Consequences\n\nThen.\n\n## Governs\n\n${governs}\n`;
+
+test("parseAdr reads number, title, status and governs", () => {
+  assert.deepEqual(parseAdr(adr()), { number: 7, title: "Cache the snapshot", status: "accepted", governs: ["scripts/lanes/", "contracts/adr-template.md"] });
+});
+
+test("parseAdr accepts each status", () => {
+  assert.equal(parseAdr(adr({ status: "Status: proposed" })).status, "proposed");
+  assert.equal(parseAdr(adr({ status: "Status: accepted" })).status, "accepted");
+  const sup = parseAdr(adr({ status: "Status: superseded by 0012" }));
+  assert.equal(sup.status, "superseded");
+  assert.equal(sup.supersededBy, 12);
+});
+
+test("parseAdr names each error", () => {
+  const cases = {
+    "missing title": [adr({ title: "" }), /title/],
+    "title without a number": [adr({ title: "# Cache the snapshot" }), /number/],
+    "title with an empty name": [adr({ title: "# 0007:" }), /title/],
+    "unknown status": [adr({ status: "Status: rejected" }), /status/],
+    "missing status": [adr({ status: "" }), /status/],
+    "superseded without a number": [adr({ status: "Status: superseded by someone" }), /status/],
+    "absolute path": [adr({ governs: "- /etc/passwd" }), /absolute/],
+    "Windows absolute path": [adr({ governs: "- C:/repo/x.md" }), /absolute/],
+    "parent segment": [adr({ governs: "- docs/../secrets.md" }), /\.\./],
+    "glob star": [adr({ governs: "- scripts/*.mjs" }), /glob/],
+    "glob brace": [adr({ governs: "- scripts/{a,b}.mjs" }), /glob/],
+    "glob question mark": [adr({ governs: "- scripts/a?.mjs" }), /glob/],
+    "empty governs": [adr({ governs: "" }), /governs/i],
+    "missing governs section": [adr().replace(/## Governs[\s\S]*$/, ""), /governs/i],
+    "governs with only prose": [adr({ governs: "the lanes scripts" }), /governs/i],
+    "governs with a * bullet": [adr({ governs: "* scripts/lanes/" }), /list item/],
+    "a second Governs section": [adr() + "\n## Governs\n\n- secrets/private.md\n", /duplicate section: governs/],
+  };
+  for (const [name, [text, re]] of Object.entries(cases)) {
+    const r = parseAdr(text);
+    assert.ok(r.error, name);
+    assert.match(r.error, re, name);
+  }
+});
+
+test("adrGoverns matches an exact file and a directory entry, not a sibling", () => {
+  const adrs = [parseAdr(adr({ title: "# 0001: A", governs: "- contracts/adr-template.md" })), parseAdr(adr({ title: "# 0002: B", governs: "- scripts/lanes/" }))];
+  assert.deepEqual(adrGoverns(adrs, "contracts/adr-template.md"), [1]);
+  assert.deepEqual(adrGoverns(adrs, "scripts/lanes/lib.mjs"), [2]);
+  assert.deepEqual(adrGoverns(adrs, "scripts/lanes/sub/x.mjs"), [2]);
+  assert.deepEqual(adrGoverns(adrs, "scripts/lanes2/lib.mjs"), []);
+  assert.deepEqual(adrGoverns(adrs, "contracts/adr-template.md.bak"), []);
+});
+
+test("parseAdr edges: CRLF, backticked paths, and headings or status lines inside a fence", () => {
+  assert.equal(parseAdr(adr().replace(/\n/g, "\r\n")).number, 7);
+  assert.deepEqual(parseAdr(adr({ governs: "- `scripts/lanes/`" })).governs, ["scripts/lanes/"]);
+  const fenced = "```\n# 9999: Fake\nStatus: proposed\n```\n" + adr();
+  assert.deepEqual([parseAdr(fenced).number, parseAdr(fenced).status], [7, "accepted"]);
+  assert.match(parseAdr(adr({ status: "```\nStatus: accepted\n```" })).error, /status/);
+});
+
+test("parseAdr edges: unnormalized Governs entries are errors", () => {
+  for (const g of ["./scripts/lanes/", "scripts//lanes/", "scripts\\lanes\\lib.mjs", "\\\\server\\share", "..", "!scripts/"]) {
+    assert.ok(parseAdr(adr({ governs: `- ${g}` })).error, g);
+  }
+  assert.equal(parseAdr(null).error.includes("title"), true);
+  assert.equal(parseAdr(adr({ status: "<!-<!-- x -->-\nStatus: proposed\n-->\nStatus: accepted" })).status, "accepted", "nested comment is stripped fully");
+});
+
+test("adrGoverns edges: error entries, normalized file spelling and duplicate entries", () => {
+  const a = parseAdr(adr({ title: "# 0004: D", governs: "- scripts/lanes/\n- scripts/lanes/lib.mjs" }));
+  assert.deepEqual(adrGoverns([a, { error: "bad" }, null], "scripts/lanes/lib.mjs"), [4]);
+  assert.deepEqual(adrGoverns([a], "./scripts/lanes/lib.mjs"), [4]);
+  assert.deepEqual(adrGoverns([a], "scripts\\lanes\\lib.mjs"), [4]);
+  assert.deepEqual(adrGoverns([a], "scripts/lanes"), []);
+  assert.deepEqual(adrGoverns([a], "scripts/lanes/../other/x.mjs"), [], "a .. that leaves the directory does not match");
+  assert.deepEqual(adrGoverns([a], "other/../scripts/lanes/x.mjs"), [4], "a .. that lands inside it does");
+  assert.deepEqual(adrGoverns([a], "../scripts/lanes/x.mjs"), []);
+  assert.deepEqual(adrGoverns([], "scripts/lanes/lib.mjs"), []);
+});
+
+test("adrGoverns ignores superseded and proposed ADRs", () => {
+  const adrs = [
+    parseAdr(adr({ title: "# 0001: Old", status: "Status: superseded by 0003", governs: "- scripts/lanes/" })),
+    parseAdr(adr({ title: "# 0002: Maybe", status: "Status: proposed", governs: "- scripts/lanes/" })),
+    parseAdr(adr({ title: "# 0003: New", governs: "- scripts/lanes/" })),
+  ];
+  assert.deepEqual(adrGoverns(adrs, "scripts/lanes/lib.mjs"), [3]);
+});
+
+// Extra case beyond the issue's listed edges: the title number must be exactly four digits, not fewer or more.
+test("parseAdr rejects a title number that is not exactly four digits", () => {
+  assert.match(parseAdr(adr({ title: "# 007: Three digits" })).error, /number/);
+  assert.match(parseAdr(adr({ title: "# 00007: Five digits" })).error, /number/);
+});
+
+// Regression test for a bug found in review: a Governs entry with a stray, unbalanced backtick (e.g. an
+// author forgot to close it) used to parse silently instead of failing. governsPathError now rejects any
+// backtick left after stripping a balanced leading+trailing pair.
+test("parseAdr rejects a Governs entry with an unbalanced backtick", () => {
+  const r = parseAdr(adr({ governs: "- `scripts/lanes/" }));
+  assert.ok(r.error, `expected an error, got a parsed path: ${JSON.stringify(r)}`);
+});
+
+// Extra case beyond the issue's listed edges: two different accepted ADRs governing the same file must both
+// be returned, sorted by number regardless of the input order (not just deduplicated, which the existing
+// duplicate-entry test already covers for one ADR listing the same path twice).
+test("adrGoverns sorts numbers from multiple accepted ADRs that govern the same file", () => {
+  const nine = parseAdr(adr({ title: "# 0009: Nine", governs: "- scripts/lanes/" }));
+  const two = parseAdr(adr({ title: "# 0002: Two", governs: "- scripts/lanes/" }));
+  assert.deepEqual(adrGoverns([nine, two], "scripts/lanes/lib.mjs"), [2, 9]);
 });

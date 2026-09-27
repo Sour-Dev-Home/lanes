@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { parseIssueForm, parsePrBody, parseSections, duplicateHeadings, parseVerdictComment } from "./lib.mjs";
+import { readdirSync, readFileSync } from "node:fs";
+import { parseAdr, parseIssueForm, parsePrBody, parseSections, duplicateHeadings, parseVerdictComment } from "./lib.mjs";
 import { buildVerdictComment, validateVerdict } from "./post-review.mjs";
 
 const issue = (over = {}) => {
@@ -201,6 +201,28 @@ test("the metrics schema and validateVerdict agree", () => {
   for (const [name, metrics, expected] of cases) {
     assert.equal(schemaAccepts(metricsSchema, metrics), expected, `schema: ${name}`);
     assert.equal(validateVerdict(verdict(metrics), { criteriaCount: 1 }).ok, expected, `validateVerdict: ${name}`);
+  }
+});
+
+// The ADR format contract: contracts/adr-template.md, parsed by parseAdr. A malformed ADR can't merge.
+test("the ADR template's example parses", () => {
+  const template = readFileSync("contracts/adr-template.md", "utf8").replace(/\r\n/g, "\n");
+  const example = template.match(/^```markdown\n([\s\S]*?)^```$/m);
+  assert.ok(example, "the template has a ```markdown example block");
+  const r = parseAdr(example[1]);
+  assert.equal(r.error, undefined, r.error);
+  assert.equal(r.status, "accepted");
+  assert.ok(r.governs.length > 0);
+});
+
+test("every docs/adr/*.md parses, and its file name carries its number", () => {
+  const files = readdirSync("docs/adr").filter((f) => f.endsWith(".md"));
+  assert.ok(files.length > 0, "docs/adr has at least one ADR");
+  for (const f of files) {
+    const r = parseAdr(readFileSync(`docs/adr/${f}`, "utf8"));
+    assert.equal(r.error, undefined, `${f}: ${r.error}`);
+    assert.match(f, /^\d{4}-[a-z0-9-]+\.md$/, `${f}: name must be NNNN-<slug>.md`);
+    assert.equal(Number(f.slice(0, 4)), r.number, `${f}: file number differs from the title's`);
   }
 });
 
