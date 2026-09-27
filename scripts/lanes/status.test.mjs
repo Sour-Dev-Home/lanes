@@ -419,3 +419,9 @@ test("--json items carry session only when their issue has one", () => {
   assert.equal("session" in s.ready[0], false);
   assert.equal("sessionsUnavailable" in s, false);
 });
+
+test("edge: a PR needing the owner that also has a running session keeps the session id in its needs: note", () => {
+  const sessions = laneSessions([agent("42c93c57", wt("issue-10-x"))], ROOT);
+  const s = summarize({ prs: [pr(7, [], { closingIssuesReferences: [{ number: 10 }], body: body("approve please") })], issues: [issue(10)], merged: [], sessions });
+  assert.deepEqual(s.waitingOnOwner, [{ number: 7, title: "pr 7", stage: "starting", note: "needs: approve please — session 42c93c57", session: { id: "42c93c57", state: "working" } }]);
+});

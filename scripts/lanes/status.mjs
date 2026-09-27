@@ -171,10 +171,10 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
     const session = refs.map((n) => sessions.get(n)).find(Boolean);
     const { stage, note } = prStage(pr, queuePosition.get(pr.number), gateDescriptions.get(pr.number));
     const needs = (parsePrBody(pr.body).sections["needs the owner"] ?? "").trim();
-    const item = withSession({ number: pr.number, title: pr.title, stage, note }, session);
-    if (stage === "owner" || session?.waiting) out.waitingOnOwner.push(item);
-    else if (needs && !/^nothing\b/i.test(needs)) out.waitingOnOwner.push({ ...item, note: `needs: ${needs.split("\n")[0]}` });
-    else out.inFlight.push(item);
+    const item = { number: pr.number, title: pr.title, stage, note };
+    if (stage === "owner" || session?.waiting) out.waitingOnOwner.push(withSession(item, session));
+    else if (needs && !/^nothing\b/i.test(needs)) out.waitingOnOwner.push(withSession({ ...item, note: `needs: ${needs.split("\n")[0]}` }, session));
+    else out.inFlight.push(withSession(item, session));
   }
   const formOf = new Map(issues.map((i) => [i.number, parseIssueForm(i.body ?? "").fields]));
   const blockedByOf = new Map([...formOf].map(([n, f]) => [n, f.blockedBy]));
