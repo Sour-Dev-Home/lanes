@@ -69,6 +69,14 @@ test("wrappers do not hide an owner command", () => {
   }
 });
 
+test("a trailing or leading whitespace on the plain owner command does not deny it (regression)", () => {
+  for (const cmd of [`${OWNER}\n`, `${OWNER} `, ` ${OWNER}`, `\n${OWNER}\n`]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [{ pr: "16", standalone: true }], JSON.stringify(cmd));
+  }
+  // an embedded newline is still a chain, not trailing whitespace, and must still be denied
+  assert.equal(findOwnerInvocations(`${OWNER}\nnode -v`)[0].standalone, false);
+});
+
 test("unbalanced quotes around a post-review command are treated as an owner command", () => {
   assert.equal(findOwnerInvocations(`node scripts/lanes/post-review.mjs owner "oops`).length, 1);
 });

@@ -175,8 +175,11 @@ export function findOwnerInvocations(command) {
   // Deeper indirection (a variable built from another, `$(…)`, backticks) cannot be resolved statically: with an
   // `owner` word and a substitution anywhere, fail closed and count it as an owner command.
   if (out.length === 0 && /[$`]/.test(cmd) && /(^|[\s'"`(])owner($|[\s'"`)])/.test(cmd)) out.push({ pr: undefined, standalone: false });
-  if (out.length === 1 && out[0].pr !== undefined && cmd.startsWith(PLAIN_PREFIX) && !SHELL_META_RE.test(cmd)) {
-    const segments = lex(cmd); // scan() lexed this cmd already, so it cannot throw here
+  // Leading/trailing whitespace (a trailing newline the model appends to a Bash command is common) must not turn the
+  // plain command into a "wrapped" one: trim before checking the exact prefix and for embedded shell metacharacters.
+  const trimmedCmd = cmd.trim();
+  if (out.length === 1 && out[0].pr !== undefined && trimmedCmd.startsWith(PLAIN_PREFIX) && !SHELL_META_RE.test(trimmedCmd)) {
+    const segments = lex(trimmedCmd); // scan() lexed this cmd already, so it cannot throw here
     if (segments.length === 1 && segments[0][1] === "scripts/lanes/post-review.mjs" && segments[0][2] === "owner") out[0].standalone = true;
   }
   return out;
