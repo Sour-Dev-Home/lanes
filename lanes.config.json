@@ -21,6 +21,29 @@
       "(^|/)CLAUDE\\.md$",
       "^\\.gitattributes$"
     ],
-    "ui": ["^frontend/src/", "^src/ui/", "\\.css$"]
+    "ui": ["^frontend/src/", "^src/ui/", "\\.css$"],
+    "owner": [
+      "^scripts/lanes/(gate|lib|approve-guard|post-review|issue-contract)(\\.test)?\\.mjs$",
+      "^scripts/lanes/gate-decision\\.test\\.mjs$",
+      "^scripts/lanes/workflow\\.test\\.mjs$",
+      "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$",
+      "^\\.claude/settings\\.json$",
+      "^\\.github/",
+      "^\\.githooks/",
+      "^lanes\\.config\\.json$",
+      "^\\.claude/agents/",
+      "^\\.claude/commands/(lane|night|approve)\\.md$",
+      "^docs/adr/",
+      "^package(-lock)?\\.json$",
+      "(^|/)(pnpm-lock\\.yaml|yarn\\.lock)$",
+      "^vendor/",
+      "(^|/)CLAUDE\\.md$",
+      "^\\.gitattributes$",
+      "^scripts/preflight\\.mjs$",
+      "(^|/)\\.env",
+      "(^|/)auth/",
+      "(^|/)secrets?/",
+      "^deploy/"
+    ]
   }
 }

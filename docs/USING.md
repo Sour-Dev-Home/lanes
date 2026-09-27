@@ -28,17 +28,27 @@
 
 ## What merges without you
 
-A PR merges on green checks alone only when its "Needs the owner" says `nothing` and one of these holds:
+`lanes.config.json` sorts the files a PR touches into three classes (ADR 0002). The gate reads the lists from the
+default branch, so a PR can't change its own rules.
 
-- its issue is `tier:skip` and it touches only skip paths;
-- its issue is `tier:quick` with no contract file and nothing on a sensitive path (`.github/`, `.claude/`,
-  `.githooks/`, `scripts/lanes/`, `lanes.config.json`, auth, secrets, deploy or `.env` paths);
-- its issue is `tier:full`, it touches no sensitive path, its "Contract changes" is `none` or `additive`, and every
-  required reviewer has both a success `review/*` status and a verdict comment for the PR's current head commit that
-  says `success`, posted by someone with write access, with no critical or important finding left unfixed. A verdict
-  for an older commit, or in the old format without a commit, does not count.
+| Class | Paths (see `lanes.config.json`) | What it requires |
+| --- | --- | --- |
+| skip (`paths.skip`) | docs, `*.md`, tests | Allowed at `tier:skip`, with no reviewers, only if *every* file is a skip path and none is sensitive. |
+| sensitive (`paths.sensitive`) | `.github/`, `.claude/`, `.githooks/`, `scripts/lanes/`, `lanes.config.json`, package and lock files, `vendor/`, `CLAUDE.md`, auth, secrets, deploy, `.env` | The security-reviewer, at quick and full; not allowed at `tier:skip`. It does not by itself need `/approve`. |
+| owner-only (`paths.owner`) | the gate and trust code and their tests, `install`/`setup-repo`/`new-project`, `.claude/settings.json`, `.github/`, `.githooks/`, `lanes.config.json`, `.claude/agents/`, `.claude/commands/{lane,night,approve}.md`, `docs/adr/`, package and lock files, `vendor/`, `CLAUDE.md`, `.gitattributes`, `scripts/preflight.mjs`, `.env`, auth, secrets, deploy | `/approve`, at every tier, however clean the reviews. Adds no reviewer. |
 
-Everything else waits for `/approve`, and the `lanes/gate` status says why. CI decides this from the diff and the PR's
+A PR merges on green checks alone only when it touches no owner-only path, its "Needs the owner" says `nothing`,
+and its tier's rule holds:
+
+- `tier:skip`: it touches only skip paths;
+- `tier:quick`: its required reviews pass and it touches no contract file;
+- `tier:full`: its "Contract changes" is `none` or `additive`, and every required reviewer has both a success
+  `review/*` status and a verdict comment for the PR's current head commit that says `success`, posted by someone
+  with write access, with no critical or important finding left unfixed. A verdict for an older commit, or in the
+  old format without a commit, does not count.
+
+Everything else waits for `/approve`, and the `lanes/gate` status says why (for example
+`waiting on owner (/approve) (owner-only path)`). CI decides this from the diff and the PR's
 comments; a lane cannot grant it to itself.
 
 ## Contracts, in one place
