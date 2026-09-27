@@ -174,6 +174,9 @@ const UNRESOLVED_RE = /[$`]/;
 // `run` subcommand ahead of its options and script, which is not itself an option or the script.
 const NODE_RE = /^(node|nodejs|bun|deno)(\.exe)?$/i;
 const RUNS_VIA_RUN_RE = /^(bun|deno)(\.exe)?$/i;
+// Commands that run their arguments as shell text: eval and source always, a shell after a -c flag.
+const EVAL_RE = /^(eval|source|\.)$/;
+const SHELL_RE = /^(sh|bash|zsh|dash|ksh|ash|busybox)(\.exe)?$/i;
 // Commands that only print, list or search their arguments: a "node" among them is never run. Every other command
 // word may be a wrapper (env, sudo, time, xargs, …), so a "node" behind it counts.
 const NON_RUNNING_COMMANDS = new Set(["echo", "printf", "grep", "egrep", "fgrep", "rg", "ls", "which", "where", "whereis", "type", "cat", "head", "tail", "wc", "file", "stat", "man"]);
@@ -326,6 +329,24 @@ function scan(cmd, depth, out) {
       const start = RUNS_VIA_RUN_RE.test(p.split(/[\\/]/).at(-1)) && plain[at + 1] === "run" ? at + 1 : at;
       for (let j = start + 1; j <= nodeScriptEnd(plain, start); j += 1) nodeRange.add(j);
     });
+    // Words that eval, source or a shell's -c runs as shell text: one still holding `$` or a backtick could be any
+    // command at all (`eval $A$B` with both ambiguous), so it fails closed like node's script.
+    let evalFrom = Infinity;
+    plain.forEach((p, at) => {
+      if ((at > 0 && !runsArgs) || at >= evalFrom) return;
+      const name = p.split(/[\\/]/).at(-1);
+      if (EVAL_RE.test(name)) evalFrom = at + 1;
+      else if (SHELL_RE.test(name)) {
+        const c = plain.findIndex((w, j) => j > at && /^-[A-Za-z]*c[A-Za-z]*$/.test(w));
+        if (c !== -1) evalFrom = c + 1;
+      }
+    });
+    // An assigned value may be run later by eval or sh -c "$CMD", and an ambiguous one is never substituted: scan
+    // every value that looks like a script as a command of its own.
+    for (const w of segments[k]) {
+      const m = ASSIGN_RE.exec(w);
+      if (m) scanNested(m[2], depth, out);
+    }
     // A redirection target is no argument, but a herestring is a script and a quoted `$(…)` or backtick in any other
     // target runs. A plain file target ("$TMP/out file.txt") is neither.
     for (const { text, herestring } of segments[k].redirects ?? []) {
@@ -345,9 +366,9 @@ function scan(cmd, depth, out) {
         const { reviewer, pr } = readPostReviewArgs(plain.slice(i + 1));
         // Fail closed: a reviewer word that could expand to anything counts as the owner.
         if (reviewer === "owner" || (reviewer !== undefined && /[$`*?[{]/.test(reviewer))) out.push({ pr, standalone: false });
-      } else if ((UNRESOLVED_RE.test(w) || mayExpandToPostReview(w)) && (i === 0 || nodeRange.has(i))) {
-        // The command word, or a node option or the script node runs, that could still expand to post-review.mjs:
-        // fail closed.
+      } else if ((UNRESOLVED_RE.test(w) || mayExpandToPostReview(w)) && (i === 0 || nodeRange.has(i) || (i >= evalFrom && UNRESOLVED_RE.test(w)))) {
+        // The command word, a node option or the script node runs, or text a shell evaluates, that could still expand
+        // to post-review.mjs: fail closed.
         out.push({ pr: undefined, standalone: false });
       }
     });

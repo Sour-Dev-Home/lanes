@@ -245,6 +245,27 @@ test("edge: spliced and unresolved forms behind wrappers, empty values and odd r
     "X=review; sh -c 'sh -c \"node scripts/lanes/post-$X.mjs owner\"'",
   ];
   for (const cmd of denied) assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  // Found by the #62 security-reviewer (round at ae38a05): a script held in a variable and run by eval or sh -c is
+  // scanned from its assignment, ambiguous or not, with its own splices failing closed.
+  for (const cmd of [
+    "true && CMD='node scripts/lanes/post-review.mjs own${E}er --pr 16' || CMD='node scripts/lanes/post-review.mjs security-reviewer --pr 16'; eval $CMD",
+    "true && CMD='node scripts/lanes/post-review.mjs own${E}er --pr 16' || CMD=x; bash -c \"$CMD\"",
+    "E=; CMD='node scripts/lanes/post-review.mjs own${E}er --pr 16'; eval $CMD",
+    "export CMD='node scripts/lanes/post-review.mjs own${E}er'; sh -c \"$CMD\"",
+    // Split across two ambiguous names, neither value looks like a script: the eval text itself fails closed.
+    "true && A='node scripts/lanes/post-rev' || A=x; true && B='iew.mjs own${E}er --pr 16' || B=y; eval $A$B",
+    'eval "$X"',
+    'bash -c "$X"',
+    'bash -lc "$X"',
+    "sudo sh -c \"$X\"",
+    'source "$F"',
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  for (const cmd of ['MSG="fix the $X thing"; git commit -m "$MSG"', "OUT='a b'; ls $OUT", "eval ls", 'bash scripts/foo.sh "$PR"', "bash -c 'gh pr view 16'", 'echo eval "$X"']) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
   // A variable resolved to another script is not an owner command. One assigned the same value twice is still resolved.
   assert.deepEqual(findOwnerInvocations("X=gate; X=gate; node scripts/lanes/$X.mjs 16"), []);
   // Found by the #62 security-reviewer: the lexer cannot tell a sequence from exclusive branches, so a name given two
