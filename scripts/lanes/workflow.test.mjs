@@ -162,4 +162,7 @@ test("night.md sends a single push notification per night for its digest", () =>
   assert.match(night, /PushNotification/);
   assert.match(night, /one notification per night/i);
   assert.match(night, /lanes night: /);
+  // lane.md's Notify rule is unconditional, so night.md must override it where it tells lanes to follow lane.md
+  const step3 = night.match(/\n3\. [\s\S]*?\n4\. /)[0];
+  assert.match(step3, /except its Notify rule/);
 });
