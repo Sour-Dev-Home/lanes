@@ -41,6 +41,18 @@ test("edge: hookScripts reads every event and ignores hooks without a project sc
   assert.deepEqual(hookScripts({}), []);
 });
 
+test("edge: hookScripts dedupes a script wired to more than one hook event", () => {
+  // approve-guard.mjs and start-guard.mjs are each wired twice in the real settings.json
+  // (UserPromptSubmit and PreToolUse); a naive list (not a Set) would count them twice.
+  const settings = {
+    hooks: {
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: 'node "$CLAUDE_PROJECT_DIR/scripts/lanes/approve-guard.mjs" user-prompt-submit' }] }],
+      PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: 'node "$CLAUDE_PROJECT_DIR/scripts/lanes/approve-guard.mjs" pre-tool-use' }] }],
+    },
+  };
+  assert.deepEqual(hookScripts(settings), ["scripts/lanes/approve-guard.mjs"]);
+});
+
 test("edge: every local module a hook script imports is in MANIFEST", () => {
   for (const s of hookScripts(JSON.parse(readFileSync(".claude/settings.json", "utf8"))))
     for (const m of readFileSync(s, "utf8").matchAll(/^import .* from "(\.{1,2}\/[^"]+)";$/gm)) {
