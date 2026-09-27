@@ -16,6 +16,20 @@ test("start.md stops when run by a lane or a schedule", () => {
   assert.match(body.split("\n")[0], /If you are a lane or were started by a schedule, stop now\./);
 });
 
+// #64 criterion 2: the command's description and step 1 name the current cap.
+test("start.md's description and step 1 name the cap", () => {
+  const md = readFileSync(new URL("../../.claude/commands/start.md", import.meta.url), "utf8");
+  const [frontMatter, ...bodyParts] = md.split(/^---\s*$/m).filter(Boolean);
+  assert.match(frontMatter, new RegExp(`caps at ${CAP}\\b`));
+  assert.match(bodyParts.join(""), new RegExp(`past ${CAP} lanes in flight`));
+});
+
+// #64 criterion 3: docs/USING.md tells the owner how many lanes /start allows.
+test("docs/USING.md says how many lanes to start", () => {
+  const doc = readFileSync(new URL("../../docs/USING.md", import.meta.url), "utf8");
+  assert.match(doc, new RegExp(`Start up to ${CAP} lanes`));
+});
+
 // Criterion 2: planStart is pure and returns { launch, refused }.
 test("planStart launches ready issues and returns the documented shape", () => {
   const input = [issue(1), issue(2)];
