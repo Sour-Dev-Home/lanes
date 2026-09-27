@@ -116,3 +116,50 @@ test("lanes point at the practice layer", () => {
   for (const name of ["test-driven-development", "incremental-implementation", "api-and-interface-design"]) assert.match(lane, new RegExp(name));
   assert.match(readFileSync(".claude/commands/plan-issues.md", "utf8"), /planning-and-task-breakdown/);
 });
+
+// #28: a lane pushes one notification when it finishes or needs the owner, never for routine progress
+const laneText = () => readFileSync(".claude/commands/lane.md", "utf8");
+
+test("lane.md loads PushNotification via ToolSearch and caps each notification at one short `lanes #N:` line", () => {
+  const lane = laneText();
+  assert.match(lane, /ToolSearch/);
+  assert.match(lane, /PushNotification/);
+  assert.match(lane, /under\s+200 characters/);
+  assert.match(lane, /`lanes #<PR or issue>: /);
+});
+
+test("lane.md step 7 notifies once after checks settle: queued to merge, or needs /approve with the gate reason", () => {
+  const step7 = laneText().match(/\n7\. [\s\S]*?\n8\. /)[0];
+  assert.match(step7, /checks settle/);
+  assert.match(step7, /queued to merge/);
+  assert.match(step7, /needs \/approve: <the lanes\/gate reason>/);
+});
+
+test("lane.md step 9 notifies `CI failed twice` before stopping", () => {
+  const step9 = laneText().match(/\n9\. [\s\S]*?\n10\. /)[0];
+  assert.match(step9, /CI failed twice: <cause>, see #<PR>/);
+});
+
+test("lane.md steps 1-2 refusals notify `cannot start`", () => {
+  const steps12 = laneText().match(/\n1\. [\s\S]*?\n3\. /)[0];
+  assert.match(steps12, /cannot start: <reason>/);
+});
+
+test("lane.md notifies on any other stop that needs the owner, and never for routine progress", () => {
+  const lane = laneText();
+  assert.match(lane, /any other stop[^.]*needs? the owner/i);
+  assert.match(lane, /never[^.]*routine progress/i);
+});
+
+test("no hook is added for permission-prompt notifications", () => {
+  const settings = readFileSync(".claude/settings.json", "utf8");
+  assert.doesNotMatch(settings, /PushNotification/);
+  assert.doesNotMatch(laneText(), /permission prompt[^.]*PushNotification/i);
+});
+
+test("night.md sends a single push notification per night for its digest", () => {
+  const night = readFileSync(".claude/commands/night.md", "utf8");
+  assert.match(night, /PushNotification/);
+  assert.match(night, /one notification per night/i);
+  assert.match(night, /lanes night: /);
+});
