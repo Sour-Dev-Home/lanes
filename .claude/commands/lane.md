@@ -5,9 +5,17 @@ argument-hint: <issue-number>
 You are a lane for issue #$ARGUMENTS. You own this one issue until its PR is open with auto-merge on. Do not work on
 anything else, and never message other sessions: everything you need is in the issue and the files it links.
 
+Notify: load the `PushNotification` tool via ToolSearch (`select:PushNotification`) and send one notification, under
+200 characters, starting `lanes #<PR or issue>: ` (the PR number once it exists, the issue number before), at each
+stop named below. Any other stop where you write that you need the owner sends one notification with that reason.
+Never send one for routine progress. If the tool is unavailable, say so in your final message and carry on.
+A notification leaves the machine: write the reason as short plain words and issue/PR numbers only, never a file
+path, command or CI output, secret, token or personal data (point to the PR or issue for detail instead).
+
 1. `gh issue view $ARGUMENTS --json title,body,labels,state`. Stop and report if it is not open, lacks the `ready`
    label, or lacks exactly one `tier:*` label.
-2. For each issue under "Blocked by": `gh issue view <N> --json state`. Stop and report if any is OPEN.
+2. For each issue under "Blocked by": `gh issue view <N> --json state`. Stop and report if any is OPEN. A refusal in
+   step 1 or 2 notifies `lanes #$ARGUMENTS: cannot start: <reason>`.
 3. `git fetch origin`, then work in a new worktree on branch `issue-$ARGUMENTS-<short-slug>` from `origin/main`
    (use the EnterWorktree tool when available, otherwise `git worktree add`). Run `npm run setup` in it.
 4. Read the issue's Interface contract and Scope. Touch nothing out of scope. If the contract is wrong or missing,
@@ -33,10 +41,13 @@ anything else, and never message other sessions: everything you need is in the i
 7. `npm run preflight`, push, then `gh pr create` with the PR template filled in completely: "Closes #$ARGUMENTS",
    every acceptance criterion mapped under "What changed", "Contract changes" starting with none, additive or
    breaking, and "Needs the owner" saying exactly what he must decide, or "nothing". Then `gh pr merge <N> --auto`.
+   Once its checks settle (`gh pr checks <N> --watch`), notify once: `lanes #<N>: queued to merge` if `lanes/gate`
+   passed, else `lanes #<N>: needs /approve: <the lanes/gate reason>` (the status's description).
 8. Follow-up work becomes new issues from the Task form: write the body to a file in the form's layout (`### Goal`,
    `### Acceptance criteria`, `### Interface contract`, `### Scope`, `### Blocked by`, `### Tier`, every field
    filled), then `gh issue create --title "<title>" --label lane-filed --body-file <file>` (not `--template`, which
    cannot take scripted answers). The `lane-filed` label means the owner must remove it before the issue can become
    `ready`. Never leave follow-ups only in the PR text.
-9. If CI fails twice on the same cause, stop: comment the cause on the PR and file an issue. Do not loop.
+9. If CI fails twice on the same cause, stop: comment the cause on the PR, file an issue, and notify
+   `lanes #<PR>: CI failed twice: <cause>, see #<PR>`. Do not loop.
 10. End with the PR URL, the lanes/gate state and a two-sentence summary.
