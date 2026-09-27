@@ -490,6 +490,14 @@ test("testHunterReusable only when the tier requires the test-hunter and the hea
   assert.equal(testHunterReusable({ ...base, issueLabels: undefined }), false);
 });
 
+// edge: not named by the acceptance criteria or the lane's edge: cases, which only test a head failure winning over
+// reuse; a pending or errored head status is "any status" too and must equally block reuse consideration.
+test("edge: testHunterReusable treats a pending or errored head status as a status too, not only a failure", () => {
+  const base = { issueLabels: ["tier:quick", "ready"], files: ["src/a.ts"], statuses: [], config };
+  assert.equal(testHunterReusable({ ...base, statuses: [{ ...hunterOk, state: "pending" }] }), false);
+  assert.equal(testHunterReusable({ ...base, statuses: [{ ...hunterOk, state: "error" }] }), false);
+});
+
 const quickPr = {
   prBody: "Closes #7\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\nnothing\n## Not done\nnothing",
   issueLabels: ["tier:quick", "ready"],
