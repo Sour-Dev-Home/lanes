@@ -233,7 +233,12 @@ function governsPathError(p) {
  * @returns {{ number: number, title: string, status: "proposed" | "accepted" | "superseded", supersededBy?: number, governs: string[] } | { error: string }}
  */
 export function parseAdr(text) {
-  const body = String(text ?? "").replace(/\r\n/g, "\n").replace(/<!--[\s\S]*?-->/g, "");
+  // Strip HTML comments until none remain, so a nested `<!-<!-- -->-` can't reassemble one after a single pass.
+  let body = String(text ?? "").replace(/\r\n/g, "\n");
+  for (let prev = null; prev !== body; ) {
+    prev = body;
+    body = body.replace(/<!--[\s\S]*?-->/g, "");
+  }
   const lines = scanFences(body).filter((l) => !l.inFence).map((l) => l.line);
   const titleLine = lines.find((l) => l.startsWith("# "));
   if (!titleLine) return { error: "missing title line `# NNNN: <title>`" };

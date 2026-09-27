@@ -215,6 +215,7 @@ test("parseAdr edges: unnormalized Governs entries are errors", () => {
     assert.ok(parseAdr(adr({ governs: `- ${g}` })).error, g);
   }
   assert.equal(parseAdr(null).error.includes("title"), true);
+  assert.equal(parseAdr(adr({ status: "<!-<!-- x -->-\nStatus: proposed\n-->\nStatus: accepted" })).status, "accepted", "nested comment is stripped fully");
 });
 
 test("adrGoverns edges: error entries, normalized file spelling and duplicate entries", () => {
