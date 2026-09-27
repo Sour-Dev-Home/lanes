@@ -21,7 +21,7 @@ const run = (over) =>
     prBody: body(),
     issueLabels: ["tier:quick", "ready"],
     issueState: "open",
-    issueAuthorAssociation: "OWNER",
+    issueAuthorCanWrite: true,
     headRef: "issue-7-x",
     files: ["src/a.ts"],
     statuses: [],
@@ -100,17 +100,17 @@ test("a closed linked issue fails", () => {
   assert.match(d.description, /open/);
 });
 
-test("a trusted issue author (OWNER, MEMBER, COLLABORATOR) passes the contract stage", () => {
-  for (const assoc of ["OWNER", "MEMBER", "COLLABORATOR"]) {
-    assert.equal(run({ issueAuthorAssociation: assoc }).stage, "review", assoc);
-  }
+test("an issue author with write access passes the contract stage", () => {
+  assert.equal(run({ issueAuthorCanWrite: true }).stage, "review");
 });
 
-test("an untrusted issue author fails the contract stage", () => {
-  for (const assoc of ["NONE", "FIRST_TIME_CONTRIBUTOR", "CONTRIBUTOR", undefined]) {
-    const d = run({ issueAuthorAssociation: assoc });
-    assert.equal(d.state, "failure", String(assoc));
-    assert.equal(d.stage, "contract", String(assoc));
+// Fails closed: only a literal true is trust; an unknown or unread permission is not.
+test("an issue author without write access fails the contract stage", () => {
+  for (const canWrite of [false, undefined, null, "true", 1]) {
+    const d = run({ issueAuthorCanWrite: canWrite });
+    assert.equal(d.state, "failure", String(canWrite));
+    assert.equal(d.stage, "contract", String(canWrite));
+    assert.match(d.description, /write access/, String(canWrite));
   }
 });
 

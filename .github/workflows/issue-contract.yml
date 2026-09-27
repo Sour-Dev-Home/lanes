@@ -28,4 +28,5 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           ISSUE_LABELS_JSON: ${{ toJson(github.event.issue.labels.*.name) }}
-          AUTHOR_ASSOCIATION: ${{ github.event.issue.author_association }}
+          # Trust is looked up from this login's repository permission (Metadata: read, which GITHUB_TOKEN always has).
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}

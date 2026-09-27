@@ -54,8 +54,11 @@ cannot grant it to itself.
   act as one GitHub account, and a lane can push branches and run code (tests, workflows). What the gate does stop:
   - honest mistakes: a missing review, a wrong tier, an incomplete contract, a lane posting the owner's approval by
     accident (the permission prompt on `post-review.mjs owner`);
-  - strangers: only issues opened by the owner, members or collaborators ever become `ready`, and the gate rejects a
-    PR linked to anyone else's issue, so outside text never reaches an unattended lane;
+  - strangers: only issues opened by someone with write, maintain or admin permission on the repository ever become
+    `ready`, and the gate rejects a PR linked to anyone else's issue, so outside text never reaches an unattended lane.
+    Both checks read the author's permission from `repos/{repo}/collaborators/{login}/permission`, never
+    `author_association`, so an owner or org member counts whether their org membership is public or private. Read or
+    triage permission, or none, is never trusted, and a failed permission lookup counts as no permission;
   - stale or copied results: the merge queue re-decides the whole gate from live inputs instead of copying the head's
     last `lanes/gate` status, and reviewer statuses posted by bots are ignored.
 

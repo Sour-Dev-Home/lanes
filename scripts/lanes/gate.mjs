@@ -2,7 +2,7 @@
 // Inputs (environment): REPO, EVENT_NAME, PR_NUMBER, STATUS_SHA, STATUS_CONTEXT, HEAD_REF, GROUP_SHA, GH_TOKEN.
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { GATE_CONTEXT, gateDecision, loadConfig, parsePrBody } from "./lib.mjs";
+import { authorCanWrite, GATE_CONTEXT, gateDecision, loadConfig, parsePrBody } from "./lib.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -34,16 +34,16 @@ export function decideForPr(api, repo, number, config) {
   const closes = parsePrBody(pr.body).closes;
   let issueLabels = [];
   let issueState = null;
-  let issueAuthorAssociation = null;
+  let issueAuthorCanWrite = false;
   let issueIsPr = false;
   if (closes !== null) {
     try {
       const issue = JSON.parse(api([`repos/${repo}/issues/${closes}`]));
       issueLabels = issue.labels.map((l) => l.name);
       issueState = issue.state;
-      issueAuthorAssociation = issue.author_association;
       // E2: the issues API also returns pull requests; only a `pull_request` key set means it is actually a PR.
       issueIsPr = issue.pull_request !== undefined && issue.pull_request !== null;
+      issueAuthorCanWrite = authorCanWrite(api, repo, issue.user?.login);
     } catch {
       issueLabels = []; // unknown issue: the decision then fails on the missing tier label
     }
@@ -52,7 +52,7 @@ export function decideForPr(api, repo, number, config) {
     prBody: pr.body,
     issueLabels,
     issueState,
-    issueAuthorAssociation,
+    issueAuthorCanWrite,
     issueIsPr,
     headRef: pr.head.ref,
     files,

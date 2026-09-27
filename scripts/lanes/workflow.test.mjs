@@ -16,9 +16,11 @@ test("lanes-gate triggers on pull_request_target, not pull_request, so a PR cann
 });
 
 // C1: strangers' issues must not be labelled ready by the issue-contract check
-test("issue-contract passes the issue author's association to the script", () => {
+// Trust is the author's repository write access, looked up by login; author_association hides private org members.
+test("issue-contract passes the issue author's login to the script, not their association", () => {
   const yml = readFileSync(".github/workflows/issue-contract.yml", "utf8");
-  assert.match(yml, /AUTHOR_ASSOCIATION: \$\{\{ github\.event\.issue\.author_association \}\}/);
+  assert.match(yml, /ISSUE_AUTHOR: \$\{\{ github\.event\.issue\.user\.login \}\}/);
+  assert.doesNotMatch(yml, /author_association/);
 });
 
 // R2: removing lane-filed (or hand-adding ready) must re-run the contract check

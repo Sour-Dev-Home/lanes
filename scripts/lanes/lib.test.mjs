@@ -1,7 +1,47 @@
 // scripts/lanes/lib.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyFiles, compileConfig, loadConfig, requiredReviewers, reviewContext } from "./lib.mjs";
+import { authorCanWrite, classifyFiles, compileConfig, loadConfig, requiredReviewers, reviewContext } from "./lib.mjs";
+
+// The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
+const permissionApi = (reply) => {
+  const calls = [];
+  const api = (args) => {
+    calls.push(args);
+    if (reply instanceof Error) throw reply;
+    return typeof reply === "string" ? reply : JSON.stringify(reply);
+  };
+  return { api, calls };
+};
+
+test("authorCanWrite trusts write, maintain and admin, read from the collaborator permission endpoint", () => {
+  for (const [permission, role_name] of [["admin", "admin"], ["write", "maintain"], ["write", "write"]]) {
+    const { api, calls } = permissionApi({ permission, role_name });
+    assert.equal(authorCanWrite(api, "o/r", "leo"), true, role_name);
+    assert.deepEqual(calls, [["repos/o/r/collaborators/leo/permission"]]);
+  }
+});
+
+test("authorCanWrite never trusts read, triage or no permission", () => {
+  for (const [permission, role_name] of [["read", "triage"], ["read", "read"], ["none", undefined], [undefined, "write"]]) {
+    assert.equal(authorCanWrite(permissionApi({ permission, role_name }).api, "o/r", "leo"), false, String(role_name));
+  }
+});
+
+test("authorCanWrite fails closed when the permission cannot be read", () => {
+  assert.equal(authorCanWrite(permissionApi(new Error("HTTP 404")).api, "o/r", "leo"), false);
+  assert.equal(authorCanWrite(permissionApi(new Error("HTTP 403")).api, "o/r", "leo"), false);
+  assert.equal(authorCanWrite(permissionApi("not json").api, "o/r", "leo"), false);
+  assert.equal(authorCanWrite(permissionApi("null").api, "o/r", "leo"), false);
+});
+
+test("authorCanWrite refuses a missing or malformed login without calling the API", () => {
+  for (const login of [undefined, null, "", "../../x", "a/b", "dependabot[bot]", "-leo", "a".repeat(40)]) {
+    const { api, calls } = permissionApi({ permission: "admin" });
+    assert.equal(authorCanWrite(api, "o/r", login), false, String(login));
+    assert.equal(calls.length, 0, String(login));
+  }
+});
 
 const config = compileConfig({
   requiredChecks: ["verify", "security", "lanes/gate"],
