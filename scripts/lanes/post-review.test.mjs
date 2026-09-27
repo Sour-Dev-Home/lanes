@@ -251,3 +251,8 @@ test("edge: an unknown, missing or multi-line reviewer name still gives a one-li
   assert.match(metricsWarning({}), /^warning: .*metrics/);
   assert.doesNotMatch(metricsWarning({ reviewer: "a\nb" }), /\n/);
 });
+
+test("edge: metricsWarning never throws on null or undefined input, and still warns", () => {
+  assert.match(metricsWarning(null), /^warning: .*metrics/);
+  assert.match(metricsWarning(undefined), /^warning: .*metrics/);
+});
