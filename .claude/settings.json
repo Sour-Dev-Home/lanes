@@ -43,10 +43,21 @@
   },
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/approve-guard.mjs\" user-prompt-submit" }] }
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/start-guard.mjs\" user-prompt-submit" },
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/approve-guard.mjs\" user-prompt-submit" }
+        ]
+      }
     ],
     "PreToolUse": [
-      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/approve-guard.mjs\" pre-tool-use" }] }
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/start-guard.mjs\" pre-tool-use" },
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/approve-guard.mjs\" pre-tool-use" }
+        ]
+      }
     ],
     "Notification": [
       {
