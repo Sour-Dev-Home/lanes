@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { gateDescriptions, issuePaths, mergeQueueEntries, pathsOverlap, render, summarize } from "./status.mjs";
+import { gateDescriptions, issuePaths, laneSessions, loadSessions, mergeQueueEntries, pathsOverlap, render, summarize } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -295,4 +295,133 @@ test("only startable issues are compared; blocked ones get no parallel note", ()
 test("render puts a heuristic disclaimer under READY TO START", () => {
   const text = render(summarize({ prs: [], issues: [scoped(106, "In: `a.mjs`")], merged: [] }), "24h");
   assert.match(text, /READY TO START \(1\)\n  [^\n]*heuristic[^\n]*not a guarantee[^\n]*\n  #106 \[quick\] issue 106 — parallel\n/);
+});
+
+// `claude agents --json`, as recorded on a real background session waiting on a permission prompt:
+// { kind: "background", status: "waiting", waitingFor: "permission prompt", state: "blocked" }.
+const ROOT = "C:\\repo\\lanes";
+const agent = (id, cwd, extra = {}) => ({ id, cwd, kind: "background", startedAt: 1, sessionId: `${id}-uuid`, name: "lane", status: "busy", state: "working", ...extra });
+const waitingAgent = (id, cwd) => agent(id, cwd, { status: "waiting", waitingFor: "permission prompt", state: "blocked" });
+const wt = (name) => `${ROOT}\\.claude\\worktrees\\${name}`;
+
+test("laneSessions keeps background sessions in this repo's issue-<N>- worktrees and maps them to issue N", () => {
+  const sessions = laneSessions(
+    [
+      agent("aaaa0001", wt("issue-19-status-sessions")),
+      agent("aaaa0002", "C:\\other\\.claude\\worktrees\\issue-20-x"), // outside this repo
+      agent("aaaa0003", wt("adr25-signin")), // not a lane worktree
+      agent("aaaa0004", ROOT), // the main checkout
+      { ...agent("aaaa0005", wt("issue-21-y")), kind: "interactive" },
+      waitingAgent("aaaa0006", wt("issue-22-z")),
+    ],
+    ROOT,
+  );
+  assert.deepEqual([...sessions], [
+    [19, { id: "aaaa0001", state: "working", waiting: false }],
+    [22, { id: "aaaa0006", state: "blocked", waiting: true }],
+  ]);
+});
+
+test("an IN FLIGHT PR whose issue has a session shows the id in its note", () => {
+  const sessions = laneSessions([agent("42c93c57", wt("issue-10-x"))], ROOT);
+  const s = summarize({ prs: [pr(7, [gate("PENDING", "waiting for review/test-hunter")], { closingIssuesReferences: [{ number: 10 }] })], issues: [issue(10)], merged: [], sessions });
+  assert.deepEqual(s.inFlight, [{ number: 7, title: "pr 7", stage: "review", note: "waiting for review/test-hunter — session 42c93c57", session: { id: "42c93c57", state: "working" } }]);
+  assert.match(render(s, "24h"), /#7 \[review\] pr 7 — waiting for review\/test-hunter — session 42c93c57/);
+});
+
+test("a lane with a session and no PR is IN FLIGHT as running, not READY TO START", () => {
+  const sessions = laneSessions([agent("42c93c57", wt("issue-10-x"))], ROOT);
+  const s = summarize({ prs: [], issues: [issue(10), issue(11)], merged: [], sessions });
+  assert.deepEqual(s.ready.map((i) => i.number), [11]);
+  assert.deepEqual(s.inFlight, [{ number: 10, title: "issue 10", stage: "running", note: "session 42c93c57", session: { id: "42c93c57", state: "working" } }]);
+  assert.match(render(s, "24h"), /IN FLIGHT \(1\)\n  #10 \[running\] issue 10 — session 42c93c57/);
+});
+
+test("a session waiting on a permission prompt is listed under WAITING ON YOU with its attach command", () => {
+  const sessions = laneSessions([waitingAgent("42c93c57", wt("issue-10-x")), waitingAgent("5555aaaa", wt("issue-12-y"))], ROOT);
+  const s = summarize({ prs: [pr(7, [gate("PENDING", "waiting for review/test-hunter")], { closingIssuesReferences: [{ number: 12 }] })], issues: [issue(10), issue(12)], merged: [], sessions });
+  assert.deepEqual(s.inFlight, []);
+  assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.note, i.session]), [
+    [7, "waiting on a prompt: claude attach 5555aaaa", { id: "5555aaaa", state: "blocked" }],
+    [10, "waiting on a prompt: claude attach 42c93c57", { id: "42c93c57", state: "blocked" }],
+  ]);
+  assert.match(render(s, "24h"), /#10 \[running\] issue 10 — waiting on a prompt: claude attach 42c93c57/);
+});
+
+test("a blocked session not on a permission prompt is running, not waiting on you", () => {
+  const sessions = laneSessions([agent("42c93c57", wt("issue-10-x"), { status: "idle", state: "blocked" })], ROOT);
+  const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions });
+  assert.deepEqual([s.waitingOnOwner.length, s.inFlight[0].note], [0, "session 42c93c57"]);
+});
+
+test("sessions outside this repo or outside a lane worktree are ignored", () => {
+  const sessions = laneSessions([agent("aaaa0002", "C:\\other\\.claude\\worktrees\\issue-10-x"), agent("aaaa0003", `${ROOT}\\scripts`), agent("aaaa0004", "C:\\repo\\lanes-other\\issue-10-x")], ROOT);
+  assert.equal(sessions.size, 0);
+  const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions });
+  assert.deepEqual([s.ready.map((i) => i.number), s.inFlight], [[10], []]);
+});
+
+test("claude unavailable: /status prints everything else plus one line", () => {
+  const enoent = Object.assign(new Error("spawn claude ENOENT"), { code: "ENOENT" });
+  const failing = Object.assign(new Error("Command failed"), { status: 2 });
+  const cases = [
+    [() => { throw enoent; }, "claude not found"],
+    [() => { throw failing; }, "claude agents --json exited 2"],
+    [() => "not json", "claude agents --json printed invalid JSON"],
+    [() => '{"a":1}', "claude agents --json printed invalid JSON"],
+  ];
+  for (const [run, reason] of cases) {
+    const loaded = loadSessions(ROOT, run);
+    assert.deepEqual(loaded, { sessions: new Map(), sessionsUnavailable: reason });
+    const text = render(summarize({ prs: [], issues: [issue(10)], merged: [], ...loaded }), "24h");
+    assert.match(text, /READY TO START \(1\)/);
+    assert.ok(text.endsWith(`\n\n(background sessions unavailable: ${reason})`), text);
+  }
+  const ok = loadSessions(ROOT, () => JSON.stringify([agent("42c93c57", wt("issue-10-x"))]));
+  assert.deepEqual(ok, { sessions: new Map([[10, { id: "42c93c57", state: "working", waiting: false }]]) });
+  assert.doesNotMatch(render(summarize({ prs: [], issues: [], merged: [], ...ok }), "24h"), /unavailable/);
+});
+
+test("edge: two sessions on one issue, the most recently started wins", () => {
+  const sessions = laneSessions([agent("new00001", wt("issue-10-b"), { startedAt: 5 }), agent("old00001", wt("issue-10-a"), { startedAt: 2 })], ROOT);
+  assert.equal(sessions.get(10).id, "new00001");
+});
+
+test("edge: malformed entries, a missing id, and a bare issue-<N> folder are skipped", () => {
+  const sessions = laneSessions([null, "x", { kind: "background" }, agent(undefined, wt("issue-10-x")), agent("aaaa0001", wt("issue-11")), agent("aaaa0002", `${wt("issue-12-y")}\\scripts`)], ROOT);
+  assert.deepEqual([...sessions.keys()], [12]);
+});
+
+test("edge: Windows paths match case-insensitively with either slash; POSIX paths match exactly", () => {
+  assert.equal(laneSessions([agent("aaaa0001", "c:/REPO/Lanes/.claude/worktrees/issue-10-x")], `${ROOT}\\`).size, 1);
+  assert.equal(laneSessions([agent("aaaa0001", "/srv/lanes/.claude/worktrees/issue-10-x")], "/srv/lanes").size, 1);
+  assert.equal(laneSessions([agent("aaaa0001", "/srv/Lanes/.claude/worktrees/issue-10-x")], "/srv/lanes").size, 0);
+});
+
+test("edge: a session whose issue is closed (not in the open list) is not listed", () => {
+  const s = summarize({ prs: [], issues: [], merged: [], sessions: laneSessions([agent("aaaa0001", wt("issue-10-x"))], ROOT) });
+  assert.deepEqual([s.inFlight, s.waitingOnOwner], [[], []]);
+});
+
+test("edge: a running session on an issue without the ready label is still in flight, and never blocked", () => {
+  const s = summarize({ prs: [], issues: [issue(10, "#11", { ready: false }), issue(11)], merged: [], sessions: laneSessions([agent("aaaa0001", wt("issue-10-x"))], ROOT) });
+  assert.deepEqual([s.inFlight.map((i) => i.number), s.blocked], [[10], []]);
+});
+
+test("edge: a timed-out claude agents --json is reported by its error code", () => {
+  const timeout = Object.assign(new Error("spawnSync claude ETIMEDOUT"), { code: "ETIMEDOUT", status: null });
+  assert.equal(loadSessions(ROOT, () => { throw timeout; }).sessionsUnavailable, "claude agents --json failed: ETIMEDOUT");
+});
+
+test("--json items carry session only when their issue has one", () => {
+  const s = summarize({ prs: [pr(7, [])], issues: [issue(11)], merged: [], sessions: new Map() });
+  assert.equal("session" in s.inFlight[0], false);
+  assert.equal("session" in s.ready[0], false);
+  assert.equal("sessionsUnavailable" in s, false);
+});
+
+test("edge: a PR needing the owner that also has a running session keeps the session id in its needs: note", () => {
+  const sessions = laneSessions([agent("42c93c57", wt("issue-10-x"))], ROOT);
+  const s = summarize({ prs: [pr(7, [], { closingIssuesReferences: [{ number: 10 }], body: body("approve please") })], issues: [issue(10)], merged: [], sessions });
+  assert.deepEqual(s.waitingOnOwner, [{ number: 7, title: "pr 7", stage: "starting", note: "needs: approve please — session 42c93c57", session: { id: "42c93c57", state: "working" } }]);
 });
