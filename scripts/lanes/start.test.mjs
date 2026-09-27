@@ -86,16 +86,39 @@ test("an issue refused for another reason does not make its overlap partner refu
 });
 
 // Criterion 5: the cap counts lanes already in flight.
-test("CAP is 3", () => assert.equal(CAP, 3));
+const busy = (n) => Array.from({ length: n }, (_, i) => 101 + i);
 
-test("refuses requests beyond a total of 3 lanes in flight", () => {
-  const { launch, refused } = plan([issue(1), issue(2), issue(3)], [7]);
+test("CAP is 8", () => assert.equal(CAP, 8));
+
+test("refuses requests beyond a total of 8 lanes in flight", () => {
+  const { launch, refused } = plan([issue(1), issue(2), issue(3)], busy(6));
   assert.deepEqual(launch, [1, 2]);
-  assert.deepEqual(refused, [{ number: 3, reason: "cap of 3 lanes in flight" }]);
+  assert.deepEqual(refused, [{ number: 3, reason: "cap of 8 lanes in flight" }]);
 });
 
-test("refuses everything when 3 lanes are already in flight", () => {
-  assert.deepEqual(plan([issue(1)], [7, 8, 9]).refused, [{ number: 1, reason: "cap of 3 lanes in flight" }]);
+test("launches one more when 7 lanes are in flight", () => {
+  assert.deepEqual(plan([issue(1)], busy(7)), { launch: [1], refused: [] });
+});
+
+test("refuses everything when 8 lanes are already in flight", () => {
+  assert.deepEqual(plan([issue(1)], busy(8)).refused, [{ number: 1, reason: "cap of 8 lanes in flight" }]);
+});
+
+test("edge: more than 8 lanes already in flight refuses without launching", () => {
+  assert.deepEqual(plan([issue(1), issue(2)], busy(9)), {
+    launch: [],
+    refused: [
+      { number: 1, reason: "cap of 8 lanes in flight" },
+      { number: 2, reason: "cap of 8 lanes in flight" },
+    ],
+  });
+});
+
+test("edge: 8 requests with nothing in flight all launch, a 9th is refused", () => {
+  const issues = Array.from({ length: 9 }, (_, i) => issue(i + 1));
+  const { launch, refused } = plan(issues, []);
+  assert.deepEqual(launch, [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.deepEqual(refused, [{ number: 9, reason: "cap of 8 lanes in flight" }]);
 });
 
 test("inFlightIssues counts open issue-* PRs and background sessions in issue worktrees once per issue", () => {
@@ -119,13 +142,13 @@ test("refuses an issue that is already in flight", () => {
 test("a mixed batch launches only what passes, in request order", () => {
   const overlaps = (a, b) => [a, b].sort().join() === "3,4";
   const issues = [issue(1), issue(2, { labels: ["tier:full"] }), issue(3), issue(4), issue(5), issue(6), issue(7)];
-  assert.deepEqual(plan(issues, [7], overlaps), {
+  assert.deepEqual(plan(issues, [7, ...busy(5)], overlaps), {
     launch: [1, 5],
     refused: [
       { number: 2, reason: "lacks ready" },
       { number: 3, reason: "overlaps #4" },
       { number: 4, reason: "overlaps #3" },
-      { number: 6, reason: "cap of 3 lanes in flight" },
+      { number: 6, reason: "cap of 8 lanes in flight" },
       { number: 7, reason: "already in flight" },
     ],
   });
@@ -209,11 +232,11 @@ test("main refuses overlapping issues using the /status overlap check", () => {
 test("main counts in-flight lanes from PRs and sessions", () => {
   const { deps } = fakes({
     issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } },
-    prs: [{ headRefName: "issue-8-x" }],
+    prs: [8, 10, 11, 12, 13, 14].map((n) => ({ headRefName: `issue-${n}-x` })),
     sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-9-y" }, { kind: "background", cwd: "/repo/.claude/worktrees/issue-1-z" }],
   });
   const { lines } = main(["1", "2"], deps);
-  assert.deepEqual(lines, ["#1: refused: already in flight", "#2: refused: cap of 3 lanes in flight"]);
+  assert.deepEqual(lines, ["#1: refused: already in flight", "#2: refused: cap of 8 lanes in flight"]);
 });
 
 test("main refuses an unreadable issue and an open blocker", () => {

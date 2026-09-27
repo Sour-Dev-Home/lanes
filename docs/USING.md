@@ -7,7 +7,7 @@
    tier. The `issue-contract` check labels a complete issue `tier:*` and `ready`, or comments what is missing.
    Faster: `/plan-issues "<your idea in 1-4 sentences>"` drafts up to 6 such issues (the contract issue first) into
    `.lanes/plans/`; edit or approve the draft, and only then are they created.
-2. **Start up to 3 lanes**: open a fresh Claude Code session per issue and run `/lane <issue>`. Each lane works in its
+2. **Start up to 8 lanes**: open a fresh Claude Code session per issue and run `/lane <issue>`. Each lane works in its
    own worktree, writes the failing tests first, runs its reviewers, opens the PR and turns auto-merge on, then ends.
    Faster: `/start <issue> [<issue> ...]` checks each issue the way `/lane` does and launches the rest as background
    sessions with `claude --bg "/lane <issue>"`, printing `#<issue> → <id>` for `claude attach` or `claude logs`. It
