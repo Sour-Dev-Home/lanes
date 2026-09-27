@@ -394,8 +394,8 @@ test("edge: malformed entries, a missing id, and a bare issue-<N> folder are ski
 
 test("edge: Windows paths match case-insensitively with either slash; POSIX paths match exactly", () => {
   assert.equal(laneSessions([agent("aaaa0001", "c:/REPO/Lanes/.claude/worktrees/issue-10-x")], `${ROOT}\\`).size, 1);
-  assert.equal(laneSessions([agent("aaaa0001", "/home/u/lanes/.claude/worktrees/issue-10-x")], "/home/u/lanes").size, 1);
-  assert.equal(laneSessions([agent("aaaa0001", "/home/u/Lanes/.claude/worktrees/issue-10-x")], "/home/u/lanes").size, 0);
+  assert.equal(laneSessions([agent("aaaa0001", "/srv/lanes/.claude/worktrees/issue-10-x")], "/srv/lanes").size, 1);
+  assert.equal(laneSessions([agent("aaaa0001", "/srv/Lanes/.claude/worktrees/issue-10-x")], "/srv/lanes").size, 0);
 });
 
 test("edge: a session whose issue is closed (not in the open list) is not listed", () => {
