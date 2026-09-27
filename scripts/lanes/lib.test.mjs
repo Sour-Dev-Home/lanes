@@ -1,8 +1,10 @@
 // scripts/lanes/lib.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, loadConfig, parseAdr, parseVerdictComment, requiredReviewers, reviewContext } from "./lib.mjs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, loadAdrs, loadConfig, parseAdr, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -136,7 +138,7 @@ test("the real config: tooling scripts and non-lane commands are sensitive but n
 });
 
 test("docs and tests only are skipOnly", () => {
-  assert.deepEqual(classifyFiles(["docs/a.md", "src/x.test.ts"], config), { skipOnly: true, contract: false, sensitive: false, ui: false, owner: false });
+  assert.deepEqual(classifyFiles(["docs/a.md", "src/x.test.ts"], config), { skipOnly: true, contract: false, sensitive: false, ui: false, owner: false, adr: [] });
 });
 
 test("a sensitive markdown file is not skipOnly", () => {
@@ -150,7 +152,7 @@ test("no files is not skipOnly", () => {
 
 test("code plus docs is not skipOnly; contract and ui are detected", () => {
   const cls = classifyFiles(["docs/a.md", "contracts/snapshot.ts", "frontend/src/App.tsx"], config);
-  assert.deepEqual(cls, { skipOnly: false, contract: true, sensitive: false, ui: true, owner: false });
+  assert.deepEqual(cls, { skipOnly: false, contract: true, sensitive: false, ui: true, owner: false, adr: [] });
 });
 
 test("required reviewers by tier and class", () => {
@@ -336,4 +338,102 @@ test("adrGoverns sorts numbers from multiple accepted ADRs that govern the same 
   const nine = parseAdr(adr({ title: "# 0009: Nine", governs: "- scripts/lanes/" }));
   const two = parseAdr(adr({ title: "# 0002: Two", governs: "- scripts/lanes/" }));
   assert.deepEqual(adrGoverns([nine, two], "scripts/lanes/lib.mjs"), [2, 9]);
+});
+
+// #45: accepted ADRs that govern a changed file require the architecture-advisor
+const governing = (n, governs, status = "Status: accepted") =>
+  parseAdr(adr({ title: `# ${String(n).padStart(4, "0")}: ADR ${n}`, status, governs }));
+
+test("classifyFiles reports the accepted ADRs governing any changed file", () => {
+  const adrs = [governing(3, "- scripts/lanes/"), governing(7, "- src/a.ts"), governing(9, "- src/b.ts")];
+  assert.deepEqual(classifyFiles(["src/a.ts", "scripts/lanes/x.mjs", "docs/a.md"], config, adrs).adr, [3, 7]);
+  assert.deepEqual(classifyFiles(["docs/a.md"], config, adrs).adr, []);
+});
+
+test("classifyFiles without adrs returns adr: [], as before", () => {
+  assert.deepEqual(classifyFiles(["scripts/lanes/x.mjs"], config).adr, []);
+});
+
+// edge: a rename passes both names (as gateDecision's skip check already relies on); moving a file out of a
+// governed path must still surface the ADR, since the old name is still in the diff.
+test("edge: a file renamed out of a governed path still reports the ADR (old name passed too)", () => {
+  const adrs = [governing(3, "- scripts/lanes/")];
+  assert.deepEqual(classifyFiles(["scripts/lanes/old.mjs", "docs/new.md"], config, adrs).adr, [3]);
+});
+
+test("classifyFiles ignores superseded and proposed ADRs", () => {
+  const adrs = [governing(3, "- src/a.ts", "Status: superseded by 0004"), governing(4, "- src/a.ts", "Status: proposed")];
+  assert.deepEqual(classifyFiles(["src/a.ts"], config, adrs).adr, []);
+});
+
+test("edge: two changed files governed by the same ADR report it once", () => {
+  assert.deepEqual(classifyFiles(["src/a.ts", "src/b.ts"], config, [governing(3, "- src/")]).adr, [3]);
+});
+
+test("requiredReviewers adds the architecture-advisor for a governed diff at quick and full, never skip", () => {
+  const none = { skipOnly: false, contract: false, sensitive: false, ui: false, owner: false, adr: [] };
+  const governed = { ...none, adr: [3] };
+  assert.deepEqual(requiredReviewers("quick", governed), ["test-hunter", "architecture-advisor"]);
+  assert.deepEqual(requiredReviewers("full", governed), ["test-hunter", "architecture-advisor"]);
+  assert.deepEqual(requiredReviewers("skip", governed), []);
+  assert.deepEqual(requiredReviewers("full", none), ["test-hunter"]);
+});
+
+test("edge: contract and ADR together add the architecture-advisor once", () => {
+  const cls = { skipOnly: false, contract: true, sensitive: false, ui: false, owner: false, adr: [3] };
+  assert.deepEqual(requiredReviewers("full", cls), ["test-hunter", "architecture-advisor"]);
+});
+
+test("edge: a class without an adr key (older callers) adds no advisor", () => {
+  assert.deepEqual(requiredReviewers("full", { skipOnly: false, contract: false, sensitive: false, ui: false }), ["test-hunter"]);
+});
+
+const adrDir = (files) => {
+  const root = mkdtempSync(join(tmpdir(), "lanes-adr-"));
+  const dir = join(root, "docs", "adr");
+  mkdirSync(dir, { recursive: true });
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+  return { root, dir };
+};
+
+test("loadAdrs parses every *.md in the directory, in file-name order", () => {
+  const { root, dir } = adrDir({ "0007-b.md": adr({ title: "# 0007: B" }), "0003-a.md": adr({ title: "# 0003: A" }), "notes.txt": "x" });
+  try {
+    assert.deepEqual(loadAdrs(dir).map((a) => a.number), [3, 7]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("edge: loadAdrs returns [] when the directory does not exist", () => {
+  assert.deepEqual(loadAdrs(join(tmpdir(), "lanes-no-such-dir", "docs", "adr")), []);
+});
+
+test("edge: loadAdrs keeps a malformed ADR as an error that governs nothing", () => {
+  const { root, dir } = adrDir({ "0001-bad.md": "no title", "0002-ok.md": adr({ title: "# 0002: Ok", governs: "- src/a.ts" }) });
+  try {
+    const adrs = loadAdrs(dir);
+    assert.ok(adrs[0].error);
+    assert.deepEqual(classifyFiles(["src/a.ts"], config, adrs).adr, [2]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("loadAdrs defaults to this repo's docs/adr", () => {
+  assert.ok(loadAdrs().some((a) => a.number === 1 && a.status === "accepted"));
+});
+
+test("reviewersReport lists the reviewers, then the governing ADRs zero-padded", () => {
+  const adrs = [governing(3, "- src/a.ts"), governing(7, "- src/a.ts")];
+  assert.equal(reviewersReport("full", ["src/a.ts"], config, adrs), "test-hunter\narchitecture-advisor\nADRs: 0003, 0007");
+});
+
+test("reviewersReport prints no ADR line when none govern the diff", () => {
+  assert.equal(reviewersReport("quick", ["src/b.ts"], config, [governing(3, "- src/a.ts")]), "test-hunter");
+});
+
+test("edge: reviewersReport at tier skip warns on code, prints none, and still names governing ADRs", () => {
+  const out = reviewersReport("skip", ["src/a.ts"], config, [governing(3, "- src/a.ts")]);
+  assert.equal(out, "NOT SKIP: the diff changes files outside the skip paths; use quick or full\nnone\nADRs: 0003");
 });

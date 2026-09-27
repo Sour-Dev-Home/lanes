@@ -1,7 +1,8 @@
 // scripts/lanes/reviewers.mjs
 // Prints the reviewers this branch's diff needs for a tier: node scripts/lanes/reviewers.mjs <skip|quick|full>
+// Then `ADRs: NNNN, ...` naming the accepted ADRs (from docs/adr in this working tree) that govern the diff.
 import { execFileSync } from "node:child_process";
-import { classifyFiles, loadConfig, requiredReviewers, TIERS } from "./lib.mjs";
+import { loadAdrs, loadConfig, reviewersReport, TIERS } from "./lib.mjs";
 
 const tier = process.argv[2];
 if (!TIERS.includes(tier)) throw new Error(`usage: reviewers.mjs <${TIERS.join("|")}>`);
@@ -10,7 +11,4 @@ const files = execFileSync("git", ["diff", "--name-status", "origin/main...HEAD"
   .split("\n")
   .filter(Boolean)
   .flatMap((line) => line.split("\t").slice(1));
-const cls = classifyFiles(files, loadConfig());
-if (tier === "skip" && !cls.skipOnly) console.log("NOT SKIP: the diff changes files outside the skip paths; use quick or full");
-const list = requiredReviewers(tier, cls);
-console.log(list.length ? list.join("\n") : "none");
+console.log(reviewersReport(tier, files, loadConfig(), loadAdrs()));
