@@ -244,13 +244,19 @@ test("parseAdr rejects a title number that is not exactly four digits", () => {
   assert.match(parseAdr(adr({ title: "# 00007: Five digits" })).error, /number/);
 });
 
-// BUG: a Governs entry with a stray, unbalanced backtick (e.g. an author forgot to close it) is not
-// rejected. governsPathError only strips a *balanced* leading+trailing backtick pair and otherwise leaves
-// the raw text alone; a backtick is not in the glob-character set, so the literal backtick ends up baked
-// into the returned path. That path can never match a real repo file, so the Governs entry silently governs
-// nothing instead of failing to parse - the opposite of "a malformed ADR can't merge". This assertion
-// captures the currently-correct expectation and fails against the current implementation.
+// Regression test for a bug found in review: a Governs entry with a stray, unbalanced backtick (e.g. an
+// author forgot to close it) used to parse silently instead of failing. governsPathError now rejects any
+// backtick left after stripping a balanced leading+trailing pair.
 test("parseAdr rejects a Governs entry with an unbalanced backtick", () => {
   const r = parseAdr(adr({ governs: "- `scripts/lanes/" }));
   assert.ok(r.error, `expected an error, got a parsed path: ${JSON.stringify(r)}`);
+});
+
+// Extra case beyond the issue's listed edges: two different accepted ADRs governing the same file must both
+// be returned, sorted by number regardless of the input order (not just deduplicated, which the existing
+// duplicate-entry test already covers for one ADR listing the same path twice).
+test("adrGoverns sorts numbers from multiple accepted ADRs that govern the same file", () => {
+  const nine = parseAdr(adr({ title: "# 0009: Nine", governs: "- scripts/lanes/" }));
+  const two = parseAdr(adr({ title: "# 0002: Two", governs: "- scripts/lanes/" }));
+  assert.deepEqual(adrGoverns([nine, two], "scripts/lanes/lib.mjs"), [2, 9]);
 });
