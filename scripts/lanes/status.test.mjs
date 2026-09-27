@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { issuePaths, mergeQueueEntries, pathsOverlap, render, summarize } from "./status.mjs";
+import { gateDescriptions, issuePaths, mergeQueueEntries, pathsOverlap, render, summarize } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -52,6 +52,29 @@ test("mergeQueueEntries reads PR numbers and positions from the GraphQL reply, [
   const reply = { data: { repository: { mergeQueue: { entries: { nodes: [{ state: "QUEUED", position: 1, pullRequest: { number: 7 } }] } } } } };
   assert.deepEqual(mergeQueueEntries(reply), [{ number: 7, position: 1 }]);
   assert.deepEqual(mergeQueueEntries({ data: { repository: { mergeQueue: null } } }), []);
+});
+
+// `gh pr list --json statusCheckRollup` returns a StatusContext without its description.
+const bareGate = (state) => ({ __typename: "StatusContext", context: "lanes/gate", state, targetUrl: "" });
+const gateReply = (nodes) => ({ data: { repository: { mergeQueue: null, pullRequests: { nodes } } } });
+const gateNode = (number, status) => ({ number, commits: { nodes: [{ commit: { status } }] } });
+
+test("a PR whose gate says waiting on owner is WAITING ON YOU even though the rollup omits the description", () => {
+  const reply = gateReply([gateNode(8, { context: { state: "PENDING", description: "waiting on owner (/approve)" } }), gateNode(9, { context: { state: "PENDING", description: "waiting for review/test-hunter" } })]);
+  const s = summarize({ prs: [pr(8, [bareGate("PENDING")]), pr(9, [bareGate("PENDING")])], issues: [], merged: [], gateDescriptions: gateDescriptions(reply) });
+  assert.deepEqual(s.waitingOnOwner, [{ number: 8, title: "pr 8", stage: "owner", note: "waiting on owner (/approve)" }]);
+  assert.deepEqual(s.inFlight, [{ number: 9, title: "pr 9", stage: "review", note: "waiting for review/test-hunter" }]);
+});
+
+test("gateDescriptions maps each PR to its head's lanes/gate description, skipping PRs with no gate status", () => {
+  const reply = gateReply([gateNode(8, { context: { state: "FAILURE", description: "contract check failed" } }), gateNode(9, { context: null }), gateNode(10, null), { number: 11, commits: { nodes: [] } }]);
+  assert.deepEqual(gateDescriptions(reply), new Map([[8, "contract check failed"]]));
+  assert.deepEqual(gateDescriptions({ data: { repository: null } }), new Map());
+});
+
+test("a gate with no fetched description notes empty, not undefined", () => {
+  const s = summarize({ prs: [pr(8, [bareGate("PENDING")]), pr(9, [bareGate("FAILURE")])], issues: [], merged: [] });
+  assert.deepEqual(s.inFlight.map((i) => [i.stage, i.note]), [["review", ""], ["contract", ""]]);
 });
 
 test("a PR whose body needs the owner is waiting on him even mid-review", () => {

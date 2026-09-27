@@ -8,7 +8,8 @@ const ISSUE_LIMIT = 1000;
 const FAILED = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"]);
 
 // A PR that enters the merge queue loses its `autoMergeRequest`, so queue membership is checked first.
-function prStage(pr, queuePosition) {
+// `gh pr list` leaves StatusContext descriptions out of `statusCheckRollup`, so the gate's comes from `gateDescription`.
+function prStage(pr, queuePosition, gateDescription) {
   if (queuePosition !== undefined) return { stage: "queued", note: `in merge queue, position ${queuePosition}` };
   const rollup = pr.statusCheckRollup ?? [];
   const failing = rollup
@@ -18,9 +19,10 @@ function prStage(pr, queuePosition) {
   const gate = rollup.find((c) => c.context === GATE_CONTEXT);
   if (!gate) return { stage: "starting", note: "no lanes/gate yet" };
   if (gate.state === "SUCCESS") return pr.autoMergeRequest ? { stage: "queued", note: "auto-merge on" } : { stage: "ready", note: "auto-merge is off" };
-  if (gate.state === "FAILURE" || gate.state === "ERROR") return { stage: "contract", note: gate.description ?? "" };
-  if (String(gate.description).startsWith("waiting on owner")) return { stage: "owner", note: gate.description };
-  return { stage: "review", note: gate.description ?? "" };
+  const description = gate.description ?? gateDescription ?? "";
+  if (gate.state === "FAILURE" || gate.state === "ERROR") return { stage: "contract", note: description };
+  if (description.startsWith("waiting on owner")) return { stage: "owner", note: description };
+  return { stage: "review", note: description };
 }
 
 // The open issues that block `number`, direct ones first, then theirs. Only open issues count, and only open
@@ -83,21 +85,33 @@ function markParallel(ready, formOf) {
   }
 }
 
-// The `{ number, position }` of each PR in the merge queue, from the reply to MERGE_QUEUE_QUERY; [] when the branch
+// The `{ number, position }` of each PR in the merge queue, from the reply to STATUS_QUERY; [] when the branch
 // has no merge queue.
 export function mergeQueueEntries(reply) {
   return (reply?.data?.repository?.mergeQueue?.entries?.nodes ?? []).map((e) => ({ number: e.pullRequest.number, position: e.position }));
 }
 
+// PR number → the `lanes/gate` description on its head commit, from the reply to STATUS_QUERY. PRs without a gate
+// status are left out.
+export function gateDescriptions(reply) {
+  const out = new Map();
+  for (const node of reply?.data?.repository?.pullRequests?.nodes ?? []) {
+    const description = node.commits?.nodes?.[0]?.commit?.status?.context?.description;
+    if (typeof description === "string") out.set(node.number, description);
+  }
+  return out;
+}
+
 // `issues` is every open issue (with body); only those labelled `ready` are listed, the rest only block.
-// `mergeQueue` is the output of mergeQueueEntries (null or missing: no merge queue).
-export function summarize({ prs, issues, merged, mergeQueue }) {
+// `mergeQueue` is the output of mergeQueueEntries (null or missing: no merge queue); `gateDescriptions` that of
+// gateDescriptions (missing: the rollup's own descriptions only).
+export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map() }) {
   const out = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
   const taken = new Set();
   const queuePosition = new Map((mergeQueue ?? []).map((e) => [e.number, e.position]));
   for (const pr of prs) {
     for (const ref of pr.closingIssuesReferences ?? []) taken.add(ref.number);
-    const { stage, note } = prStage(pr, queuePosition.get(pr.number));
+    const { stage, note } = prStage(pr, queuePosition.get(pr.number), gateDescriptions.get(pr.number));
     const needs = (parsePrBody(pr.body).sections["needs the owner"] ?? "").trim();
     const item = { number: pr.number, title: pr.title, stage, note };
     if (stage === "owner") out.waitingOnOwner.push(item);
@@ -134,10 +148,13 @@ export function render(summary, sinceLabel) {
 
 const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
 
-// `gh pr --json` has no merge queue field. `mergeQueue` without `branch` is the default branch's queue; null when it
-// has none. `{owner}` and `{repo}` are filled in by gh.
-const MERGE_QUEUE_QUERY =
-  "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ mergeQueue { entries(first:100){ nodes { state position pullRequest { number } } } } } }";
+// `gh pr --json` has no merge queue field and drops status descriptions, so one GraphQL call fetches both.
+// `mergeQueue` without `branch` is the default branch's queue; null when it has none. `pullRequests` matches the
+// `gh pr list` limit below. `{owner}` and `{repo}` are filled in by gh.
+const STATUS_QUERY =
+  "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ " +
+  "mergeQueue { entries(first:100){ nodes { state position pullRequest { number } } } } " +
+  `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description } } } } } } } } }`;
 
 function main(argv = process.argv.slice(2)) {
   const sinceIdx = argv.indexOf("--since");
@@ -145,11 +162,13 @@ function main(argv = process.argv.slice(2)) {
   const hours = Number(/^(\d+)h$/.exec(sinceLabel)?.[1]);
   if (!hours) throw new Error("--since takes hours, for example 12h");
   const since = new Date(Date.now() - hours * 3600_000).toISOString().slice(0, 19);
+  const reply = gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${STATUS_QUERY}`]);
   const data = {
     prs: gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,statusCheckRollup,autoMergeRequest,closingIssuesReferences"]),
     issues: gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,title,labels,body"]),
     merged: gh(["pr", "list", "--state", "merged", "--search", `merged:>=${since}`, "--limit", "100", "--json", "number,title"]),
-    mergeQueue: mergeQueueEntries(gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${MERGE_QUEUE_QUERY}`])),
+    mergeQueue: mergeQueueEntries(reply),
+    gateDescriptions: gateDescriptions(reply),
   };
   // A blocker missing from a truncated list would read as closed, so refuse rather than list a blocked issue as ready.
   if (data.issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
