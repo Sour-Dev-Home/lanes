@@ -64,8 +64,17 @@ export function blockerDiff(wanted = [], current = []) {
   return { add: want.filter((n) => !have.has(n)), remove: current.filter((c) => c.number === null || !want.includes(c.number)) };
 }
 
-/** One line of a failed `gh` call, bounded: it goes into a public comment. */
-const reason = (e) => String(e?.stderr || e?.message || e).trim().split("\n")[0].replace(/^gh: /, "").slice(0, 200);
+/** One line of a failed `gh` call, bounded and with token-like strings masked: it goes into a public comment. */
+const reason = (e) =>
+  String(e?.stderr || e?.message || e)
+    .trim()
+    .split("\n")[0]
+    .replace(/^gh: /, "")
+    .replace(/\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/g, "$1***")
+    .slice(0, 200);
+
+/** At most this many distinct blockers are mirrored, so one issue cannot drive an unbounded number of API calls. */
+export const MAX_BLOCKERS = 20;
 
 /** Cross-repository references (`owner/repo#N`) in the "Blocked by" text; the native list is not linked to them. */
 const FOREIGN_REF = /([\w.-]+\/[\w.-]+)#(\d+)/g;
@@ -79,13 +88,16 @@ export function mirrorBlockedBy(repo, n, body, run) {
   // Only a field that parses is mirrored: an empty or malformed one must not wipe the native list.
   if (r.errors.some((e) => e === "missing: blocked by" || e.startsWith("blocked by:"))) return [];
   const notes = [];
-  // parseIssueForm reads `owner/repo#12` as #12; take one occurrence of each such reference back out.
+  // parseIssueForm reads `owner/repo#12` as #12; take one occurrence of each such reference back out, unless
+  // `owner/repo` names this repository itself (e.g. pasted from GitHub's autocomplete), which is not foreign.
   const wanted = [...r.fields.blockedBy];
-  for (const [ref, , num] of String(parseSections(body, "###")["blocked by"] ?? "").matchAll(FOREIGN_REF)) {
+  for (const [ref, ownerRepo, num] of String(parseSections(body, "###")["blocked by"] ?? "").matchAll(FOREIGN_REF)) {
+    if (ownerRepo.toLowerCase() === repo.toLowerCase()) continue;
     const i = wanted.indexOf(Number(num));
     if (i !== -1) wanted.splice(i, 1);
     notes.push(`${ref} is in another repository, not linked`);
   }
+  if (new Set(wanted).size > MAX_BLOCKERS) return [...notes, `more than ${MAX_BLOCKERS} blockers are listed, so nothing was mirrored`];
   const base = `repos/${repo}/issues/${n}/dependencies/blocked_by`;
   let current;
   try {
@@ -150,7 +162,10 @@ export function main(env = process.env, run = gh) {
   if (plan.add.length) edit.push("--add-label", plan.add.join(","));
   if (plan.remove.length) edit.push("--remove-label", plan.remove.join(","));
   if (edit.length > 5) run(edit);
-  const notes = mirrorBlockedBy(repo, n, env.ISSUE_BODY, run);
+  // Like `ready` (C1), the mirror acts only for a trusted author: otherwise anyone who can open an issue could have
+  // this job's issues:write token link their issue to any issue in the repository.
+  const notes =
+    canWrite === true ? mirrorBlockedBy(repo, n, env.ISSUE_BODY, run) : ["not mirrored: the issue's author does not have write access"];
   const comment = notes.length
     ? `${plan.comment}\n\n**Blocked by mirror** (the form field is the source of truth):\n${notes.map((l) => `- ${l}`).join("\n")}`
     : plan.comment;

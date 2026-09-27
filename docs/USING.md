@@ -90,7 +90,8 @@ comments; a lane cannot grant it to itself.
   native GitHub blocked-by relationships a mirror of its "Blocked by" field: it links what the field lists and unlinks
   everything else, including a relationship you added by hand in GitHub's UI. To change an issue's blockers, edit the
   field; a hand edit to the native relationships is overwritten on the issue's next run. A field that is empty or has
-  no `#N` leaves them alone. A blocker it cannot link (a PR, a missing issue, `owner/repo#N` in another repository) or
+  no `#N` leaves them alone, and so does an issue whose author lacks write access (the same trust rule as `ready`) or
+  that lists more than 20 blockers. A blocker it cannot link (a PR, a missing issue, `owner/repo#N` in another repository) or
   a failing dependencies API is named in the contract comment; the labels are set either way. `/lane`, `/status` and
   the gate keep reading the field, not the mirror. Existing issues are mirrored the next time they are edited.
 - **Dependabot PRs.** They have no linked task issue and their branch never matches `issue-<N>-*`, so `lanes/gate`

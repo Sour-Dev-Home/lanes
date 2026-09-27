@@ -1,7 +1,7 @@
 // scripts/lanes/issue-contract.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { blockerDiff, issuePlan, main, MARKER } from "./issue-contract.mjs";
+import { blockerDiff, issuePlan, main, MARKER, MAX_BLOCKERS } from "./issue-contract.mjs";
 
 const body = "### Goal\n\ng\n\n### Acceptance criteria\n\n- [ ] a\n\n### Interface contract\n\nnone\n\n### Scope\n\ns\n\n### Blocked by\n\nnone\n\n### Tier\n\nfull\n";
 
@@ -180,13 +180,43 @@ test("main: a relationship added by hand but absent from the form is removed", (
   assert.deepEqual(deletes(calls), ["repos/o/r/issues/9/dependencies/blocked_by/6006"]);
 });
 
-test("main mirrors for a task whose other fields are incomplete, and for an author without write access", () => {
+test("main mirrors for a task whose other fields are incomplete", () => {
   const incomplete = withBlocked(body, "#3").replace("\ns\n", "\n_No response_\n");
-  for (const permission of ["admin", "none"]) {
+  for (const permission of ["admin", "write"]) {
     const { run, calls } = fakeMirror({ issues: { 3: { id: 3003 } }, permission });
     main({ ...env, ISSUE_BODY: incomplete }, run);
     assert.deepEqual(posts(calls), ["issue_id=3003"], permission);
   }
+});
+
+// Security review: the mirror uses the job's issues:write token, so like `ready` it acts only for a trusted author.
+test("main edge: an author without write access gets no mirror call, and the comment says why", () => {
+  for (const permission of ["read", "none"]) {
+    const { run, calls } = fakeMirror({ deps: [{ id: 5005, number: 5 }], issues: { 3: { id: 3003 } }, permission });
+    main({ ...env, ISSUE_BODY: withBlocked(body, "#3") }, run);
+    assert.ok(!calls.some((a) => a.some((x) => String(x).includes("dependencies"))), permission);
+    assert.match(commentBody(calls), /not mirrored.*write access/, permission);
+  }
+});
+
+test("main edge: more than MAX_BLOCKERS distinct blockers mirror nothing and say so; exactly MAX_BLOCKERS are mirrored", () => {
+  const list = (k) => Array.from({ length: k }, (_, i) => `#${100 + i}`).join(", ");
+  const issues = Object.fromEntries(Array.from({ length: MAX_BLOCKERS + 1 }, (_, i) => [100 + i, { id: 10000 + i }]));
+  const over = fakeMirror({ deps: [{ id: 5005, number: 5 }], issues });
+  main({ ...env, ISSUE_BODY: withBlocked(body, list(MAX_BLOCKERS + 1)) }, over.run);
+  assert.ok(!over.calls.some((a) => a.some((x) => String(x).includes("dependencies"))));
+  assert.match(commentBody(over.calls), new RegExp(`more than ${MAX_BLOCKERS} blockers`));
+  const at = fakeMirror({ issues });
+  main({ ...env, ISSUE_BODY: withBlocked(body, list(MAX_BLOCKERS)) }, at.run);
+  assert.equal(posts(at.calls).length, MAX_BLOCKERS);
+});
+
+test("main edge: a token-like string in a gh error is masked before it reaches the public comment", () => {
+  const { run, calls } = fakeMirror({ fail: { deps: ghError("gh: bad credentials ghp_abcDEF123456 and github_pat_11ABC_xyz (HTTP 401)\n") } });
+  main({ ...env, ISSUE_BODY: withBlocked(body, "#3") }, run);
+  const c = commentBody(calls);
+  assert.doesNotMatch(c, /abcDEF123456|11ABC_xyz/);
+  assert.match(c, /ghp_\*\*\*.*github_pat_\*\*\*/);
 });
 
 test("main runs no mirror call for a non-task issue", () => {
@@ -215,6 +245,15 @@ test("main: a blocker that is a PR, nonexistent, or in another repository is nam
   assert.match(c, /other\/repo#12\b.*another repository/);
   assert.doesNotMatch(c, /#12\b.*not found/i, "the cross-repository reference is not looked up here as #12");
   assert.ok(labelEdit(calls), "labels still set");
+});
+
+// Bug: `owner/repo#N` naming this repository itself (e.g. pasted from GitHub's autocomplete) is not foreign, and must
+// still be linked like a bare #N.
+test("main edge: an owner/repo#N reference to this repository itself is linked, not treated as foreign", () => {
+  const { run, calls } = fakeMirror({ issues: { 3: { id: 3003 } } });
+  main({ ...env, ISSUE_BODY: withBlocked(body, "o/r#3") }, run);
+  assert.deepEqual(posts(calls), ["issue_id=3003"]);
+  assert.doesNotMatch(commentBody(calls), /another repository/);
 });
 
 test("main edge: a blocker the POST rejects is named in the comment; the others are still linked", () => {
