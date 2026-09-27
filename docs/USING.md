@@ -86,6 +86,13 @@ comments; a lane cannot grant it to itself.
 - **A lane's own follow-up issues.** `/lane` step 8 files them with the label `lane-filed`; `issue-contract` never adds
   `ready` to one, however complete its contract, even when the owner opened it. Remove `lane-filed` to approve one
   (the check then adds `ready` on its next run).
+- **"Blocked by" is the source of truth.** On every open or edit of a task issue, `issue-contract` makes the issue's
+  native GitHub blocked-by relationships a mirror of its "Blocked by" field: it links what the field lists and unlinks
+  everything else, including a relationship you added by hand in GitHub's UI. To change an issue's blockers, edit the
+  field; a hand edit to the native relationships is overwritten on the issue's next run. A field that is empty or has
+  no `#N` leaves them alone. A blocker it cannot link (a PR, a missing issue, `owner/repo#N` in another repository) or
+  a failing dependencies API is named in the contract comment; the labels are set either way. `/lane`, `/status` and
+  the gate keep reading the field, not the mirror. Existing issues are mirrored the next time they are edited.
 - **Dependabot PRs.** They have no linked task issue and their branch never matches `issue-<N>-*`, so `lanes/gate`
   always fails them — there is no exemption for `dependabot/` heads, since one would be a way around the branch-to-issue
   check (I4). Open a matching Task issue instead, let a lane recreate the dependency bump on its own `issue-<N>-<slug>`
