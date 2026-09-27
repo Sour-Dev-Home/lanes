@@ -38,6 +38,44 @@ function openBlockers(number, blockedByOf) {
   return found.includes(number) ? [...found.filter((b) => b !== number), number] : found;
 }
 
+const cleanPath = (token) =>
+  token
+    .replace(/^[("'[]+|[)"'\].,;:]+$/g, "")
+    .replace(/^\.\//, "")
+    .replace(/\*+$/, "");
+const looksLikePath = (p) => p && !/\s/.test(p) && !/^(-|https?:)/.test(p) && (p.includes("/") || /\.[a-z][a-z0-9]{0,5}$/i.test(p));
+
+// The file paths an issue names: backticked or bare tokens with a `/` or a file extension, read from its Interface
+// contract and the "In:" part of its Scope (anything after "Out:" is ignored). A trailing `*` glob reads as its directory.
+export function issuePaths({ contract = "", scope = "" }) {
+  const inPart = scope.split(/\bOut:/i)[0].replace(/^[\s\S]*?\bIn:/i, "");
+  const paths = [];
+  for (const text of [contract, inPart]) {
+    for (const [, quoted, bare] of text.matchAll(/`([^`]+)`|(\S+)/g)) {
+      const p = cleanPath(quoted ?? bare);
+      if (looksLikePath(p) && !paths.includes(p)) paths.push(p);
+    }
+  }
+  return paths;
+}
+
+// Two path lists overlap when they share a path, or one names a directory (`dir/`) holding a path the other names.
+export function pathsOverlap(a, b) {
+  const within = (dir, p) => dir.endsWith("/") && p.startsWith(dir);
+  return a.some((x) => b.some((y) => x === y || within(x, y) || within(y, x)));
+}
+
+// Marks each startable item `parallel` unless its paths overlap another startable item's, or its Scope names none.
+function markParallel(ready, formOf) {
+  const paths = new Map(ready.map((i) => [i.number, issuePaths(formOf.get(i.number) ?? {})]));
+  for (const item of ready) {
+    const scoped = issuePaths({ scope: formOf.get(item.number)?.scope }).length > 0;
+    item.overlapsWith = scoped ? ready.filter((o) => o !== item && pathsOverlap(paths.get(item.number), paths.get(o.number))).map((o) => o.number) : [];
+    item.parallel = scoped && item.overlapsWith.length === 0;
+    item.note = !scoped ? "one at a time (scope names no paths)" : item.parallel ? "parallel" : `one at a time with ${item.overlapsWith.map((n) => `#${n}`).join(", ")}`;
+  }
+}
+
 // `issues` is every open issue (with body); only those labelled `ready` are listed, the rest only block.
 export function summarize({ prs, issues, merged }) {
   const out = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
@@ -51,7 +89,8 @@ export function summarize({ prs, issues, merged }) {
     else if (needs && !/^nothing\b/i.test(needs)) out.waitingOnOwner.push({ ...item, note: `needs: ${needs.split("\n")[0]}` });
     else out.inFlight.push(item);
   }
-  const blockedByOf = new Map(issues.map((i) => [i.number, parseIssueForm(i.body ?? "").fields.blockedBy]));
+  const formOf = new Map(issues.map((i) => [i.number, parseIssueForm(i.body ?? "").fields]));
+  const blockedByOf = new Map([...formOf].map(([n, f]) => [n, f.blockedBy]));
   for (const issue of issues) {
     const labels = (issue.labels ?? []).map((l) => l.name);
     if (taken.has(issue.number) || !labels.includes("ready")) continue;
@@ -61,17 +100,18 @@ export function summarize({ prs, issues, merged }) {
     if (blockedBy.length === 0) out.ready.push(item);
     else out.blocked.push({ ...item, note: `blocked by ${blockedBy.map((n) => `#${n}`).join(", ")}`, blockedBy });
   }
+  markParallel(out.ready, formOf);
   for (const pr of merged) out.merged.push({ number: pr.number, title: pr.title, stage: "merged", note: "" });
   return out;
 }
 
 export function render(summary, sinceLabel) {
-  const block = (title, items, withStage = true) =>
-    [`${title} (${items.length})`, ...items.map((i) => `  #${i.number}${withStage ? ` [${i.stage}]` : ""} ${i.title}${i.note ? ` — ${i.note}` : ""}`)].join("\n");
+  const block = (title, items, withStage = true, hint = "") =>
+    [`${title} (${items.length})`, ...(hint && items.length ? [`  ${hint}`] : []), ...items.map((i) => `  #${i.number}${withStage ? ` [${i.stage}]` : ""} ${i.title}${i.note ? ` — ${i.note}` : ""}`)].join("\n");
   return [
     block("WAITING ON YOU", summary.waitingOnOwner),
     block("IN FLIGHT", summary.inFlight),
-    block("READY TO START", summary.ready),
+    block("READY TO START", summary.ready, true, "(parallel is a heuristic read from each issue's Scope and Interface contract, not a guarantee)"),
     block("BLOCKED", summary.blocked ?? []),
     block(`MERGED, last ${sinceLabel}`, summary.merged, false),
   ].join("\n\n");
