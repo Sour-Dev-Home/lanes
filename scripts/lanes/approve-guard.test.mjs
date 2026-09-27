@@ -280,6 +280,11 @@ test("edge: a node flag that takes a value does not hide a spliced script word (
     "node --import ./i.mjs --no-warnings $S owner --pr 16",
     "node --require $M scripts/lanes/gate.mjs 16",
     "node --env-file=.env $S owner",
+    // Found by the #62 security review: an option missing from any list must fail closed, not shift the script.
+    "node --allow-fs-read /tmp scripts/lanes/post-$X.mjs $R --pr 16",
+    "node --some-future-flag v scripts/lanes/post-$X.mjs",
+    "node --allow-fs-read /tmp --allow-net x scripts/lanes/post-$X.mjs",
+    "node -- $S",
   ]) {
     assert.deepEqual(findOwnerInvocations(cmd), [{ pr: undefined, standalone: false }], cmd);
     assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);

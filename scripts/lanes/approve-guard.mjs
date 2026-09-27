@@ -117,28 +117,35 @@ const VAR_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
 // What is left of a word after substitution that could still expand to anything.
 const UNRESOLVED_RE = /[$`]/;
 const NODE_RE = /^(node|nodejs)(\.exe)?$/i;
-// Node options that take their value from the next word (`--flag=value` never does): the value is not the script.
-const NODE_VALUE_FLAGS = new Set([
-  "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "-e", "--eval", "-p",
-  "--print", "--input-type", "--env-file", "--env-file-if-exists", "--title", "--inspect-port", "--debug-port",
-  "--watch-path", "--test-name-pattern", "--test-skip-pattern", "--test-reporter", "--test-reporter-destination",
-  "--test-concurrency", "--test-shard", "--experimental-config-file", "--redirect-warnings", "--disable-warning",
-  "--openssl-config", "--icu-data-dir", "--diagnostic-dir", "--report-dir", "--report-directory", "--report-filename",
-  "--report-signal", "--unhandled-rejections", "--heapsnapshot-signal", "--heapsnapshot-near-heap-limit",
-  "--cpu-prof-dir", "--cpu-prof-name", "--heap-prof-dir", "--heap-prof-name", "--dns-result-order",
-  "--localstorage-file", "--experimental-policy", "--policy-integrity", "--secure-heap", "--secure-heap-min",
-  "--tls-cipher-list", "--tls-keylog", "--use-largepages", "--trace-event-categories", "--trace-event-file-pattern",
-  "--stack-trace-limit", "--max-http-header-size", "--experimental-sea-config", "--run",
+// Node options known to take no value. Any other bare option (no `=value`) may take the next word as its value, so
+// that word and the one after it are both treated as the script: an option missing here only costs a false deny.
+const NODE_BOOLEAN_FLAGS = new Set([
+  "--test", "--test-only", "--watch", "--watch-preserve-output", "--no-warnings", "--no-deprecation",
+  "--trace-warnings", "--trace-deprecation", "--throw-deprecation", "--pending-deprecation", "--enable-source-maps",
+  "--inspect", "--inspect-brk", "--inspect-wait", "--expose-gc", "--preserve-symlinks", "--preserve-symlinks-main",
+  "--experimental-strip-types", "--no-experimental-strip-types", "--experimental-transform-types",
+  "--experimental-vm-modules", "--experimental-test-coverage", "--experimental-detect-module", "--trace-uncaught",
+  "--abort-on-uncaught-exception", "--frozen-intrinsics", "--check", "-c", "--interactive", "-i",
 ]);
 
-/** The index of the script node runs: the first word after its options, skipping each option's value. -1 if none. */
-function nodeScriptIndex(plain, nodeAt) {
+/**
+ * The last index of node's options and script: options, their possible values and the first word that is surely not
+ * an option's value. Every word from node up to it could load or be post-review.mjs. The last word if none is surely it.
+ */
+function nodeScriptEnd(plain, nodeAt) {
+  let maybeValue = false;
   for (let i = nodeAt + 1; i < plain.length; i += 1) {
-    if (!plain[i].startsWith("-") || plain[i] === "-") return i;
-    if (plain[i] === "--") return i + 1 < plain.length ? i + 1 : -1;
-    if (NODE_VALUE_FLAGS.has(plain[i])) i += 1;
+    const w = plain[i];
+    if (w === "--") return Math.min(i + 1, plain.length - 1);
+    if (w.startsWith("-") && w !== "-") {
+      maybeValue = !w.includes("=") && !NODE_BOOLEAN_FLAGS.has(w);
+    } else if (maybeValue) {
+      maybeValue = false;
+    } else {
+      return i;
+    }
   }
-  return -1;
+  return plain.length - 1;
 }
 
 /** `NAME=value` words anywhere in the command's segments, in order, so a later assignment overrides an earlier one. */
@@ -183,9 +190,8 @@ function scan(cmd, depth, out) {
     // The command word and the script node runs (also behind env, time or sudo), counted without `NAME=value` words.
     const plain = words.filter((w) => !ASSIGN_RE.test(w));
     const nodeAt = plain.findIndex((p) => NODE_RE.test(p.split(/[\\/]/).at(-1)));
-    const scriptAt = nodeAt === -1 ? -1 : nodeScriptIndex(plain, nodeAt);
     // Node's options and the script: any of them that still holds `$` or a backtick could load or be post-review.mjs.
-    const scriptEnd = nodeAt === -1 ? -1 : scriptAt === -1 ? plain.length - 1 : scriptAt;
+    const scriptEnd = nodeAt === -1 ? -1 : nodeScriptEnd(plain, nodeAt);
     plain.forEach((w, i) => {
       if (/[\s;&|()<>]/.test(w) && /post-review|[$`]/i.test(w)) {
         // A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own. One that still
