@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SCHEMA_VERSION, buildReport, collectVerdicts, normalizePr, parseArgs, parseGraphql, readVerdict, renderMarkdown, summarize } from "./review-metrics.mjs";
+import { SCHEMA_VERSION, buildReport, collectVerdicts, errorMessage, normalizePr, parseArgs, parseGraphql, readVerdict, renderMarkdown, summarize } from "./review-metrics.mjs";
 
 const NOW = new Date("2026-09-27T12:00:00Z");
 const SHA = "a".repeat(40);
@@ -273,6 +273,14 @@ test("edge: parseGraphql never echoes the raw response", () => {
   assert.throws(() => parseGraphql("secret <html>"), (e) => !e.message.includes("secret"));
   assert.throws(() => parseGraphql('{"data":{}}'), /unexpected/);
   assert.equal(parseGraphql('{"data":{"repository":{"pullRequests":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}').nodes.length, 0);
+});
+
+test("edge: a failed gh run is reported without its stderr; own errors keep their message", () => {
+  const ghError = Object.assign(new Error("Command failed: gh api graphql secret-stderr"), { status: 1, stderr: "secret-stderr" });
+  assert.ok(!errorMessage(ghError).includes("secret"));
+  assert.match(errorMessage(ghError), /exit 1/);
+  assert.equal(errorMessage(new Error("--days must be a whole number from 1 to 365")), "--days must be a whole number from 1 to 365");
+  assert.equal(errorMessage("weird"), "review-metrics failed");
 });
 
 // ---- args ----

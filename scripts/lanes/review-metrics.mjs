@@ -279,4 +279,17 @@ function main() {
   console.log(options.json ? JSON.stringify(report, null, 2) : renderMarkdown(report));
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) main();
+/** An error for the terminal: a failed `gh` run (whose stderr can quote API text) becomes a generic line. */
+export function errorMessage(error) {
+  if (error && typeof error.status === "number") return `gh failed (exit ${error.status}): check gh auth status and the network`;
+  return error instanceof Error ? error.message : "review-metrics failed";
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (error) {
+    console.error(errorMessage(error));
+    process.exitCode = 1;
+  }
+}
