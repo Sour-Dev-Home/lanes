@@ -495,6 +495,21 @@ test("--auto prints one line per pick and per skipped ready issue, and launches 
   ]);
 });
 
+// Not named by the issue's criteria or its listed edge cases: --auto shares readInFlight with explicit /start, so a
+// merged lane's leftover session must free the issue there too, not only when the issue number is requested directly.
+test("--auto ignores a merged lane's leftover session too, so that issue is a candidate instead of already in flight", () => {
+  const { deps, launches } = fakes({
+    issues: autoIssues(),
+    mergedPrs: [{ headRefName: "issue-6-done" }],
+    sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-6-y" }],
+  });
+  const { code, lines } = main(["--auto"], deps);
+  assert.equal(code, 0);
+  assert.equal(launches.length, 0);
+  assert.ok(lines.includes("#6: would start"), lines.join("\n"));
+  assert.ok(!lines.some((l) => l.startsWith("#6: skipped")), lines.join("\n"));
+});
+
 test("--auto skips a ready issue with an open blocker", () => {
   const { deps } = fakes({ issues: { 1: { body: form({ blockedBy: "#9" }) } } });
   deps.gh = ((inner) => (args) => (args[0] === "api" ? JSON.stringify({ state: "open" }) : inner(args)))(deps.gh);
