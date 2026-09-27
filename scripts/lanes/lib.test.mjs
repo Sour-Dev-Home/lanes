@@ -135,7 +135,16 @@ test("the real config: start-guard.mjs and contracts.test.mjs are owner-only, re
   for (const file of ["scripts/lanes/contracts.test.mjs", "scripts/lanes/start-guard.mjs", "scripts/lanes/start-guard.test.mjs"]) {
     assert.equal(classifyFiles([file], real).owner, true, file);
   }
-  for (const file of ["scripts/lanes/reviewers.mjs", "scripts/lanes/reviewers.test.mjs", "scripts/lanes/contracts.mjs", "scripts/lanes/start-guard.mjs.orig", "scripts/lanes/start.mjs"]) {
+  for (const file of [
+    "scripts/lanes/reviewers.mjs",
+    "scripts/lanes/reviewers.test.mjs",
+    "scripts/lanes/contracts.mjs",
+    "scripts/lanes/start-guard.mjs.orig",
+    "scripts/lanes/start.mjs",
+    // edge: the new regexes are anchored to scripts/lanes/ exactly, not any nested directory under it.
+    "scripts/lanes/sub/contracts.test.mjs",
+    "scripts/lanes/sub/start-guard.mjs",
+  ]) {
     assert.equal(classifyFiles([file], real).owner, false, file);
   }
 });
