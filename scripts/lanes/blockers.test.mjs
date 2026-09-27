@@ -140,6 +140,19 @@ test("cli: a missing issue N exits 2", () => {
   assert.match(r.message, /^#404: cannot check blockers: /);
 });
 
+test("edge: a multi-line gh error reduces to its first line, keeping the printed message one line", () => {
+  const run = () => {
+    const err = new Error("boom");
+    err.stderr = "GraphQL: Could not resolve to an issue (repository.issue)\nsome.query:1\nextra trailer line";
+    throw err;
+  };
+  const r = main(["15"], run);
+  assert.equal(r.code, 2);
+  assert.equal(r.message, "#15: cannot check blockers: issue #15 not found or unreadable (GraphQL: Could not resolve to an issue (repository.issue))");
+  assert.doesNotMatch(r.message, /\n/);
+  assert.doesNotMatch(r.message, /trailer/);
+});
+
 test("edge: an issue body gh returns as non-JSON exits 2", () => {
   const r = main(["15"], () => "<html>");
   assert.equal(r.code, 2);
