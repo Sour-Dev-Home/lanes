@@ -117,6 +117,29 @@ const VAR_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
 // What is left of a word after substitution that could still expand to anything.
 const UNRESOLVED_RE = /[$`]/;
 const NODE_RE = /^(node|nodejs)(\.exe)?$/i;
+// Node options that take their value from the next word (`--flag=value` never does): the value is not the script.
+const NODE_VALUE_FLAGS = new Set([
+  "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "-e", "--eval", "-p",
+  "--print", "--input-type", "--env-file", "--env-file-if-exists", "--title", "--inspect-port", "--debug-port",
+  "--watch-path", "--test-name-pattern", "--test-skip-pattern", "--test-reporter", "--test-reporter-destination",
+  "--test-concurrency", "--test-shard", "--experimental-config-file", "--redirect-warnings", "--disable-warning",
+  "--openssl-config", "--icu-data-dir", "--diagnostic-dir", "--report-dir", "--report-directory", "--report-filename",
+  "--report-signal", "--unhandled-rejections", "--heapsnapshot-signal", "--heapsnapshot-near-heap-limit",
+  "--cpu-prof-dir", "--cpu-prof-name", "--heap-prof-dir", "--heap-prof-name", "--dns-result-order",
+  "--localstorage-file", "--experimental-policy", "--policy-integrity", "--secure-heap", "--secure-heap-min",
+  "--tls-cipher-list", "--tls-keylog", "--use-largepages", "--trace-event-categories", "--trace-event-file-pattern",
+  "--stack-trace-limit", "--max-http-header-size", "--experimental-sea-config", "--run",
+]);
+
+/** The index of the script node runs: the first word after its options, skipping each option's value. -1 if none. */
+function nodeScriptIndex(plain, nodeAt) {
+  for (let i = nodeAt + 1; i < plain.length; i += 1) {
+    if (!plain[i].startsWith("-") || plain[i] === "-") return i;
+    if (plain[i] === "--") return i + 1 < plain.length ? i + 1 : -1;
+    if (NODE_VALUE_FLAGS.has(plain[i])) i += 1;
+  }
+  return -1;
+}
 
 /** `NAME=value` words anywhere in the command's segments, in order, so a later assignment overrides an earlier one. */
 function collectAssignments(segments) {
@@ -160,7 +183,9 @@ function scan(cmd, depth, out) {
     // The command word and the script node runs (also behind env, time or sudo), counted without `NAME=value` words.
     const plain = words.filter((w) => !ASSIGN_RE.test(w));
     const nodeAt = plain.findIndex((p) => NODE_RE.test(p.split(/[\\/]/).at(-1)));
-    const scriptAt = nodeAt === -1 ? -1 : plain.findIndex((p, i) => i > nodeAt && !p.startsWith("-"));
+    const scriptAt = nodeAt === -1 ? -1 : nodeScriptIndex(plain, nodeAt);
+    // Node's options and the script: any of them that still holds `$` or a backtick could load or be post-review.mjs.
+    const scriptEnd = nodeAt === -1 ? -1 : scriptAt === -1 ? plain.length - 1 : scriptAt;
     plain.forEach((w, i) => {
       if (/[\s;&|()<>]/.test(w) && /post-review|[$`]/i.test(w)) {
         // A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own. One that still
@@ -171,8 +196,9 @@ function scan(cmd, depth, out) {
         const { reviewer, pr } = readPostReviewArgs(plain.slice(i + 1));
         // Fail closed: a reviewer word that could expand to anything counts as the owner.
         if (reviewer === "owner" || (reviewer !== undefined && /[$`*?[]/.test(reviewer))) out.push({ pr, standalone: false });
-      } else if (UNRESOLVED_RE.test(w) && (i === 0 || i === scriptAt)) {
-        // The command word, or the script node runs, that could still expand to post-review.mjs: fail closed.
+      } else if (UNRESOLVED_RE.test(w) && (i === 0 || (i > nodeAt && i <= scriptEnd))) {
+        // The command word, or a node option or the script node runs, that could still expand to post-review.mjs:
+        // fail closed.
         out.push({ pr: undefined, standalone: false });
       }
     });

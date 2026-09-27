@@ -270,6 +270,24 @@ test("ordinary $ arguments get no decision (#62)", () => {
   }
 });
 
+// Found by the #62 test-hunter: a node flag that takes its value from the next word (--require/-r, --loader, …) must
+// not shift the script position onto that value and leave the spliced script word unchecked.
+test("edge: a node flag that takes a value does not hide a spliced script word (#62 review)", () => {
+  for (const cmd of [
+    "node --require ./setup.js scripts/lanes/post-$X.mjs $R --pr 16",
+    "node -r ./setup.js scripts/lanes/post-$X.mjs $R --pr 16",
+    "node --loader ./l.mjs scripts/lanes/post-$X.mjs $R --pr 16",
+    "node --import ./i.mjs --no-warnings $S owner --pr 16",
+    "node --require $M scripts/lanes/gate.mjs 16",
+    "node --env-file=.env $S owner",
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [{ pr: undefined, standalone: false }], cmd);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // A literal script behind a value flag is still an ordinary run, $ arguments after it included.
+  assert.deepEqual(findOwnerInvocations("node -r ./setup.js scripts/lanes/gate.mjs $PR"), []);
+});
+
 test("the CLI answers deny, never crashes, when it cannot evaluate a PreToolUse call", () => {
   const cli = (event, input) => spawnSync(process.execPath, ["scripts/lanes/approve-guard.mjs", event], { input, encoding: "utf8" });
   for (const [event, input] of [["pre-tool-use", "{oops"], ["bogus-event", JSON.stringify(bash(OWNER))]]) {
