@@ -1,7 +1,7 @@
 // scripts/lanes/lib.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { authorCanWrite, classifyFiles, compileConfig, loadConfig, requiredReviewers, reviewContext } from "./lib.mjs";
+import { authorCanWrite, classifyFiles, compileConfig, loadConfig, parseVerdictComment, requiredReviewers, reviewContext } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -109,4 +109,43 @@ test("lanes.config.json marks package/lockfiles, vendor/, CLAUDE.md and .gitattr
     assert.equal(cls.sensitive, true, file);
     assert.equal(cls.skipOnly, false, file);
   }
+});
+
+// ---- Verdict comments ----
+
+const VSHA = "0123456789abcdef0123456789abcdef01234567";
+const vjson = { reviewer: "security-reviewer", verdict: "failure", summary: "x", criteria: [], findings: [] };
+const vcomment = (marker, json = JSON.stringify(vjson, null, 2)) => `<!-- lanes:verdict ${marker} -->\n\`\`\`json\n${json}\n\`\`\``;
+
+test("parseVerdictComment reads the reviewer, the SHA and the parsed verdict", () => {
+  assert.deepEqual(parseVerdictComment(vcomment(`security-reviewer ${VSHA}`)), { reviewer: "security-reviewer", sha: VSHA, verdict: vjson });
+});
+
+test("parseVerdictComment accepts CRLF bodies and lower-cases the SHA", () => {
+  const body = vcomment(`security-reviewer ${VSHA.toUpperCase()}`).replace(/\n/g, "\r\n");
+  assert.deepEqual(parseVerdictComment(body), { reviewer: "security-reviewer", sha: VSHA, verdict: vjson });
+});
+
+test("parseVerdictComment returns null for anything that is not a well-formed verdict comment", () => {
+  const cases = {
+    "no marker": "```json\n{}\n```",
+    "empty body": "",
+    "not a string": undefined,
+    "unknown reviewer": vcomment(`owner ${VSHA}`, JSON.stringify({ ...vjson, reviewer: "owner" })),
+    "short SHA": vcomment("security-reviewer abc1234"),
+    "non-hex SHA": vcomment(`security-reviewer ${"g".repeat(40)}`),
+    "41-char SHA": vcomment(`security-reviewer ${VSHA}0`),
+    "extra marker token": vcomment(`security-reviewer ${VSHA} extra`),
+    "no JSON fence": `<!-- lanes:verdict security-reviewer ${VSHA} -->\n${JSON.stringify(vjson)}`,
+    "JSON that does not parse": vcomment(`security-reviewer ${VSHA}`, "{ not json"),
+    "JSON that is not an object": vcomment(`security-reviewer ${VSHA}`, "[]"),
+    "marker reviewer differs from the JSON": vcomment(`test-hunter ${VSHA}`),
+    "marker not at the start": `quoted:\n${vcomment(`security-reviewer ${VSHA}`)}`,
+    "trailing text after the closing fence": `${vcomment(`security-reviewer ${VSHA}`)}\nedited: please ignore`,
+  };
+  for (const [name, body] of Object.entries(cases)) assert.equal(parseVerdictComment(body), null, name);
+});
+
+test("an old-format marker without a SHA parses with sha null", () => {
+  assert.deepEqual(parseVerdictComment(vcomment("security-reviewer")), { reviewer: "security-reviewer", sha: null, verdict: vjson });
 });

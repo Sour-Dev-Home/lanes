@@ -1,7 +1,7 @@
 // scripts/lanes/post-review.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildStatus, checkSha, parseArgs, validateVerdict } from "./post-review.mjs";
+import { buildStatus, buildVerdictComment, checkSha, parseArgs, validateVerdict } from "./post-review.mjs";
 
 test("skipped is a success whose description starts with skipped", () => {
   assert.deepEqual(buildStatus("ui-reviewer", "skipped", "no visible change"), { context: "review/ui-reviewer", state: "success", description: "skipped: no visible change" });
@@ -126,4 +126,22 @@ test("malformed verdicts are refused with every problem listed", () => {
   for (const re of [/reviewer must be/, /verdict must be/, /summary is required/, /criteria must be an array/, /severity must be/, /fixed must be/]) {
     assert.match(r.errors.join("\n"), re);
   }
+});
+
+const SHA = "0123456789abcdef0123456789abcdef01234567";
+const commentVerdict = { reviewer: "test-hunter", verdict: "success", summary: "ok", criteria: [], findings: [] };
+
+test("the verdict comment starts with a marker naming the reviewer and the head SHA, then the JSON fence", () => {
+  const body = buildVerdictComment(commentVerdict, SHA);
+  assert.equal(body, `<!-- lanes:verdict test-hunter ${SHA} -->\n\`\`\`json\n${JSON.stringify(commentVerdict, null, 2)}\n\`\`\``);
+});
+
+test("the verdict comment builder refuses a SHA that is not 40 hex characters", () => {
+  for (const sha of [undefined, "", "abc1234", `${SHA}0`, "g".repeat(40)]) {
+    assert.throws(() => buildVerdictComment(commentVerdict, sha), /40-character hex/, String(sha));
+  }
+});
+
+test("the verdict comment builder refuses an unknown reviewer", () => {
+  assert.throws(() => buildVerdictComment({ ...commentVerdict, reviewer: "owner" }, SHA), /reviewer must be one of/);
 });

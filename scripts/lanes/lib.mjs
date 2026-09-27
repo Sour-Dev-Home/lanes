@@ -183,6 +183,33 @@ export function parsePrBody(body) {
   };
 }
 
+// ---- Verdict comments ----
+
+/**
+ * The verdict comment post-review.mjs posts: `<!-- lanes:verdict <reviewer> <40-hex sha> -->`, a newline, then a
+ * ```json fence holding the verdict, and nothing else. The marker must open the body, so a quoted marker further down
+ * never counts. An old-format marker without a SHA parses with `sha: null` (unbound to any commit).
+ */
+const VERDICT_COMMENT_RE = /^<!-- lanes:verdict (\S+)(?: (\S+))? -->\r?\n```json\r?\n([\s\S]*)\r?\n```\s*$/;
+const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
+
+/** @returns {{ reviewer: string, sha: string | null, verdict: object } | null} null for anything not well-formed */
+export function parseVerdictComment(body) {
+  const m = String(body ?? "").match(VERDICT_COMMENT_RE);
+  if (!m) return null;
+  const [, reviewer, sha, json] = m;
+  if (!REVIEWERS.includes(reviewer)) return null;
+  if (sha !== undefined && !COMMIT_SHA_RE.test(sha)) return null;
+  let verdict;
+  try {
+    verdict = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (verdict === null || typeof verdict !== "object" || Array.isArray(verdict) || verdict.reviewer !== reviewer) return null;
+  return { reviewer, sha: sha === undefined ? null : sha.toLowerCase(), verdict };
+}
+
 // ---- The gate decision ----
 
 /** Newest status per context (GitHub keeps every status ever posted on a commit). */
