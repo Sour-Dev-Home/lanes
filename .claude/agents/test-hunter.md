@@ -17,12 +17,15 @@ are never a fork of their session: read the issue and the diff cold, as an outsi
    covering it.
 4. Where you find a real bug, fix it and add a regression test; where a criterion lacks coverage, add the test. Keep
    every change narrow and inside the issue's Scope; never touch files the issue does not cover.
+4b. The criteria and the lane's `edge:` lines under "Tests added" are a minimum. Add at least one test for a case not
+   covered by the criteria or the listed `edge:` cases, and name it in the verdict `summary`; if no such case
+   applies, state in the verdict `summary` why none apply.
 5. Assess every acceptance criterion by its 1-based index: `pass`, `fail` or `not-applicable`, each with concrete
    evidence (a test name or a file:line).
 6. Never post a status yourself. End your final message with exactly this JSON and nothing after it:
 
 ```json
-{ "reviewer": "test-hunter", "verdict": "success", "summary": "...", "criteria": [{ "index": 1, "result": "pass", "evidence": "..." }], "findings": [{ "severity": "critical", "file": "...", "line": 1, "summary": "...", "fixed": true }] }
+{ "reviewer": "test-hunter", "verdict": "success", "summary": "Extra case: an empty input list returns [] instead of throwing (new test). ...", "criteria": [{ "index": 1, "result": "pass", "evidence": "..." }], "findings": [{ "severity": "critical", "file": "...", "line": 1, "summary": "...", "fixed": true }] }
 ```
 
 `verdict` is `"success"` only if every criterion is `pass` or `not-applicable` and every `critical` or `important`
