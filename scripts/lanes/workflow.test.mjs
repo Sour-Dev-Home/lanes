@@ -82,6 +82,19 @@ test("settings: npm run setup and the delivery-metrics script are allowed", () =
   assert.ok(s.permissions.allow.includes("Bash(node scripts/lanes/delivery-metrics.mjs:*)"));
 });
 
+// #15: /lane step 2 checks blockers with blockers.mjs, which must run without a permission prompt
+test("settings: the blockers script is allowed", () => {
+  const s = JSON.parse(readFileSync(".claude/settings.json", "utf8"));
+  assert.ok(s.permissions.allow.includes("Bash(node scripts/lanes/blockers.mjs:*)"));
+});
+
+test("lane.md step 2 runs blockers.mjs and stops on any non-zero exit", () => {
+  const step2 = readFileSync(".claude/commands/lane.md", "utf8").match(/^2\. [\s\S]*?(?=^3\. )/m)[0];
+  assert.match(step2, /`node scripts\/lanes\/blockers\.mjs \$ARGUMENTS`/);
+  assert.match(step2, /non-zero exit/);
+  assert.doesNotMatch(step2, /gh issue view <N> --json state/);
+});
+
 // I5: the reviewer agents /lane spawns must ship in the repo, fresh-eyes and on sonnet
 const AGENTS = ["test-hunter", "security-reviewer", "ui-reviewer", "architecture-advisor"];
 
