@@ -17,5 +17,7 @@ You are the unattended night run. Nobody is watching; nothing you do may need a 
    (create it titled "Lanes digest" with that label if none exists), headed with today's date. Then load the
    `PushNotification` tool via ToolSearch (`select:PushNotification`) and send one notification per night, under 200
    characters: `lanes night: <PRs opened>, <what needs the owner or "nothing">, see #<digest issue>`. Lanes run in
-   step 3 send none of their own; their stops go into this one.
+   step 3 send none of their own; their stops go into this one. Its text follows lane.md's rule: plain words and
+   numbers only, never a path, output, secret or personal data. If the tool is unavailable or would need a
+   permission prompt, skip the notification; the digest comment is enough.
 5. Never run `/plan-issues` or `/approve`: both need the owner.

@@ -165,4 +165,12 @@ test("night.md sends a single push notification per night for its digest", () =>
   // lane.md's Notify rule is unconditional, so night.md must override it where it tells lanes to follow lane.md
   const step3 = night.match(/\n3\. [\s\S]*?\n4\. /)[0];
   assert.match(step3, /except its Notify rule/);
+  // an unattended run must never stall on the notification
+  assert.match(night, /would need a\s+permission prompt, skip the notification/);
+});
+
+// security review of #28: notification text leaves the machine, so it must not carry paths, output or secrets
+test("notification text never carries a path, output, secret or personal data", () => {
+  assert.match(laneText(), /never a file\s+path, command or CI output, secret, token or personal data/);
+  assert.match(readFileSync(".claude/commands/night.md", "utf8"), /never a path, output, secret or personal data/);
 });

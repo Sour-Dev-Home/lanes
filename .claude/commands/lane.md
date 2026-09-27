@@ -9,6 +9,8 @@ Notify: load the `PushNotification` tool via ToolSearch (`select:PushNotificatio
 200 characters, starting `lanes #<PR or issue>: ` (the PR number once it exists, the issue number before), at each
 stop named below. Any other stop where you write that you need the owner sends one notification with that reason.
 Never send one for routine progress. If the tool is unavailable, say so in your final message and carry on.
+A notification leaves the machine: write the reason as short plain words and issue/PR numbers only, never a file
+path, command or CI output, secret, token or personal data (point to the PR or issue for detail instead).
 
 1. `gh issue view $ARGUMENTS --json title,body,labels,state`. Stop and report if it is not open, lacks the `ready`
    label, or lacks exactly one `tier:*` label.
