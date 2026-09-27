@@ -45,6 +45,16 @@ function metricsErrors(m) {
   return errors;
 }
 
+/**
+ * A one-line warning when a verdict carries no `metrics` (lane.md step 6 records them from the Agent tool's result),
+ * or null. A warning, not a refusal: an Agent tool that reported no figures leaves `metrics` out rather than guess.
+ */
+export function metricsWarning(v) {
+  if (v?.metrics !== undefined) return null;
+  const who = String(v?.reviewer ?? "the reviewer").replace(/\s+/g, " ");
+  return `warning: ${who}'s verdict has no metrics (tier, minutes, tokens); posting it anyway`;
+}
+
 export function validateVerdict(v, { criteriaCount }) {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return { ok: false, errors: ["verdict must be a JSON object"], status: null };
   const errors = [];
@@ -171,6 +181,8 @@ function main(argv = process.argv.slice(2)) {
     const verdict = JSON.parse(readFileSync(parsed.file, "utf8"));
     const result = validateVerdict(verdict, { criteriaCount: parseIssueForm(issue.body).fields.criteria.length });
     if (!result.ok) throw new Error(`verdict refused:\n- ${result.errors.join("\n- ")}`);
+    const warning = metricsWarning(verdict);
+    if (warning) console.warn(warning);
     status = result.status;
     comment = buildVerdictComment(verdict, pr.headRefOid);
   } else {

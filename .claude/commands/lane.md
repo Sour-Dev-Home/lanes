@@ -39,8 +39,11 @@ path, command or CI output, secret, token or personal data (point to the PR or i
    "critical"|"important"|"minor", "file", "line", "summary", "fixed" }] }`. The test-hunter and ui-reviewer assess
    every criterion by its 1-based index. When `reviewers.mjs` also prints `ADRs: NNNN, ...`, the diff touches files
    those accepted ADRs govern: give the architecture-advisor each one's path (`docs/adr/NNNN-*.md`) to review
-   against. Fix what they find (one more round only if they found real bugs), set
-   `fixed` truthfully, and save each verdict to `.lanes/verdicts/<reviewer>.json`. After the final push, post each:
+   against. After each reviewer subagent returns, add `"metrics": { "tier", "minutes", "tokens" }` to its verdict,
+   taking tokens and duration from the Agent tool's result (rounded to 0.1 minute), and the tier from the issue; for
+   a second round, record the second run's figures in the second verdict. Never estimate: if the Agent tool reported
+   no figures, leave `metrics` out (`post-review.mjs` then warns but still posts). Fix what they find (one more round
+   only if they found real bugs), set `fixed` truthfully, and save each verdict to `.lanes/verdicts/<reviewer>.json`. After the final push, post each:
    `node scripts/lanes/post-review.mjs --file .lanes/verdicts/<reviewer>.json`. A refused verdict prints why; fix the
    JSON or the code, never the facts. Never post a verdict for a review you did not run.
 7. `npm run preflight`, push, then `gh pr create` with the PR template filled in completely: "Closes #$ARGUMENTS",

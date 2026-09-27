@@ -1,7 +1,8 @@
 // scripts/lanes/post-review.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildStatus, buildVerdictComment, checkSha, parseArgs, validateVerdict } from "./post-review.mjs";
+import { readFileSync } from "node:fs";
+import { buildStatus, buildVerdictComment, checkSha, metricsWarning, parseArgs, validateVerdict } from "./post-review.mjs";
 
 test("skipped is a success whose description starts with skipped", () => {
   assert.deepEqual(buildStatus("ui-reviewer", "skipped", "no visible change"), { context: "review/ui-reviewer", state: "success", description: "skipped: no visible change" });
@@ -200,4 +201,53 @@ test("the verdict comment carries the whole verdict, metrics included", () => {
   const v = verdict({ metrics: metrics() });
   const body = buildVerdictComment(v, SHA);
   assert.deepEqual(JSON.parse(body.split("```json\n")[1].split("\n```")[0]), v);
+});
+
+// #23: a reviewer verdict without metrics is posted, with a one-line warning (not a refusal).
+test("a verdict without metrics gets a one-line warning naming the reviewer", () => {
+  const w = metricsWarning(verdict());
+  assert.equal(typeof w, "string");
+  assert.match(w, /^warning: /);
+  assert.match(w, /test-hunter/);
+  assert.match(w, /metrics/);
+  assert.doesNotMatch(w, /\n/);
+});
+
+test("a verdict with metrics gets no warning", () => {
+  assert.equal(metricsWarning(verdict({ metrics: metrics() })), null);
+  assert.equal(metricsWarning(verdict({ reviewer: "security-reviewer", metrics: metrics({ tier: "quick", minutes: 0, tokens: 0 }) })), null);
+});
+
+test("a verdict without metrics is still valid: the warning is not a refusal", () => {
+  const r = validateVerdict(verdict(), { criteriaCount: 2 });
+  assert.equal(r.ok, true, r.errors.join("; "));
+  assert.deepEqual(r.errors, []);
+});
+
+// lane.md step 6 is where a lane fills `metrics` before calling post-review.mjs --file.
+const laneStep6 = () => readFileSync(".claude/commands/lane.md", "utf8").match(/\n6\. [\s\S]*?\n7\. /)[0].replace(/\s+/g, " ");
+
+test("lane.md step 6 adds metrics from the Agent tool's result, tier from the issue, per round", () => {
+  const step6 = laneStep6();
+  assert.match(step6, /[Aa]fter each reviewer subagent returns, add `"metrics": \{ "tier", "minutes", "tokens" \}` to its verdict/);
+  assert.match(step6, /tokens and duration from the Agent tool's result \(rounded to 0\.1 minute\)/);
+  assert.match(step6, /the tier from the issue/);
+  assert.match(step6, /for a second round, record the second run's figures in the second verdict/);
+});
+
+test("lane.md step 6 says never to estimate, and to leave metrics out when the Agent tool reported none", () => {
+  const step6 = laneStep6();
+  assert.match(step6, /[Nn]ever estimate/);
+  assert.match(step6, /if the Agent tool reported no figures, leave `metrics` out/);
+});
+
+test("night.md has no reviewer step of its own: its lanes follow lane.md, so they record metrics too", () => {
+  const night = readFileSync(".claude/commands/night.md", "utf8");
+  assert.match(night, /follow `\.claude\/commands\/lane\.md` exactly/);
+  assert.doesNotMatch(night, /reviewers\.mjs|post-review|verdict/);
+});
+
+test("edge: an unknown, missing or multi-line reviewer name still gives a one-line warning, never a throw", () => {
+  assert.match(metricsWarning({}), /^warning: .*metrics/);
+  assert.doesNotMatch(metricsWarning({ reviewer: "a\nb" }), /\n/);
 });
