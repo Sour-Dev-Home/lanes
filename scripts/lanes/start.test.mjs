@@ -181,6 +181,27 @@ test("parseSessionId reads the id after 'backgrounded ·'", () => {
   assert.equal(parseSessionId("backgrounded · a1b2-c3"), "a1b2-c3");
 });
 
+test("parseSessionId strips ANSI colour codes before reading the id", () => {
+  assert.equal(parseSessionId("\x1b[2mbackgrounded · \x1b[0m\x1b[1m81ddaf76\x1b[22m\n"), "81ddaf76");
+  assert.equal(parseSessionId("\x1b[32mbackgrounded\x1b[39m \x1b[90m·\x1b[39m \x1b[36ma1b2-c3\x1b[39m"), "a1b2-c3");
+});
+
+test("edge: parseSessionId strips OSC hyperlinks and 256-colour codes, and still finds no id in colour alone", () => {
+  assert.equal(parseSessionId("\x1b]8;;https://x\x07backgrounded · \x1b[38;5;208mdeadbeef\x1b[0m\x1b]8;;\x07"), "deadbeef");
+  assert.equal(parseSessionId("\x1b[1mbackgrounded · \x1b[0m"), null);
+});
+
+test("inFlightIssues ignores a leftover session whose issue is finished (PR merged or issue closed)", () => {
+  const sessions = [
+    { kind: "background", cwd: "/repo/.claude/worktrees/issue-20-cleanup" },
+    { kind: "background", cwd: "/repo/.claude/worktrees/issue-21-live" },
+  ];
+  assert.deepEqual(inFlightIssues({ prs: [], sessions, finished: [20] }), [21]);
+  // An open PR still counts: finished only drops sessions.
+  assert.deepEqual(inFlightIssues({ prs: [{ headRefName: "issue-20-again" }], sessions, finished: [20] }), [20, 21]);
+  assert.deepEqual(inFlightIssues({ prs: [], sessions }), [20, 21]);
+});
+
 test("parseSessionId returns null when no id is printed", () => {
   assert.equal(parseSessionId(""), null);
   assert.equal(parseSessionId("backgrounded · "), null);
@@ -189,10 +210,10 @@ test("parseSessionId returns null when no id is printed", () => {
 });
 
 // main, with fakes for gh, claude and git.
-const form = ({ scope = "In: `a.mjs`.", blockedBy = "none" } = {}) =>
-  ["### Goal", "g", "### Acceptance criteria", "- [ ] a", "### Interface contract", "none", "### Scope", scope, "### Blocked by", blockedBy, "### Tier", "quick"].join("\n\n");
+const form = ({ scope = "In: `a.mjs`.", blockedBy = "none", contract = "none" } = {}) =>
+  ["### Goal", "g", "### Acceptance criteria", "- [ ] a", "### Interface contract", contract, "### Scope", scope, "### Blocked by", blockedBy, "### Tier", "quick"].join("\n\n");
 
-function fakes({ issues = {}, prs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config } = {}) {
+function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config } = {}) {
   const launches = [];
   const view = (n) => {
     const i = issues[n];
@@ -206,7 +227,7 @@ function fakes({ issues = {}, prs = [], sessions = [], launchOut = {}, launchFai
     }
     if (args[0] === "issue" && args[1] === "list") return JSON.stringify(Object.keys(issues).map(Number).map(view).filter((i) => i.state === "OPEN"));
     if (args[0] === "api") return JSON.stringify({ state: "closed" });
-    if (args[0] === "pr" && args[1] === "list") return JSON.stringify(prs);
+    if (args[0] === "pr" && args[1] === "list") return JSON.stringify(args[args.indexOf("--state") + 1] === "merged" ? mergedPrs : prs);
     throw new Error(`unexpected gh call: ${args.join(" ")}`);
   };
   const claude = (args, opts) => {
@@ -257,6 +278,58 @@ test("main counts in-flight lanes from PRs and sessions", () => {
   });
   const { lines } = main(["1", "2"], deps);
   assert.deepEqual(lines, ["#1: refused: already in flight", "#2: refused: cap of 8 lanes in flight"]);
+});
+
+test("main reads a coloured `backgrounded · <id>` line as launched", () => {
+  const { deps } = fakes({ issues: { 62: {} }, launchOut: { 62: "\x1b[2mbackgrounded · \x1b[0m\x1b[1mc0ffee12\x1b[22m\n" } });
+  const { code, lines } = main(["62"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#62 → c0ffee12"]);
+});
+
+test("main does not count a merged lane's leftover session, or one whose issue is closed", () => {
+  const leftovers = [20, 21, 22, 23, 24, 25, 26, 27].map((n) => ({ kind: "background", cwd: `/repo/.claude/worktrees/issue-${n}-done` }));
+  const { deps, launches } = fakes({
+    issues: { 1: {}, 24: { state: "CLOSED" }, 25: { state: "CLOSED" }, 26: { state: "CLOSED" }, 27: { state: "CLOSED" } },
+    mergedPrs: [20, 21, 22, 23].map((n) => ({ headRefName: `issue-${n}-done` })),
+    prs: [{ headRefName: "issue-30-open" }],
+    sessions: [...leftovers, { kind: "background", cwd: "/repo/.claude/worktrees/issue-31-running" }],
+  });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1"]);
+  assert.equal(launches.length, 1);
+});
+
+test("edge: a session whose issue cannot be read still counts, so an unknown state never frees a slot", () => {
+  const sessions = [9, 10, 11, 12, 13, 14, 15, 16].map((n) => ({ kind: "background", cwd: `/repo/.claude/worktrees/issue-${n}-x` }));
+  const { deps, launches } = fakes({ issues: { 1: {} }, sessions });
+  assert.deepEqual(main(["1"], deps).lines, ["#1: refused: cap of 8 lanes in flight"]);
+  assert.equal(launches.length, 0);
+});
+
+test("edge: an open issue with no merged PR keeps its session in flight", () => {
+  const { deps } = fakes({ issues: { 1: {}, 5: {} }, mergedPrs: [{ headRefName: "issue-50-other" }], sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-5-x" }] });
+  assert.deepEqual(main(["5"], deps).lines, ["#5: refused: already in flight"]);
+});
+
+test("edge: main launches nothing when the merged-PR list cannot be read", () => {
+  const { deps, launches } = fakes({ issues: { 1: {} }, sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-5-x" }] });
+  const gh = deps.gh;
+  deps.gh = (args) => {
+    if (args[0] === "pr" && args.includes("merged")) throw new Error("gh: rate limited");
+    return gh(args);
+  };
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 2);
+  assert.match(lines[0], /cannot count lanes in flight.*gh: rate limited/);
+  assert.equal(launches.length, 0);
+});
+
+test("main does not refuse two issues whose contracts only read the same file", () => {
+  const contract = "none (reads `contracts/adr-template.md` from #44)";
+  const { deps } = fakes({ issues: { 45: { body: form({ contract, scope: "In: `a.mjs`." }) }, 46: { body: form({ contract, scope: "In: `b.mjs`." }) } } });
+  assert.deepEqual(main(["45", "46"], deps).lines, ["#45 → id45", "#46 → id46"]);
 });
 
 test("main refuses an unreadable issue and an open blocker", () => {
@@ -420,6 +493,21 @@ test("--auto prints one line per pick and per skipped ready issue, and launches 
     "#7: skipped: scope names no paths",
     "dry run, nothing launched: /start --auto --go launches the 2 marked would start",
   ]);
+});
+
+// Not named by the issue's criteria or its listed edge cases: --auto shares readInFlight with explicit /start, so a
+// merged lane's leftover session must free the issue there too, not only when the issue number is requested directly.
+test("--auto ignores a merged lane's leftover session too, so that issue is a candidate instead of already in flight", () => {
+  const { deps, launches } = fakes({
+    issues: autoIssues(),
+    mergedPrs: [{ headRefName: "issue-6-done" }],
+    sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-6-y" }],
+  });
+  const { code, lines } = main(["--auto"], deps);
+  assert.equal(code, 0);
+  assert.equal(launches.length, 0);
+  assert.ok(lines.includes("#6: would start"), lines.join("\n"));
+  assert.ok(!lines.some((l) => l.startsWith("#6: skipped")), lines.join("\n"));
 });
 
 test("--auto skips a ready issue with an open blocker", () => {
