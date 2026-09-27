@@ -118,13 +118,26 @@ export function deliveryCommand(platform, { title = "", body = "" } = {}) {
     return { file: "osascript", args: ["-e", 'display notification (system attribute "LANES_NOTIFY_BODY") with title (system attribute "LANES_NOTIFY_TITLE")'], env };
   }
   if (platform === "linux") return { file: "notify-send", args: ["--app-name=lanes", "--", title, body], env };
-  throw new Error(`no desktop notifier for platform ${platform}`);
+  throw new HookError(`no desktop notifier for platform ${clean(String(platform)).slice(0, 40)}`);
+}
+
+// An error this script raises on purpose; its message holds no input and may be logged as is.
+class HookError extends Error {}
+
+// Node's own error messages quote the failed command line and its stderr, or the bad JSON, so only the stage, the
+// error code and the exit status are logged for them.
+function logLine(stage, error) {
+  if (error instanceof HookError) return error.message;
+  const code = typeof error?.code === "string" && /^[A-Z_]+$/.test(error.code) ? error.code : error?.name ?? "error";
+  return `${stage} failed: ${code}${Number.isInteger(error?.status) ? ` (exit ${error.status})` : ""}`;
 }
 
 /** One hook call. `raw` is the hook's stdin; errors go to `log` as one line and never escape. */
 export function runHook(raw, { platform = process.platform, exec = execFileSync, log, now = Date.now } = {}) {
+  let stage = "reading hook input";
   try {
     const input = JSON.parse(raw);
+    stage = "building the notification";
     let lookup;
     if (input?.notification_type === "agent_completed" && laneIssue(input.cwd) !== null) {
       try {
@@ -136,9 +149,10 @@ export function runHook(raw, { platform = process.platform, exec = execFileSync,
     const n = notification(input, lookup);
     if (!n) return;
     const d = deliveryCommand(platform, n);
+    stage = "notifier";
     exec(d.file, d.args, { env: { ...process.env, ...d.env }, stdio: "ignore", timeout: NOTIFIER_TIMEOUT_MS, windowsHide: true });
   } catch (error) {
-    log(clean(String(error?.message ?? error)).slice(0, 300));
+    log(logLine(stage, error));
   }
 }
 

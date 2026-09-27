@@ -173,6 +173,23 @@ test("an unknown platform and a failed notifier each log one line and do not thr
   for (const l of lines) assert.doesNotMatch(l, /\n/);
 });
 
+// edge: Node's error messages quote the failed command line (on Linux, the notification text) and bad JSON input,
+// so a log line keeps only a fixed stage name, the error code and the exit status
+test("edge: a log line never repeats stdin, the notifier's command line or its stderr", () => {
+  const lines = [];
+  const log = (l) => lines.push(l);
+  runHook('{"cwd": "SECRET-STDIN', { platform: "linux", exec: () => {}, log });
+  const failed = Object.assign(new Error("Command failed: notify-send -- lanes SECRET-BODY\nSECRET-STDERR"), { status: 1 });
+  runHook(JSON.stringify(input({ message: "SECRET-BODY" })), { platform: "linux", exec: () => { throw failed; }, log });
+  const missing = Object.assign(new Error("spawnSync notify-send ENOENT"), { code: "ENOENT" });
+  runHook(JSON.stringify(input()), { platform: "linux", exec: () => { throw missing; }, log });
+  assert.equal(lines.length, 3);
+  for (const l of lines) assert.doesNotMatch(l, /SECRET|notify-send|Command failed/);
+  assert.match(lines[0], /reading hook input/);
+  assert.match(lines[1], /notifier failed.*exit 1/);
+  assert.match(lines[2], /notifier failed.*ENOENT/);
+});
+
 test("the log lives in .lanes/, which git ignores", () => {
   assert.match(readFileSync(".gitignore", "utf8"), /^\.lanes\/$/m);
   assert.match(readFileSync(script, "utf8"), /\.lanes\//);
@@ -201,6 +218,15 @@ test("agent_completed: a failed check notifies `failing: <check>`", () => {
   assert.equal(n.body, "lanes #52: failing: verify, security");
   const gateFailed = notification(done(), openPr(OK, { state: "failure", description: "PR body lacks Closes #N" }));
   assert.equal(gateFailed.body, "lanes #52: failing: lanes/gate");
+});
+
+// extra: a failing check takes priority over an owner-wait reason when both are present on the same PR
+test("agent_completed: a failing check outranks a simultaneous owner-wait reason", () => {
+  const n = notification(
+    done(),
+    openPr([{ name: "verify", conclusion: "FAILURE" }], { state: "pending", description: "waiting on owner (/approve) (touches a contract file)" }),
+  );
+  assert.equal(n.body, "lanes #52: failing: verify");
 });
 
 test("agent_completed: queued, merged and unattended-eligible PRs stay silent", () => {
