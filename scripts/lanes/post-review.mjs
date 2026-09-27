@@ -1,0 +1,156 @@
+// scripts/lanes/post-review.mjs
+// Posts a review result as the commit status review/<reviewer> on a PR's current head.
+// A reviewer's success or failure is a JSON verdict (the reviewer contract), validated first:
+//   node scripts/lanes/post-review.mjs --file .lanes/verdicts/test-hunter.json [--pr N]
+// Free text only for the owner's approval and for a reviewer the tier does not need:
+//   node scripts/lanes/post-review.mjs owner success "approved by owner" --pr N   (asks for permission)
+//   node scripts/lanes/post-review.mjs ui-reviewer skipped "no visible change"
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { parseIssueForm, parsePrBody, REVIEWERS, reviewContext } from "./lib.mjs";
+
+const RESULTS = ["pass", "fail", "not-applicable"];
+const SEVERITIES = ["critical", "important", "minor"];
+/** Reviewers that judge the acceptance criteria themselves, so they must assess every one. */
+const MUST_COVER = ["test-hunter", "ui-reviewer"];
+
+export function buildStatus(reviewer, verdict, summary) {
+  if (![...REVIEWERS, "owner"].includes(reviewer)) throw new Error(`reviewer must be one of ${[...REVIEWERS, "owner"].join(", ")}`);
+  if (reviewer === "owner" && verdict !== "success") throw new Error("the owner verdict is only 'success' (approve); to reject, comment on the PR");
+  if (reviewer !== "owner" && verdict !== "skipped") throw new Error("a reviewer posts success or failure as a JSON verdict: --file <verdict.json>");
+  const text = String(summary ?? "").trim();
+  if (!text) throw new Error("summary is required");
+  return {
+    context: reviewContext(reviewer),
+    state: "success",
+    description: (verdict === "skipped" ? `skipped: ${text}` : text).slice(0, 140),
+  };
+}
+
+export function validateVerdict(v, { criteriaCount }) {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return { ok: false, errors: ["verdict must be a JSON object"], status: null };
+  const errors = [];
+  if (!REVIEWERS.includes(v.reviewer)) errors.push(`reviewer must be one of ${REVIEWERS.join(", ")}`);
+  if (!["success", "failure"].includes(v.verdict)) errors.push("verdict must be success or failure");
+  if (typeof v.summary !== "string" || !v.summary.trim()) errors.push("summary is required");
+  let criteria = [];
+  if (Array.isArray(v.criteria)) criteria = v.criteria;
+  else errors.push("criteria must be an array");
+  let findings = [];
+  if (Array.isArray(v.findings)) findings = v.findings;
+  else errors.push("findings must be an array");
+
+  const seen = new Set();
+  for (const c of criteria) {
+    const index = c?.index;
+    if (!Number.isInteger(index) || index < 1 || index > criteriaCount) errors.push(`criterion index ${index} is not 1..${criteriaCount}`);
+    else if (seen.has(index)) errors.push(`criterion ${index} appears twice`);
+    else seen.add(index);
+    if (!RESULTS.includes(c?.result)) errors.push(`criterion ${index}: result must be ${RESULTS.join(", ")}`);
+    if (typeof c?.evidence !== "string" || !c.evidence.trim()) errors.push(`criterion ${index}: evidence is required`);
+  }
+  if (MUST_COVER.includes(v.reviewer) && seen.size !== criteriaCount) {
+    errors.push(`${v.reviewer} must assess all ${criteriaCount} criteria (got ${seen.size})`);
+  }
+  findings.forEach((f, i) => {
+    if (!SEVERITIES.includes(f?.severity)) errors.push(`finding ${i + 1}: severity must be ${SEVERITIES.join(", ")}`);
+    if (typeof f?.summary !== "string" || !f.summary.trim()) errors.push(`finding ${i + 1}: summary is required`);
+    if (typeof f?.fixed !== "boolean") errors.push(`finding ${i + 1}: fixed must be true or false`);
+  });
+  if (v.verdict === "success") {
+    if (criteria.some((c) => c?.result === "fail")) errors.push("success is refused: a criterion fails");
+    if (findings.some((f) => (f?.severity === "critical" || f?.severity === "important") && f?.fixed !== true)) {
+      errors.push("success is refused: an unfixed critical or important finding");
+    }
+  }
+  if (errors.length) return { ok: false, errors, status: null };
+
+  const fixed = findings.filter((f) => f.fixed).length;
+  const pass = criteria.filter((c) => c.result === "pass").length;
+  const counts = criteria.length ? `${pass}/${criteriaCount} criteria pass, ${fixed} fixed` : `${fixed} fixed`;
+  return {
+    ok: true,
+    errors: [],
+    status: { context: reviewContext(v.reviewer), state: v.verdict, description: `${counts}: ${v.summary.trim()}`.slice(0, 140) },
+  };
+}
+
+const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+const VALUED_FLAGS = new Set(["--file", "--pr", "--sha"]);
+const SHA_RE = /^[0-9a-f]{40}$/i;
+
+/**
+ * Strict CLI parsing (M1 + T7): `--file` takes a value and then no positional arguments; the positional form (a
+ * reviewer, a verdict and a summary) needs exactly 3 positionals; any other `--flag` is an error; a literal `--`
+ * ends flag parsing, so a summary may start with `--` only after it.
+ * @returns {{ file?: string, pr?: string, sha?: string, positional: string[] }}
+ */
+export function parseArgs(argv) {
+  const out = { file: undefined, pr: undefined, sha: undefined, positional: [] };
+  let doubleDash = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (!doubleDash && a === "--") {
+      doubleDash = true;
+      continue;
+    }
+    if (!doubleDash && VALUED_FLAGS.has(a)) {
+      const key = a.slice(2);
+      if (out[key] !== undefined) throw new Error(`${a} may be given only once`);
+      const value = argv[i + 1];
+      if (value === undefined || value === "" || (VALUED_FLAGS.has(value) && value !== "--")) {
+        throw new Error(`${a} requires a value`);
+      }
+      out[key] = value;
+      i += 1;
+      continue;
+    }
+    if (!doubleDash && a.startsWith("--")) throw new Error(`unknown flag: ${a}`);
+    out.positional.push(a);
+  }
+  if (out.file !== undefined) {
+    if (out.positional.length > 0) throw new Error("--file takes no positional arguments");
+  } else if (out.positional.length !== 3) {
+    throw new Error("usage: post-review.mjs <reviewer> <skipped|success> <summary>, or --file <verdict.json>");
+  }
+  if (out.sha !== undefined && !SHA_RE.test(out.sha)) throw new Error("--sha must be a 40-character hex commit SHA");
+  return out;
+}
+
+/** M5: refuses a stale `--sha` (a push landed between /approve reading the head and posting the status). */
+export function checkSha(sha, headRefOid) {
+  if (sha === undefined) return null;
+  if (sha.toLowerCase() !== String(headRefOid ?? "").toLowerCase()) {
+    return `refusing: --sha ${sha} does not match the PR's current head ${headRefOid} (a new commit landed; re-run /approve)`;
+  }
+  return null;
+}
+
+function main(argv = process.argv.slice(2)) {
+  const parsed = parseArgs(argv);
+  const pr = JSON.parse(gh(["pr", "view", ...(parsed.pr ? [parsed.pr] : []), "--json", "number,headRefOid,body"]));
+  const staleSha = checkSha(parsed.sha, pr.headRefOid);
+  if (staleSha) throw new Error(staleSha);
+  const repo = gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim();
+  let status;
+  let comment = null;
+  if (parsed.file) {
+    const closes = parsePrBody(pr.body).closes;
+    if (closes === null) throw new Error("the PR body has no 'Closes #N' outside code fences; fix the PR body first");
+    const issue = JSON.parse(gh(["issue", "view", String(closes), "--json", "body"]));
+    const verdict = JSON.parse(readFileSync(parsed.file, "utf8"));
+    const result = validateVerdict(verdict, { criteriaCount: parseIssueForm(issue.body).fields.criteria.length });
+    if (!result.ok) throw new Error(`verdict refused:\n- ${result.errors.join("\n- ")}`);
+    status = result.status;
+    comment = `<!-- lanes:verdict ${verdict.reviewer} -->\n\`\`\`json\n${JSON.stringify(verdict, null, 2)}\n\`\`\``;
+  } else {
+    status = buildStatus(...parsed.positional);
+  }
+  gh(["api", `repos/${repo}/statuses/${pr.headRefOid}`, "-f", `state=${status.state}`, "-f", `context=${status.context}`, "-f", `description=${status.description}`]);
+  if (comment) gh(["pr", "comment", String(pr.number), "--body", comment]);
+  console.log(`${status.context}=${status.state} on #${pr.number} at ${pr.headRefOid.slice(0, 7)}`);
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) main();

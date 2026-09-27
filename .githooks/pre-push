@@ -1,0 +1,3 @@
+#!/bin/sh
+# Runs the same PII, path and conflict checks as CI before anything leaves this machine.
+exec node scripts/preflight.mjs

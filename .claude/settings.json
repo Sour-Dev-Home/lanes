@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm test)",
+      "Bash(npm test:*)",
+      "Bash(npm run preflight)",
+      "Bash(npm run setup)",
+      "Bash(npm run status:*)",
+      "Bash(node --test:*)",
+      "Bash(node scripts/lanes/status.mjs:*)",
+      "Bash(node scripts/lanes/reviewers.mjs:*)",
+      "Bash(node scripts/lanes/delivery-metrics.mjs:*)",
+      "Bash(node scripts/lanes/post-review.mjs test-hunter:*)",
+      "Bash(node scripts/lanes/post-review.mjs ui-reviewer:*)",
+      "Bash(node scripts/lanes/post-review.mjs security-reviewer:*)",
+      "Bash(node scripts/lanes/post-review.mjs architecture-advisor:*)",
+      "Bash(node scripts/lanes/post-review.mjs --file:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr diff:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh issue list:*)",
+      "Bash(gh issue create:*)",
+      "Bash(gh issue comment:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run list:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git fetch:*)",
+      "Bash(git worktree:*)",
+      "Bash(git switch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git merge origin/main:*)",
+      "Bash(git push:*)"
+    ],
+    "ask": ["Bash(node scripts/lanes/post-review.mjs owner:*)"],
+    "deny": ["Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git push --force-with-lease:*)"]
+  },
+  "enabledPlugins": {
+    "superpowers@superpowers-marketplace": false
+  }
+}

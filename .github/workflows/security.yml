@@ -1,0 +1,32 @@
+name: security
+on:
+  pull_request:
+  merge_group:
+permissions:
+  contents: read
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check for PII or hardcoded local paths
+        # Patterns come from the PII_PATTERNS repository SECRET (one fixed string per line), never a variable:
+        # Actions prints a step's env block unmasked, and only secrets are masked. Only file:line is printed.
+        # -H is required: with a single file grep omits the filename and cut would keep the matched text.
+        env:
+          PII_PATTERNS: ${{ secrets.PII_PATTERNS }}
+        run: |
+          PATTERNS=$(mktemp)
+          printf '%s\n' "$PII_PATTERNS" | sed '/^[[:space:]]*$/d' > "$PATTERNS"
+          printf '%s\n' 'C:\Users' 'C:/Users' '/home/' '/Users/' >> "$PATTERNS"
+          if [ -z "$PII_PATTERNS" ]; then
+            echo "::warning::PII_PATTERNS secret is not available; only checking for local paths."
+          fi
+          # LICENSE names the copyright holder on purpose; .github/ and CLAUDE.md files document the patterns.
+          # -z/-0 throughout: NUL-separated, so a filename with a space or newline cannot split or hide from the scan.
+          HITS=$(git ls-files -z | grep -zvE '^(\.github/|.*CLAUDE\.md$|LICENSE$)' | xargs -0 -r grep -H -n -iF -f "$PATTERNS" | cut -d: -f1,2 || true)
+          if [ -n "$HITS" ]; then
+            echo "$HITS"
+            echo "::error::Possible PII or hardcoded-path leak at the file:line locations above."
+            exit 1
+          fi

@@ -1,0 +1,129 @@
+// scripts/lanes/post-review.test.mjs
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { buildStatus, checkSha, parseArgs, validateVerdict } from "./post-review.mjs";
+
+test("skipped is a success whose description starts with skipped", () => {
+  assert.deepEqual(buildStatus("ui-reviewer", "skipped", "no visible change"), { context: "review/ui-reviewer", state: "success", description: "skipped: no visible change" });
+});
+
+test("a reviewer's success or failure must come as a JSON verdict", () => {
+  assert.throws(() => buildStatus("test-hunter", "success", "x"), /--file/);
+  assert.throws(() => buildStatus("test-hunter", "failure", "x"), /--file/);
+});
+
+test("unknown reviewer and empty summary are refused", () => {
+  assert.throws(() => buildStatus("me", "skipped", "x"), /reviewer/);
+  assert.throws(() => buildStatus("test-hunter", "skipped", "  "), /summary/);
+});
+
+test("the owner can only approve", () => {
+  assert.equal(buildStatus("owner", "success", "approved").context, "review/owner");
+  assert.throws(() => buildStatus("owner", "skipped", "x"), /owner/);
+});
+
+test("descriptions are cut to 140 characters", () => {
+  assert.equal(buildStatus("test-hunter", "skipped", "x".repeat(200)).description.length, 140);
+});
+
+const verdict = (over = {}) => ({
+  reviewer: "test-hunter",
+  verdict: "success",
+  summary: "4 tests added, 1 bug fixed",
+  criteria: [
+    { index: 1, result: "pass", evidence: "rejects a duplicate name" },
+    { index: 2, result: "not-applicable", evidence: "no UI in this change" },
+  ],
+  findings: [{ severity: "important", file: "src/a.mjs", line: 3, summary: "off by one", fixed: true }],
+  ...over,
+});
+
+test("a valid verdict becomes a status with derived counts", () => {
+  assert.deepEqual(validateVerdict(verdict(), { criteriaCount: 2 }), {
+    ok: true,
+    errors: [],
+    status: { context: "review/test-hunter", state: "success", description: "1/2 criteria pass, 1 fixed: 4 tests added, 1 bug fixed" },
+  });
+});
+
+test("the test-hunter and ui-reviewer must assess every criterion exactly once", () => {
+  assert.match(validateVerdict(verdict({ criteria: [verdict().criteria[0]] }), { criteriaCount: 2 }).errors.join(), /all 2 criteria/);
+  const dup = [verdict().criteria[0], verdict().criteria[0]];
+  assert.match(validateVerdict(verdict({ criteria: dup }), { criteriaCount: 2 }).errors.join(), /appears twice/);
+  const out = [{ index: 3, result: "pass", evidence: "x" }];
+  assert.match(validateVerdict(verdict({ criteria: out }), { criteriaCount: 2 }).errors.join(), /not 1\.\.2/);
+});
+
+test("success is refused with a failing criterion or an unfixed important finding", () => {
+  const failing = [{ index: 1, result: "fail", evidence: "x" }, verdict().criteria[1]];
+  assert.match(validateVerdict(verdict({ criteria: failing }), { criteriaCount: 2 }).errors.join(), /a criterion fails/);
+  const open = [{ severity: "important", summary: "leak", fixed: false }];
+  assert.match(validateVerdict(verdict({ findings: open }), { criteriaCount: 2 }).errors.join(), /unfixed/);
+  assert.equal(validateVerdict(verdict({ verdict: "failure", findings: open }), { criteriaCount: 2 }).status.state, "failure");
+});
+
+test("an unfixed minor finding does not block success", () => {
+  assert.equal(validateVerdict(verdict({ findings: [{ severity: "minor", summary: "naming", fixed: false }] }), { criteriaCount: 2 }).ok, true);
+});
+
+test("the security reviewer may leave criteria empty", () => {
+  const r = validateVerdict(verdict({ reviewer: "security-reviewer", criteria: [], findings: [] }), { criteriaCount: 2 });
+  assert.equal(r.ok, true);
+  assert.equal(r.status.description, "0 fixed: 4 tests added, 1 bug fixed");
+});
+
+// M1 + T7: strict argument parsing, so a malformed command line cannot reach the owner form without a prompt
+test("--file takes a value and then no positional arguments", () => {
+  assert.deepEqual(parseArgs(["--file", "v.json"]), { file: "v.json", pr: undefined, sha: undefined, positional: [] });
+  assert.throws(() => parseArgs(["--file", "v.json", "extra"]), /positional/);
+  assert.throws(() => parseArgs(["--file"]), /requires a value/);
+  assert.throws(() => parseArgs(["--file", "--pr"]), /requires a value/);
+});
+
+test("the positional form needs exactly 3 positionals, reviewer first", () => {
+  const r = parseArgs(["test-hunter", "skipped", "no ui in this change"]);
+  assert.deepEqual(r.positional, ["test-hunter", "skipped", "no ui in this change"]);
+  assert.equal(r.file, undefined);
+  assert.throws(() => parseArgs(["test-hunter", "skipped"]), /usage/);
+  assert.throws(() => parseArgs(["test-hunter", "skipped", "a", "extra"]), /usage/);
+});
+
+test("unknown flags are errors", () => {
+  assert.throws(() => parseArgs(["--bogus", "x", "y", "z"]), /unknown flag/);
+});
+
+test("a summary may start with -- only after a literal --", () => {
+  assert.throws(() => parseArgs(["owner", "success", "--looks-like-a-flag"]), /unknown flag/);
+  const r = parseArgs(["owner", "success", "--", "--looks-like-a-flag"]);
+  assert.deepEqual(r.positional, ["owner", "success", "--looks-like-a-flag"]);
+});
+
+test("--pr and --sha are recognised flags with values", () => {
+  assert.equal(parseArgs(["--pr", "12", "test-hunter", "skipped", "x"]).pr, "12");
+  assert.equal(parseArgs(["--sha", "a".repeat(40), "test-hunter", "skipped", "x"]).sha, "a".repeat(40));
+});
+
+test("--sha must be a 40-character hex commit SHA", () => {
+  assert.throws(() => parseArgs(["--sha", "deadbeef", "test-hunter", "skipped", "x"]), /40-character/);
+  assert.doesNotThrow(() => parseArgs(["--sha", "A".repeat(40), "test-hunter", "skipped", "x"]));
+});
+
+test("a flag may not be given twice", () => {
+  assert.throws(() => parseArgs(["--pr", "1", "--pr", "2", "test-hunter", "skipped", "x"]), /once/);
+});
+
+// M5: /approve races a push; --sha refuses unless it matches the PR's current head
+test("checkSha refuses a stale head, accepts a match case-insensitively, and is a no-op when omitted", () => {
+  assert.equal(checkSha(undefined, "a".repeat(40)), null);
+  assert.equal(checkSha("A".repeat(40), "a".repeat(40)), null);
+  assert.match(checkSha("a".repeat(40), "b".repeat(40)), /does not match the PR's current head/);
+});
+
+test("malformed verdicts are refused with every problem listed", () => {
+  assert.deepEqual(validateVerdict(null, { criteriaCount: 1 }).errors, ["verdict must be a JSON object"]);
+  const r = validateVerdict({ reviewer: "owner", verdict: "ok", summary: "", criteria: "x", findings: [{ severity: "huge" }] }, { criteriaCount: 1 });
+  assert.equal(r.ok, false);
+  for (const re of [/reviewer must be/, /verdict must be/, /summary is required/, /criteria must be an array/, /severity must be/, /fixed must be/]) {
+    assert.match(r.errors.join("\n"), re);
+  }
+});

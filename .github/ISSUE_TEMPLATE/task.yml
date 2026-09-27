@@ -1,0 +1,33 @@
+name: Task
+description: One unit of work for one lane. Every field is part of the task contract.
+body:
+  - type: textarea
+    id: goal
+    attributes: { label: Goal, description: One sentence. }
+    validations: { required: true }
+  - type: textarea
+    id: criteria
+    attributes:
+      label: Acceptance criteria
+      description: One checkable item per line, written as "- [ ] ...". Each becomes a test.
+      value: "- [ ] "
+    validations: { required: true }
+  - type: textarea
+    id: contract
+    attributes: { label: Interface contract, description: "The type, schema, endpoint or CLI shape this task produces or consumes (link the file), or none." }
+    validations: { required: true }
+  - type: textarea
+    id: scope
+    attributes: { label: Scope, description: "In scope: files and areas. Out of scope: what this task must not touch." }
+    validations: { required: true }
+  - type: input
+    id: blocked
+    attributes: { label: Blocked by, description: "Issue numbers as #N, or none.", value: none }
+    validations: { required: true }
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Tier
+      description: "skip = docs/config/tests only; quick = UI or small fix; full = logic, data, APIs, security."
+      options: [skip, quick, full]
+    validations: { required: true }

@@ -1,0 +1,31 @@
+name: issue-contract
+on:
+  # labeled/unlabeled (R2): so removing lane-filed, or hand-adding/removing ready, re-runs the contract check. This
+  # cannot loop: a label edit this job itself makes uses GITHUB_TOKEN, and GITHUB_TOKEN-triggered events do not start
+  # new workflow runs.
+  issues:
+    types: [opened, edited, labeled, unlabeled]
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: issue-contract-${{ github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - run: node scripts/lanes/issue-contract.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_LABELS_JSON: ${{ toJson(github.event.issue.labels.*.name) }}
+          AUTHOR_ASSOCIATION: ${{ github.event.issue.author_association }}
