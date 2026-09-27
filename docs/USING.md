@@ -15,6 +15,9 @@
    already in flight; both issues of a pair whose paths overlap (pick one and run `/start` again); and anything past 3
    lanes in flight, counting open `issue-*` PRs and running sessions. Owner only: a lane or a schedule never runs it.
 3. **Watch with `/status`**: WAITING ON YOU, IN FLIGHT (each PR's stage), READY TO START, MERGED.
+   A `Notification` hook (`scripts/lanes/notify-hook.mjs`) pops a notification when a lane stops at a permission
+   prompt or needs input (with the `claude attach <id>` to reach it), or finishes with its PR waiting on you or failing.
+   It is a desktop notification on the machine running the lane only, never a phone or external push.
 4. **Approve with `/approve <pr>`** when a PR waits on you: read its "Needs the owner" and the diff; typing the command
    is the approval, and the merge queue does the rest. The approve guard (`scripts/lanes/approve-guard.mjs`, two hooks
    in `.claude/settings.json`) lets `post-review.mjs owner` run without a prompt only for that PR, once, in the turn

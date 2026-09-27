@@ -145,11 +145,25 @@ test("lane.md loads PushNotification via ToolSearch and caps each notification a
   assert.match(lane, /`lanes #<PR or issue>: /);
 });
 
-test("lane.md step 7 notifies once after checks settle: queued to merge, or needs /approve with the gate reason", () => {
+// #37: a queued PR needs nothing from the owner, so step 7 only notifies when the gate waits on them
+test("lane.md step 7 notifies only `needs /approve` with the gate reason once checks settle, never `queued to merge`", () => {
   const step7 = laneText().match(/\n7\. [\s\S]*?\n8\. /)[0];
   assert.match(step7, /checks settle/);
-  assert.match(step7, /queued to merge/);
+  assert.doesNotMatch(step7, /queued to merge/);
   assert.match(step7, /needs \/approve: <the lanes\/gate reason>/);
+});
+
+// #37: a lane stuck on a prompt cannot notify, so the harness's Notification hook does it
+test("settings: the Notification hook runs notify-hook.mjs with node, for lane stops and completions", () => {
+  const s = JSON.parse(readFileSync(".claude/settings.json", "utf8"));
+  const entries = s.hooks.Notification ?? [];
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].matcher, "permission_prompt|agent_needs_input|elicitation_dialog|agent_completed");
+  const [hook] = entries[0].hooks;
+  assert.equal(hook.type, "command");
+  assert.ok(hook.command.startsWith("node "), hook.command);
+  assert.match(hook.command, /scripts\/lanes\/notify-hook\.mjs"?$/);
+  assert.doesNotMatch(hook.command, /\bsh\b|bash|&&|\|/);
 });
 
 test("lane.md step 9 notifies `CI failed twice` before stopping", () => {
