@@ -2,7 +2,7 @@
 // Inputs (environment): REPO, EVENT_NAME, PR_NUMBER, STATUS_SHA, STATUS_CONTEXT, HEAD_REF, GROUP_SHA, GH_TOKEN.
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { authorCanWrite, GATE_CONTEXT, gateDecision, loadConfig, parsePrBody } from "./lib.mjs";
+import { authorCanWrite, GATE_CONTEXT, gateDecision, loadConfig, parsePrBody, parseVerdictComment } from "./lib.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -17,6 +17,37 @@ function post(api, repo, sha, { state, description }) {
 }
 
 const statusesOf = (api, repo, sha) => JSON.parse(api([`repos/${repo}/commits/${sha}/statuses?per_page=100`]));
+
+/**
+ * The PR's verdict comments, oldest first, parsed with `parseVerdictComment` and kept only when their author passes
+ * `authorCanWrite` (one lookup per login). Fails closed: comments that cannot be read mean no verdicts, so a full-tier
+ * PR waits on the owner.
+ */
+export function trustedVerdicts(api, repo, number) {
+  let lines;
+  try {
+    // @json emits one line per comment, whatever newlines its body holds.
+    lines = api([`repos/${repo}/issues/${number}/comments`, "--paginate", "--jq", ".[] | {login: .user.login, body} | @json"]).split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+  const canWrite = new Map();
+  const out = [];
+  for (const line of lines) {
+    let comment;
+    try {
+      comment = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const parsed = parseVerdictComment(comment?.body);
+    if (!parsed) continue;
+    const login = comment.login;
+    if (!canWrite.has(login)) canWrite.set(login, authorCanWrite(api, repo, login));
+    if (canWrite.get(login)) out.push(parsed);
+  }
+  return out;
+}
 
 /**
  * Gathers every input `gateDecision` needs for PR `number` from the API and returns its verdict, without posting
@@ -55,8 +86,10 @@ export function decideForPr(api, repo, number, config) {
     issueAuthorCanWrite,
     issueIsPr,
     headRef: pr.head.ref,
+    headSha: pr.head.sha,
     files,
     statuses: statusesOf(api, repo, pr.head.sha),
+    verdicts: trustedVerdicts(api, repo, number),
     config,
   });
   return { pr, decision };
