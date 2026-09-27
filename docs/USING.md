@@ -9,6 +9,11 @@
    `.lanes/plans/`; edit or approve the draft, and only then are they created.
 2. **Start up to 3 lanes**: open a fresh Claude Code session per issue and run `/lane <issue>`. Each lane works in its
    own worktree, writes the failing tests first, runs its reviewers, opens the PR and turns auto-merge on, then ends.
+   Faster: `/start <issue> [<issue> ...]` checks each issue the way `/lane` does and launches the rest as background
+   sessions with `claude --bg "/lane <issue>"`, printing `#<issue> → <id>` for `claude attach` or `claude logs`. It
+   refuses, with the reason, an issue that is not open, lacks `ready` or one `tier:*` label, has an open blocker or is
+   already in flight; both issues of a pair whose paths overlap (pick one and run `/start` again); and anything past 3
+   lanes in flight, counting open `issue-*` PRs and running sessions. Owner only: a lane or a schedule never runs it.
 3. **Watch with `/status`**: WAITING ON YOU, IN FLIGHT (each PR's stage), READY TO START, MERGED.
 4. **Approve with `/approve <pr>`** when a PR waits on you: read its "Needs the owner" and the diff; typing the command
    is the approval, and the merge queue does the rest. The approve guard (`scripts/lanes/approve-guard.mjs`, two hooks
