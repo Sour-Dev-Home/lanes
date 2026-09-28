@@ -240,6 +240,41 @@ export function parseIssueForm(body) {
   };
 }
 
+export class ValidationParseError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ValidationParseError";
+  }
+}
+
+const VALIDATE_FORM = "validate: <command> — <regex> <op> <threshold> (attempts: N)";
+const VALIDATE_LINE = /^validate:\s*(.*?)\s+—\s+(.+)\s+(<=|>=|<|>)\s+(-?\d+(?:\.\d+)?)\s+\(attempts:\s*(\d+)\)$/;
+
+/**
+ * Parses a validation-loop criterion (ADR 0012): `validate: <command> — <regex> <op> <threshold> (attempts: N)`.
+ * @returns {{ command: string, regex: string, op: "<"|"<="|">"|">=", threshold: number, attempts: number } | null}
+ *   null for a criterion that does not start with `validate:`
+ * @throws {ValidationParseError} for a `validate:` line that is malformed
+ */
+export function parseValidation(line) {
+  const text = String(line ?? "").trim();
+  if (!text.startsWith("validate:")) return null;
+  const m = VALIDATE_LINE.exec(text);
+  if (!m) throw new ValidationParseError(`malformed validate: line, expected "${VALIDATE_FORM}"`);
+  const [, command, regex, op, threshold, attempts] = m;
+  if (!command.trim()) throw new ValidationParseError("validate: line has an empty command");
+  const n = Number(attempts);
+  if (!Number.isInteger(n) || n < 1 || n > 10) throw new ValidationParseError(`validate: attempts must be 1 to 10, got ${attempts}`);
+  let compiled;
+  try {
+    compiled = new RegExp(regex);
+  } catch (err) {
+    throw new ValidationParseError(`validate: regex does not compile (${err.message})`);
+  }
+  if (new RegExp(`${compiled.source}|`).exec("")?.length < 2) throw new ValidationParseError("validate: regex needs a capture group for the metric");
+  return { command: command.trim(), regex, op, threshold: Number(threshold), attempts: n };
+}
+
 export const PR_SECTIONS = ["what changed", "contract changes", "tests added", "reviewer results", "needs the owner", "not done"];
 const CONTRACT_CHANGES = ["none", "additive", "breaking"];
 

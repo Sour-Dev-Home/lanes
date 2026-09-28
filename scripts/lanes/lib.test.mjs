@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, loadAdrs, loadConfig, parseAdr, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, loadAdrs, loadConfig, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -683,4 +683,41 @@ test("edge: diffFingerprint keeps a hunk boundary: one hunk split in two is a di
   const one = "diff --git a/b.js b/b.js\n--- a/b.js\n+++ b/b.js\n@@ -1,2 +1,2 @@\n-x\n+y\n-p\n+q\n";
   const two = "diff --git a/b.js b/b.js\n--- a/b.js\n+++ b/b.js\n@@ -1,1 +1,1 @@\n-x\n+y\n@@ -9,1 +9,1 @@\n-p\n+q\n";
   assert.notEqual(diffFingerprint(one), diffFingerprint(two));
+});
+
+const V = (tail) => `validate: node --test — ${tail}`;
+
+test("parseValidation returns the parts for each operator", () => {
+  for (const op of ["<", "<=", ">", ">="]) {
+    assert.deepEqual(parseValidation(V(`(\\d+) passed ${op} 3.5 (attempts: 4)`)), { command: "node --test", regex: "(\\d+) passed", op, threshold: 3.5, attempts: 4 });
+  }
+});
+
+test("parseValidation accepts attempts 1 and 10, rejects 0 and 11", () => {
+  assert.equal(parseValidation(V("(\\d+) >= 1 (attempts: 1)")).attempts, 1);
+  assert.equal(parseValidation(V("(\\d+) >= 1 (attempts: 10)")).attempts, 10);
+  for (const n of [0, 11]) assert.throws(() => parseValidation(V(`(\\d+) >= 1 (attempts: ${n})`)), { name: "ValidationParseError" });
+});
+
+test("parseValidation: null for a plain criterion, negative thresholds parse", () => {
+  assert.equal(parseValidation("Tests cover the parser"), null);
+  assert.equal(parseValidation(""), null);
+  assert.equal(parseValidation("see validate: later"), null);
+  assert.equal(parseValidation(V("(\\d+) > -2 (attempts: 2)")).threshold, -2);
+});
+
+test("edge: parseValidation throws a named error for malformed validate lines", () => {
+  for (const bad of [
+    "validate:",
+    "validate: node --test",
+    "validate: node --test — (\\d+) >= 3",
+    "validate: node --test — (\\d+) == 3 (attempts: 2)",
+    "validate: node --test — (\\d+) >= three (attempts: 2)",
+    "validate: — (\\d+) >= 3 (attempts: 2)",
+    "validate: node --test — (\\d+ >= 3 (attempts: 2)",
+    "validate: node --test — \\d+ >= 3 (attempts: 2)",
+    "validate: node --test — (\\d+) >= 3 (attempts: 2.5)",
+  ]) {
+    assert.throws(() => parseValidation(bad), (e) => e.name === "ValidationParseError" && /validate/.test(e.message), bad);
+  }
 });
