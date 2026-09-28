@@ -341,3 +341,11 @@ test("edge: a new import cycle beside the allowed one is reported", () => {
   assert.ok(r.cycles[0].includes("scripts/lanes/lib.mjs") && r.cycles[0].includes("scripts/lanes/blockers.mjs"));
   assert.equal(r.allowedCycles.length, 1);
 });
+
+test("edge: main on the real map exits 1 and names a stray file that no module claims", () => {
+  const files = { ...repoFiles(), "scripts/lanes/stray.mjs": "" };
+  const io = { readConfig: realConfig, listFiles: (dir) => Object.keys(files).filter((f) => f.startsWith(dir)), readFile: (f) => files[f] };
+  const { code, message } = main(io);
+  assert.equal(code, 1);
+  assert.match(message, /^unmapped: scripts\/lanes\/stray\.mjs$/m);
+});
