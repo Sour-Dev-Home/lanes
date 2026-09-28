@@ -17,10 +17,11 @@ on:
       pr:
         description: PR number to re-evaluate (for example after an issue's tier label changed)
         required: true
+# issues: write is only for #82 (ADR 0004): gate.mjs comments on a PR when an owner approval lands on its head.
 permissions:
   contents: read
   pull-requests: read
-  issues: read
+  issues: write
   statuses: write
 concurrency:
   group: lanes-gate-${{ github.event.pull_request.head.sha || github.event.sha || github.event.merge_group.head_sha || github.event.inputs.pr || format('issue-{0}', github.event.issue.number) }}
@@ -45,6 +46,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr }}
           STATUS_SHA: ${{ github.event.sha }}
           STATUS_CONTEXT: ${{ github.event.context }}
+          STATUS_STATE: ${{ github.event.state }}
           HEAD_REF: ${{ github.event.merge_group.head_ref }}
           GROUP_SHA: ${{ github.event.merge_group.head_sha }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
