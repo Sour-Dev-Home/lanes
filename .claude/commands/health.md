@@ -20,6 +20,12 @@ Report, in at most 15 lines:
    for the worst structural problems it finds (none is a fine answer), each from the Task form's layout with
    `gh issue create --label lane-filed --body-file <file>`, and each Scope naming the file paths to change. Report
    the issues it filed.
+   The same advisor run also checks ADR drift, replacing the per-PR ADR reviews: in the same spawn as the structural
+   report (not a second subagent), also give it the files changed by lane PRs merged in the window
+   (`gh pr list --state merged --json files`, merged within the last 7 days) with the accepted ADRs governing each
+   (the ADR lookup `node scripts/lanes/reviewers.mjs` uses, from `docs/adr/`). It files at most 3 ADR-drift issues
+   (tier skip or quick, `--label lane-filed`, same layout and `--body-file` rule) for ADR text that no longer matches
+   the code, each naming the ADR and the file (none is a fine answer). Report the issues it filed.
 9. `node scripts/lanes/lessons.mjs --recurring`: for each pattern with no open issue whose title carries
    `lesson:<area>/<pattern>`, file one `lane-filed` Task issue (tier quick) proposing a lint rule or test, from this
    session, not the architecture advisor. Report the issues filed.
