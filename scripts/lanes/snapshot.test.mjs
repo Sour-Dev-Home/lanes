@@ -21,6 +21,7 @@ const pr = (number, over = {}) => ({
   title: `PR ${number}`,
   body: "Closes #1",
   headRefOid: SHA,
+  isCrossRepository: false,
   headRefName: `issue-${number}`,
   statusCheckRollup: [{ name: "verify", conclusion: "SUCCESS" }, gate("SUCCESS")],
   autoMergeRequest: { enabledAt: NOW },
@@ -125,8 +126,23 @@ test("edge: a check with an unknown state or conclusion counts as pending; a sta
 });
 
 test("edge: a PR with no statusCheckRollup, comments or closing refs does not throw", () => {
-  const bare = { number: 7, title: "t", headRefOid: SHA };
+  const bare = { number: 7, title: "t", headRefOid: SHA, isCrossRepository: false };
   assert.deepEqual(build({ prs: [bare], issues: [issue(1)] }).issues.map((i) => i.pr), [undefined]);
+});
+
+test("a fork's PR, or one whose origin is unknown, is ignored: its check names never reach the snapshot", () => {
+  const strangerChecks = [{ name: "job /home/x", conclusion: "SUCCESS" }, gate("SUCCESS")];
+  for (const isCrossRepository of [true, undefined, null, "false"]) {
+    const s = build({ issues: [issue(1)], prs: [pr(5, { isCrossRepository, statusCheckRollup: strangerChecks })] });
+    assert.equal(s.issues[0].pr, undefined, String(isCrossRepository));
+    assert.equal(s.issues[0].stage, "ready");
+    assert.ok(!JSON.stringify(s).includes("/home/"));
+  }
+});
+
+test("edge: a fork's PR does not hide a same-repo PR for the same issue, whatever its number", () => {
+  const s = build({ issues: [issue(1)], prs: [pr(5), pr(9, { isCrossRepository: true })] });
+  assert.equal(s.issues[0].pr.number, 5);
 });
 
 test("edge: two PRs closing one issue: the newest number is shown", () => {
@@ -270,4 +286,15 @@ test("writeSnapshot writes the JSON to the file, creating the folder, and ends w
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("edge: a PR whose gate passed with auto-merge off is ready, with no blockers", () => {
+  const i = one({ issues: [issue(1)], prs: [pr(5, { autoMergeRequest: null })] });
+  assert.equal(i.stage, "ready");
+  assert.deepEqual(i.blockedBy, []);
+});
+
+test("edge: a criterion result outside pass/fail/not-applicable never reaches the criteria", () => {
+  const v = { sha: SHA, reviewer: "r", verdict: { criteria: [{ index: 1, result: "<script>" }, { index: 2, result: "pass" }] } };
+  assert.deepEqual(verdictCriteria([v], SHA), [{ index: 2, result: "pass" }]);
 });

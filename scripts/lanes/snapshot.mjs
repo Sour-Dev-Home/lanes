@@ -10,6 +10,7 @@ import { GATE_CONTEXT, parseIssueForm, parseVerdictComment } from "./lib.mjs";
 import { gateDescriptions, mergeQueueEntries, prStage } from "./status.mjs";
 
 const ISSUE_LIMIT = 1000;
+const PR_LIMIT = 100; // also the GraphQL page size of SNAPSHOT_QUERY
 const TITLE_MAX = 200;
 // Only comments by people with write access count: a verdict comment from anyone else is not a review.
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -85,7 +86,11 @@ function prBlockers(stage, note) {
 export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), generatedAt }) {
   const queuePosition = new Map(mergeQueue.map((e) => [e.number, e.position]));
   const prOf = new Map();
-  for (const pr of [...prs].sort((a, b) => a.number - b.number)) for (const ref of pr.closingIssuesReferences ?? []) prOf.set(ref.number, pr);
+  // A fork's PR is stranger-controlled (its check names are whatever its workflow calls them, and "Fixes #N" is free),
+  // and those names would be published and compared with the PII secret. Only a PR proven same-repo counts; a missing
+  // isCrossRepository counts as a stranger's.
+  const sameRepo = prs.filter((pr) => pr.isCrossRepository === false);
+  for (const pr of [...sameRepo].sort((a, b) => a.number - b.number)) for (const ref of pr.closingIssuesReferences ?? []) prOf.set(ref.number, pr);
   const blockedByOf = new Map(issues.map((i) => [i.number, [...new Set(parseIssueForm(i.body ?? "").fields.blockedBy ?? [])]]));
   const listed = issues
     .filter((i) => i.labels?.some((l) => l.name.startsWith("tier:")) || prOf.has(i.number))
@@ -179,7 +184,9 @@ function main(argv = process.argv.slice(2)) {
   const issues = gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,title,labels,body"]);
   // A blocker missing from a truncated list would read as closed, so refuse rather than publish a wrong "ready".
   if (issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
-  const prs = gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefOid,comments"]);
+  const prs = gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,isCrossRepository,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefOid,comments"]);
+  // Same reason as issues: a PR cut off the list would leave its issue showing a wrong stage.
+  if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to list every issue's real stage`);
   const snapshot = buildSnapshot({ prs, issues, mergeQueue: mergeQueueEntries(reply), gateDescriptions: gateDescriptions(reply), generatedAt: new Date().toISOString() });
   if (out) writeSnapshot(snapshot, out);
   else console.log(JSON.stringify(snapshot, null, 2));

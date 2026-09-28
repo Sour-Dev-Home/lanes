@@ -271,6 +271,7 @@ const snapshotInput = {
       {
         number: 9,
         headRefOid: SNAP_SHA,
+        isCrossRepository: false,
         statusCheckRollup: [{ name: "verify", conclusion: "FAILURE" }, { context: "lanes/gate", state: "PENDING", description: "waiting on owner (/approve)" }],
         closingIssuesReferences: [{ number: 3 }],
         comments: [{ authorAssociation: "OWNER", body: buildVerdictComment({ reviewer: "test-hunter", verdict: "success", summary: "s", criteria: [{ index: 1, result: "pass", evidence: "e" }], findings: [] }, SNAP_SHA) }],

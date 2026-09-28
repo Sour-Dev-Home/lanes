@@ -32,6 +32,7 @@ test("every checkout is of the default branch's own code", () => {
   assert.equal(checkouts.length, 1);
   for (const [, withBlock] of checkouts) assert.match(withBlock, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
   assert.doesNotMatch(yml, /github\.(head_ref|event\.pull_request)/);
+  assert.match(buildJob, /default_branch \}\}\n {10}persist-credentials: false\n/);
 });
 
 test("pages: write and id-token: write appear in the deploy job only", () => {
@@ -128,6 +129,12 @@ test("the PII step fails on a private pattern, case-insensitively, and never pri
   assert.equal(result.status, 1);
   assert.doesNotMatch(result.out, /codename/i);
   assert.deepEqual(result.hits, ["snapshot.json:2"]);
+});
+
+test("edge: a secret saved with CRLF line endings still matches", (t) => {
+  const result = runCheck(clean("the Internal-Codename project"), "Internal-Codename\r\nOther\r\n");
+  if (skipNoBash(t, result)) return;
+  assert.equal(result.status, 1);
 });
 
 test("edge: a secret with blank lines does not match everything", (t) => {
