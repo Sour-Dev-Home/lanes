@@ -167,31 +167,35 @@ export function checkSha(sha, headRefOid) {
   return null;
 }
 
-function main(argv = process.argv.slice(2)) {
+/**
+ * Runs the CLI. `run` stands in for `gh` in tests. With `--file` the verdict comment is posted before the status: the
+ * status event re-runs lanes/gate, which must find the comment then (#42). A failed comment throws before any status.
+ */
+export function main(argv = process.argv.slice(2), { run = gh, log = console.log, warn = console.warn } = {}) {
   const parsed = parseArgs(argv);
-  const pr = JSON.parse(gh(["pr", "view", ...(parsed.pr ? [parsed.pr] : []), "--json", "number,headRefOid,body"]));
+  const pr = JSON.parse(run(["pr", "view", ...(parsed.pr ? [parsed.pr] : []), "--json", "number,headRefOid,body"]));
   const staleSha = checkSha(parsed.sha, pr.headRefOid);
   if (staleSha) throw new Error(staleSha);
-  const repo = gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim();
+  const repo = run(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim();
   let status;
   let comment = null;
   if (parsed.file) {
     const closes = parsePrBody(pr.body).closes;
     if (closes === null) throw new Error("the PR body has no 'Closes #N' outside code fences; fix the PR body first");
-    const issue = JSON.parse(gh(["issue", "view", String(closes), "--json", "body"]));
+    const issue = JSON.parse(run(["issue", "view", String(closes), "--json", "body"]));
     const verdict = JSON.parse(readFileSync(parsed.file, "utf8"));
     const result = validateVerdict(verdict, { criteriaCount: parseIssueForm(issue.body).fields.criteria.length });
     if (!result.ok) throw new Error(`verdict refused:\n- ${result.errors.join("\n- ")}`);
     const warning = metricsWarning(verdict);
-    if (warning) console.warn(warning);
+    if (warning) warn(warning);
     status = result.status;
     comment = buildVerdictComment(verdict, pr.headRefOid);
   } else {
     status = buildStatus(...parsed.positional);
   }
-  gh(["api", `repos/${repo}/statuses/${pr.headRefOid}`, "-f", `state=${status.state}`, "-f", `context=${status.context}`, "-f", `description=${status.description}`]);
-  if (comment) gh(["pr", "comment", String(pr.number), "--body", comment]);
-  console.log(`${status.context}=${status.state} on #${pr.number} at ${pr.headRefOid.slice(0, 7)}`);
+  if (comment) run(["pr", "comment", String(pr.number), "--body", comment]);
+  run(["api", `repos/${repo}/statuses/${pr.headRefOid}`, "-f", `state=${status.state}`, "-f", `context=${status.context}`, "-f", `description=${status.description}`]);
+  log(`${status.context}=${status.state} on #${pr.number} at ${pr.headRefOid.slice(0, 7)}`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main();
