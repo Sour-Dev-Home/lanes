@@ -448,7 +448,9 @@ function programWords(words) {
 // builtin. Such a script can only compute and read or write text.
 const SAFE_IMPORT_RE = /^(node:)?(fs|fs\/promises|path|url|os|util)$/;
 const SAFE_JS_KEYWORDS = new Set(["const", "let", "var", "of", "in", "for", "if", "else", "return", "true", "false", "null", "typeof", "function", "while", "break", "continue", "do", "switch", "case", "default", "import", "from", "as"]);
-// Keywords after which a `/` starts a regex literal rather than a division.
+// Keywords after which a `/` starts a regex literal rather than a division. `of` is no reserved word: a script that
+// binds it could hide code between two slashes as a "regex", so namesInert refuses any binding of it (#61 security
+// review round 4).
 const JS_EXPRESSION_KEYWORDS = new Set(["return", "typeof", "case", "in", "of", "else", "do"]);
 const SAFE_JS_GLOBALS = new Set(["console", "JSON", "String", "Number", "Math", "parseInt", "undefined", "NaN"]);
 // Names that are no property of globalThis but still reach code: module-scope variables, and keywords not listed above.
@@ -571,11 +573,15 @@ function namesInert(t) {
       if (["const", "let", "var", "function"].includes(x.v) && t[k + 1]?.k === "id") declared.add(t[k + 1].v);
       if (assignAt(k + 1) || arrowAt(k + 1)) declared.add(x.v);
       if (x.v === "import") for (let m = k + 1; m < t.length && !(t[m].k === "id" && t[m].v === "from"); m += 1) if (t[m].k === "id") declared.add(t[m].v);
-      if ((isP(k - 1, "{") || isP(k - 1, ",")) && isP(k + 1, ":") && brackets.at(-1) === "{") keyAt.add(k);
+      if ((isP(k - 1, "{") || isP(k - 1, ",")) && isP(k + 1, ":") && brackets.at(-1) === "{o") keyAt.add(k);
     }
     if (x.k !== "p") continue;
     if ((x.v === "}" || x.v === "]") && (assignAt(k + 1) || (t[k + 1]?.k === "id" && ["of", "in"].includes(t[k + 1].v)))) return false;
-    if (x.v === "(" || x.v === "{" || x.v === "[") brackets.push(x.v);
+    // A `{` after `=`, `(`, `,`, `:`, `[`, `?` or return opens an object literal ("{o"), whose `key:` is no expression;
+    // any other `{` (a block, a switch body with `case a, b:`) is not one (#61 security review round 4).
+    const literalOpener = isP(k - 1, "=") || isP(k - 1, "(") || isP(k - 1, ",") || isP(k - 1, ":") || isP(k - 1, "[") || isP(k - 1, "?") || (t[k - 1]?.k === "id" && t[k - 1].v === "return");
+    if (x.v === "{") brackets.push(literalOpener ? "{o" : "{");
+    else if (x.v === "(" || x.v === "[") brackets.push(x.v);
     else if (x.v === ")" || x.v === "}" || x.v === "]") brackets.pop();
     if (x.v === "(") parens.push({ at: k, pattern: false, params: t[k - 1]?.v === "function" || t[k - 2]?.v === "function" });
     else if ((x.v === "{" || x.v === "[") && parens.length > 0) parens.at(-1).pattern = true;
@@ -588,6 +594,8 @@ function namesInert(t) {
       }
     }
   }
+  // A bound `of` changes how the tokenizer reads a `/` after it (see JS_EXPRESSION_KEYWORDS).
+  if (declared.has("of")) return false;
   const unsafe = (w) => UNSAFE_JS_NAMES.has(w) || w in globalThis || (BUILTIN_MODULES.has(w) && !SAFE_IMPORT_RE.test(w));
   return t.every((x, k) => x.k !== "id" || x.dot || keyAt.has(k) || SAFE_JS_KEYWORDS.has(x.v) || SAFE_JS_GLOBALS.has(x.v) || (declared.has(x.v) && !unsafe(x.v)));
 }

@@ -1850,3 +1850,24 @@ test("#61 edge (security review round 3): scripts that bind their own names, par
 test("#61 edge (security review round 3): Import-Alias fails closed like the other alias commands", () => {
   for (const c of ["Import-Alias aliases.csv; n scripts/lanes/start.mjs 5", "ipal aliases.csv"]) assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
 });
+
+test("#61 edge (security review round 4): a bindable name before a slash does not start a regex literal", () => {
+  for (const js of [
+    `const of = 4; of / 1, require("fs") / 1; "scripts/lanes/start.mjs"`,
+    `let of = 2; const n = of / 2 / 1; "scripts/lanes/start.mjs"`,
+  ]) {
+    assert.deepEqual(decideFor(bash(`node -e '${js}'`), grant()), { decision: "deny", reason: DENY_REASON }, js);
+    assert.equal(decideFor(ps(`node -e '${js}'`), grant())?.decision, "deny", js);
+  }
+  // A regex after a reserved word, and a division, still read as they should.
+  for (const js of [`const f = (s) => { return /start/.test(s) }; console.log(f("start.mjs"), 4 / 2 / 1)`, `for (const x of ["start.mjs"]) console.log(x)`]) {
+    assert.equal(decideFor(bash(`node -e '${js}'`)), null, js);
+  }
+});
+
+test("#61 edge (security review round 4): only an object literal's key is exempt, not a case expression", () => {
+  assert.equal(decideFor(bash(`node -e 'switch (1) { case 1, child_process: break } "scripts/lanes/start.mjs"'`), grant())?.decision, "deny");
+  for (const js of [`const o = { a: 1, b: [{ c: "start.mjs" }] }; console.log(o)`, `console.log(1 ? { k: "start.mjs" } : null)`]) {
+    assert.equal(decideFor(bash(`node -e '${js}'`)), null, js);
+  }
+});
