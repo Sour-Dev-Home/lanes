@@ -9,7 +9,8 @@
 //     `node scripts/lanes/start.mjs --auto [--go]`, only with a grant from this session under 15 minutes old for the
 //     same issue numbers or the same auto form (a dry-run grant never allows --go). Every other start.mjs run is denied. A direct
 //     `claude --bg` is always denied: start.mjs launches lanes itself (execFileSync, not a Bash tool call), so no
-//     session ever needs it. Anything else gets no decision. A deny holds in every permission mode.
+//     session ever needs it. A `queue.mjs` run is always denied too, grant or not: the owner runs it in their own
+//     terminal (#95, ADR 0005). Anything else gets no decision. A deny holds in every permission mode.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,7 @@ import { fileURLToPath } from "node:url";
 export const GRANT_TTL_MS = 15 * 60 * 1000;
 export const DENY_REASON = "lanes are launched only from /start <N> typed by the owner in this session";
 export const BG_DENY_REASON = "claude --bg is never run directly; the owner launches lanes with /start <N>";
+export const QUEUE_DENY_REASON = "queue.mjs runs only in the owner's own terminal, never from a Claude session, lane or schedule (ADR 0005)";
 export const PARSE_DENY_REASON =
   "this command could not be parsed (an unterminated quote or nesting too deep) and it names start.mjs or --bg, so start-guard denies it; rewrite it, for example a commit message with git commit -F <file>";
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -27,6 +29,7 @@ const AUTO_PROMPT_RE = /^\/start\s+--auto(\s+--go)?$/;
 const AUTO_PLAIN_RE = /^node scripts\/lanes\/start\.mjs --auto( --go)?$/;
 const AUTO_FORMS = { dry: "--auto", go: "--auto --go" };
 const START_WORD_RE = /start\.mjs$/i;
+const QUEUE_WORD_RE = /queue\.mjs$/i;
 const NODE_RE =/^(node|nodejs|bun|deno)(\.exe)?$/i;
 const CLAUDE_RE = /^claude(-code)?(\.exe|\.cmd|\.ps1)?$/i;
 const BG_FLAG_RE = /^--(bg|background)(=.*)?$/;
@@ -280,6 +283,35 @@ export function findStartInvocations(command) {
   return out;
 }
 
+/**
+ * True when a Bash command runs `queue.mjs` (#95, ADR 0005): the script as the command itself, or as an argument of
+ * node, bun or deno, behind any wrapper, chain, `bash -c` or heredoc. A part that cannot be read and names queue.mjs, or
+ * a command or script word that stays unresolved (`$X`, a backtick) in a call that names queue.mjs, also counts: either
+ * could be a run. Merely naming the file (cat, git diff, `node --test …queue.test.mjs`) is not a run.
+ */
+export function findQueueInvocations(command) {
+  const cmd = String(command ?? "");
+  let found = false;
+  let unresolved = false;
+  walk(
+    cmd,
+    0,
+    (words) => {
+      const plain = words.filter((w) => !ASSIGN_RE.test(w));
+      const nodeAt = plain.findIndex((p) => NODE_RE.test(basename(p)));
+      const scriptAt = nodeAt === -1 ? -1 : plain.findIndex((p, i) => i > nodeAt && !p.startsWith("-"));
+      plain.forEach((w, i) => {
+        if (QUEUE_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i))) found = true;
+        else if (UNRESOLVED_RE.test(w) && (i === 0 || i === scriptAt)) unresolved = true;
+      });
+    },
+    (text) => {
+      if (/queue\.mjs/i.test(text)) found = true;
+    },
+  );
+  return found || (unresolved && /queue\.mjs/i.test(withoutLiteralSubstitutions(cmd)));
+}
+
 /** True when a Bash command runs `claude --bg` (or `--background`) directly, behind any wrapper, or cannot be read. */
 export function findBgLaunches(command) {
   return scanBgLaunches(command).found;
@@ -339,6 +371,8 @@ export function decidePreToolUse(input, grant, now = Date.now()) {
   const command = input.tool_input?.command;
   const bg = scanBgLaunches(command);
   if (bg.found) return { decision: "deny", reason: bg.unparsed ? PARSE_DENY_REASON : BG_DENY_REASON };
+  // Before any grant is read: no /start grant, of any form, reaches queue.mjs.
+  if (findQueueInvocations(command)) return { decision: "deny", reason: QUEUE_DENY_REASON };
   const found = findStartInvocations(command);
   if (found.length === 0) return null;
   if (found.every((f) => f.unparsed)) return { decision: "deny", reason: PARSE_DENY_REASON };

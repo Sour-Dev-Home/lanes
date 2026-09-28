@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON,GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findStartInvocations, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, runHook } from "./start-guard.mjs";
+import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, runHook } from "./start-guard.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const START = "node scripts/lanes/start.mjs 12 14";
@@ -546,4 +546,137 @@ test("edge: the hook itself passes a heredoc commit and gives the could-not-pars
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- queue.mjs (#95, ADR 0005): the owner's own terminal only -------------------------------------------------------
+
+const QUEUE = "node scripts/lanes/queue.mjs 12 14";
+const QUEUE_RUNS = [
+  QUEUE,
+  "node scripts/lanes/queue.mjs",
+  "node scripts/lanes/queue.mjs\n",
+  "cd /repo && node scripts/lanes/queue.mjs 12",
+  "node scripts/lanes/queue.mjs 12; echo done",
+  "git fetch origin || node scripts/lanes/queue.mjs 12",
+  "(node scripts/lanes/queue.mjs 12)",
+  'bash -c "node scripts/lanes/queue.mjs 12"',
+  "sh -c 'cd /repo && node scripts/lanes/queue.mjs 12'",
+  "env FOO=1 node scripts/lanes/queue.mjs 12",
+  "FOO=1 node scripts/lanes/queue.mjs 12",
+  "nohup node scripts/lanes/queue.mjs 12 &",
+  "timeout 60 node scripts/lanes/queue.mjs 12",
+  "bun scripts/lanes/queue.mjs 12",
+  "bun run scripts/lanes/queue.mjs 12",
+  "deno run -A scripts/lanes/queue.mjs 12",
+  "nodejs scripts/lanes/queue.mjs 12",
+  "node.exe scripts/lanes/queue.mjs 12",
+  '"C:/Program Files/nodejs/node.exe" scripts/lanes/queue.mjs 12',
+  "node --no-warnings scripts/lanes/queue.mjs 12",
+  "node ./scripts/lanes/queue.mjs 12",
+  "node /c/Users/me/repo/scripts/lanes/queue.mjs 12",
+  "node C:/repo/scripts/lanes/queue.mjs 12",
+  '"C:\\repo\\scripts\\lanes\\queue.mjs" 12',
+  "node scripts\\lanes\\queue.mjs 12",
+  "./scripts/lanes/queue.mjs 12",
+  "scripts/lanes/queue.mjs 12",
+  "cd scripts/lanes && node queue.mjs 12",
+  "node scripts/lanes/QUEUE.MJS 12",
+  "Q=scripts/lanes/queue.mjs; node $Q 12",
+  "X=queue; node scripts/lanes/$X.mjs 12",
+  "bash <<'EOF'\nnode scripts/lanes/queue.mjs 12\nEOF",
+  "cat <<EOF | sh\nnode scripts/lanes/queue.mjs 12\nEOF",
+];
+const AUTO_GO_GRANT = () => grant({ issues: undefined, auto: "go" });
+
+test("#95 criterion 1: every run of queue.mjs, plain, chained, wrapped, through node/bun/deno, relative or absolute, is found", () => {
+  for (const c of QUEUE_RUNS) assert.equal(findQueueInvocations(c), true, c);
+});
+
+test("#95 criterion 1: every queue.mjs run is denied with a reason naming the owner's terminal, with no grant", () => {
+  assert.match(QUEUE_DENY_REASON, /owner's own terminal/);
+  for (const c of QUEUE_RUNS) assert.deepEqual(decidePreToolUse(bash(c), null, NOW), { decision: "deny", reason: QUEUE_DENY_REASON }, c);
+});
+
+test("#95 criterion 1: every queue.mjs run is denied whatever grant the session holds", () => {
+  const grants = [grant(), grant({ issues: [12] }), grant({ issues: undefined, auto: "dry" }), AUTO_GO_GRANT(), { unreadable: true }, null];
+  for (const g of grants) {
+    for (const c of QUEUE_RUNS) assert.deepEqual(decidePreToolUse(bash(c), g, NOW), { decision: "deny", reason: QUEUE_DENY_REASON }, `${JSON.stringify(g)} ${c}`);
+  }
+});
+
+test("#95 criterion 2: a /start grant never allows queue.mjs, even chained with the start command it grants", () => {
+  for (const c of [QUEUE, `${START} && ${QUEUE}`, `${QUEUE}; ${START}`, `${GO}; node scripts/lanes/queue.mjs`]) {
+    assert.deepEqual(decidePreToolUse(bash(c), grant(), NOW), { decision: "deny", reason: QUEUE_DENY_REASON }, c);
+    assert.deepEqual(decidePreToolUse(bash(c), AUTO_GO_GRANT(), NOW), { decision: "deny", reason: QUEUE_DENY_REASON }, c);
+  }
+});
+
+test("#95 criterion 3: commands that only mention queue.mjs, or run its tests, are not denied", () => {
+  const mentions = [
+    "cat scripts/lanes/queue.mjs",
+    "grep -n queue scripts/lanes/queue.mjs",
+    "git diff scripts/lanes/queue.mjs",
+    "git diff --stat -- scripts/lanes/queue.mjs scripts/lanes/queue.test.mjs",
+    "node --test scripts/lanes/queue.test.mjs",
+    "node --test scripts/lanes/queue.test.mjs --reporter=dot",
+    "sed -n 1,40p scripts/lanes/queue.mjs",
+    "git log --oneline -5 -- scripts/lanes/queue.mjs",
+    'git commit -m "queue.mjs: owner-run lane queue"',
+    'gh pr create --title "start-guard denies queue.mjs" --body "only the owner runs queue.mjs"',
+    "gh pr create --title x --body-file .lanes/pr-body.md",
+    "wc -l scripts/lanes/queue.mjs",
+  ];
+  for (const c of mentions) {
+    assert.equal(findQueueInvocations(c), false, c);
+    assert.equal(decidePreToolUse(bash(c), null, NOW), null, c);
+    assert.equal(decidePreToolUse(bash(c), AUTO_GO_GRANT(), NOW), null, c);
+  }
+});
+
+test("#95 criterion 4: with a /start --auto --go grant written by the hook, queue.mjs is denied and the grant is kept", () => {
+  const dir = tmp();
+  try {
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start --auto --go" }), { dir, now: NOW });
+    for (const c of [QUEUE, "node scripts/lanes/queue.mjs --auto --go", 'bash -c "node scripts/lanes/queue.mjs 12"']) {
+      assert.deepEqual(out(runHook("pre-tool-use", JSON.stringify(bash(c)), { dir, now: NOW + 1000 })), { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: QUEUE_DENY_REASON }, c);
+    }
+    assert.ok(existsSync(join(dir, "s1.json")), "a denied queue.mjs run does not consume the /start grant");
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(GO)), { dir, now: NOW + 2000 })).permissionDecision, "allow");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#95 criterion 4: the hook process Claude Code runs denies queue.mjs end to end", () => {
+  const r = spawnSync(process.execPath, ["scripts/lanes/start-guard.mjs", "pre-tool-use"], { input: JSON.stringify(bash(QUEUE, { session_id: "queue-e2e-no-grant" })), encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.deepEqual(out(r.stdout), { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: QUEUE_DENY_REASON });
+});
+
+test("#95 edge: a quoted script that cannot be read and names queue.mjs is denied as a queue run", () => {
+  for (const c of ['bash -c "node scripts/lanes/queue.mjs 12', "sh -c 'node scripts/lanes/queue.mjs"]) {
+    assert.deepEqual(decidePreToolUse(bash(c), grant(), NOW), { decision: "deny", reason: QUEUE_DENY_REASON }, c);
+  }
+});
+
+test("#95 edge: an unresolved command or script word in a call that names queue.mjs is denied as a queue run", () => {
+  for (const c of ["node $(echo scripts/lanes/queue.mjs) 12", "node `echo scripts/lanes/queue.mjs` 12", "$NODE scripts/lanes/queue.mjs 12", "node $SCRIPT # queue.mjs"]) {
+    assert.deepEqual(decidePreToolUse(bash(c), grant(), NOW), { decision: "deny", reason: QUEUE_DENY_REASON }, c);
+  }
+});
+
+test("#95 edge: files that merely look like queue.mjs, empty input and non-Bash tools are not queue runs", () => {
+  for (const c of ["node scripts/lanes/queue.test.mjs","node scripts/lanes/queue.mjs.bak", "node scripts/lanes/queue.js", "", undefined]) {
+    assert.equal(findQueueInvocations(c), false, String(c));
+  }
+  assert.equal(decidePreToolUse({ tool_name: "Read", tool_input: { file_path: "scripts/lanes/queue.mjs" }, session_id: "s1" }, null, NOW), null);
+});
+
+test("#95 edge: quoted text that reads as a queue.mjs command fails closed, as it does for start.mjs", () => {
+  // A quoted word holding shell syntax could be run (bash -c, eval), so it is walked; use --body-file for such prose.
+  assert.deepEqual(decidePreToolUse(bash('gh pr create --body "node scripts/lanes/queue.mjs is owner-only"'), null, NOW), { decision: "deny", reason: QUEUE_DENY_REASON });
+});
+
+test("#95 edge: a background launch keeps its own reason, checked before queue.mjs", () => {
+  assert.deepEqual(decidePreToolUse(bash("claude --bg x; node scripts/lanes/queue.mjs 12"), null, NOW), { decision: "deny", reason: BG_DENY_REASON });
 });
