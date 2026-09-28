@@ -399,6 +399,28 @@ test("lane.md step 5 treats the criteria as a minimum and lists edge-case tests 
   assert.match(step5, /"Tests added" as `edge: <case>`/);
 });
 
+// #136: a lane that finds every criterion already met on origin/main takes the issue out of the ready pool
+const laneAlreadyMet = () => laneText().replace(/\r\n/g, "\n").match(/\n4c\. [\s\S]*?\n5\. /)[0].replace(/\s+/g, " ");
+
+test("lane.md step 4c: criteria all met on origin/main are commented with evidence, then ready comes off and needs-owner goes on", () => {
+  const step = laneAlreadyMet();
+  assert.match(step, /every acceptance criterion is already met on `origin\/main`/);
+  assert.match(step, /comments the evidence \(each criterion with the file, test or commit that meets it\)/);
+  assert.match(step, /removes the `ready` label and adds `needs-owner`/);
+  assert.match(step, /stops without a worktree change or PR/);
+});
+
+test("edge: lane.md step 4c creates needs-owner with gh label create only when it is missing, and never closes the issue", () => {
+  const step = laneAlreadyMet();
+  assert.match(step, /`gh label create needs-owner`[^.]*only if it is missing/);
+  assert.match(step, /never closes the issue/);
+});
+
+test("edge: lane.md step 4c comments before it removes ready, so the evidence is on record even if the relabel fails", () => {
+  const step = laneAlreadyMet();
+  assert.ok(step.indexOf("comments the evidence") < step.indexOf("removes the `ready` label"));
+});
+
 test("test-hunter.md adds a case beyond the criteria and listed edge cases, or says in the summary why none apply", () => {
   const hunter = readFileSync(".claude/agents/test-hunter.md", "utf8");
   const flat = hunter.replace(/\s+/g, " ");

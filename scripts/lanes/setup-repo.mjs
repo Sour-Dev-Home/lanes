@@ -13,6 +13,7 @@ export const LABELS = [
   { name: "contract:breaking", color: "b60205", description: "This task may break an interface contract" },
   { name: "digest", color: "5319e7", description: "The nightly digest thread" },
   { name: "lane-filed", color: "bfd4f2", description: "A lane's own follow-up; needs the owner to remove this label before it can become ready" },
+  { name: "needs-owner", color: "fef2c0", description: "A lane found nothing to build; the owner closes or rewrites it" },
 ];
 
 /** The GitHub Actions app's fixed integration id (I3): pins a required check so only a status it posted can satisfy it. */

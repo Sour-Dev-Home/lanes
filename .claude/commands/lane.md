@@ -27,6 +27,11 @@ path, command or CI output, secret, token or personal data (point to the PR or i
     Hand reviewers the matching checklist from `vendor/agent-skills/references/`: the test-hunter gets
     `definition-of-done.md` and `testing-patterns.md`, the security reviewer `security-checklist.md`, the ui-reviewer
     `accessibility-checklist.md`.
+4c. Already built: when every acceptance criterion is already met on `origin/main`, the lane comments the evidence
+    (each criterion with the file, test or commit that meets it), then removes the `ready` label and adds
+    `needs-owner`, and stops without a worktree change or PR. It never closes the issue: the owner closes or rewrites
+    it. It runs `gh label create needs-owner` (description "A lane found nothing to build; the owner closes or
+    rewrites it") only if it is missing. Notify `lanes #$ARGUMENTS: already met: close or rewrite it`.
 5. Tests first: one failing test per acceptance criterion. Run it narrowly (`node --test <file>` or the project's
    equivalent) and watch it fail, then implement until it passes. The criteria are a minimum: after the
    per-criterion tests, add tests for the edge cases you found while implementing (empty, boundary, malformed and
