@@ -269,6 +269,18 @@ test("lane.md step 7 waits only on the CI checks, not lanes/gate, with pipefail 
   assert.match(step7, /read `lanes\/gate`'s state and description on the PR head once/);
 });
 
+test("lane.md step 7 never pushes with --no-verify: a refusing hook stops the lane, comments the output and notifies", () => {
+  const step7 = laneStep(7);
+  assert.match(step7, /Never push with `--no-verify`, or skip a git hook any other way/);
+  assert.match(step7, /stop, comment the hook's output on the PR or issue, and notify/);
+});
+
+test("lane.md step 7 writes every body and message to a file, never a heredoc or long quoted argument", () => {
+  const step7 = laneStep(7);
+  assert.match(step7, /Write every PR body, issue body, comment and commit message to a file with the Write tool/);
+  assert.match(step7, /`--body-file <file>` or `git commit -F <file>`, never through a heredoc or a long quoted argument/);
+});
+
 test("lane.md step 7 runs a missing review the gate waits for, posts it, and reads the gate again", () => {
   const step7 = laneStep(7);
   assert.match(step7, /`waiting for review\/<name>`/);

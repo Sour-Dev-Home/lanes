@@ -80,6 +80,11 @@ path, command or CI output, secret, token or personal data (point to the PR or i
    - Any other `pending` or `failure`: report the gate's description as the lane's end state.
    - `pass`: done. A passing gate needs no notification.
    From Git Bash, prefix `gh pr create`, `gh pr edit` and `gh issue create` with `MSYS_NO_PATHCONV=1` when they pass `--title` or `--body`, or a leading `/` becomes a Windows path.
+   Never push with `--no-verify`, or skip a git hook any other way: when a hook refuses a push or a commit, stop,
+   comment the hook's output on the PR or issue, and notify `lanes #<N>: hook refused the push`, instead of bypassing it.
+   Write every PR body, issue body, comment and commit message to a file with the Write tool and pass it with
+   `--body-file <file>` or `git commit -F <file>`, never through a heredoc or a long quoted argument, so the guards
+   never have to read the text.
    After merging main into the branch with no other change, do not re-run the test-hunter: check that `lanes/gate`
    says `reused`, and run the test-hunter again only if it does not.
 8. Follow-up work becomes new issues from the Task form: write the body to a file in the form's layout (`### Goal`,
