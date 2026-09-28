@@ -31,9 +31,10 @@ You are the planner. The idea: $ARGUMENTS
    one is a contract the other depends on. Before drafting a new issue, check the open issues from step 2 for one that
    changes the same files for a related goal, and propose extending it instead (as #145 was merged into #105).
    When a module map exists (a `modules` key in `lanes.config.json`; ADR 0008), each drafted issue names its module
-   from the map, and its Interface contract and Scope "In:" paths must resolve to exactly one module. If an issue
-   spans more than one module, split it, or, where the modules meet at an interface, the draft adds the contract issue
-   first and lists it under "Blocked by". Do this before showing the draft, so `issue-contract.mjs` never has to refuse
+   from the map (a note in the draft, not a field of the Task form), and its Interface contract and Scope "In:" paths
+   must resolve to exactly one module. If an issue spans more than one module, split it, or, where the modules meet at
+   an interface, the draft adds the contract issue first and lists it under "Blocked by", with the spanning issue's
+   Interface contract naming a path that the contract issue's Scope contains. Do this before showing the draft, so `issue-contract.mjs` never has to refuse
    the issue after it is filed. With no `modules` key, skip this.
    For each new issue, propose blockers among the open issues and PRs from step 2 whose Scope, Interface contract or
    goal overlaps it (for a PR, its changed files against the new issue's Scope). Put them in a separate table, one

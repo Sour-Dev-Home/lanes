@@ -542,6 +542,9 @@ test("plan-issues.md step 5 names each issue's module from the map, and adds a b
   assert.match(step, /exactly one module/);
   assert.match(step, /spans more than one module/);
   assert.match(step, /adds the contract issue first and lists it under "Blocked by"/);
+  // ADR 0008: the spanning issue clears issue-contract.mjs only if its contract path is in the blocker's Scope.
+  assert.match(step, /a note in the draft, not a field of the Task form/);
+  assert.match(step, /Interface contract naming a path that the contract issue's Scope contains/);
   // With no map the step must not invent modules.
   assert.match(step, /no `modules` key[^.]*skip this/);
 });
