@@ -96,6 +96,7 @@ const OWNER_SAMPLES = {
   "^scripts/lanes/contracts\\.test\\.mjs$": ["scripts/lanes/contracts.test.mjs", "scripts/lanes/contracts.test.mjs.bak"],
   "^scripts/lanes/start-guard(\\.test)?\\.mjs$": ["scripts/lanes/start-guard.test.mjs", "scripts/lanes/start-guards.mjs"],
   "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$": ["scripts/lanes/setup-repo.mjs", "scripts/lanes/new-project-x.mjs"],
+  "^scripts/gate-workflow\\.test\\.mjs$": ["scripts/gate-workflow.test.mjs", "scripts/gate-workflow.test.mjs.bak"],
   "^\\.claude/settings\\.json$": [".claude/settings.json", ".claude/settings.local.json"],
   "^\\.github/": [".github/workflows/verify.yml", "docs/github/x.md"],
   "^\\.githooks/": [".githooks/pre-push", "scripts/githooks/x.mjs"],
@@ -147,6 +148,25 @@ test("the real config: start-guard.mjs and contracts.test.mjs are owner-only, re
   ]) {
     assert.equal(classifyFiles([file], real).owner, false, file);
   }
+});
+
+test("the real config: scripts/gate-workflow.test.mjs is owner-only, near-misses are not (ADR 0002)", () => {
+  const real = loadConfig();
+  assert.equal(classifyFiles(["scripts/gate-workflow.test.mjs"], real).owner, true);
+  for (const file of [
+    "scripts/gate-workflow.mjs",
+    "scripts/gate-workflow.test.mjs.bak",
+    // edge: anchored to scripts/ exactly, not a nested directory or another root.
+    "scripts/lanes/gate-workflow.test.mjs",
+    "docs/scripts/gate-workflow.test.mjs",
+  ]) {
+    assert.equal(classifyFiles([file], real).owner, false, file);
+  }
+});
+
+test("ADR 0002 lists scripts/gate-workflow.test.mjs among the owner-only paths", () => {
+  const adr = readFileSync("docs/adr/0002-owner-only-paths.md", "utf8");
+  assert.ok(adr.includes("`scripts/gate-workflow.test.mjs`"), "ADR 0002's list names the file");
 });
 
 test("ADR 0003 is accepted, parses, and governs lanes.config.json", () => {

@@ -64,6 +64,7 @@
       "^scripts/lanes/(gate|lib|approve-guard|post-review|issue-contract)(\\.test)?\\.mjs$",
       "^scripts/lanes/gate-decision\\.test\\.mjs$",
       "^scripts/lanes/workflow\\.test\\.mjs$",
+      "^scripts/gate-workflow\\.test\\.mjs$",
       "^scripts/lanes/contracts\\.test\\.mjs$",
       "^scripts/lanes/start-guard(\\.test)?\\.mjs$",
       "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$",
