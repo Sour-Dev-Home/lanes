@@ -16,15 +16,24 @@ jobs:
         env:
           PII_PATTERNS: ${{ secrets.PII_PATTERNS }}
         run: |
-          PATTERNS=$(mktemp)
-          printf '%s\n' "$PII_PATTERNS" | sed '/^[[:space:]]*$/d' > "$PATTERNS"
-          printf '%s\n' 'C:\Users' 'C:/Users' '/home/' '/Users/' >> "$PATTERNS"
+          PII=$(mktemp)
+          PATHS=$(mktemp)
+          FILES=$(mktemp)
+          printf '%s\n' "$PII_PATTERNS" | sed '/^[[:space:]]*$/d' > "$PII"
+          printf '%s\n' 'C:\Users' 'C:/Users' '/home/' '/Users/' > "$PATHS"
           if [ -z "$PII_PATTERNS" ]; then
             echo "::warning::PII_PATTERNS secret is not available; only checking for local paths."
           fi
           # LICENSE names the copyright holder on purpose; .github/ and CLAUDE.md files document the patterns.
           # -z/-0 throughout: NUL-separated, so a filename with a space or newline cannot split or hide from the scan.
-          HITS=$(git ls-files -z | grep -zvE '^(\.github/|.*CLAUDE\.md$|LICENSE$)' | xargs -0 -r grep -H -n -iF -f "$PATTERNS" | cut -d: -f1,2 || true)
+          git ls-files -z | grep -zvE '^(\.github/|.*CLAUDE\.md$|LICENSE$)' > "$FILES" || true
+          PII_HITS=$(xargs -0 -r grep -H -n -iF -f "$PII" < "$FILES" | cut -d: -f1,2 || true)
+          # The path patterns alone skip vendor/owasp-cheatsheets/sheets/: byte-identical upstream sheets (ADR 0009) whose
+          # URL fragments ('/users/profile') look like paths. scripts/lanes/vendor.test.mjs proves their integrity by git
+          # blob id, so an edit that adds a real local path fails that test instead. The rest of vendor/ is still scanned.
+          # Keep in step with SCAN_EXEMPT and PATH_SCAN_EXEMPT in scripts/preflight.mjs (scripts/security-workflow.test.mjs).
+          PATH_HITS=$(grep -zvE '^vendor/owasp-cheatsheets/sheets/' "$FILES" | xargs -0 -r grep -H -n -iF -f "$PATHS" | cut -d: -f1,2 || true)
+          HITS=$(printf '%s\n%s\n' "$PII_HITS" "$PATH_HITS" | sed '/^$/d' | sort -u)
           if [ -n "$HITS" ]; then
             echo "$HITS"
             echo "::error::Possible PII or hardcoded-path leak at the file:line locations above."
