@@ -434,6 +434,73 @@ test("edge: a quote, backslash or glob inside the script name does not hide an o
   }
 });
 
+const denied = (cmd) => {
+  assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+  assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+};
+
+test("a glob in the script word, in node's script position or the command position, is an owner command (#70)", () => {
+  for (const cmd of [
+    "node scripts/lanes/po*-review.mjs owner --pr 16",
+    "node scripts/lanes/post-rev??w.mjs owner --pr 16",
+    "node scripts/lanes/post-rev[a-z]ew.mjs owner --pr 16",
+    "node --no-warnings scripts/lanes/po*-review.mjs owner --pr 16",
+    "scripts/lanes/po*-review.mjs owner --pr 16",
+    "./scripts/lanes/post-review.m?s owner --pr 16",
+  ]) denied(cmd);
+});
+
+test("a brace expansion in the script word, list or sequence, is an owner command (#70)", () => {
+  for (const cmd of [
+    "node scripts/lanes/p{ost-review.mjs,x} owner --pr 16",
+    "node scripts/lanes/post-{review,x}{.mjs,} owner --pr 16",
+    "node scripts/lanes/post-revie{w..w}.mjs owner --pr 16",
+    "node scripts/lanes/post-review.mj{a..z} owner --pr 16",
+    "node scripts/lanes/post-review.mj{r..t} owner --pr 16",
+    "node scripts/lanes/post-review.mj{a..z..2} owner --pr 16",
+    "node scripts/lanes/post-{re{v,x}iew,x}.mjs owner --pr 16",
+    "scripts/lanes/post-revie{v..x}.mjs owner --pr 16",
+  ]) denied(cmd);
+});
+
+test("ordinary commands with glob or brace arguments get no decision (#70)", () => {
+  for (const cmd of [
+    "ls scripts/*.mjs",
+    "git diff -- 'scripts/lanes/*.mjs'",
+    "git diff -- scripts/lanes/*.mjs",
+    "ls scripts/lanes/post-*.mjs",
+    "cat scripts/lanes/{gate,queue}.mjs",
+    "node scripts/lanes/gate.mjs {a,b}",
+    "node scripts/lanes/post-review.mj{1..3} owner --pr 16",
+    "node scripts/lanes/post-revie{a..c}.mjs owner --pr 16",
+    "node scripts/lanes/{gate,queue}.mjs --pr 16",
+  ]) assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+});
+
+test("edge: a malformed or unusual brace in the script word fails closed or reads as bash does (#70)", () => {
+  // An unclosed brace is literal to bash, but the guard cannot be sure what follows: fail closed.
+  denied("node scripts/lanes/post-review{.mjs owner --pr 16");
+  // {w..w..0} and {w..w..-1} still expand in bash (a zero step is taken as one).
+  denied("node scripts/lanes/post-revie{w..w..0}.mjs owner --pr 16");
+  denied("node scripts/lanes/post-revie{x..v..-1}.mjs owner --pr 16");
+  // An empty brace or one without a comma or `..` is literal to bash, so it cannot become post-review.mjs.
+  // A nested list inside such a brace still expands, but the outer braces stay: post-{review}.mjs, post-{rexiew}.mjs.
+  for (const cmd of ["node scripts/lanes/post-review.mjs{} x", "node scripts/lanes/post-{review}.mjs owner --pr 16", "node scripts/lanes/post-{re{v,x}iew}.mjs owner --pr 16"]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+// test-hunter (this round): a bracket expression whose first character is a literal `]` (bash reads `]` right after
+// `[` as a set member, not a close) and a brace holding a `/` that spans into the directory part of the path, both
+// uncommon enough that neither #70's criteria nor the round above named them.
+test("edge: a bracket expression starting with a literal ']', and a brace holding a '/', are still owner commands (#70)", () => {
+  // `[]i]` is the set {']', 'i'}: post-rev[]i]ew.mjs matches post-review.mjs with 'i' in that slot.
+  denied("node scripts/lanes/post-rev[]i]ew.mjs owner --pr 16");
+  // The brace spans a '/', so one branch names a whole path ending in post-review.mjs; the last path segment alone
+  // (naive slicing on the final '/') would misread this, so the guard must catch it via the embedded '/' instead.
+  denied("node scripts/{lanes/post-review.mjs,x} owner --pr 16");
+});
+
 // Found by the test-hunter (this round): NODE_RE only matched node/nodejs, so `bun`/`deno` running post-review.mjs
 // owner got no decision at all (a full bypass), and bun/deno's own `run` subcommand needed skipping to still find
 // the real script and reviewer behind it, mirroring start-guard.mjs's existing bun/deno coverage.

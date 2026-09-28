@@ -246,6 +246,80 @@ function resolveVars(words, assignments) {
 }
 
 const GLOB_RE = /[*?[{]/;
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
+// Brace sequences: {1..9} and {a..z}, each with an optional ..step (which only thins the range, so it is ignored).
+const INT_SEQ_RE = /^[+-]?[0-9]+\.\.[+-]?[0-9]+(\.\.[+-]?[0-9]+)?$/;
+const CHAR_SEQ_RE = /^([A-Za-z])\.\.([A-Za-z])(\.\.[+-]?[0-9]+)?$/;
+
+/** The index of the `}` closing the `{` at `open`, or -1. */
+function closingBrace(s, open) {
+  let depth = 0;
+  for (let i = open; i < s.length; i += 1) {
+    if (s[i] === "{") depth += 1;
+    else if (s[i] === "}" && (depth -= 1) === 0) return i;
+  }
+  return -1;
+}
+
+/** `s` split at the commas outside any nested brace. */
+function topLevelCommas(s) {
+  const parts = [""];
+  let depth = 0;
+  for (const c of s) {
+    if (c === "," && depth === 0) parts.push("");
+    else {
+      if (c === "{") depth += 1;
+      else if (c === "}") depth -= 1;
+      parts[parts.length - 1] += c;
+    }
+  }
+  return parts;
+}
+
+/**
+ * A regex source matching everything a glob and brace pattern can expand to, as bash reads it: a list `{a,b}` or a
+ * sequence `{a..c}`/`{1..3}` expands, any other brace is literal text. null when a brace is left unclosed, which fails
+ * closed.
+ */
+function patternRe(s) {
+  let re = "";
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === "*") re += ".*";
+    else if (c === "?") re += ".";
+    else if (c === "[") {
+      const end = s.indexOf("]", i + 2);
+      if (end === -1) re += "\\[";
+      else {
+        re += ".";
+        i = end;
+      }
+    } else if (c === "{") {
+      const end = closingBrace(s, i);
+      if (end === -1) return null;
+      const inner = s.slice(i + 1, end);
+      const parts = topLevelCommas(inner);
+      let seq;
+      if (parts.length > 1) {
+        const alts = parts.map(patternRe);
+        if (alts.includes(null)) return null;
+        re += `(?:${alts.join("|")})`;
+      } else if (INT_SEQ_RE.test(inner)) re += "-?[0-9]+";
+      else if ((seq = CHAR_SEQ_RE.exec(inner))) {
+        const [lo, hi] = [seq[1].charCodeAt(0), seq[2].charCodeAt(0)].sort((a, b) => a - b);
+        let chars = "";
+        for (let code = lo; code <= hi; code += 1) chars += String.fromCharCode(code);
+        re += `[${escapeRe(chars)}]`;
+      } else {
+        const lit = patternRe(inner);
+        if (lit === null) return null;
+        re += `\\{${lit}\\}`;
+      }
+      i = end;
+    } else re += escapeRe(c);
+  }
+  return re;
+}
 
 /**
  * Whether a word bash would glob- or brace-expand could expand to post-review.mjs: its last path component, as a
@@ -254,30 +328,8 @@ const GLOB_RE = /[*?[{]/;
 function mayExpandToPostReview(w) {
   if (!GLOB_RE.test(w)) return false;
   if (/\{[^}]*\//.test(w)) return true;
-  const name = w.slice(w.lastIndexOf("/") + 1);
-  let re = "";
-  let braces = 0;
-  for (let i = 0; i < name.length; i += 1) {
-    const c = name[i];
-    if (c === "*") re += ".*";
-    else if (c === "?") re += ".";
-    else if (c === "[") {
-      const end = name.indexOf("]", i + 2);
-      if (end === -1) re += "\\[";
-      else {
-        re += ".";
-        i = end;
-      }
-    } else if (c === "{") {
-      re += "(?:";
-      braces += 1;
-    } else if (c === "}" && braces > 0) {
-      re += ")";
-      braces -= 1;
-    } else if (c === "," && braces > 0) re += "|";
-    else re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-  if (braces > 0) return true;
+  const re = patternRe(w.slice(w.lastIndexOf("/") + 1));
+  if (re === null) return true;
   const pattern = new RegExp(`^${re}$`, "i");
   return pattern.test("post-review.mjs") || pattern.test("post-review");
 }
