@@ -3,7 +3,7 @@
 import { execFileSync } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GATE_CONTEXT, parseIssueForm, parsePrBody } from "./lib.mjs";
+import { GATE_CONTEXT, parseIssueForm, parsePrBody, reviewContext } from "./lib.mjs";
 // pick.mjs imports this module too; the cycle is safe because neither calls the other at load time.
 import { claimedPaths } from "./pick.mjs";
 
@@ -25,8 +25,12 @@ function prStage(pr, queuePosition, gateDescription) {
   const description = gate.description ?? gateDescription ?? "";
   if (gate.state === "FAILURE" || gate.state === "ERROR") return { stage: "contract", note: description };
   if (description.startsWith("waiting on owner")) return { stage: "owner", note: description };
+  // The gate waits for a reviewer's status: the lane owes it, not the owner, whatever the body asks for.
+  if (/^waiting for review\/\S/.test(description)) return { stage: "gate", note: description };
   return { stage: "review", note: description };
 }
+
+const ownerApproved = (pr) => (pr.statusCheckRollup ?? []).some((c) => c.context === reviewContext("owner") && c.state === "SUCCESS");
 
 // The open issues that block `number`, direct ones first, then theirs. Only open issues count, and only open
 // issues are followed; `number` itself appears last when it sits on a cycle.
@@ -182,7 +186,10 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
     const { stage, note } = prStage(pr, queuePosition.get(pr.number), gateDescriptions.get(pr.number));
     const needs = (parsePrBody(pr.body).sections["needs the owner"] ?? "").trim();
     const item = { number: pr.number, title: pr.title, stage, note };
-    if (stage === "owner" || session?.waiting) out.waitingOnOwner.push(withSession(item, session));
+    // A prompt still needs the owner; an approval already given, or a gate waiting on a reviewer, does not.
+    if (session?.waiting) out.waitingOnOwner.push(withSession(item, session));
+    else if (stage === "gate" || ownerApproved(pr)) out.inFlight.push(withSession(item, session));
+    else if (stage === "owner") out.waitingOnOwner.push(withSession(item, session));
     else if (needs && !/^nothing\b/i.test(needs)) out.waitingOnOwner.push(withSession({ ...item, note: `needs: ${needs.split("\n")[0]}` }, session));
     else out.inFlight.push(withSession(item, session));
   }
