@@ -160,6 +160,16 @@ function compileMap(map) {
 
 const cycleKey = (files) => [...new Set(files)].sort().join("\n");
 
+const entryOf = (prefixes, file) => prefixes.find((p) => file.startsWith(p.prefix))?.entry ?? null;
+
+/**
+ * The id of the module that claims repo-relative POSIX `path` under `map` (the `modules` value of lanes.config.json),
+ * by its longest matching path prefix, or null when no module claims it. Throws on a malformed map.
+ */
+export function moduleOf(path, map) {
+  return entryOf(compileMap(map).prefixes, String(path))?.id ?? null;
+}
+
 // Enumerating every elementary cycle is exponential in the worst case, and source files are written by ordinary
 // lanes, so the walk is bounded: past either limit checkModules throws rather than hang verify.
 export const MAX_CYCLES = 1000;
@@ -246,19 +256,19 @@ function findCycles(graph) {
  */
 export function checkModules({ map, files }) {
   const { prefixes, allowed } = compileMap(map);
-  const moduleOf = (file) => prefixes.find((p) => file.startsWith(p.prefix))?.entry ?? null;
+  const entry = (file) => entryOf(prefixes, file);
   const names = Object.keys(files).sort();
   const graph = new Map(names.map((f) => [f, new Set()]));
   const violations = [];
   const unmapped = [];
   for (const from of names) {
-    const fromEntry = moduleOf(from);
+    const fromEntry = entry(from);
     if (!fromEntry) unmapped.push(from);
     const targets = new Set(importSpecifiers(files[from]).map((spec) => posix.normalize(posix.join(posix.dirname(from), spec))));
     for (const to of [...targets].sort()) {
       if (graph.has(to)) graph.get(from).add(to);
       if (!fromEntry) continue;
-      const toEntry = moduleOf(to);
+      const toEntry = entry(to);
       if (toEntry === fromEntry || (toEntry && fromEntry.imports.includes(toEntry.id))) continue;
       violations.push({ from, to, fromModule: fromEntry.id, toModule: toEntry?.id ?? null });
     }

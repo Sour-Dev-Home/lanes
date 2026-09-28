@@ -90,6 +90,12 @@ test("MANIFEST includes cleanup.mjs", () => {
   assert.ok(MANIFEST.includes("scripts/lanes/cleanup.mjs"));
 });
 
+test("MANIFEST ships lessons.mjs and the module it imports, but no lesson fragment", () => {
+  assert.ok(MANIFEST.includes("scripts/lanes/lessons.mjs"));
+  assert.ok(MANIFEST.includes("scripts/lanes/modules.mjs"));
+  assert.deepEqual(MANIFEST.filter((f) => f.startsWith("docs/lessons.d")), []);
+});
+
 test("every script a copied command file runs is in MANIFEST, or a listed exception", () => {
   const commands = MANIFEST.filter((f) => /^\.claude\/commands\/[^/]+\.md$/.test(f));
   assert.ok(commands.includes(".claude/commands/health.md"), "found the copied command files");
