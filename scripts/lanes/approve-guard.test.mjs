@@ -771,6 +771,23 @@ test("edge: a heredoc fed to awk or sed, or written to a file a later command ma
   allowed("cat > notes.md <<'EOF'\nrun node scripts/lanes/post-review.mjs owner --pr 16 after /approve 16\nEOF");
   allowed("cat > notes.md <<'EOF'\n$ npm test\nEOF\ngit add notes.md && git commit -m notes");
   allowed("tee notes.md <<'EOF' > /dev/null\n## Needs the owner: $0\nEOF");
+  // A verdict written to a file and then posted with --file: `node` after it is no data command, so the body is
+  // scanned (#140 review), but an ordinary verdict whose summary mentions the owner and a $ holds nothing that reads
+  // as a post-review invocation, so it still gets no decision (round-2 follow-up).
+  allowed(
+    "cat > .lanes/verdicts/test-hunter.json <<'EOF'\n" +
+      '{ "reviewer": "test-hunter", "verdict": "success", "summary": "the owner pays $0, no findings" }\n' +
+      "EOF\nnode scripts/lanes/post-review.mjs --file .lanes/verdicts/test-hunter.json",
+  );
+});
+
+// Found by the #140 security-reviewer (round 2): origin/main denied these, and a heredoc inside a process
+// substitution is run by the command around it, whatever reads it inside.
+test("edge: a heredoc inside a process substitution is a script (#140 review)", () => {
+  const body = "\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF\n)";
+  for (const run of ["bash <(", "bash < <(", "sh <(", "source <(", ". <(", "bash <( true; "]) denied(`${run}cat <<'EOF'${body}`);
+  // The segments after the substitution closes are outside it again.
+  allowed("diff <(sort a.txt) b.txt; cat > notes.md <<'EOF'\n$ npm test\nEOF");
 });
 
 test("edge: assignment words are only the leading ones and export's; the rest are arguments (#152)", () => {

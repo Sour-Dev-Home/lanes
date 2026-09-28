@@ -128,6 +128,14 @@ function lex(cmd) {
   const pending = [];
   let word = null;
   let wordLiteral = false;
+  // Parenthesis depth, and the depths at which a process substitution opened: its segments are `inProcSub`.
+  let parens = 0;
+  const procSubs = [];
+  let procSubNext = false;
+  const markProcSub = () => {
+    if (procSubs.length > 0) segments.at(-1).inProcSub = true;
+    else delete segments.at(-1).inProcSub;
+  };
   const endWord = () => {
     if (word !== null) {
       if (wordLiteral) (segments.at(-1).literal ??= new Set()).add(segments.at(-1).length);
@@ -188,6 +196,7 @@ function lex(cmd) {
         end = r.end;
       }
       i = end;
+      markProcSub();
     } else if (c === "|" && cmd[i + 1] === "|") {
       endSegment();
       i += 1;
@@ -196,6 +205,15 @@ function lex(cmd) {
       if (cmd[i + 1] === "&") i += 1;
     } else if (";&()\n\r".includes(c)) {
       endSegment();
+      if (c === "(") {
+        parens += 1;
+        if (procSubNext) procSubs.push(parens);
+        procSubNext = false;
+      } else if (c === ")") {
+        if (procSubs.at(-1) === parens) procSubs.pop();
+        parens -= 1;
+      }
+      markProcSub();
     } else if (c === "<" || c === ">") {
       // A bare fd number immediately before `<`/`>` (as in `2>file`) is part of the operator, not a word.
       if (word !== null && /^[0-9]+$/.test(word)) word = null;
@@ -211,8 +229,10 @@ function lex(cmd) {
       const herestring = c === "<" && cmd[j] === "<";
       if (herestring) j += 1;
       const end = skipRedirectTarget(cmd, j);
+      // `<(…)`/`>(…)`: a process substitution, whose commands follow as segments of their own.
+      procSubNext = cmd[end] === "(" && cmd.slice(j, end).trim() === "";
       // `toFile`: output written to a file (`>`, `>>`), not duplicated onto another fd (`2>&1`).
-      (segments.at(-1).redirects ??= []).push({ text: cmd.slice(j, end), herestring, toFile: c === ">" && cmd[i + 1] !== "&" });
+      (segments.at(-1).redirects ??= []).push({ text: cmd.slice(j, end), herestring, toFile: c === ">" && cmd[i + 1] !== "&" && !procSubNext });
       i = end - 1;
     } else if (/\s/.test(c)) {
       endWord();
@@ -501,7 +521,8 @@ function scan(cmd, depth, out) {
     // is scanned too (#140 security review), and an unquoted body still runs its `$(…)` and backticks.
     const writesFile = name === "tee" || (segments[k].redirects ?? []).some((r) => r.toFile);
     const laterRuns = () => plains.some((p, m) => m > k && p.length > 0 && !DATA_COMMANDS.has(commandName(p)));
-    const heredocIsData = DATA_COMMANDS.has(name) && !feedsRunner(k) && !(writesFile && laterRuns());
+    // Inside a process substitution (`bash <(cat <<'EOF' … EOF)`), the output goes to the command around it: a script.
+    const heredocIsData = DATA_COMMANDS.has(name) && !segments[k].inProcSub && !feedsRunner(k) && !(writesFile && laterRuns());
     for (const { body, quoted } of segments[k].heredocs ?? []) {
       if (!heredocIsData || (!quoted && RUNS_ON_EXPANSION_RE.test(body))) scanScript(body, depth, out);
     }
