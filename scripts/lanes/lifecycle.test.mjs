@@ -16,7 +16,10 @@ const SLUG = "issue-233-lifecycle";
 const form = (n) =>
   ["### Goal", `g${n}`, "### Acceptance criteria", "- [ ] a", "### Interface contract", "none", "### Scope", `In: \`scripts/x${n}.mjs\`.`, "### Blocked by", "None", "### Tier", "full"].join("\n\n");
 
-const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true }).trim();
+// A git hook (pre-commit, pre-push) runs with GIT_DIR and friends set, which would send these git calls to the real repo.
+const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));
+const gitOptions = (cwd) => ({ cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+const git = (cwd, ...args) => execFileSync("git", args, gitOptions(cwd)).trim();
 
 // A repository with a bare origin and one pushed commit on main. `w.calls` records every fake `run`.
 function world() {
@@ -90,7 +93,7 @@ function world() {
     w.calls.push({ by, cmd, args, options });
     if (cmd === "claude") return claude(args);
     if (cmd === "gh") return gh(args);
-    if (cmd === "git") return execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    if (cmd === "git") return execFileSync("git", args, gitOptions(root));
     throw new Error(`unexpected command: ${cmd}`);
   };
   w.count = (cmd, ...args) => w.calls.filter((c) => c.cmd === cmd && args.every((a, i) => c.args[i] === a)).length;
