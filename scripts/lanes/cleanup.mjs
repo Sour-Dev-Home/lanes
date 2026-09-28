@@ -438,12 +438,16 @@ export function saveSessionLog(id, issue, { run, root, keep = LOG_KEEP }) {
   return `.lanes/logs/${name}`;
 }
 
-// The background sessions under `root` from `claude agents --json`, as planCleanup's `sessions`.
+// A session id is passed to `claude stop` and `claude rm` as an argv item, so it must not start with `-` (a flag).
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+// The background sessions under `root` from `claude agents --json`, as planCleanup's `sessions`. A session whose id is
+// not a plain name is dropped.
 export function sessionsFrom(agents, root) {
   const top = `${normalPath(root)}/`;
   const sessions = [];
   for (const a of agents) {
-    if (a?.kind !== "background" || typeof a.id !== "string" || typeof a.cwd !== "string") continue;
+    if (a?.kind !== "background" || typeof a.id !== "string" || !SESSION_ID.test(a.id) || typeof a.cwd !== "string") continue;
     const cwd = normalPath(a.cwd);
     if (!cwd.startsWith(top)) continue;
     const issue = Number(cwd.slice(top.length).split("/").map((s) => LANE_FOLDER.exec(s)?.[1]).find(Boolean)) || null;

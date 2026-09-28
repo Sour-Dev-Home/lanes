@@ -1,5 +1,5 @@
 // Posts the `lanes/gate` commit status. Run by .github/workflows/lanes-gate.yml, always from the default branch.
-// Inputs (environment): REPO, EVENT_NAME, PR_NUMBER, STATUS_SHA, STATUS_CONTEXT, HEAD_REF, GROUP_SHA, ISSUE_NUMBER, GH_TOKEN.
+// Inputs (environment): REPO, EVENT_NAME, PR_NUMBER, STATUS_SHA, STATUS_CONTEXT, STATUS_STATE, HEAD_REF, GROUP_SHA, ISSUE_NUMBER, GH_TOKEN.
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
@@ -235,6 +235,33 @@ export function reevaluateBlocked(api, repo, closed, config, adrs = []) {
   return out;
 }
 
+const OWNER_CONTEXT = reviewContext("owner");
+// The login GITHUB_TOKEN comments as: only its markers count, so nobody else can pre-empt the notice.
+const GATE_BOT = "github-actions[bot]";
+
+/**
+ * #82 (ADR 0004): comments on PR `number` that an owner approval was recorded for `sha`, so the owner hears of every
+ * approval whatever route posted it. Skips when the gate already left its marker for that SHA. Returns whether it
+ * commented. A comment list that cannot be read throws rather than risk a missed or doubled notice.
+ */
+export function noteOwnerApproval(api, repo, number, sha, now = new Date()) {
+  const marker = `<!-- lanes:owner-approval ${sha} -->`;
+  const lines = api([`repos/${repo}/issues/${number}/comments`, "--paginate", "--jq", ".[] | {login: .user.login, body} | @json"]).split("\n").filter(Boolean);
+  for (const line of lines) {
+    let comment;
+    try {
+      comment = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (comment?.login === GATE_BOT && typeof comment.body === "string" && comment.body.includes(marker)) return false;
+  }
+  const at = `${now.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  const text = `Owner approval recorded for ${sha.slice(0, 7)} at ${at}. If you didn't approve this, dismiss the ${OWNER_CONTEXT} status and report it.\n\n${marker}`;
+  api([`repos/${repo}/issues/${number}/comments`, "-f", `body=${text}`]);
+  return true;
+}
+
 export function evaluatePr(api, repo, number, config, adrs = []) {
   const result = decideForPr(api, repo, number, config, adrs);
   if (result === null) return null;
@@ -272,9 +299,21 @@ export function main(env = process.env, api = ghApi) {
     case "status": {
       // Intentionally duplicates the workflow's job-level if (defence in depth for manual runs).
       if (env.STATUS_CONTEXT === GATE_CONTEXT || !SHA.test(env.STATUS_SHA ?? "")) return;
+      const ownerApproval = env.STATUS_CONTEXT === OWNER_CONTEXT && env.STATUS_STATE === "success";
+      // A failed notice must not stop the gate re-evaluating; it fails the run once every PR has been decided.
+      const failures = [];
       for (const pr of JSON.parse(api([`repos/${repo}/commits/${env.STATUS_SHA}/pulls`]))) {
-        if (pr.state === "open" && pr.head?.sha === env.STATUS_SHA) console.log(JSON.stringify(evaluatePr(api, repo, pr.number, config, adrs)));
+        if (pr.state !== "open" || pr.head?.sha !== env.STATUS_SHA) continue;
+        if (ownerApproval) {
+          try {
+            noteOwnerApproval(api, repo, pr.number, env.STATUS_SHA);
+          } catch (e) {
+            failures.push(`#${pr.number}: ${e.message}`);
+          }
+        }
+        console.log(JSON.stringify(evaluatePr(api, repo, pr.number, config, adrs)));
       }
+      if (failures.length > 0) throw new Error(`owner approval comment failed on ${failures.join("; ")}`);
       return;
     }
     case "issues": {

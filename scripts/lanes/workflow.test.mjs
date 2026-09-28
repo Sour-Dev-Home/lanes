@@ -62,11 +62,12 @@ test("lanes-gate also runs on issues closed, passing the issue number to the gat
   assert.match(yml, /ISSUE_NUMBER: \$\{\{ github\.event\.issue\.number \}\}/);
 });
 
-test("lanes-gate keeps its permissions to reading plus posting statuses, with no new ones for the issues trigger", () => {
+// #82 (ADR 0004) adds issues: write, for the owner-approval comment; scripts/gate-workflow.test.mjs pins it too.
+test("lanes-gate keeps its permissions to reading, posting statuses and issue comments, with none added for the issues trigger", () => {
   const yml = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
   const perms = /\npermissions:\n((?: {2}\S.*\n)+)/.exec(yml);
   assert.ok(perms, "expected a top-level permissions block");
-  assert.deepEqual(perms[1].trim().split("\n").map((l) => l.trim()).sort(), ["contents: read", "issues: read", "pull-requests: read", "statuses: write"]);
+  assert.deepEqual(perms[1].trim().split("\n").map((l) => l.trim()).sort(), ["contents: read", "issues: write", "pull-requests: read", "statuses: write"]);
   assert.equal((yml.match(/permissions:/g) ?? []).length, 1, "no job-level permissions");
 });
 
