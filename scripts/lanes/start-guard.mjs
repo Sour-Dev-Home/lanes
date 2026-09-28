@@ -254,7 +254,7 @@ function lex(cmd) {
       let end = i;
       for (const h of pending.splice(0)) {
         const r = readHeredoc(cmd, end + 1, h.delim, h.stripTabs);
-        bodies.push({ text: r.body, literal: h.quoted || !/[$`\\]/.test(r.body), start: end + 1, end: r.end });
+        bodies.push({ text: r.body, literal: h.quoted || !/[$`\\]/.test(r.body), toShell: h.toShell, start: end + 1, end: r.end });
         end = r.end;
       }
       i = end;
@@ -277,7 +277,9 @@ function lex(cmd) {
     } else if (c === "<" && cmd[i - 1] !== "<" && cmd[i + 1] === "<" && cmd[i + 2] !== "<" && HEREDOC_RE.test(cmd.slice(i))) {
       const m = HEREDOC_RE.exec(cmd.slice(i));
       endWord();
-      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-", quoted: m[4] === undefined });
+      // `toShell`: a shell reads the body as its script (`bash <<'EOF'`), so even a quoted body's backticks run.
+      const program = segments.at(-1).find((w) => !ASSIGN_RE.test(w));
+      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-", quoted: m[4] === undefined, toShell: program !== undefined && SHELL_RE.test(basename(program)) });
       i += m[0].length - 1;
     } else if (c === "<" || /\s/.test(c)) {
       // A `<<` that HEREDOC_RE does not read ends the word, as before.
@@ -332,6 +334,16 @@ function resolveSegments(segments) {
 
 /** A quoted script, as in bash -c "…", sh -c '…', eval "…" or node -e "…": a word holding shell syntax. */
 const isNestedScript = (w) => /[\s;&|()<>]/.test(w);
+
+const SHELL_RE = /^(bash|sh|zsh|dash|ksh|ash)(\.exe)?$/i;
+/**
+ * True when word `i` is a script a shell runs: the value of a shell's `-c` (`-lc`, `-ec`, …), or an argument of eval
+ * or source. Its literal backticks then run too, while a literal message elsewhere ('Fix `start.mjs`') stays text.
+ */
+const runsAsShell = (words, i) =>
+  (i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(words[i - 1]) && words.slice(0, i - 1).some((w) => SHELL_RE.test(basename(w)))) ||
+  words.slice(0, i).some((w) => w === "eval" || w === "source" || w === ".");
+const unliteralLive = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, "`");
 
 // Programs that write what they are given to a file, and never run it (#89); cd and mkdir may come alongside.
 const WRITE_COMMANDS = new Set(["cat", "echo", "printf"]);
@@ -397,7 +409,7 @@ function walk(cmd, depth, visit, onOpaque, onEval) {
     const scripts = dataOnly ? new Map() : evalScripts(words);
     words.forEach((w, i) => {
       if (scripts.has(i)) onEval(scripts.get(i));
-      else if (isNestedScript(w) && !(dataOnly && !UNRESOLVED_RE.test(w))) nested(unliteral(w));
+      else if (isNestedScript(w) && !(dataOnly && !UNRESOLVED_RE.test(w))) nested(runsAsShell(words, i) ? unliteralLive(w) : unliteral(w));
     });
   };
   for (const [k, words] of resolveSegments(lexed.segments).entries()) {
@@ -408,7 +420,7 @@ function walk(cmd, depth, visit, onOpaque, onEval) {
   // A redirection target is no word, but a substitution in it still runs (#191).
   for (const t of lexed.targets) if (isNestedScript(t) && !(dataOnly && !UNRESOLVED_RE.test(t))) nested(unliteral(t));
   // A quoted heredoc's backticks are literal text, as in a single-quoted word.
-  for (const body of lexed.bodies) if (!(dataOnly && body.literal)) nested(body.literal ? body.text.replaceAll("`", QUOTED_TICK) : body.text);
+  for (const body of lexed.bodies) if (!(dataOnly && body.literal)) nested(body.literal && !body.toShell ? body.text.replaceAll("`", QUOTED_TICK) : body.text);
 }
 
 // What find hands its -exec command for `{}`, and the arguments xargs appends from its input: known only at run time,

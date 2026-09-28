@@ -1077,6 +1077,14 @@ test("#113 edge: a literal backtick (single quotes, a quoted heredoc message) is
   assert.deepEqual(decide('git commit -m "Fix `start.mjs` parsing"'), { decision: "deny", reason: DENY_REASON });
 });
 
+test("#113 edge: a literal backtick in a script a shell runs (-c, eval, a heredoc on its stdin) runs", () => {
+  for (const cmd of ["bash -c 'echo `node scripts/lanes/start.mjs 12`'", "sh -lc 'x=`node scripts/lanes/start.mjs 12`'", "eval 'echo `node scripts/lanes/start.mjs 12`'", "bash <<'EOF'\necho `node scripts/lanes/start.mjs 12`\nEOF"]) {
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: DENY_REASON }, JSON.stringify(cmd));
+  }
+  assert.deepEqual(decide("bash -c 'echo `node scripts/lanes/queue.mjs`'"), { decision: "deny", reason: QUEUE_DENY_REASON });
+  assert.equal(decide("git commit -F - <<'EOF'\nFix `start.mjs` and `queue.mjs`\nEOF"), null);
+});
+
 test("#113 edge: an unterminated backtick that names a lane script fails closed", () => {
   assert.deepEqual(decide("echo `node scripts/lanes/start.mjs 12"), { decision: "deny", reason: PARSE_DENY_REASON });
   assert.equal(findQueueInvocations("echo `node scripts/lanes/queue.mjs"), true);
