@@ -1,7 +1,10 @@
 // scripts/lanes/modules.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkModules, importSpecifiers, main, MAX_CYCLES, MAX_STEPS } from "./modules.mjs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { checkModules, importSpecifiers, listFiles, main, MAX_CYCLES, MAX_STEPS } from "./modules.mjs";
 
 // Fixture sources are built with `q` so this file's own text never holds a literal `from "./..."` import it doesn't make.
 const q = (s) => JSON.stringify(s);
@@ -191,6 +194,30 @@ test("edge: a large acyclic graph with exponentially many paths is cheap, not re
   const names = Array.from({ length: 60 }, (_, k) => `src/core/f${String(k).padStart(2, "0")}.mjs`);
   const files = Object.fromEntries(names.map((f, k) => [f, names.slice(k + 1).map((g) => imp(`./${g.slice(9)}`)).join("")]));
   assert.deepEqual(checkModules({ map, files }).cycles, []);
+});
+
+test("edge: a 20,000-file import chain does not overflow the stack", () => {
+  const names = Array.from({ length: 20000 }, (_, k) => `src/core/f${k}.mjs`);
+  const files = Object.fromEntries(names.map((f, k) => [f, k + 1 < names.length ? imp(`./f${k + 1}.mjs`) : ""]));
+  assert.deepEqual(checkModules({ map, files }).cycles, []);
+});
+
+test("edge: listFiles walks subdirectories but never follows a symlink or junction", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "modules-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const inside = join(root, "repo");
+  const outside = join(root, "outside");
+  mkdirSync(join(inside, "sub"), { recursive: true });
+  mkdirSync(join(inside, "node_modules"), { recursive: true });
+  mkdirSync(outside);
+  writeFileSync(join(inside, "a.mjs"), "");
+  writeFileSync(join(inside, "sub", "b.mjs"), "");
+  writeFileSync(join(inside, "node_modules", "dep.mjs"), "");
+  writeFileSync(join(outside, "secret.mjs"), "");
+  symlinkSync(outside, join(inside, "linked"), "junction");
+  const dir = inside.replaceAll("\\", "/");
+  assert.deepEqual(listFiles(`${dir}/`).map((f) => f.slice(dir.length + 1)).sort(), ["a.mjs", "sub/b.mjs"]);
+  assert.deepEqual(listFiles(`${dir}/missing/`), []);
 });
 
 // ---- main -------------------------------------------------------------------------------------------------------

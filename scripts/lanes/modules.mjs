@@ -165,26 +165,44 @@ const cycleKey = (files) => [...new Set(files)].sort().join("\n");
 export const MAX_CYCLES = 1000;
 export const MAX_STEPS = 1_000_000;
 
-/** Each node's strongly connected component id (Tarjan): a cycle never leaves its component. */
+/**
+ * Each node's strongly connected component id (Tarjan): a cycle never leaves its component. Iterative, like
+ * findCycles, so a long import chain cannot overflow the call stack.
+ */
 function components(graph) {
   const index = new Map();
   const low = new Map();
   const comp = new Map();
   const stack = [];
-  const visit = (v) => {
+  const work = [];
+  const enter = (v) => {
     index.set(v, index.size);
     low.set(v, index.get(v));
     stack.push(v);
-    for (const w of graph.get(v)) {
-      if (!index.has(w)) { visit(w); low.set(v, Math.min(low.get(v), low.get(w))); }
-      else if (!comp.has(w)) low.set(v, Math.min(low.get(v), index.get(w)));
-    }
-    if (low.get(v) === index.get(v)) {
-      let w;
-      do { w = stack.pop(); comp.set(w, v); } while (w !== v);
-    }
+    work.push([v, graph.get(v)[Symbol.iterator]()]);
   };
-  for (const v of graph.keys()) if (!index.has(v)) visit(v);
+  for (const root of graph.keys()) {
+    if (index.has(root)) continue;
+    enter(root);
+    while (work.length) {
+      const [v, edges] = work[work.length - 1];
+      const { value: w, done } = edges.next();
+      if (!done) {
+        if (!index.has(w)) enter(w);
+        else if (!comp.has(w)) low.set(v, Math.min(low.get(v), index.get(w)));
+        continue;
+      }
+      work.pop();
+      if (low.get(v) === index.get(v)) {
+        let w2;
+        do { w2 = stack.pop(); comp.set(w2, v); } while (w2 !== v);
+      }
+      if (work.length) {
+        const u = work[work.length - 1][0];
+        low.set(u, Math.min(low.get(u), low.get(v)));
+      }
+    }
+  }
   return comp;
 }
 
@@ -198,22 +216,24 @@ function findCycles(graph) {
   for (const start of nodes) {
     const path = [start];
     const onPath = new Set(path);
-    const walk = (node) => {
-      for (const next of graph.get(node)) {
-        if (++steps > MAX_STEPS) throw new Error(`import graph too tangled to list its cycles (over ${MAX_STEPS} steps)`);
-        if (next === start) {
-          cycles.push([...path]);
-          if (cycles.length > MAX_CYCLES) throw new Error(`more than ${MAX_CYCLES} import cycles`);
-        } else if (rank.get(next) > rank.get(start) && comp.get(next) === comp.get(start) && !onPath.has(next)) {
-          path.push(next);
-          onPath.add(next);
-          walk(next);
-          onPath.delete(next);
-          path.pop();
-        }
+    const edges = [graph.get(start)[Symbol.iterator]()];
+    while (edges.length) {
+      const { value: next, done } = edges[edges.length - 1].next();
+      if (done) {
+        edges.pop();
+        onPath.delete(path.pop());
+        continue;
       }
-    };
-    walk(start);
+      if (++steps > MAX_STEPS) throw new Error(`import graph too tangled to list its cycles (over ${MAX_STEPS} steps)`);
+      if (next === start) {
+        cycles.push([...path]);
+        if (cycles.length > MAX_CYCLES) throw new Error(`more than ${MAX_CYCLES} import cycles`);
+      } else if (rank.get(next) > rank.get(start) && comp.get(next) === comp.get(start) && !onPath.has(next)) {
+        path.push(next);
+        onPath.add(next);
+        edges.push(graph.get(next)[Symbol.iterator]());
+      }
+    }
   }
   return cycles.sort((a, b) => (a.join("\n") < b.join("\n") ? -1 : 1));
 }
@@ -251,16 +271,31 @@ export function checkModules({ map, files }) {
 
 const readConfig = () => JSON.parse(readFileSync("lanes.config.json", "utf8"));
 
-/** Every file under `dir` (repo-relative, POSIX; "" is the repo root), or [] when it does not exist. */
-function listFiles(dir) {
-  let entries;
-  try {
-    entries = readdirSync(dir || ".", { recursive: true, withFileTypes: true });
-  } catch (err) {
-    if (err.code === "ENOENT" || err.code === "ENOTDIR") return [];
-    throw err;
+/**
+ * Every regular file under `dir` (repo-relative, POSIX; "" is the repo root), or [] when it does not exist. Walks by
+ * hand rather than with `recursive: true`, which follows symlinks and junctions out of the repo: a symlinked file or
+ * directory is skipped, as are node_modules and .git.
+ */
+export function listFiles(dir) {
+  const files = [];
+  const pending = [dir.replace(/\/+$/, "")];
+  while (pending.length) {
+    const d = pending.pop();
+    let entries;
+    try {
+      entries = readdirSync(d || ".", { withFileTypes: true });
+    } catch (err) {
+      if (err.code === "ENOENT" || err.code === "ENOTDIR") continue;
+      throw err;
+    }
+    for (const e of entries) {
+      const path = d ? `${d}/${e.name}` : e.name;
+      if (e.isSymbolicLink()) continue;
+      if (e.isDirectory()) { if (e.name !== "node_modules" && e.name !== ".git") pending.push(path); }
+      else if (e.isFile()) files.push(path);
+    }
   }
-  return entries.filter((d) => d.isFile()).map((d) => posix.join(d.parentPath.replaceAll("\\", "/"), d.name));
+  return files;
 }
 
 const readFile = (file) => readFileSync(file, "utf8");
