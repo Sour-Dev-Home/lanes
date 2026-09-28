@@ -200,7 +200,23 @@ function gh(args) {
   return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
 }
 
-const PR_QUERY = `query($owner: String!, $name: String!, $cursor: String) {
+// The extra selections `rich` adds. Personal fields (author, login, message, PR and issue titles) are never selected;
+// the issue body is fetched only to be reduced to counts by normalizeRichPr.
+const RICH_FIELDS = `
+        files(first: 100) { nodes { path } }
+        commits(first: 100) { nodes { commit { committedDate } } }
+        lastCommit: commits(last: 1) {
+          nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+            __typename
+            ... on StatusContext { context state createdAt }
+            ... on CheckRun { checkSuite { workflowRun { runAttempt } } }
+          } } } } }
+        }
+        closingIssuesReferences(first: 1) { nodes { number body userContentEdits(first: 100) { nodes { editedAt } } } }`;
+
+/** The paginated merged-PR query; `rich` adds the per-PR files, commits, statuses and closing-issue edits. */
+export function prQuery(rich = false) {
+  return `query($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequests(states: MERGED, first: 50, after: $cursor, orderBy: { field: UPDATED_AT, direction: DESC }) {
       pageInfo { hasNextPage endCursor }
@@ -208,14 +224,58 @@ const PR_QUERY = `query($owner: String!, $name: String!, $cursor: String) {
         number createdAt mergedAt updatedAt additions deletions title
         timelineItems(first: 100, itemTypes: [ADDED_TO_MERGE_QUEUE_EVENT, REMOVED_FROM_MERGE_QUEUE_EVENT]) {
           nodes { __typename ... on RemovedFromMergeQueueEvent { reason } }
-        }
+        }${rich ? RICH_FIELDS : ""}
       }
     }
   }
 }`;
+}
 
-function repoSlug() {
-  const [owner, name] = gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim().split("/");
+const isoDate = (value) => (typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value : undefined);
+
+/** A status context name is kept only when it looks like a check name (e.g. "lanes/gate"); free text folds to "other". */
+function safeContext(context) {
+  return typeof context === "string" && /^[A-Za-z0-9_./-]{1,64}$/.test(context) ? context : "other";
+}
+
+/**
+ * The rich counterpart of normalizePr: the same base fields plus changed file paths, commit dates, status contexts
+ * (name, lowercase state, time), check-run attempt counts and the closing issue reduced to numbers and dates. Logins,
+ * titles, commit messages and the issue body text never leave this function.
+ * @returns {ReturnType<typeof normalizePr> & { number: number; files: string[]; commitDates: string[]; statuses: { context: string; state: string; at: string }[]; checkRunAttempts: number[]; closingIssue: { number: number; criteria: number; criteriaDone: number; bodyChars: number; editedAt: string[] } | null } | undefined}
+ */
+export function normalizeRichPr(node) {
+  const base = normalizePr(node);
+  if (base === undefined) return undefined;
+  const list = (value) => (Array.isArray(value) ? value : []);
+  const contexts = list(node.lastCommit?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes);
+  const issue = node.closingIssuesReferences?.nodes?.[0];
+  const body = typeof issue?.body === "string" ? issue.body : "";
+  return {
+    ...base,
+    number: Number(node.number) || 0,
+    files: list(node.files?.nodes).map((file) => file?.path).filter((path) => typeof path === "string"),
+    commitDates: list(node.commits?.nodes).map((entry) => isoDate(entry?.commit?.committedDate)).filter((date) => date !== undefined),
+    statuses: contexts
+      .filter((entry) => entry?.__typename === "StatusContext" && isoDate(entry.createdAt) !== undefined)
+      .map((entry) => ({ context: safeContext(entry.context), state: safeReason(entry.state), at: entry.createdAt })),
+    checkRunAttempts: contexts
+      .filter((entry) => entry?.__typename === "CheckRun")
+      .map((entry) => Number(entry.checkSuite?.workflowRun?.runAttempt))
+      .filter((attempt) => Number.isInteger(attempt) && attempt >= 1),
+    closingIssue: issue
+      ? {
+          number: Number(issue.number) || 0,
+          criteria: (body.match(/^\s*- \[[ xX]\]/gm) ?? []).length,
+          criteriaDone: (body.match(/^\s*- \[[xX]\]/gm) ?? []).length,
+          bodyChars: body.length,          editedAt: list(issue.userContentEdits?.nodes).map((edit) => isoDate(edit?.editedAt)).filter((date) => date !== undefined),
+        }
+      : null,
+  };
+}
+
+function repoSlug(run = gh) {
+  const [owner, name] = run(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim().split("/");
   return { owner, name };
 }
 
@@ -234,20 +294,26 @@ export function parseGraphql(text) {
   return page;
 }
 
-function fetchMergedPrs(from) {
-  const { owner, name } = repoSlug();
+/**
+ * Merged PRs updated since `from`, normalised. Without `rich` the query and output are the plain normalizePr shape;
+ * with it the same paginated query also returns normalizeRichPr's extra fields. `run` is the gh runner (injectable for tests).
+ */
+export function fetchMergedPrs(from, { rich = false, run = gh } = {}) {
+  const { owner, name } = repoSlug(run);
+  const query = prQuery(rich);
+  const normalize = rich ? normalizeRichPr : normalizePr;
   const prs = [];
   const seen = new Set();
   let cursor = null;
   for (;;) {
-    const args = ["api", "graphql", "-f", `query=${PR_QUERY}`, "-F", `owner=${owner}`, "-F", `name=${name}`];
+    const args = ["api", "graphql", "-f", `query=${query}`, "-F", `owner=${owner}`, "-F", `name=${name}`];
     if (cursor !== null) args.push("-F", `cursor=${cursor}`);
-    const page = parseGraphql(gh(args));
+    const page = parseGraphql(run(args));
     // A PR updated while paging can shift onto the next page: count each PR number once.
     for (const node of page.nodes) {
       if (seen.has(node.number)) continue;
       seen.add(node.number);
-      prs.push(normalizePr(node));
+      prs.push(normalize(node));
     }
     // Ordered by update time: once a whole page was last touched before the window, nothing older can have merged inside it.
     const stale = page.nodes.length > 0 && page.nodes.every((node) => new Date(node.updatedAt) < from);
