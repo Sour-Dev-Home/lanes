@@ -378,6 +378,16 @@ test("edge: pidRunning is false for a pid no process has and true for this proce
   for (const bad of [0, -1, NaN, 1.5]) assert.equal(pidRunning(bad), false, String(bad));
 });
 
+test("edge: pidRunning treats EPERM (a pid owned by someone else) as running, not absent", () => {
+  const original = process.kill;
+  process.kill = () => { throw Object.assign(new Error("no permission"), { code: "EPERM" }); };
+  try {
+    assert.equal(pidRunning(123), true);
+  } finally {
+    process.kill = original;
+  }
+});
+
 test("/health runs cleanup.mjs and states it as its one exception; /status only shows output and runs nothing", async () => {
   const { readFileSync } = await import("node:fs");
   const read = (name) => readFileSync(new URL(`../../.claude/commands/${name}`, import.meta.url), "utf8");
