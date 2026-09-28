@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SESSION_ID } from "./cleanup.mjs";
 import { FIRST_POLL_MS, GIVE_UP_FAILURES, GIVE_UP_MS, POLL_MS, STARTUP_GRACE_MS, laneInputs, main, reapTick, runOptions } from "./reap.mjs";
 
 const HOUR = 60 * 60 * 1000;
@@ -450,6 +451,35 @@ for (const argv of [
       assert.equal(existsSync(join(root, ".lanes", "reap")), false);
     }));
 }
+
+// #209: the session-id pattern lives in cleanup.mjs; reap.mjs applies that one rather than a copy.
+test("reap.mjs imports SESSION_ID from cleanup.mjs and defines no pattern of its own", () => {
+  const source = readFileSync(new URL("./reap.mjs", import.meta.url), "utf8");
+  assert.match(source, /import \{[^}]*\bSESSION_ID\b[^}]*\} from "\.\/cleanup\.mjs"/);
+  assert.doesNotMatch(source, /const SESSION_ID\b/);
+  assert.doesNotMatch(source, /A-Za-z0-9\]\[A-Za-z0-9_-\]/);
+});
+
+test("every id cleanup.mjs's SESSION_ID rejects is refused by reap.mjs with a usage line and exit 2", () =>
+  withRoot(async (root) => {
+    for (const id of ["-x", "--rm", "", "_x", "a b", "a/b", "a.b", "s7\n"]) {
+      assert.ok(!SESSION_ID.test(id), JSON.stringify(id));
+      const w = world(root);
+      assert.equal(await main(["--issue", "7", "--session", id], w.deps), 2, JSON.stringify(id));
+      assert.match(w.errs.join("\n"), /^usage: /m);
+      assert.deepEqual(w.calls, []);
+    }
+  }));
+
+test("edge: an id cleanup.mjs's SESSION_ID accepts gets past reap.mjs's argument check", () =>
+  withRoot(async (root) => {
+    for (const id of ["s7", "A_b-9", "0"]) {
+      assert.ok(SESSION_ID.test(id), id);
+      const w = world(root, { issue: "CLOSED", prs: merged });
+      assert.notEqual(await main(["--issue", "7", "--session", id], w.deps), 2, id);
+      rmSync(join(root, ".lanes"), { recursive: true, force: true });
+    }
+  }));
 
 test("edge: the flags may come in either order", () =>
   withRoot(async (root) => {

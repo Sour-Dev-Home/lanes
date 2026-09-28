@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cleanupMerged, loadCleanupInputs, pidRunning, sessionsFrom } from "./cleanup.mjs";
+import { SESSION_ID, cleanupMerged, loadCleanupInputs, pidRunning, sessionsFrom } from "./cleanup.mjs";
 
 // The ADR's defaults, which the owner may tune without another ADR.
 export const GIVE_UP_MS = 48 * 60 * 60 * 1000;
@@ -122,8 +122,6 @@ export function laneInputs(inputs, issue) {
 // Everything below does I/O.
 
 const USAGE = "usage: node scripts/lanes/reap.mjs --issue N --session ID";
-// A session id goes to `claude rm` as an argument, so it must never read as a flag.
-const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 // A lock older than any reaper can live is stale even if its pid now belongs to some other process.
 const LOCK_MAX_AGE = GIVE_UP_MS + 2 * POLL_MS;
 
