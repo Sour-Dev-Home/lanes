@@ -6,6 +6,37 @@
     "softPaths": ["^docs/USING\\.md$", "^README\\.md$"],
     "models": { "skip": "sonnet", "quick": "sonnet" }
   },
+  "modules": {
+    "entries": [
+      { "id": "preflight", "paths": ["scripts/preflight."], "imports": [] },
+      { "id": "modules", "paths": ["scripts/lanes/modules."], "imports": [] },
+      { "id": "lib", "paths": ["scripts/lanes/lib."], "imports": [] },
+      {
+        "id": "gate",
+        "paths": [
+          "scripts/lanes/gate.", "scripts/lanes/gate-decision.", "scripts/lanes/blockers.", "scripts/lanes/approve-guard.",
+          "scripts/lanes/post-review.", "scripts/lanes/issue-contract.", "scripts/lanes/reviewers.", "scripts/lanes/contracts.",
+          "scripts/lanes/workflow."
+        ],
+        "imports": ["lib", "preflight"]
+      },
+      {
+        "id": "queue",
+        "paths": [
+          "scripts/lanes/pick.", "scripts/lanes/status.", "scripts/lanes/start.", "scripts/lanes/start-guard.",
+          "scripts/lanes/queue.", "scripts/lanes/cleanup.", "scripts/lanes/reap."
+        ],
+        "imports": ["lib", "gate"]
+      },
+      { "id": "metrics", "paths": ["scripts/lanes/delivery-metrics.", "scripts/lanes/review-metrics."], "imports": ["lib"] },
+      {
+        "id": "install",
+        "paths": ["scripts/lanes/install.", "scripts/lanes/new-project.", "scripts/lanes/setup-repo.", "scripts/lanes/notify-hook."],
+        "imports": ["lib", "preflight"]
+      }
+    ],
+    "allowCycles": [["scripts/lanes/pick.mjs", "scripts/lanes/status.mjs"]]
+  },
   "paths": {
     "skip": ["^docs/", "\\.md$", "\\.test\\.m?[jt]sx?$", "(^|/)__tests__/", "(^|/)test/"],
     "contract": ["^contracts/", "\\.schema\\.json$", "(^|/)schema\\.ts$"],
