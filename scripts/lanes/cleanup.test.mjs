@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  SESSION_ID, cleanableCount, cleanupMerged, findOrphans, formatStep, parseWorktrees, pidRunning, planCleanup, removeEmptyDir, render, runCleanup,
+  SESSION_ID, cleanableCount, cleanupMerged, findOrphans, formatStep, loadCleanupInputs, parseWorktrees, pidRunning, planCleanup, removeEmptyDir, render, runCleanup,
   saveSessionLog, sessionEnded, sessionsFrom, shOptions, waitForStop,
 } from "./cleanup.mjs";
 
@@ -1355,4 +1355,40 @@ test("edge: the call scanner reads a multi-line call, and skips comments and the
   const calls = processCalls(src);
   assert.equal(calls.length, 1);
   assert.match(calls[0], /windowsHide: true/);
+});
+
+test("sessionsFrom keeps a session whose cwd is the repository root, with no issue", () => {
+  for (const cwd of ["C:/repo", "C:\\repo", "c:/repo/"]) {
+    const [s, ...rest] = sessionsFrom([{ kind: "background", id: "s1", cwd, status: "busy", state: "working" }], ROOT);
+    assert.equal(rest.length, 0, cwd);
+    assert.deepEqual({ id: s.id, issue: s.issue, cwd: s.cwd }, { id: "s1", issue: null, cwd });
+  }
+  assert.deepEqual(sessionsFrom([{ kind: "background", id: "s2", cwd: "C:/repo-other" }], ROOT), [], "a sibling folder is not the root");
+});
+
+test("planCleanup leaves a session at the repository root alone", () => {
+  const sessions = sessionsFrom([{ kind: "background", id: "s1", cwd: ROOT, status: "busy", state: "working" }], ROOT);
+  const worktrees = [{ path: ROOT, branch: "main", head: HEAD, main: true, dirty: false }];
+  assert.deepEqual(planCleanup({ worktrees, sessions }), []);
+});
+
+test("loadCleanupInputs reads git, gh and claude only through the injected run", () => {
+  const calls = [];
+  const run = (cmd, args) => {
+    calls.push(cmd);
+    if (cmd === "git" && args[0] === "worktree") return `worktree ${ROOT}\nHEAD ${HEAD}\nbranch refs/heads/main\n`;
+    if (cmd === "git") return "";
+    if (cmd === "gh") return "[]";
+    if (cmd === "claude") return JSON.stringify([{ kind: "background", id: "s1", cwd: ROOT, status: "busy", state: "working" }]);
+    throw new Error(`unexpected ${cmd}`);
+  };
+  const inputs = loadCleanupInputs(ROOT, run);
+  assert.equal(inputs.root, ROOT);
+  assert.equal(inputs.worktrees.length, 1);
+  assert.equal(inputs.sessions.length, 1);
+  assert.deepEqual([...new Set(calls)].sort(), ["claude", "gh", "git"]);
+});
+
+test("edge: loadCleanupInputs lets an injected run's failure through", () => {
+  assert.throws(() => loadCleanupInputs(ROOT, () => { throw new Error("gh down"); }), /gh down/);
 });
