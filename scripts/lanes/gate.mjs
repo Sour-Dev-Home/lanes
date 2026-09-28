@@ -7,6 +7,7 @@ import {
   diffFingerprint,
   GATE_CONTEXT,
   gateDecision,
+  interfaceContractOf,
   latestByContext,
   loadAdrs,
   loadConfig,
@@ -149,6 +150,8 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   let issueState = null;
   let issueAuthorCanWrite = false;
   let issueIsPr = false;
+  // #241: the paths the issue's Interface contract names need the architecture-advisor; unread, it names none.
+  let interfaceContract = "";
   // Fails closed until the issue's "Blocked by" has been read.
   let blockers = { ok: false, open: [], unreadable: [], error: "issue unreadable" };
   if (closes !== null) {
@@ -158,6 +161,7 @@ export function decideForPr(api, repo, number, config, adrs = []) {
       issueState = issue.state;
       // E2: the issues API also returns pull requests; only a `pull_request` key set means it is actually a PR.
       issueIsPr = issue.pull_request !== undefined && issue.pull_request !== null;
+      interfaceContract = interfaceContractOf(issue.body);
       issueAuthorCanWrite = authorCanWrite(api, repo, issue.user?.login);
       // Only a trusted task issue's blockers are read: each costs an API call, and a stranger's PR runs this gate.
       // An untrusted issue fails in gateDecision before the blocker check, so the fail-closed default never shows.
@@ -169,7 +173,7 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     }
   }
   const statuses = statusesOf(api, repo, pr.head.sha);
-  const candidates = reusableReviewers({ issueLabels, files, statuses, config, adrs });
+  const candidates = reusableReviewers({ issueLabels, files, statuses, config, adrs, interfaceContract });
   const reused = candidates.length > 0 ? reusableReviews(api, repo, number, pr, candidates, { files, adrs }) : [];
   const decision = gateDecision({
     prBody: pr.body,
@@ -184,6 +188,7 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     verdicts: trustedVerdicts(api, repo, number),
     config,
     adrs,
+    interfaceContract,
     reused,
     blockers,
   });

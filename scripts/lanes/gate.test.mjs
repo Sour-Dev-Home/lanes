@@ -284,9 +284,18 @@ const adrMd = (n, governs) =>
   `# ${String(n).padStart(4, "0")}: ADR ${n}\n\nStatus: accepted\n\n## Context\n\nx\n\n## Decision\n\nx\n\n## Decisions for the owner\n\nnothing\n\n## Consequences\n\nx\n\n## Governs\n\n- ${governs}\n`;
 const WAIT_ADVISOR = "waiting for review/architecture-advisor";
 
-test("evaluatePr and carry require the architecture-advisor for a file an accepted ADR governs", () => {
+// #241: a file an accepted ADR governs no longer requires the advisor on its own; a change under docs/adr/ does.
+test("evaluatePr and carry need no architecture-advisor for a file an accepted ADR only governs", () => {
   const adrs = [parseAdr(adrMd(3, "src/"))];
-  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  assert.equal(evaluatePr(api, "o/r", 5, config, adrs).state, "success");
+});
+
+test("evaluatePr and carry require the architecture-advisor for an ADR change", () => {
+  const adrs = [parseAdr(adrMd(3, "src/"))];
+  const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+  routes["repos/o/r/pulls/5/files"] = "docs/adr/0003-src.md\nsrc/a.ts\n";
+  const { api, posted } = fakeApi(routes);
   assert.equal(evaluatePr(api, "o/r", 5, config, adrs).description, WAIT_ADVISOR);
   assert.ok(posted[0].fields.includes("state=pending"));
   const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, "b".repeat(40), config, adrs);
@@ -315,18 +324,57 @@ function inCheckout(adrFiles, fn) {
 }
 const descriptionOf = (post) => post.fields.find((f) => f.startsWith("description=")).slice("description=".length);
 
-test("main loads the default branch's ADRs: a governed file waits for the architecture-advisor", () => {
+test("main loads the default branch's ADRs: a governed file alone no longer waits for the architecture-advisor", () => {
   const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
   inCheckout({ "0003-src.md": adrMd(3, "src/") }, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
-  assert.equal(descriptionOf(posted[0]), WAIT_ADVISOR);
+  assert.equal(descriptionOf(posted[0]), "unattended-eligible (tier:full), reviews in");
 });
 
-test("main ignores an ADR the PR itself adds: it is not on the default branch yet", () => {
+test("main requires the advisor for an ADR the PR itself adds, though it is not on the default branch yet", () => {
   const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
   routes["repos/o/r/pulls/5/files"] = "docs/adr/0003-src.md\nsrc/a.ts\n";
   const { api, posted } = fakeApi(routes);
   inCheckout({}, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
-  assert.equal(descriptionOf(posted[0]), "unattended-eligible (tier:full), reviews in");
+  assert.equal(descriptionOf(posted[0]), WAIT_ADVISOR);
+});
+
+// #241 (from #250): the gate passes the linked issue's Interface contract to the reviewer rule.
+const withContract = (contract) => {
+  const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+  routes["repos/o/r/issues/7"] = { ...routes["repos/o/r/issues/7"], body: `### Goal\n\ng\n\n### Interface contract\n\n${contract}\n\n### Blocked by\n\nnone\n` };
+  return routes;
+};
+
+test("evaluatePr waits for the architecture-advisor when the issue's Interface contract names a changed path", () => {
+  const { api, posted } = fakeApi(withContract("`src/a.ts` exports `f(x)`"));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_ADVISOR);
+  assert.ok(posted[0].fields.includes("state=pending"));
+});
+
+test("evaluatePr needs no advisor when the Interface contract is none", () => {
+  const { api } = fakeApi(withContract("none"));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, "unattended-eligible (tier:full), reviews in");
+});
+
+test("edge: an Interface contract naming a path the PR does not change needs no advisor", () => {
+  const { api } = fakeApi(withContract("`src/b.ts` exports `g`"));
+  assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
+});
+
+test("edge: carry re-decides with the Interface contract too", () => {
+  const { api } = fakeApi(withContract("`src/a.ts`"));
+  const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, "b".repeat(40), config);
+  assert.deepEqual(d, { state: "failure", description: WAIT_ADVISOR });
+});
+
+test("edge: an issue body that is missing or not a string names no path (the blocker check still fails it closed)", () => {
+  for (const body of [null, undefined, 42]) {
+    const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+    routes["repos/o/r/issues/7"] = { ...routes["repos/o/r/issues/7"], body };
+    const d = evaluatePr(fakeApi(routes).api, "o/r", 5, config);
+    assert.notEqual(d.description, WAIT_ADVISOR, String(body));
+    assert.notEqual(d.state, "success", String(body));
+  }
 });
 
 // #25: reuse a test-hunter success from an earlier commit when the PR's own diff is unchanged
@@ -464,6 +512,8 @@ function threeRoutes(reusedNames, over = {}) {
     ...over,
   });
   routes[statusesRoute(SHA)] = at(SHA, onHead);
+  // #241: srcAdrs governing src/a.ts no longer requires the advisor; the PR's own ADR change does.
+  routes["repos/o/r/pulls/5/files"] = "src/a.ts\ndocs/adr/0005-new.md\n";
   return routes;
 }
 const decide = (routes) => evaluatePr(fakeApi(routes).api, "o/r", 5, secArch, srcAdrs);

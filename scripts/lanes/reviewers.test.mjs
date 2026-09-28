@@ -228,3 +228,29 @@ test("edge: an unknown tier on an empty diff still reports usage, not the empty-
     assert.doesNotMatch(r.stderr, /no diff to review/);
   });
 });
+
+// #241/#250 (AC7): the optional issue-number argument is validated the same way as the tier, before any git or gh
+// work, so a malformed issue number never reaches `gh issue view`.
+const runWithIssue = (root, tier, issue) => spawnSync(process.execPath, [SCRIPT, tier, issue], { cwd: root, encoding: "utf8" });
+
+test("edge: a malformed issue-number argument is refused, before reading any diff", () => {
+  atBase(({ root }) => {
+    for (const issue of ["0", "-1", "1.5", "abc", "007", "", "1 ", "+7"]) {
+      const r = runWithIssue(root, "quick", issue);
+      assert.notEqual(r.status, 0, issue);
+      assert.match(r.stderr, /usage: reviewers\.mjs/, issue);
+      assert.doesNotMatch(r.stderr, /no diff to review/, issue);
+    }
+  });
+});
+
+// A well-formed issue number passes validation and reaches the (still-empty) diff check next, proving the regex
+// accepts good input rather than merely never being exercised.
+test("edge: a well-formed issue-number argument passes validation, reaching the empty-diff check next", () => {
+  atBase(({ root }) => {
+    const r = runWithIssue(root, "quick", "7");
+    assert.notEqual(r.status, 0);
+    assert.doesNotMatch(r.stderr, /usage: reviewers\.mjs/);
+    assert.match(r.stderr, /no diff to review/);
+  });
+});
