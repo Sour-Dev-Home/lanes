@@ -8,7 +8,7 @@
   },
   "modules": {
     "entries": [
-      { "id": "preflight", "paths": ["scripts/preflight."], "imports": [] },
+      { "id": "preflight", "paths": ["scripts/preflight.", "scripts/security-workflow."], "imports": [] },
       { "id": "modules", "paths": ["scripts/lanes/modules."], "imports": [] },
       { "id": "lib", "paths": ["scripts/lanes/lib."], "imports": [] },
       {
