@@ -1816,3 +1816,37 @@ test("#61 edge (test-hunter round 2): only an alias command word fails closed, n
     assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
   }
 });
+
+test("#61 edge (security review round 3): node -e's bare builtin modules and destructuring are not inert", () => {
+  for (const js of [
+    `const {execSync} = child_process; execSync("node scripts/lanes/start.mjs 5")`,
+    `const c = child_process; "scripts/lanes/start.mjs"`,
+    `let child_process = 1; "scripts/lanes/start.mjs"`,
+    `function vm() {} "scripts/lanes/start.mjs"`,
+    `const [a] = [1]; "scripts/lanes/start.mjs"`,
+    `let e; ({ execSync: e } = {}); "scripts/lanes/start.mjs"`,
+    `for ({ x } of []); "scripts/lanes/start.mjs"`,
+    `[1].map(({ constructor }) => constructor); "scripts/lanes/start.mjs"`,
+    `function f({ constructor }) {} "scripts/lanes/start.mjs"`,
+    `const s = undeclaredName; "scripts/lanes/start.mjs"`,
+    `fs.writeFileSync("x", "scripts/lanes/start.mjs")`,
+  ]) {
+    assert.deepEqual(decideFor(bash(`node -e '${js}'`), grant()), { decision: "deny", reason: DENY_REASON }, js);
+  }
+  assert.deepEqual(decideFor(bash(`node -e 'const {spawnSync} = child_process; spawnSync("claude", ["${BG}"])'`), grant()), { decision: "deny", reason: BG_DENY_REASON });
+  assert.equal(decideFor(ps(`node -e 'const {execSync} = child_process; execSync("node scripts/lanes/start.mjs 5")'`), grant())?.decision, "deny");
+});
+
+test("#61 edge (security review round 3): scripts that bind their own names, parameters and object keys stay inert", () => {
+  for (const js of [
+    `import fs from "node:fs"; let n = 0; n = 1; function f(a, b) { return a + b } fs.writeFileSync("x", "start.mjs " + f(n, 2))`,
+    `const o = { a: 1, b: "claude ${BG}" }; console.log(JSON.stringify(o), [1, 2].map((x, i) => x * i), ((y) => y)(3))`,
+    `for (const line of ["start.mjs"]) console.log(line)`,
+  ]) {
+    assert.equal(decideFor(bash(`node --input-type=module -e '${js}'`)), null, js);
+  }
+});
+
+test("#61 edge (security review round 3): Import-Alias fails closed like the other alias commands", () => {
+  for (const c of ["Import-Alias aliases.csv; n scripts/lanes/start.mjs 5", "ipal aliases.csv"]) assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+});

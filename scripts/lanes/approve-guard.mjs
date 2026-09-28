@@ -774,7 +774,7 @@ const PS_LAUNCH_RE = /^(start-process|saps|start|invoke-item|ii)$/i;
 const PS_OPAQUE_RE = /scriptblock|invokescript|invokecommand|add-type|process\]?::start|processstartinfo|diagnostics\.process|activator\]|comobject|alias:/i;
 // Commands that rename a program (an alias for node or claude): as a command word, their statement fails closed. Only
 // the command word counts, so a word such as "sal" in a message or file name does not (#61 test-hunter round 2).
-const PS_ALIAS_RE = /^(set-alias|new-alias|sal|nal)$/i;
+const PS_ALIAS_RE = /^(set-alias|new-alias|import-alias|sal|nal|ipal)$/i;
 // The names a PowerShell quote or backtick inside a string could hide from a Bash reading.
 const PS_NAMES_RE = /start\.mjs|queue\.mjs|post-review|--(?:bg|background)|claude/gi;
 const psDequoted = (s) => s.replace(/['"`‘-„]/g, "");
