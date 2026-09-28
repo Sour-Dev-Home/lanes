@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GATE_CONTEXT, parseIssueForm, parsePrBody, reviewContext } from "./lib.mjs";
-// pick.mjs imports this module too; the cycle is safe because neither calls the other at load time.
+import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { claimedPaths } from "./pick.mjs";
 
 const ISSUE_LIMIT = 1000;
@@ -47,35 +47,6 @@ function openBlockers(number, blockedByOf) {
     }
   }
   return found.includes(number) ? [...found.filter((b) => b !== number), number] : found;
-}
-
-const cleanPath = (token) =>
-  token
-    .replace(/^[("'[]+|[)"'\].,;:]+$/g, "")
-    .replace(/^\.\//, "")
-    .replace(/\*+$/, "");
-const looksLikePath = (p) => p && !/\s/.test(p) && !/^(-|https?:)/.test(p) && (p.includes("/") || /\.[a-z][a-z0-9]{0,5}$/i.test(p));
-
-// The file paths an issue names: backticked or bare tokens with a `/` or a file extension, read from its Interface
-// contract and the "In:" part of its Scope (anything after "Out:" is ignored). A trailing `*` glob reads as its directory.
-export function issuePaths({ contract = "", scope = "" }) {
-  const inPart = scope.split(/(?<![\w-])Out:/i)[0].replace(/^[\s\S]*?(?<![\w-])In:/i, "");
-  // A contract of `none (reads `x` from #N)` only reads x, so the note right after `none` names no path to claim.
-  const owned = contract.replace(/^\s*none\s*\((?:[^()]|\([^()]*\))*\)/i, "none");
-  const paths = [];
-  for (const text of [owned, inPart]) {
-    for (const [, quoted, bare] of text.matchAll(/`([^`]+)`|(\S+)/g)) {
-      const p = cleanPath(quoted ?? bare);
-      if (looksLikePath(p) && !paths.includes(p)) paths.push(p);
-    }
-  }
-  return paths;
-}
-
-// Two path lists overlap when they share a path, or one names a directory (`dir/`) holding a path the other names.
-export function pathsOverlap(a, b) {
-  const within = (dir, p) => dir.endsWith("/") && p.startsWith(dir);
-  return a.some((x) => b.some((y) => x === y || within(x, y) || within(y, x)));
 }
 
 // Marks each startable item `parallel` unless its paths overlap another startable item's or claimed work's (the
@@ -297,7 +268,8 @@ export function render(summary, sinceLabel) {
     block(`MERGED, last ${sinceLabel}`, summary.merged, false),
     ...(summary.sessionsUnavailable ? [`(background sessions unavailable: ${summary.sessionsUnavailable})`] : []),
     ...(summary.branchesUnavailable ? [`(stopped lanes may be missing: ${summary.branchesUnavailable})`] : []),
-    ...(summary.toCleanUp > 0 ? [`${summary.toCleanUp} merged lane${summary.toCleanUp === 1 ? "" : "s"} to clean up: node scripts/lanes/cleanup.mjs`] : []),
+    // Merged lanes, closed-issue lanes and empty orphan folders all count, so the line names none of them alone.
+    ...(summary.toCleanUp > 0 ? [`${summary.toCleanUp} ${summary.toCleanUp === 1 ? "lane or folder" : "lanes or folders"} to clean up: node scripts/lanes/cleanup.mjs`] : []),
   ].join("\n\n");
 }
 

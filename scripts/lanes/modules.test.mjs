@@ -295,28 +295,52 @@ const repoFiles = () => inRepo(() => Object.fromEntries(
   listFiles("scripts/").filter((f) => f.endsWith(".mjs")).map((f) => [f, readFileSync(f, "utf8")]),
 ));
 
-const PICK_STATUS = ["scripts/lanes/pick.mjs", "scripts/lanes/status.mjs"];
-
 test("the repository's module map has no violation, unallowed cycle or unmapped file", () => {
   const { code, message } = inRepo(() => main());
   assert.equal(code, 0, message);
   assert.doesNotMatch(message, /no module map configured/);
-  assert.match(message, /, 0 violations, 0 cycles \(1 allowed\), 0 unmapped$/m);
+  assert.match(message, /, 0 violations, 0 cycles \(0 allowed\), 0 unmapped$/m);
 });
 
 test("the map claims every non-test file in scripts/lanes/ and scripts/preflight.mjs", () => {
   const files = repoFiles();
-  const sources = Object.keys(files).filter((f) => !f.endsWith(".test.mjs") && (f.startsWith("scripts/lanes/") || f === "scripts/preflight.mjs"));
+  const sourceFiles = Object.fromEntries(Object.entries(files).filter(([f]) => !f.endsWith(".test.mjs")));
+  const sources = Object.keys(sourceFiles).filter((f) => f.startsWith("scripts/lanes/") || f === "scripts/preflight.mjs");
   assert.ok(sources.includes("scripts/preflight.mjs") && sources.includes("scripts/lanes/modules.mjs"), "the scan found the expected sources");
-  const { unmapped } = checkModules({ map: realConfig().modules, files });
+  const { unmapped } = checkModules({ map: realConfig().modules, files: sourceFiles });
   assert.deepEqual(unmapped, []);
 });
 
-test("allowCycles holds exactly the pick.mjs / status.mjs cycle, and it is the only cycle in the graph", () => {
+test("the map claims the vendor.* prefix in a module that imports nothing", () => {
+  const entry = realConfig().modules.entries.find((e) => e.paths.includes("scripts/lanes/vendor."));
+  assert.ok(entry, "an entry claims the scripts/lanes/vendor. prefix");
+  assert.deepEqual(entry.imports, []);
+});
+
+test("edge: a vendor.test.mjs that imports only node: built-ins is mapped and violates nothing", () => {
+  const files = { ...repoFiles(), "scripts/lanes/vendor.test.mjs": imp("node:test") + imp("node:fs") };
+  const r = checkModules({ map: realConfig().modules, files });
+  assert.deepEqual(r.unmapped, []);
+  assert.deepEqual(r.violations, []);
+});
+
+test("edge: a vendor.* file that imports a lanes module is a violation (imports: [] is enforced)", () => {
+  const files = { ...repoFiles(), "scripts/lanes/vendor.test.mjs": imp("node:test") + imp("./lib.mjs") };
+  const r = checkModules({ map: realConfig().modules, files });
+  assert.ok(r.violations.length > 0, "importing ./lib.mjs from the vendor module is reported");
+});
+
+test("edge: the real map passes on a tree with no vendor.* file (a prefix that matches nothing is not an error)", () => {
+  const files = Object.fromEntries(Object.entries(repoFiles()).filter(([f]) => !f.startsWith("scripts/lanes/vendor.")));
+  const r = checkModules({ map: realConfig().modules, files });
+  assert.deepEqual([r.unmapped, r.violations, r.cycles], [[], [], []]);
+});
+
+test("allowCycles is empty, and the graph has no cycle at all (pick.mjs and status.mjs no longer import each other)", () => {
   const { modules } = realConfig();
-  assert.deepEqual(modules.allowCycles.map((c) => [...c].sort()), [PICK_STATUS]);
+  assert.deepEqual(modules.allowCycles, []);
   const r = checkModules({ map: modules, files: repoFiles() });
-  assert.deepEqual(r.allowedCycles.map((c) => [...c].sort()), [PICK_STATUS]);
+  assert.deepEqual(r.allowedCycles, []);
   assert.deepEqual(r.cycles, []);
   assert.deepEqual(r.violations, []);
 });
@@ -333,13 +357,13 @@ test("edge: an import across a boundary the map does not allow is a violation", 
   assert.deepEqual(r.violations.map((v) => `${v.from} -> ${v.to}`), ["scripts/lanes/modules.mjs -> scripts/lanes/lib.mjs"]);
 });
 
-test("edge: a new import cycle beside the allowed one is reported", () => {
+test("edge: a new import cycle is reported", () => {
   const files = repoFiles();
   files["scripts/lanes/lib.mjs"] += imp("./blockers.mjs");
   const r = checkModules({ map: realConfig().modules, files });
   assert.equal(r.cycles.length, 1);
   assert.ok(r.cycles[0].includes("scripts/lanes/lib.mjs") && r.cycles[0].includes("scripts/lanes/blockers.mjs"));
-  assert.equal(r.allowedCycles.length, 1);
+  assert.equal(r.allowedCycles.length, 0);
 });
 
 test("edge: main on the real map exits 1 and names a stray file that no module claims", () => {

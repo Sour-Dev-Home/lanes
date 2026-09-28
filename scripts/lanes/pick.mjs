@@ -2,7 +2,7 @@
 // Chooses which ready, unblocked issues can start now without touching files other work already claims. Pure: the
 // callers read GitHub and the sessions and pass the data in.
 import { parseIssueForm } from "./lib.mjs";
-import { issuePaths, pathsOverlap } from "./status.mjs";
+import { issuePaths, pathsOverlap } from "./paths.mjs";
 
 const formOf = (issue) => parseIssueForm(issue?.body ?? "").fields;
 const prFiles = (pr) => (pr.files ?? []).map((f) => (typeof f === "string" ? f : f?.path)).filter(Boolean);

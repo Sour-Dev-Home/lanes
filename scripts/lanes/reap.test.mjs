@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FIRST_POLL_MS, GIVE_UP_FAILURES, GIVE_UP_MS, POLL_MS, STARTUP_GRACE_MS, laneInputs, main, reapTick } from "./reap.mjs";
+import { FIRST_POLL_MS, GIVE_UP_FAILURES, GIVE_UP_MS, POLL_MS, STARTUP_GRACE_MS, laneInputs, main, reapTick, runOptions } from "./reap.mjs";
 
 const HOUR = 60 * 60 * 1000;
 const T0 = Date.UTC(2026, 8, 28, 12);
@@ -801,4 +801,25 @@ test("laneInputs keeps only the one lane's worktrees and sessions, no orphans, a
   assert.deepEqual(out.orphans, []);
   assert.deepEqual(out.prs, inputs.prs);
   assert.deepEqual(out.issues, inputs.issues);
+});
+
+test("the CLI's run options hide the console window on Windows", () => {
+  const options = runOptions("/r");
+  assert.equal(options.windowsHide, true);
+  assert.equal(options.cwd, "/r");
+});
+
+test("edge: the run options keep the output capture, timeout and buffer the polls rely on", () => {
+  const options = runOptions("/r");
+  assert.equal(options.encoding, "utf8");
+  assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+  assert.equal(options.timeout, 60_000);
+  assert.ok(options.maxBuffer >= 1024 * 1024);
+});
+
+test("edge: every execFileSync call in reap.mjs hides the console window", () => {
+  const source = readFileSync(new URL("./reap.mjs", import.meta.url), "utf8");
+  const calls = source.split("\n").filter((line) => /\bexecFileSync\(/.test(line));
+  assert.ok(calls.length >= 2);
+  for (const line of calls) assert.match(line, /windowsHide: true|runOptions\(/, line.trim());
 });
