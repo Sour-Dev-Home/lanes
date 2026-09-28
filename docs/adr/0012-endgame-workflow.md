@@ -66,9 +66,11 @@ of this (`prStage`, `gateDescriptions`, `mergeQueueEntries`, `laneSessions`, `op
   "Acceptance criteria" line with a fixed prefix: `- [ ] validate: <command> — <metric-regex> <op> <threshold>
   (attempts: N)`, N from 1 to 10. Plain `- [ ]` lines are untouched.
 - `scripts/lanes/validate.mjs --issue N --criterion I`: runs the command, extracts the metric from the regex's first
-  capture group, appends `{ attempt, value, pass }` to `.lanes/validate/<N>.jsonl`, prints the best so far, and exits
-  0 (threshold met), 1 (keep going) or 2 (cap reached without meeting it). `lane.md` step 5 loops on it for that
-  criterion and puts the attempt table in the PR body.
+  capture group, appends `{ attempt, value, pass, at, criterion }` to `.lanes/validate/<N>.jsonl` (`criterion` is the
+  1-based criterion index, so several criteria of one issue keep separate counts; a failed attempt also carries
+  `reason`), prints the best so far, and exits 0 (threshold met), 1 (keep going), 2 (cap reached without meeting it)
+  or 3 (cannot run: bad usage, an unreadable issue or log, a plain or malformed criterion). `lane.md` step 5 loops on
+  it for that criterion and puts the attempt table in the PR body.
 - `issue-contract.mjs` validates a `validate:` line's syntax; a malformed one is a contract error.
 - Spike: a `spike` label, not a tier; `TIERS` stays `skip`, `quick`, `full`. `lane.md` step 1 checks the label; a
   spike skips test-first, and its PR holds a findings file or an ADR draft only, under `tier:skip`'s docs-only rule.
