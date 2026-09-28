@@ -478,6 +478,25 @@ test("docs/USING.md documents start.models", () => {
   assert.match(doc, /--model/);
 });
 
+// Extra, not from criteria or a listed edge case: this repository's actual lanes.config.json, run through main()
+// end to end (not a hand-built fixture), launches each tier on the model criterion 3 requires.
+test("edge: main launches on the models from this repository's own lanes.config.json", () => {
+  const config = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
+  const issues = {
+    1: { labels: ["ready", "tier:skip"], body: form({ scope: "In: `a.mjs`." }) },
+    2: { labels: ["ready", "tier:quick"], body: form({ scope: "In: `b.mjs`." }) },
+    3: { labels: ["ready", "tier:full"], body: form({ scope: "In: `c.mjs`." }) },
+  };
+  const { deps, launches } = fakes({ issues, config });
+  const { code } = main(["1", "2", "3"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(launches, [
+    { args: ["--bg", "--model", "sonnet", "/lane 1"], cwd: "/repo" },
+    { args: ["--bg", "--model", "sonnet", "/lane 2"], cwd: "/repo" },
+    { args: ["--bg", "/lane 3"], cwd: "/repo" },
+  ]);
+});
+
 test("startConfig accepts maxLanes 1 and 10 and refuses anything outside 1 to 10", () => {
   assert.equal(startConfig({ start: { maxLanes: 1 } }).maxLanes, 1);
   assert.equal(startConfig({ start: { maxLanes: 10 } }).maxLanes, 10);

@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main as checkBlockers } from "./blockers.mjs";
 import { cleanupMerged } from "./cleanup.mjs";
-import { parseIssueForm } from "./lib.mjs";
+import { TIERS, parseIssueForm } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { issuePaths, pathsOverlap } from "./status.mjs";
 
@@ -22,7 +22,6 @@ export const START_DEFAULTS = Object.freeze({
   models: Object.freeze({}),
 });
 const MAX_LANES_LIMIT = 10;
-const TIERS = Object.freeze(["skip", "quick", "full"]);
 // A model name is one word that cannot start with `-`, so claude never reads it as a flag.
 const MODEL_NAME = /^[^\s-]\S*$/;
 const PR_LIMIT = 1000;
