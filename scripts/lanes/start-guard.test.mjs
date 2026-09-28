@@ -745,6 +745,14 @@ test("#89 criterion 1: a command that only writes or prints text mentioning lane
   }
 });
 
+test("#89 edge: a written file that names claude --bg or start.mjs is only written, so it gets no decision (architecture review)", () => {
+  // Denied before #89 though nothing runs it; running it later is its own Bash call, which the guard reads then.
+  for (const cmd of ["mkdir -p x; cat > x/run.sh <<'EOF'\nclaude --bg y\nEOF", "mkdir -p x && cat > x/run.sh <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF"]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, JSON.stringify(cmd));
+  }
+  assert.deepEqual(decidePreToolUse(bash("bash x/run.sh"), null, NOW), null, "a script file's content is never visible to the guard, as before #89 (ADR 0007)");
+});
+
 test("#89 criterion 3: near misses that write or print text and also run it are still refused", () => {
   for (const [cmd, reason] of [
     // The written file is run in the same call.
@@ -792,6 +800,25 @@ test("#102 criterion 3: an arithmetic expansion holding a command substitution i
   }
   assert.deepEqual(decidePreToolUse(bash('echo "$(( $(node scripts/lanes/queue.mjs) ))"'), grant(), NOW), { decision: "deny", reason: QUEUE_DENY_REASON });
   assert.deepEqual(decidePreToolUse(bash("echo $(( $(claude --bg x) ))"), grant(), NOW), { decision: "deny", reason: BG_DENY_REASON });
+});
+
+test("extra (test-hunter): a data-only write (cat/echo/printf with `>`) still has its arithmetic body's command substitution walked, never hidden by isDataOnly", () => {
+  // Not covered by #89 or #102's own cases: #89's data-only tests never use `$((…))`, and #102's arithmetic tests
+  // never redirect to a file, so nothing exercised the interaction where arithmeticScript bodies are pushed with
+  // `literal: false` (always walked) even when the whole call is otherwise data-only (whose *other* non-expanding
+  // parts are skipped). A plausible lane pattern, `echo "$((RETRIES+1))" > .lanes/retry-count.txt`, must not become
+  // a blind spot for `$(( $(node scripts/lanes/start.mjs 12) ))` smuggled into the same position.
+  for (const [cmd, reason] of [
+    ['echo "$(( $(node scripts/lanes/start.mjs 12) ))" > out.txt', DENY_REASON],
+    ['echo "$(( $(claude --bg x) ))" > out.txt', BG_DENY_REASON],
+    ['echo "$(( $(node scripts/lanes/queue.mjs 12) ))" > out.txt', QUEUE_DENY_REASON],
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason }, cmd);
+  }
+  // The safe counterpart: plain arithmetic written to a file still gets no decision.
+  for (const cmd of ['echo "$((5<<1))" > out.txt', "N=$((N+1)); echo $N > out.txt"]) {
+    assert.equal(decidePreToolUse(bash(cmd), grant(), NOW), null, cmd);
+  }
 });
 
 test("#89 criterion 7: every case named in #102 is covered", () => {
