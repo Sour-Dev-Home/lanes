@@ -1,5 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { EMPTY_TREE, PATH_PATTERNS, PATH_SCAN_EXEMPT, addedLines, checkPr, dedupeHits, diffBase, scanLines, scanMessages } from "./preflight.mjs";
 
 // The path shapes are taken from the module, so this file does not contain them literally (CI's PII scan would flag it).
@@ -107,6 +112,37 @@ test("edge: every path shape, including the JSON-escaped one, is skipped in a sh
 
 test("edge: a commit message naming a sheet path is still scanned", () => {
   assert.equal(scanMessages(`${SHEET}\n${URL_LINE}`, PATH_PATTERNS).length, 1);
+});
+
+// Not covered above: every other test calls scanLines/scanMessages directly. This runs the real CLI (`node
+// preflight.mjs`, the actual program CI's PR hook invokes) end to end in a throwaway repo, so a wiring mistake in
+// runChecks itself (patterns list, exempt lists, diff plumbing) would fail here even if the exported units look right.
+const PREFLIGHT_CLI = fileURLToPath(new URL("./preflight.mjs", import.meta.url));
+const GIT_IDENTITY = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.example", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.example" };
+
+test("edge: the CLI itself passes a sheet with a users/profile line, and fails the same line elsewhere", () => {
+  const dir = mkdtempSync(join(tmpdir(), "preflight-cli-"));
+  try {
+    const sheetDir = join(dir, "vendor", "owasp-cheatsheets", "sheets");
+    mkdirSync(sheetDir, { recursive: true });
+    writeFileSync(join(sheetDir, "CSRF.md"), `${URL_LINE}\n`);
+    writeFileSync(join(dir, "README.md"), "clean\n");
+    const env = { ...process.env, ...GIT_IDENTITY };
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir, env });
+
+    const clean = spawnSync("node", [PREFLIGHT_CLI], { cwd: dir, encoding: "utf8" });
+    assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+
+    writeFileSync(join(dir, "other.md"), `${URL_LINE}\n`);
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    const dirty = spawnSync("node", [PREFLIGHT_CLI], { cwd: dir, encoding: "utf8" });
+    assert.equal(dirty.status, 1, dirty.stdout + dirty.stderr);
+    assert.match(dirty.stderr, /other\.md:1 contains a local absolute path/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("an added line whose text starts with '++ ' is content, not a file header", () => {
