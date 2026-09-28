@@ -1026,3 +1026,14 @@ test("ordinary powershell/pwsh/cmd/fish commands unrelated to post-review get no
   denied("fish -c 'node scripts/lanes/post-rev*.mjs owner --pr 16'");
   denied('cmd /c "node scripts/lanes/%S% owner --pr 16"');
 });
+
+// test-hunter (#142 review, round 2): cases not exercised above, since #119's own tests only use /c and forward
+// slashes. A real Windows path (backslash separators, /k instead of /c) must still be read in bash terms, and a
+// fish backslash-escaped paren (no command substitution at all) must not be mistaken for one.
+test("cmd's real Windows path separators and /k form still deny the owner command (#142 review, round 2)", () => {
+  denied('cmd /c "node scripts\\lanes\\post-review.mjs owner --pr 16"');
+  denied('cmd /k "node scripts/lanes/post-review.mjs owner --pr 16"');
+});
+test("fish's backslash-escaped parens are literal text, not command substitution, unrelated commands get no decision (#142 review, round 2)", () => {
+  allowed("fish -c 'echo \\(literal parens\\)'");
+});
