@@ -1075,6 +1075,12 @@ test("edge: model:opus beside an unknown model:* label still launches on opus an
   assert.deepEqual(lines, ["#1: ignored label model:x", "#1 → id1"]);
 });
 
+test("edge: an ignored model:* label's control characters cannot reach the log line", () => {
+  const { deps } = fakes({ issues: { 1: { labels: ["ready", "tier:full", "model:x\x1b[2J\nfake"] } } });
+  const { lines } = main(["1"], deps);
+  assert.deepEqual(lines, ["#1: ignored label model:x?[2J?fake", "#1 → id1"]);
+});
+
 test("launchArgs puts --model opus first when opus is set, over the tier's model", () => {
   assert.deepEqual(launchArgs(18, { tier: "full", models: { full: "sonnet" }, opus: true }), [...NAMED(18), "--model", "opus", "/lane 18"]);
   assert.deepEqual(launchArgs(18, { tier: "full", models: { full: "sonnet" }, opus: false }), [...NAMED(18), "--model", "sonnet", "/lane 18"]);

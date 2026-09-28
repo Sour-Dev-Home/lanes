@@ -263,7 +263,8 @@ function launchAll(numbers, deps, { tiers, models, labels }) {
   const root = numbers.length ? deps.root() : null;
   for (const n of numbers) {
     const { opus, ignored } = modelLabels(labels.get(n));
-    const notes = ignored.map((l) => `#${n}: ignored label ${l}`);
+    // A label name is untrusted text: control characters (ANSI escapes, newlines) become `?` in the log line.
+    const notes = ignored.map((l) => `#${n}: ignored label ${l.replace(/[\x00-\x1f\x7f-\x9f]/g, "?")}`);
     // One attempt only: a launch that printed no id may still have started, and a retry could start it twice.
     let id = null;
     let why = "no session id in output";

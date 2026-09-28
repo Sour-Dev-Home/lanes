@@ -89,8 +89,8 @@ own diff is unchanged since (so merging main in needs no new review). The status
 or `reused <a>+<b> from <sha7>` when several reviewers are reused from one commit. A failure is never reused, and
 neither is the ui-reviewer or the owner's approval. A reuse is blocked by any change since the review to the
 reviewer's brief (`.claude/agents/<reviewer>.md`), the test-hunter's two checklists (`definition-of-done.md` and
-`testing-patterns.md`), the security checklist or `vendor/owasp-cheatsheets/`, or an ADR governing the PR's files, and
-by a changed-file list of 300 or more files. A rebase or force-push drops the earlier commits, so it always needs a
+`testing-patterns.md`), or the security checklist or `vendor/owasp-cheatsheets/`, or for the architecture-advisor an ADR
+governing the PR's files, and by a changed-file list of 300 or more files. A rebase or force-push drops the earlier commits, so it always needs a
 fresh review.
 
 Everything else waits for `/approve`, and the `lanes/gate` status says why (for example
