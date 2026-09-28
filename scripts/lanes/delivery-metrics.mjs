@@ -25,6 +25,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseIssueForm } from "./lib.mjs";
+import { issuePaths } from "./paths.mjs";
 
 export const SCHEMA_VERSION = 1;
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -247,14 +249,15 @@ function safeContext(context) {
 export function normalizeRichPr(node) {
   const base = normalizePr(node);
   if (base === undefined) return undefined;
-  const contexts = node.lastCommit?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes ?? [];
+  const list = (value) => (Array.isArray(value) ? value : []);
+  const contexts = list(node.lastCommit?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes);
   const issue = node.closingIssuesReferences?.nodes?.[0];
   const body = typeof issue?.body === "string" ? issue.body : "";
   return {
     ...base,
     number: Number(node.number) || 0,
-    files: (node.files?.nodes ?? []).map((file) => file?.path).filter((path) => typeof path === "string"),
-    commitDates: (node.commits?.nodes ?? []).map((entry) => isoDate(entry?.commit?.committedDate)).filter((date) => date !== undefined),
+    files: list(node.files?.nodes).map((file) => file?.path).filter((path) => typeof path === "string"),
+    commitDates: list(node.commits?.nodes).map((entry) => isoDate(entry?.commit?.committedDate)).filter((date) => date !== undefined),
     statuses: contexts
       .filter((entry) => entry?.__typename === "StatusContext" && isoDate(entry.createdAt) !== undefined)
       .map((entry) => ({ context: safeContext(entry.context), state: safeReason(entry.state), at: entry.createdAt })),
@@ -268,7 +271,8 @@ export function normalizeRichPr(node) {
           criteria: (body.match(/^\s*- \[[ xX]\]/gm) ?? []).length,
           criteriaDone: (body.match(/^\s*- \[[xX]\]/gm) ?? []).length,
           bodyChars: body.length,
-          editedAt: (issue.userContentEdits?.nodes ?? []).map((edit) => isoDate(edit?.editedAt)).filter((date) => date !== undefined),
+          scopePaths: (({ contract, scope }) => issuePaths({ contract, scope }))(parseIssueForm(body).fields),
+          editedAt: list(issue.userContentEdits?.nodes).map((edit) => isoDate(edit?.editedAt)).filter((date) => date !== undefined),
         }
       : null,
   };
