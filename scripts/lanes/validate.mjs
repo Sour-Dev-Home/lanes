@@ -40,7 +40,8 @@ const CMD_UNSAFE = /["%^&|<>!\r\n\0]/;
 export function resolveCommand(argv, { platform = process.platform, env = process.env, exists = existsSync } = {}) {
   const plain = { file: argv[0], args: argv.slice(1), verbatim: false };
   if (platform !== "win32" || /[\\/]/.test(argv[0])) return plain;
-  const dirs = (env.PATH ?? env.Path ?? "").split(";").filter(Boolean);
+  // Only absolute PATH entries count: a relative one would resolve against the checkout and could pick a planted shim.
+  const dirs = (env.PATH ?? env.Path ?? "").split(";").filter((d) => /^([A-Za-z]:[\\/]|\\\\)/.test(d));
   const exts = (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
   for (const dir of dirs) {
     for (const ext of exts) {
@@ -48,7 +49,8 @@ export function resolveCommand(argv, { platform = process.platform, env = proces
       if (!exists(full)) continue;
       if (!/\.(cmd|bat)$/i.test(full)) return plain;
       const parts = [full, ...argv.slice(1)];
-      const bad = parts.find((p) => CMD_UNSAFE.test(p));
+      // A trailing backslash would escape the closing quote when the target parses its command line.
+      const bad = parts.find((p) => CMD_UNSAFE.test(p) || p.endsWith("\\"));
       if (bad !== undefined) throw new Error(`unsafe character in a command argument for ${argv[0]}: ${JSON.stringify(bad)}`);
       return { file: env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", `"${parts.map((p) => `"${p}"`).join(" ")}"`], verbatim: true };
     }
