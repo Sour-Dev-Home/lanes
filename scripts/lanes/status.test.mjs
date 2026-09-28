@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
-import { gateDescriptions, laneBranches, laneSessions, loadLaneBranches, loadSessions, mergeQueueEntries, render, summarize } from "./status.mjs";
+import { approveLine, gateDescriptions, laneBranches, laneSessions, loadLaneBranches, loadSessions, mergeQueueEntries, render, renderWaiting, summarize, waitingApprovals } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -743,4 +743,57 @@ test("prStage is exported and classifies each stage", async () => {
   assert.deepEqual(prStage(pr(6, noDescription), undefined, "waiting on owner: review/owner"), { stage: "owner", note: "waiting on owner: review/owner" });
   assert.deepEqual(prStage(pr(7, [gate("PENDING", "waiting for review/test-hunter")])), { stage: "gate", note: "waiting for review/test-hunter" });
   assert.deepEqual(prStage(pr(8, [gate("PENDING", "waiting on reviewers")])), { stage: "review", note: "waiting on reviewers" });
+});
+
+const ownerGate = gate("PENDING", "waiting on owner (/approve)");
+const waitingBody = (needs, contract = "none") => body(needs).replace("## Contract changes\nnone", `## Contract changes\n${contract}`);
+const waitingPr = (number, extra = {}) => pr(number, [ownerGate], { body: waitingBody("Approve the new label"), files: [{ path: "a" }, { path: "b" }], ...extra });
+const waitingOf = (prs) => renderWaiting(waitingApprovals(prs, summarize({ prs, issues: [], merged: [] })));
+
+test("--waiting prints none when no PR waits on /approve", () => {
+  assert.equal(waitingOf([pr(2, [gate("PENDING", "waiting for review/test-hunter")])]), "none");
+  assert.equal(waitingOf([]), "none");
+});
+
+test("--waiting prints one block with the number, title, needs, contract changes and file count", () => {
+  const out = waitingOf([waitingPr(7, { body: waitingBody("Approve the new label", "additive: new field") })]);
+  assert.equal(out, "#7 pr 7\n  Needs the owner: Approve the new label\n  Contract changes: additive: new field\n  Files changed: 2");
+});
+
+test("--waiting lists several, skipping PRs that do not wait on /approve", () => {
+  const out = waitingOf([waitingPr(7), pr(8, [gate("PENDING", "waiting for review/test-hunter")]), waitingPr(9, { files: [] })]);
+  assert.deepEqual(out.split("\n\n").map((b) => b.split("\n")[0]), ["#7 pr 7", "#9 pr 9"]);
+  assert.match(out, /Files changed: 0/);
+});
+
+test("edge: --waiting on a PR body without a Needs the owner section says so", () => {
+  const out = waitingOf([waitingPr(7, { body: "Closes #1\n## What changed\nx" })]);
+  assert.match(out, /Needs the owner: \(none stated\)/);
+  assert.match(out, /Contract changes: \(none stated\)/);
+});
+
+test("edge: --waiting skips a PR the owner already approved and an issue waiting on the owner", () => {
+  const approved = waitingPr(7, { statusCheckRollup: [ownerGate, { __typename: "StatusContext", context: "review/owner", state: "SUCCESS" }] });
+  assert.equal(waitingOf([approved]), "none");
+  const s = summarize({ prs: [], issues: [{ number: 5, title: "t", labels: [{ name: "needs-owner" }], body: "" }], merged: [] });
+  assert.equal(renderWaiting(waitingApprovals([], s)), "none");
+});
+
+test("edge: --waiting includes a PR whose body asks for /approve while its gate is elsewhere", () => {
+  const p = pr(4, [gate("PENDING", "some other wait")], { body: body("Please /approve this"), files: [{ path: "a" }] });
+  assert.match(waitingOf([p]), /^#4 pr 4/);
+});
+
+test("edge: --waiting strips control characters from the title and body lines", () => {
+  const out = waitingOf([waitingPr(7, { title: "a\u001b[31mred", body: waitingBody("go\u001b[2Jnow") })]);
+  assert.equal(out.includes("\u001b"), false);
+  assert.match(out, /#7 a\[31mred/);
+});
+
+test("approveLine lists at most 10 numbers and is empty for none", () => {
+  const prs = Array.from({ length: 12 }, (_, i) => waitingPr(i + 1));
+  const numbers = waitingApprovals(prs, summarize({ prs, issues: [], merged: [] })).map((w) => w.number);
+  assert.equal(numbers.length, 12);
+  assert.equal(approveLine(numbers), "/approve 1 2 3 4 5 6 7 8 9 10");
+  assert.equal(approveLine([]), "");
 });

@@ -1,5 +1,5 @@
 // /status and the nightly digest: what waits on the owner, what is in flight, what is ready, what merged.
-// Usage: node scripts/lanes/status.mjs [--since 24h] [--json]
+// Usage: node scripts/lanes/status.mjs [--since 24h] [--json] [--waiting]
 import { execFileSync } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -274,6 +274,37 @@ export function render(summary, sinceLabel) {
   ].join("\n\n");
 }
 
+const NONE_STATED = "(none stated)";
+// PR text is untrusted: control characters (ANSI escapes) are dropped before it reaches the owner's terminal.
+const plain = (text) => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+const firstLine = (text) => plain((text ?? "").trim().split("\n")[0]).trim() || NONE_STATED;
+
+// The open PRs in `summary.waitingOnOwner` that wait on the owner's /approve: the gate's own owner wait, or a body
+// asking for /approve. Prompts, stopped lanes and issues also wait on the owner but are not approvals.
+export function waitingApprovals(prs, summary) {
+  const waiting = new Map(summary.waitingOnOwner.map((i) => [i.number, i]));
+  const out = [];
+  for (const pr of prs) {
+    const item = waiting.get(pr.number);
+    if (!item || item.session?.state === PROMPT_STATE && item.note.startsWith("waiting on a prompt")) continue;
+    const sections = parsePrBody(pr.body).sections;
+    const needs = (sections["needs the owner"] ?? "").trim();
+    if (item.stage !== "owner" && !/\/approve\b/i.test(needs)) continue;
+    out.push({ number: pr.number, title: plain(pr.title ?? ""), needs: firstLine(needs), contract: firstLine(sections["contract changes"]), files: (pr.files ?? []).length });
+  }
+  return out;
+}
+
+export function renderWaiting(waiting) {
+  if (!waiting.length) return "none";
+  return waiting.map((w) => `#${w.number} ${w.title}\n  Needs the owner: ${w.needs}\n  Contract changes: ${w.contract}\n  Files changed: ${w.files}`).join("\n\n");
+}
+
+// The `/approve N M K` line for the owner to paste: at most 10 numbers, empty when there are none.
+export function approveLine(numbers) {
+  return numbers.length ? `/approve ${numbers.slice(0, 10).join(" ")}` : "";
+}
+
 const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
 
 // `gh pr --json` has no merge queue field and drops status descriptions, so one GraphQL call fetches both.
@@ -304,6 +335,10 @@ async function main(argv = process.argv.slice(2)) {
   // A blocker missing from a truncated list would read as closed, so refuse rather than list a blocked issue as ready.
   if (data.issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
   const summary = summarize(data);
+  if (argv.includes("--waiting")) {
+    console.log(renderWaiting(waitingApprovals(data.prs, summary)));
+    return;
+  }
   // Only a hint: when cleanup.mjs is not installed or its inputs cannot be read, /status stays silent rather than failing.
   try {
     const { cleanableCount, loadCleanupInputs, planCleanup } = await import("./cleanup.mjs");
