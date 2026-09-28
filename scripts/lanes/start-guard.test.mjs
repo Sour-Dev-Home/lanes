@@ -682,6 +682,20 @@ test("#95 edge: a program named only at run time is denied with a reason naming 
   }
 });
 
+test("#95 edge: an unresolved script after a flag that takes a value is still denied (security review, round 2)", () => {
+  const runs = ["X=$(cat /tmp/hidden); node -r dotenv/config $X", "node -r dotenv/config $X", "node --require dotenv/config $X 12", "node --experimental-loader ./x.mjs $X", "node --max-old-space-size 4096 $X", "deno run -A $X", "bun run $X", "node --no-warnings -r a -r b $X"];
+  for (const c of runs) {
+    for (const g of [null, grant(), AUTO_GO_GRANT()]) assert.deepEqual(decidePreToolUse(bash(c), g, NOW), { decision: "deny", reason: UNRESOLVED_DENY_REASON }, c);
+    assert.ok(findStartInvocations(c).length > 0, `start.mjs bypass not caught: ${c}`);
+  }
+});
+
+test("#95 edge: an argument after a script node plainly runs is not a script candidate", () => {
+  for (const c of ["node scripts/lanes/blockers.mjs $N", "node scripts/lanes/post-review.mjs --file $F", "bun run scripts/x.mjs $ARG"]) {
+    assert.equal(decidePreToolUse(bash(c), null, NOW), null, c);
+  }
+});
+
 test("#95 edge: a queue.mjs mention elsewhere does not relabel an unrelated unresolved run as a queue run", () => {
   // Found by the test-hunter: the queue reason is scoped to the simple command, not the whole call's text.
   const c = 'git commit -m "note about queue.mjs" && node $X';

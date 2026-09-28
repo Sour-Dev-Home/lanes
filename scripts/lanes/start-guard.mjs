@@ -247,6 +247,31 @@ function walk(cmd, depth, visit, onOpaque) {
 }
 
 /**
+ * The indexes of the words node/bun/deno at `nodeAt` could run as its script: every word up to the first resolved one
+ * that must be the script. A flag's value may be the next word (`-r dotenv/config $X`, #95 security review), so a word
+ * right after a flag without `=` is skipped as possibly its value, as is bun/deno's `run`.
+ */
+function scriptCandidates(plain, nodeAt) {
+  const at = new Set();
+  if (nodeAt === -1) return at;
+  let afterFlag = false;
+  for (let i = nodeAt + 1; i < plain.length; i += 1) {
+    const w = plain[i];
+    if (w.startsWith("-")) {
+      afterFlag = !w.includes("=");
+      continue;
+    }
+    at.add(i);
+    if (UNRESOLVED_RE.test(w) || afterFlag || w === "run") {
+      afterFlag = false;
+      continue;
+    }
+    break;
+  }
+  return at;
+}
+
+/**
  * Every run of `start.mjs` in a Bash command: the script as the command itself, or as an argument of node, including
  * runs behind env, chains, subshells or `bash -c`. `standalone` is true only for the plain
  * `node scripts/lanes/start.mjs <N ...>` (with its `issues`) or `node scripts/lanes/start.mjs --auto [--go]` (with its
@@ -263,12 +288,12 @@ export function findStartInvocations(command) {
     (words) => {
       const plain = words.filter((w) => !ASSIGN_RE.test(w));
       const nodeAt = plain.findIndex((p) => NODE_RE.test(basename(p)));
-      const scriptAt = nodeAt === -1 ? -1 : plain.findIndex((p, i) => i > nodeAt && !p.startsWith("-"));
+      const scripts = scriptCandidates(plain, nodeAt);
       plain.forEach((w, i) => {
         // Unquoted `scripts\lanes\start.mjs` loses its backslashes in the lexer, as in bash: match the word's end.
         if (START_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i))) out.push({ issues: undefined, standalone: false });
-        // The command word, or the script node runs, that still holds `$` or a backtick could expand to start.mjs.
-        else if (UNRESOLVED_RE.test(w) && (i === 0 || i === scriptAt)) out.push({ issues: undefined, standalone: false });
+        // The command word, or a word node could run as its script, that still holds `$` or a backtick could expand to start.mjs.
+        else if (UNRESOLVED_RE.test(w) && (i === 0 || scripts.has(i))) out.push({ issues: undefined, standalone: false });
       });
     },
     (text) => {
@@ -308,11 +333,11 @@ function scanQueueInvocations(command) {
     (words) => {
       const plain = words.filter((w) => !ASSIGN_RE.test(w));
       const nodeAt = plain.findIndex((p) => NODE_RE.test(basename(p)));
-      const scriptAt = nodeAt === -1 ? -1 : plain.findIndex((p, i) => i > nodeAt && !p.startsWith("-"));
+      const scripts = scriptCandidates(plain, nodeAt);
       const names = plain.some((w) => /queue\.mjs/i.test(w));
       plain.forEach((w, i) => {
         if (QUEUE_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i))) found = true;
-        else if (UNRESOLVED_RE.test(w) && (i === 0 || i === scriptAt)) {
+        else if (UNRESOLVED_RE.test(w) && (i === 0 || scripts.has(i))) {
           if (names) found = true;
           else unresolved = true;
         }
