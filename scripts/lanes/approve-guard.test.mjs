@@ -490,6 +490,34 @@ test("edge: a malformed or unusual brace in the script word fails closed or read
   }
 });
 
+// #123: bash never expands an unclosed `{`, so a nested re-scan of a quoted jq filter or node -e script, whose text
+// after a `|` becomes a command word such as `{r:.a,`, must not fail closed on it.
+test("read-only commands whose quoted jq or node -e argument leaves a brace open are not owner commands (#123)", () => {
+  for (const cmd of [
+    "gh api x --jq '[.[]|{r:.a, m:.b}]'",
+    "gh issue list --jq '.[]|select(.body|test(\"x\"))|{n:.number, t:.title}'",
+    "claude agents --json | node -e \"process.stdin.on('end',()=>{for(const a of []){console.log(a.id,a.status)}})\"",
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+test("an unclosed brace in a command word is literal, not a post-review run (#123)", () => {
+  for (const cmd of ["{r:.a, m:.b}", "{n:.number x", "sh -c '{x, y'", "echo a | {r:.a,", "{", "x{", "{{", "{a,b", "{1..3", "{a/b", "{lanes/gate.mjs x"]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+  }
+  // A closed brace still expands, and a word that names post-review.mjs once the stray `{` is dropped still fails
+  // closed, since the guard cannot be sure how the rest was quoted.
+  denied("node scripts/lanes/post-{review,x}.mjs owner --pr 16");
+  denied("post-{review x");
+  denied("{post-review.mjs owner --pr 16");
+  denied("node scripts/{lanes/post-review.mjs owner --pr 16");
+  denied("node scripts/lanes/post-review{.mjs owner --pr 16");
+  denied("node scripts/lanes/post-{re{v,x}iew.mjs owner --pr 16");
+  denied("node scripts/lanes/p{ost-{review,x}.mjs owner --pr 16");
+});
+
 // test-hunter (this round): a bracket expression whose first character is a literal `]` (bash reads `]` right after
 // `[` as a set member, not a close) and a brace holding a `/` that spans into the directory part of the path, both
 // uncommon enough that neither #70's criteria nor the round above named them.
