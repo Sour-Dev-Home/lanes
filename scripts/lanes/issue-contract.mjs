@@ -4,7 +4,7 @@
 // GH_TOKEN.
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { authorCanWrite, parseIssueForm, parseSections } from "./lib.mjs";
+import { authorCanWrite, parseIssueForm, parseSections, parseValidation, ValidationParseError } from "./lib.mjs";
 
 export const MARKER = "<!-- lanes:issue-contract -->";
 
@@ -16,6 +16,16 @@ export const MARKER = "<!-- lanes:issue-contract -->";
 export function issuePlan(body, labels, canWrite) {
   if (!/^### Goal\s*$/m.test(String(body ?? "").replace(/\r\n/g, "\n"))) return { isTask: false, add: [], remove: [], comment: "" };
   const r = parseIssueForm(body);
+  // ADR 0012: a `validate:` criterion that will not parse would only fail once a lane is running it.
+  r.fields.criteria.forEach((c, i) => {
+    try {
+      parseValidation(c);
+    } catch (e) {
+      if (!(e instanceof ValidationParseError)) throw e;
+      r.errors.push(`acceptance criterion ${i + 1}: ${e.message}`);
+      r.ok = false;
+    }
+  });
   const tierLabels = labels.filter((l) => l.startsWith("tier:"));
   const hadReady = labels.includes("ready");
   if (!r.ok) {

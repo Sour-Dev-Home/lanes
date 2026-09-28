@@ -13,7 +13,8 @@ A notification leaves the machine: write the reason as short plain words and iss
 path, command or CI output, secret, token or personal data (point to the PR or issue for detail instead).
 
 1. `gh issue view $ARGUMENTS --json title,body,labels,state`. Stop and report if it is not open, lacks the `ready`
-   label, or lacks exactly one `tier:*` label.
+   label, or lacks exactly one `tier:*` label. An issue labelled `spike` is findings, not code (ADR 0012): it skips
+   test-first (step 5), and its PR adds only a findings file or an ADR draft, no other code.
 2. Run `node scripts/lanes/blockers.mjs $ARGUMENTS`, and stop and report its line on any non-zero exit (1: a
    blocker is open; 2: the blockers cannot be checked, which also stops the lane). A refusal in
    step 1 or 2 notifies `lanes #$ARGUMENTS: cannot start: <reason>`.
@@ -37,6 +38,9 @@ path, command or CI output, secret, token or personal data (point to the PR or i
    equivalent) and watch it fail, then implement until it passes. The criteria are a minimum: after the
    per-criterion tests, add tests for the edge cases you found while implementing (empty, boundary, malformed and
    error inputs), and list each under "Tests added" as `edge: <case>`. Run the full suite once at the end.
+   A `validate:` criterion is not a test: loop on `node scripts/lanes/validate.mjs --issue $ARGUMENTS --criterion <index>`
+   (the 1-based criterion), making a fix and then a run, until it exits 0 or 2, and put the attempt table under that
+   criterion in "What changed". Exit 0 means met, and exit 2 reports the best value and stops.
 6. Commit your work first, so the reviewers listed match what the gate will see; then
    `node scripts/lanes/reviewers.mjs <tier> $ARGUMENTS` lists the reviewers this diff needs, counting the paths the
    issue's Interface contract names as the gate does (it refuses when there is no diff at all). Spawn each as a fresh subagent,
