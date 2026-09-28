@@ -303,10 +303,11 @@ const EVAL_RE = /^(eval|source|\.)$/;
 const SHELL_RE = /^(sh|bash|zsh|dash|ksh|ash|busybox)(\.exe)?$/i;
 // Shells with another syntax (#119): every argument after one may be its command text (powershell.exe runs its
 // arguments as a command by default, cmd takes /c or /k anywhere, and `-c`/`-Command` have prefixes and `=` forms), so
-// all of them count as run. Their own splicing (`$x`, `%X%`, `!X!`, `(…)`, `+`, the `^` and backtick escapes) cannot be
-// resolved here, so text of theirs holding any of it fails closed.
+// all of them count as run, joined into one command line as those shells do. cmd and fish text is rewritten into bash
+// terms and scanned like bash -c text (see asBashText); powershell's splicing (`$x`, `(…)`, `{…}`, `+` concatenation,
+// the backtick escape) has no bash reading, so powershell text holding any of it fails closed.
 const FOREIGN_SHELL_RE = /^(powershell|pwsh|cmd|fish)(\.exe)?$/i;
-const FOREIGN_SPLICE_RE = /[$`%!^()[\]{}+@*?]/;
+const POWERSHELL_SPLICE_RE = /[$`(){}+[\]]/;
 // powershell's -EncodedCommand (and its -e, -ec and prefix forms) takes base64 UTF-16LE: read it decoded.
 const isEncodedFlag = (w) => /^[-/]e[a-z]*$/i.test(w) && (w.slice(1).toLowerCase() === "ec" || "encodedcommand".startsWith(w.slice(1).toLowerCase()));
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
@@ -318,6 +319,18 @@ function foreignText(plain, i, shellName) {
     return Buffer.from(text, "base64").toString("utf16le");
   }
   return text;
+}
+
+/**
+ * cmd or fish text in bash terms, or null for powershell: cmd's `^` escape is dropped and its `%X%`/`!X!` (and any other
+ * `%` or `!`) become an unresolved `${X}`/`$`; fish's `(…)` command substitution becomes `$(…)`.
+ */
+function asBashText(text, shellName) {
+  if (/^cmd/i.test(shellName)) {
+    return text.replace(/\^(.?)/gs, "$1").replace(/%([A-Za-z_][A-Za-z0-9_]*)%|!([A-Za-z_][A-Za-z0-9_]*)!/g, (_, a, b) => `\${${a ?? b}}`).replace(/[%!]/g, "$");
+  }
+  if (/^fish/i.test(shellName)) return text.replace(/(^|[^$])\(/g, "$1$(");
+  return null;
 }
 // Commands that hand their arguments to a shell as text without a -c flag of bash's (#219): watch, ssh, su -c,
 // script -c, flock -c, parallel, tmux, screen. Every argument after one counts as run.
@@ -624,6 +637,13 @@ function scan(cmd, depth, out) {
         if (c !== -1) evalFrom = c + 1;
       }
     });
+    // What powershell, pwsh, cmd or fish runs: its arguments as one command line, scanned in bash terms (#119).
+    if (foreignFrom !== Infinity) {
+      const line = plain.slice(foreignFrom).map((_, j) => foreignText(plain, foreignFrom + j, foreignName)).join(" ");
+      const bashText = asBashText(line, foreignName);
+      if (bashText === null && POWERSHELL_SPLICE_RE.test(line)) out.push({ pr: undefined, standalone: false });
+      else scanScript(bashText ?? line, depth, out);
+    }
     // Every argument is shell text when the output feeds a shell, or goes to a file a later command may run (#219).
     const argsRun = feedsRunner(k) || (writesFile && laterRuns());
     // An assigned value may be run later by eval or sh -c "$CMD", and an ambiguous one is never substituted: scan
@@ -645,12 +665,8 @@ function scan(cmd, depth, out) {
       // A word run as shell text reads with its quoted characters alive again.
       const shell = i >= evalFrom || argsRun;
       const w = shell ? unmark(raw) : raw;
-      const foreign = i >= foreignFrom ? foreignText(plain, i, foreignName) : null;
       if (i > 0 && ((readsData && literalAt[k].has(i)) || (programArgs && !/post-review/i.test(unquoted(w))))) {
         // Data for a command that does not run it: a commit message, a PR body, an awk program.
-      } else if (foreign !== null && (FOREIGN_SPLICE_RE.test(foreign) || scanNested(foreign, depth, out, true))) {
-        // Text another shell runs: splicing of its own fails closed, and plain text is scanned as a command.
-        if (FOREIGN_SPLICE_RE.test(foreign)) out.push({ pr: undefined, standalone: false });
       } else if (scanNested(raw, depth, out, shell)) {
         // Scanned as a command of its own.
       } else if (POST_REVIEW_RE.test(w)) {

@@ -1006,3 +1006,23 @@ test("edge: literal backticks and $ in data arguments are allowed; live ones in 
   allowed("printf '%s\\n' '`a` $b'");
   denied('echo "`node scripts/lanes/post-review.mjs owner --pr 1` x"');
 });
+
+// Found by the test-hunter (#142 review): the first cut failed closed on any splice character anywhere in
+// powershell/pwsh/cmd/fish text. cmd and fish text is now read in bash terms and scanned like bash -c text, so only a
+// splice where it could build the script or reviewer word counts; powershell's wildcards are literal to a native
+// command, but its variables and concatenation have no bash reading and still fail closed.
+test("ordinary powershell/pwsh/cmd/fish commands unrelated to post-review get no decision, like bash -c (#142 review)", () => {
+  for (const cmd of [
+    'pwsh -c "Get-ChildItem *.txt"',
+    'cmd /c "for %i in (*.txt) do echo %i"',
+    "fish -c 'echo $argv'",
+    'cmd /c "echo %DATE%"',
+    'cmd /c "(cd x && dir)"',
+    "fish -c 'for f in *.mjs; echo (basename $f); end'",
+  ]) allowed(cmd);
+  // powershell concatenation can spell any name, so it fails closed on purpose.
+  denied("powershell -Command \"'a' + 'b'\"");
+  // The bash reading still catches a splice where it matters.
+  denied("fish -c 'node scripts/lanes/post-rev*.mjs owner --pr 16'");
+  denied('cmd /c "node scripts/lanes/%S% owner --pr 16"');
+});
