@@ -49,7 +49,7 @@
 5. **At night** a scheduled cloud session runs `/night`: up to 3 skip or quick tasks, merged only if CI finds them
    unattended-eligible. In the morning read the digest comment on the "Lanes digest" issue, and `/approve` the rest.
 6. **Weekly `/health`** files issues for stale work, a red main and flaky checks.
-7. **Clean up finished lanes** with `node scripts/lanes/cleanup.mjs` (`--dry-run` to see the plan first). It removes
+7. **Clean up merged lanes** with `node scripts/lanes/cleanup.mjs` (`--dry-run` to see the plan first). It removes
    three kinds: merged lanes, closed-issue lanes (no PR, nothing unpushed) and empty orphan folders under
    `.claude/worktrees`. For each `issue-<N>-…` lane whose PR merged at exactly its local branch tip and whose worktree
    has no uncommitted or untracked changes, it runs `claude rm <id>` for its background session, `git worktree remove` and `git branch -D`,
