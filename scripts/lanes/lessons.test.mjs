@@ -64,6 +64,17 @@ test("--paths prints at most MAX_CHARS characters, dropping the lowest-count pat
   assert.ok(out.split("\n").filter(Boolean).length < 11);
 });
 
+test("edge: --paths includes a line landing exactly at MAX_CHARS, excludes one a character over", () => {
+  const prefix = "(x1) general/top: ";
+  const lesson = "A".repeat(MAX_CHARS - prefix.length - 2) + ".";
+  const exact = [{ area: "general", pattern: "top", n: 1, file: "general-top-1.md", body: lesson }];
+  const out = lessonsFor([], exact, undefined);
+  assert.equal(out.length, MAX_CHARS);
+  assert.equal(out, `${prefix}${lesson}\n`);
+  const over = [{ area: "general", pattern: "top", n: 1, file: "general-top-1.md", body: `${lesson}!` }];
+  assert.equal(lessonsFor([], over, undefined), "");
+});
+
 test("edge: --paths with no paths prints general only", () => {
   const { out } = main(["--paths"], io([frag("gate", "race", 1), frag("general", "g", 2)]));
   assert.equal(out, "(x1) general/g: Lesson for g.\n");
