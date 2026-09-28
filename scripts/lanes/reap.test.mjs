@@ -165,6 +165,26 @@ test("edge: the target session is gone from the list: give up", () => {
   assert.match(r.reason, /s7 not found/);
 });
 
+// The repo itself may sit under a lane-shaped folder (cloned inside an old lane's folder); the worktree folder under
+// .claude/worktrees is what counts.
+test("edge: an ancestor folder shaped like a lane folder does not shadow the real worktree", () => {
+  const cwd = "D:\\src\\issue-99-oldclone\\repo\\.claude\\worktrees\\issue-7-x";
+  assert.equal(tick({ issueState: "CLOSED", sessions: [lane({ cwd })] }).action, "remove");
+});
+
+test("edge: a lane-shaped folder inside the worktree does not shadow it either", () => {
+  const cwd = "/repo/.claude/worktrees/issue-7-x/fixtures/issue-3-sample";
+  assert.equal(tick({ issueState: "CLOSED", sessions: [lane({ cwd })] }).action, "remove");
+});
+
+test("edge: a cwd directly in .claude/worktrees is not a lane worktree", () => {
+  assert.equal(tick({ sessions: [lane({ cwd: "/issue-7-x/.claude/worktrees" })] }).action, "give-up");
+});
+
+test("edge: a lane folder outside .claude/worktrees still counts", () => {
+  assert.equal(tick({ issueState: "CLOSED", sessions: [lane({ cwd: "/lanes/issue-7-x/src" })] }).action, "remove");
+});
+
 test("edge: a session with no cwd gives up", () => {
   assert.equal(tick({ sessions: [lane({ cwd: undefined })] }).action, "give-up");
 });

@@ -23,14 +23,15 @@ const LANE_FOLDER = /^issue-(\d+)(?:-.*)?$/;
 // stopped (#83), so it only counts when there is no status this script knows.
 const stillWorking = (s) => (s.status === "idle" ? false : s.status === "busy" ? true : s.state === "working");
 
-// The issue number of the first lane-folder segment in a session's cwd, or null.
-const cwdIssue = (cwd) =>
-  Number(
-    cwd
-      .split(/[\\/]+/)
-      .map((seg) => LANE_FOLDER.exec(seg)?.[1])
-      .find(Boolean),
-  ) || null;
+// The issue number of a session's lane folder, or null. The folder directly under the last `.claude/worktrees` in the
+// cwd is the lane's worktree, whatever lane-shaped folders sit above it (the repo's own parent folders) or below it
+// (the lane's own files); a cwd with no `.claude/worktrees` falls back to its first lane-shaped folder.
+function cwdIssue(cwd) {
+  const segs = cwd.split(/[\\/]+/);
+  const at = segs.findLastIndex((seg, i) => seg === "worktrees" && segs[i - 1] === ".claude");
+  const lane = (seg) => Number(LANE_FOLDER.exec(seg ?? "")?.[1]) || null;
+  return at >= 0 ? lane(segs[at + 1]) : (segs.map(lane).find(Boolean) ?? null);
+}
 
 const time = (v, name) => {
   const ms = v instanceof Date ? v.getTime() : v;
