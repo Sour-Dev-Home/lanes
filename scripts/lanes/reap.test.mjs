@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GIVE_UP_FAILURES, GIVE_UP_MS, POLL_MS, laneInputs, main, reapTick } from "./reap.mjs";
+import { FIRST_POLL_MS, GIVE_UP_FAILURES, GIVE_UP_MS, POLL_MS, STARTUP_GRACE_MS, laneInputs, main, reapTick } from "./reap.mjs";
 
 const HOUR = 60 * 60 * 1000;
 const T0 = Date.UTC(2026, 8, 28, 12);
@@ -122,6 +122,77 @@ test("give up when the target session's cwd is another issue's worktree", () => 
 
 test("give up when the target session's cwd is not a lane worktree at all", () => {
   assert.equal(tick({ sessions: [lane({ cwd: "C:\\repo" })] }).action, "give-up");
+});
+
+// #201: a lane starts at the repository root and only then enters its issue-N worktree, so a reaper started at launch
+// waits out a startup grace for it.
+const MIN = 60 * 1000;
+const atRoot = () => lane({ cwd: "C:\\repo" });
+
+test("wait when the session is not listed yet, 2 seconds after the reaper started", () => {
+  const r = tick({ sessions: [], now: T0 + 2000 });
+  assert.equal(r.action, "wait");
+  assert.match(r.reason, /s7/);
+});
+
+test("wait when the session is still at the repository root, 5 minutes in", () => {
+  const r = tick({ sessions: [atRoot()], now: T0 + 5 * MIN });
+  assert.equal(r.action, "wait");
+  assert.match(r.reason, /worktree/);
+});
+
+test("the session in its own worktree takes the normal path during the grace", () => {
+  assert.equal(tick({ now: T0 + 2000 }).action, "wait");
+  assert.equal(tick({ now: T0 + 2000, issueState: "CLOSED" }).action, "remove");
+  assert.equal(tick({ now: T0 + 2000, prs: [pr("OPEN")] }).reason, "PR #90 is open");
+});
+
+test("give up at once when the session is in another issue's worktree, grace or not", () => {
+  const other = lane({ cwd: "C:\\repo\\.claude\\worktrees\\issue-8-y" });
+  for (const now of [T0, T0 + 2000, T0 + 5 * MIN, T0 + 29 * MIN]) {
+    const r = tick({ sessions: [other], now });
+    assert.equal(r.action, "give-up");
+    assert.match(r.reason, /not an issue-7 worktree/);
+  }
+});
+
+test("give up when the session is still at the repository root after the grace", () => {
+  const r = tick({ sessions: [atRoot()], now: T0 + STARTUP_GRACE_MS });
+  assert.equal(r.action, "give-up");
+  assert.match(r.reason, /not an issue-7 worktree/);
+});
+
+test("give up when the session is still not listed after the grace", () => {
+  const r = tick({ sessions: [], now: T0 + STARTUP_GRACE_MS });
+  assert.equal(r.action, "give-up");
+  assert.match(r.reason, /s7 not found/);
+});
+
+test("the startup grace is 30 minutes and the first poll waits 60 seconds", () => {
+  assert.equal(STARTUP_GRACE_MS, 30 * MIN);
+  assert.equal(FIRST_POLL_MS, 60 * 1000);
+});
+
+test("edge: 1 ms before the grace ends still waits, for a missing session and for one at the root", () => {
+  assert.equal(tick({ sessions: [], now: T0 + STARTUP_GRACE_MS - 1 }).action, "wait");
+  assert.equal(tick({ sessions: [atRoot()], now: T0 + STARTUP_GRACE_MS - 1 }).action, "wait");
+});
+
+test("edge: a session with no cwd waits during the grace", () => {
+  assert.equal(tick({ sessions: [lane({ cwd: undefined })], now: T0 + MIN }).action, "wait");
+});
+
+test("edge: a lane that never showed up waits through the grace even when the issue looks done", () => {
+  assert.equal(tick({ sessions: [], now: T0 + MIN, issueState: "CLOSED", prs: [pr("MERGED")] }).action, "wait");
+});
+
+test("edge: failures and the 48-hour limit still outrank the grace", () => {
+  assert.equal(tick({ sessions: [], now: T0 + MIN, failures: 3 }).action, "give-up");
+});
+
+test("edge: an unread session list waits during and after the grace, as before", () => {
+  assert.equal(tick({ sessions: null, now: T0 + MIN }).action, "wait");
+  assert.equal(tick({ sessions: null, now: T0 + HOUR }).action, "wait");
 });
 
 test("the defaults are ADR 0010's", () => {
@@ -475,18 +546,18 @@ test("edge: the trap it registers releases the lock", () =>
 // Criteria 3 and 5: polls every 5 minutes; a lane merged after two polls is removed once.
 test("a lane merged after two polls is removed once, through cleanup's rules, log saved first", () =>
   withRoot(async (root) => {
-    const w = world(root, { prs: open, polls: [{}, { prs: merged, issue: "CLOSED" }] });
+    const w = world(root, { prs: open, polls: [{}, {}, { prs: merged, issue: "CLOSED" }] });
     assert.equal(await main(ARGS, w.deps), 0);
-    assert.deepEqual(w.calls.filter((c) => c.startsWith("sleep")), [`sleep ${POLL_MS}`, `sleep ${POLL_MS}`]);
+    assert.deepEqual(w.calls.filter((c) => c.startsWith("sleep")), [`sleep ${FIRST_POLL_MS}`, `sleep ${POLL_MS}`, `sleep ${POLL_MS}`]);
     assert.equal(w.calls.filter((c) => c.startsWith("gh issue view 7")).length, 3);
-    assert.deepEqual(w.cleanupLoads, [T0 + 2 * POLL_MS]);
+    assert.deepEqual(w.cleanupLoads, [T0 + FIRST_POLL_MS + 2 * POLL_MS]);
     // Only lane 7: lane 8 (merged too) and the empty orphan folder are left for cleanup.mjs itself.
     assert.deepEqual(w.order, ["log s7", "claude rm", "git worktree", "git branch"]);
     assert.ok(w.calls.includes("claude rm s7"));
     assert.ok(!w.calls.some((c) => /s8|issue-8/.test(c)));
     const log = logLines(root);
     assert.match(log[0], /^2026-09-28T12:00:00\.000Z started: issue #7, session s7$/);
-    assert.match(log.at(-1), /^2026-09-28T12:10:00\.000Z removed: /);
+    assert.match(log.at(-1), /^2026-09-28T12:11:00\.000Z removed: /);
     assert.equal(log.filter((l) => / removed: /.test(l)).length, 1);
   }));
 
@@ -494,9 +565,10 @@ test("a merged lane whose session is busy waits for the session before removing"
   withRoot(async (root) => {
     const w = world(root, { issue: "CLOSED", prs: merged });
     w.state.agents = [{ kind: "background", id: "s7", cwd: w.cwd, status: "busy", state: "working" }];
+    let sleeps = 0;
     w.deps.sleep = async (ms) => {
       w.calls.push(`sleep ${ms}`);
-      w.state.agents = [{ kind: "background", id: "s7", cwd: w.cwd, status: "idle", state: "idle" }];
+      if (++sleeps > 1) w.state.agents = [{ kind: "background", id: "s7", cwd: w.cwd, status: "idle", state: "idle" }];
     };
     assert.equal(await main(ARGS, w.deps), 0);
     assert.equal(w.cleanupLoads.length, 1);
@@ -528,7 +600,7 @@ test("three read failures in a row give up with a log line", () =>
 test("edge: a good poll between failures resets the count", () =>
   withRoot(async (root) => {
     const bad = new Error("down");
-    const w = world(root, { issue: bad, polls: [{ issue: bad }, { issue: "OPEN" }, { issue: bad }, { issue: bad }] });
+    const w = world(root, { issue: bad, polls: [{}, { issue: bad }, { issue: "OPEN" }, { issue: bad }, { issue: bad }] });
     assert.equal(await main(ARGS, w.deps), 1);
     assert.equal(logLines(root).filter((l) => / error: /.test(l)).length, 5);
   }));
@@ -550,17 +622,70 @@ test("edge: an issue state other than OPEN or CLOSED counts as a read failure", 
     assert.match(logLines(root).join("\n"), /error: gh issue view: unexpected state/);
   }));
 
-test("edge: a session that is gone gives up at once", () =>
+// #201: the first poll is FIRST_POLL_MS after start, and a lane that has not entered its worktree yet is waited for.
+test("the first poll happens no sooner than 60 seconds after start", () =>
+  withRoot(async (root) => {
+    const w = world(root, { issue: "CLOSED", prs: merged });
+    assert.equal(await main(ARGS, w.deps), 0);
+    assert.equal(w.calls[0], `sleep ${FIRST_POLL_MS}`);
+    assert.deepEqual(w.cleanupLoads, [T0 + FIRST_POLL_MS]);
+  }));
+
+test("a session that appears on the second poll, first at the root and then in its worktree, is later removed", () =>
+  withRoot(async (root) => {
+    const at = (cwd) => [{ kind: "background", id: "s7", cwd, status: "busy", state: "working" }];
+    const inWorktree = [{ kind: "background", id: "s7", cwd: join(root, ".claude", "worktrees", "issue-7-x"), status: "idle", state: "idle" }];
+    // Polls: not listed at 60 s, then in a folder of the repo that is no worktree, then in its worktree with an open
+    // PR, then merged. (A session at the root itself is dropped by sessionsFrom, so it reads as not listed.)
+    const w = world(root, { agents: [], prs: open, polls: [{}, { agents: at(root) }, { agents: at(join(root, "scripts")) }, { agents: inWorktree }, { prs: merged, issue: "CLOSED" }] });
+    assert.equal(await main(ARGS, w.deps), 0);
+    assert.deepEqual(w.cleanupLoads, [T0 + FIRST_POLL_MS + 4 * POLL_MS]);
+    const log = logLines(root);
+    assert.match(log.join("\n"), / waiting: session s7 is not listed yet/);
+    assert.match(log.join("\n"), / waiting: session s7 is not in an issue-7 worktree yet/);
+    assert.doesNotMatch(log.join("\n"), / gave up: /);
+    assert.match(log.at(-1), / removed: /);
+    assert.deepEqual(w.order, ["log s7", "claude rm", "git worktree", "git branch"]);
+  }));
+
+test("a session that never appears gives up at the first poll past the 30-minute grace", () =>
   withRoot(async (root) => {
     const w = world(root, { agents: [] });
     assert.equal(await main(ARGS, w.deps), 1);
-    assert.match(logLines(root).at(-1), / gave up: session s7 not found$/);
+    const log = logLines(root);
+    assert.match(log.at(-1), /^2026-09-28T12:31:00\.000Z gave up: session s7 not found$/);
+    assert.equal(log.filter((l) => / waiting: /.test(l)).length, 1);
+    assert.equal(w.cleanupLoads.length, 0);
+    assert.equal(existsSync(lockFile(root)), false);
   }));
 
-test("edge: a session outside this repo counts as gone", () =>
+test("a session that stays outside any worktree gives up after the grace", () =>
+  withRoot(async (root) => {
+    const w = world(root, { agents: [{ kind: "background", id: "s7", cwd: join(root, "scripts"), status: "busy", state: "working" }] });
+    assert.equal(await main(ARGS, w.deps), 1);
+    assert.match(logLines(root).at(-1), /^2026-09-28T12:31:00\.000Z gave up: session s7's cwd is not an issue-7 worktree$/);
+  }));
+
+test("edge: a session in another issue's worktree gives up at the first poll, grace or not", () =>
+  withRoot(async (root) => {
+    const w = world(root, { agents: [{ kind: "background", id: "s7", cwd: join(root, ".claude", "worktrees", "issue-8-y"), status: "idle" }] });
+    assert.equal(await main(ARGS, w.deps), 1);
+    assert.match(logLines(root).at(-1), /^2026-09-28T12:01:00\.000Z gave up: session s7's cwd is not an issue-7 worktree$/);
+    assert.deepEqual(w.calls.filter((c) => c.startsWith("sleep")), [`sleep ${FIRST_POLL_MS}`]);
+  }));
+
+test("edge: a session outside this repo counts as not listed, so gives up after the grace", () =>
   withRoot(async (root) => {
     const w = world(root, { agents: [{ kind: "background", id: "s7", cwd: "/elsewhere/.claude/worktrees/issue-7-x", status: "idle" }] });
     assert.equal(await main(ARGS, w.deps), 1);
+    assert.match(logLines(root).at(-1), /^2026-09-28T12:31:00\.000Z gave up: session s7 not found$/);
+  }));
+
+test("edge: a claude agents read failure during the grace still counts toward 3 failed polls", () =>
+  withRoot(async (root) => {
+    const w = world(root, { agents: new Error("claude down") });
+    assert.equal(await main(ARGS, w.deps), 1);
+    assert.match(logLines(root).at(-1), /^2026-09-28T12:11:00\.000Z gave up: 3 consecutive failed polls$/);
   }));
 
 test("edge: gives up after 48 hours of waiting", () =>
@@ -568,7 +693,7 @@ test("edge: gives up after 48 hours of waiting", () =>
     const w = world(root, { prs: open });
     assert.equal(await main(ARGS, w.deps), 1);
     assert.match(logLines(root).at(-1), / gave up: still not done after 48 hours$/);
-    assert.equal(w.calls.filter((c) => c.startsWith("sleep")).length, GIVE_UP_MS / POLL_MS);
+    assert.equal(w.calls.filter((c) => c.startsWith("sleep")).length, 1 + GIVE_UP_MS / POLL_MS);
   }));
 
 test("edge: a failed removal is logged as an error and retried on the next poll", () =>
