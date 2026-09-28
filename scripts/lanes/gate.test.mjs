@@ -338,6 +338,45 @@ test("main requires the advisor for an ADR the PR itself adds, though it is not 
   assert.equal(descriptionOf(posted[0]), WAIT_ADVISOR);
 });
 
+// #241 (from #250): the gate passes the linked issue's Interface contract to the reviewer rule.
+const withContract = (contract) => {
+  const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+  routes["repos/o/r/issues/7"] = { ...routes["repos/o/r/issues/7"], body: `### Goal\n\ng\n\n### Interface contract\n\n${contract}\n\n### Blocked by\n\nnone\n` };
+  return routes;
+};
+
+test("evaluatePr waits for the architecture-advisor when the issue's Interface contract names a changed path", () => {
+  const { api, posted } = fakeApi(withContract("`src/a.ts` exports `f(x)`"));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_ADVISOR);
+  assert.ok(posted[0].fields.includes("state=pending"));
+});
+
+test("evaluatePr needs no advisor when the Interface contract is none", () => {
+  const { api } = fakeApi(withContract("none"));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, "unattended-eligible (tier:full), reviews in");
+});
+
+test("edge: an Interface contract naming a path the PR does not change needs no advisor", () => {
+  const { api } = fakeApi(withContract("`src/b.ts` exports `g`"));
+  assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
+});
+
+test("edge: carry re-decides with the Interface contract too", () => {
+  const { api } = fakeApi(withContract("`src/a.ts`"));
+  const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, "b".repeat(40), config);
+  assert.deepEqual(d, { state: "failure", description: WAIT_ADVISOR });
+});
+
+test("edge: an issue body that is missing or not a string names no path (the blocker check still fails it closed)", () => {
+  for (const body of [null, undefined, 42]) {
+    const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+    routes["repos/o/r/issues/7"] = { ...routes["repos/o/r/issues/7"], body };
+    const d = evaluatePr(fakeApi(routes).api, "o/r", 5, config);
+    assert.notEqual(d.description, WAIT_ADVISOR, String(body));
+    assert.notEqual(d.state, "success", String(body));
+  }
+});
+
 // #25: reuse a test-hunter success from an earlier commit when the PR's own diff is unchanged
 const OLD = "e".repeat(40);
 const MID = "f".repeat(40);

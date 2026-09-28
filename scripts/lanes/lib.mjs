@@ -80,6 +80,11 @@ export function interfacePaths(text) {
   return [...out];
 }
 
+/** A task issue body's Interface contract text (#241), or `""` for a body that is missing or not a string. */
+export function interfaceContractOf(body) {
+  return typeof body === "string" ? parseIssueForm(body).fields.contract : "";
+}
+
 /**
  * Which kinds of files a diff touches. Pass both the new and the old name of a renamed file. `adr` lists the accepted
  * ADRs (from `adrs`, default none) that govern any changed file. `architecture` (#241) is a change to an ADR, to

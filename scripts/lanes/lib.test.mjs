@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, interfacePaths, loadAdrs, loadConfig, parseAdr, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, loadAdrs, loadConfig, parseAdr, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -512,6 +512,12 @@ test("edge: an Interface contract naming several paths needs the advisor when th
   assert.deepEqual(interfacePaths(text), ["src/a.ts", "src/b.ts"]);
   assert.equal(advisorFor(["src/b.ts"], text), true);
   assert.equal(advisorFor(["src/c.ts"], text), false);
+});
+
+test("interfaceContractOf reads a task issue's Interface contract, and '' for a missing or non-string body", () => {
+  assert.equal(interfaceContractOf("### Goal\n\ng\n\n### Interface contract\n\n`src/a.ts` exports `f`\n\n### Scope\n\nx\n"), "`src/a.ts` exports `f`");
+  assert.equal(interfaceContractOf("### Goal\n\ng\n"), "");
+  for (const body of [null, undefined, 42, {}]) assert.equal(interfaceContractOf(body), "", String(body));
 });
 
 test("edge: the tier skip still needs no reviewer, whatever the diff touches", () => {
