@@ -1131,3 +1131,173 @@ test("#113 edge (test-hunter): a $(...) redirection target naming queue.mjs or c
   assert.deepEqual(decide("printf x > $(node scripts/lanes/queue.mjs 12)"), { decision: "deny", reason: QUEUE_DENY_REASON });
   assert.deepEqual(decide('printf x > "$(claude --bg -p hi)"'), { decision: "deny", reason: BG_DENY_REASON });
 });
+
+// --- #240: text-only mentions of queue.mjs (#240), backticks piped into a shell (#246), bare backticks (#247) -------
+
+// A comment body as a lane writes it: prose with an apostrophe (an unterminated quote read as shell), markdown
+// backticks and the command itself, none of it run.
+const PROSE = "The queue script (queue.mjs) isn't run here: the owner runs `node scripts/lanes/queue.mjs` in their own terminal.";
+const deny = (reason) => ({ decision: "deny", reason });
+
+test("#240 criterion 1: gh --body-file <file> and git commit -F <file> get no decision, whatever the file holds", () => {
+  // The guard never reads the file, so text written first (with the Write tool) avoids the heredoc false positive.
+  for (const cmd of [
+    "gh issue comment 97 --body-file .lanes/comment.md",
+    'gh pr create --title "Queue CLI: owner-run queue.mjs" --body-file .lanes/pr.md',
+    "MSYS_NO_PATHCONV=1 gh issue create --title x --label lane-filed --body-file .lanes/issue.md",
+    "git commit -F .lanes/msg.txt",
+    "git -c core.safecrlf=false commit -q -F .lanes/msg.txt",
+    // edge: a file path that itself names a lane script is still only read as text.
+    "gh issue comment 1 --body-file scripts/lanes/queue.mjs",
+    "git commit -F scripts/lanes/start.mjs",
+  ]) {
+    assert.equal(findQueueInvocations(cmd), false, cmd);
+    assert.deepEqual(findStartInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+    assert.equal(decide(cmd), null, cmd);
+  }
+});
+
+test("#240 criterion 1: no heredoc body is skipped as literal: one that reads as a run keeps main's decision", () => {
+  // Main's decisions, unchanged: a call that only writes text (#89) still has no body read; any other still reads it.
+  assert.equal(decidePreToolUse(bash(`cat > .lanes/comment.md <<'EOF'\n${PROSE}\nEOF`), null, NOW), null);
+  for (const cmd of [
+    `cat <<'EOF' > .lanes/comment.md\n${PROSE}\nEOF\ngh issue comment 97 --body-file .lanes/comment.md`,
+    `gh issue comment 97 --body-file - <<'EOF'\n${PROSE}\nEOF`,
+    "gh issue comment 97 --body-file - <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF",
+    "git commit -F - <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF",
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(QUEUE_DENY_REASON), cmd);
+  }
+});
+
+test("#240 criterion 2: queue.mjs runs, plain, ./-relative, inside bash -c or sh -c, or in a pipeline, are still denied", () => {
+  for (const cmd of [
+    "node scripts/lanes/queue.mjs",
+    "node ./scripts/lanes/queue.mjs",
+    "bash -c 'node scripts/lanes/queue.mjs'",
+    'bash -c "node ./scripts/lanes/queue.mjs"',
+    "sh -c 'node scripts/lanes/queue.mjs'",
+    'sh -c "node ./scripts/lanes/queue.mjs 12"',
+    "echo 12 | node scripts/lanes/queue.mjs",
+    "node ./scripts/lanes/queue.mjs | tee .lanes/queue.log",
+    "git fetch origin | bash -c 'node scripts/lanes/queue.mjs'",
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(QUEUE_DENY_REASON), cmd);
+  }
+});
+
+test("#240 criterion 3: a grep for queue.mjs, and a gh comment whose --body mentions it, get no decision", () => {
+  for (const cmd of ["grep -n queue.mjs docs/USING.md", 'gh issue comment 97 --body "the owner runs queue.mjs in their terminal"', 'gh issue comment 97 --body "see queue.mjs: it polls the ready issues"']) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+test("#246 criterion 1: a quoted heredoc piped into sh runs its backticks", () => {
+  assert.deepEqual(decide("cat <<'EOF' | sh\necho `node scripts/lanes/start.mjs 12`\nEOF"), deny(DENY_REASON));
+  assert.deepEqual(decide("cat <<'EOF' | sh\necho `node scripts/lanes/queue.mjs`\nEOF"), deny(QUEUE_DENY_REASON));
+});
+
+test("#246 criterion 2: a single-quoted echo piped into bash runs its backticks", () => {
+  assert.deepEqual(decide("echo 'echo `node scripts/lanes/start.mjs 12`' | bash"), deny(DENY_REASON));
+});
+
+test("#246 criterion 3: a commit message naming start.mjs in backticks still gets no decision", () => {
+  for (const cmd of ["git commit -F - <<'EOF'\nFix `start.mjs` parsing\n\nThe guard read `start.mjs` in a message.\nEOF", "git commit -m 'Fix `start.mjs` parsing'"]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+    assert.equal(decide(cmd), null, cmd);
+  }
+});
+
+test("#247 criterion 1: a bare double-quoted backtick substitution of a lane script is denied with its reason", () => {
+  assert.deepEqual(decide('echo "`scripts/lanes/queue.mjs`"'), deny(QUEUE_DENY_REASON));
+  assert.deepEqual(decide('echo "`scripts/lanes/start.mjs`"'), deny(DENY_REASON));
+});
+
+test("#247 criterion 2: a bare backtick substitution as a redirection target, unquoted or double-quoted, is denied", () => {
+  assert.deepEqual(decide("echo x > `scripts/lanes/queue.mjs`"), deny(QUEUE_DENY_REASON));
+  assert.deepEqual(decide('echo x > "`scripts/lanes/queue.mjs`"'), deny(QUEUE_DENY_REASON));
+  assert.deepEqual(decide("echo x > `scripts/lanes/start.mjs`"), deny(DENY_REASON));
+  assert.deepEqual(decide('echo x > "`scripts/lanes/start.mjs`"'), deny(DENY_REASON));
+});
+
+test("#247 criterion 3: a backtick substitution with a node prefix or an argument is still denied as a word and as a target", () => {
+  for (const [cmd, reason] of [
+    ["echo `node scripts/lanes/queue.mjs`", QUEUE_DENY_REASON],
+    ['echo "`node scripts/lanes/queue.mjs`"', QUEUE_DENY_REASON],
+    ["echo `scripts/lanes/queue.mjs 12`", QUEUE_DENY_REASON],
+    ["echo x > `node scripts/lanes/queue.mjs`", QUEUE_DENY_REASON],
+    ['echo x > "`scripts/lanes/queue.mjs 12`"', QUEUE_DENY_REASON],
+    ["echo `node scripts/lanes/start.mjs 12`", DENY_REASON],
+    ["echo `scripts/lanes/start.mjs 12`", DENY_REASON],
+    ["echo x > `node scripts/lanes/start.mjs 12`", DENY_REASON],
+    ['echo x > "`scripts/lanes/start.mjs 12`"', DENY_REASON],
+  ]) {
+    assert.deepEqual(decide(cmd), deny(reason), cmd);
+  }
+});
+
+test("#240 edge: a --body-file or -F run chained with a lane-script run, or its body written and run, is still denied", () => {
+  for (const [cmd, reason] of [
+    ["gh issue comment 1 --body-file .lanes/c.md && node scripts/lanes/queue.mjs", QUEUE_DENY_REASON],
+    ["git commit -F .lanes/msg.txt; node scripts/lanes/start.mjs 12", DENY_REASON],
+    ['gh issue comment 1 --body-file "$(node scripts/lanes/queue.mjs)"', QUEUE_DENY_REASON],
+    [`cat > .lanes/c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 --body-file .lanes/c.md && bash .lanes/c.md`, QUEUE_DENY_REASON],
+    // Shapes the security review built against a heredoc-body skip (#240 PR #270), pinned: main denies each too.
+    ["gh issue comment 1 -b x # <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    ["gh issue comment 1 -b x ${x#<<'EOF'}\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    ["gh issue comment 1 --body-file - <<E\\OF\nx\nEOF\nnode scripts/lanes/queue.mjs\nE\\OF", QUEUE_DENY_REASON],
+    ["gh issue comment 1 --body-file g <<X'y'\nX\ncat > g <<'Z'\nXy\nnode scripts/lanes/queue.mjs\nZ", QUEUE_DENY_REASON],
+    // gh's output piped into a shell.
+    [`gh issue comment 1 --body-file - <<'EOF' | sh\necho \`node scripts/lanes/start.mjs 12\`\nEOF`, DENY_REASON],
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(reason), cmd);
+  }
+});
+
+test("#240 edge: an unquoted body sent by gh still runs its substitutions", () => {
+  assert.deepEqual(decidePreToolUse(bash("cat > c.md <<EOF\n$(node scripts/lanes/queue.mjs)\nEOF\ngh issue comment 1 --body-file c.md"), null, NOW), deny(QUEUE_DENY_REASON));
+  assert.deepEqual(decidePreToolUse(bash("gh issue comment 1 --body-file - <<EOF\n`node scripts/lanes/start.mjs 12`\nEOF"), null, NOW), deny(DENY_REASON));
+});
+
+test("#246 edge: a pipe into a shell anywhere down the pipeline, or behind a wrapper, runs the backticks", () => {
+  for (const [cmd, reason] of [
+    ["cat <<'EOF' | tee .lanes/x.log | bash\necho `node scripts/lanes/start.mjs 12`\nEOF", DENY_REASON],
+    ["cat <<'EOF' |& sh\necho `node scripts/lanes/queue.mjs`\nEOF", QUEUE_DENY_REASON],
+    ["cat <<'EOF' | env bash -s\necho `node scripts/lanes/queue.mjs`\nEOF", QUEUE_DENY_REASON],
+    ["printf '%s\\n' 'echo `node scripts/lanes/queue.mjs`' | sh", QUEUE_DENY_REASON],
+    ["echo 'echo `scripts/lanes/start.mjs`' | bash", DENY_REASON],
+    ["echo '`scripts/lanes/queue.mjs`' | sh", QUEUE_DENY_REASON],
+    ["echo 'x' 'node scripts/lanes/queue.mjs' | sh", QUEUE_DENY_REASON],
+  ]) {
+    assert.deepEqual(decide(cmd), deny(reason), cmd);
+  }
+});
+
+test("#246 edge: backticks in text piped into no shell, or after || (no pipe), stay text", () => {
+  for (const cmd of [
+    "echo 'Fix `start.mjs` parsing' | grep start",
+    "cat <<'EOF' | wc -l\nFix `start.mjs` parsing\nEOF",
+    "git commit -F - <<'EOF' || bash scripts/lanes/cleanup.sh\nFix `start.mjs` parsing\nEOF",
+    "cat <<'EOF'\nFix `start.mjs` parsing\nEOF",
+  ]) {
+    assert.equal(decide(cmd), null, cmd);
+  }
+});
+
+test("#246 edge (test-hunter): text piped into eval, source or . has its backticks read live", () => {
+  for (const sink of ["eval", "source /dev/stdin", ". /dev/stdin"]) {
+    assert.deepEqual(decide(`echo 'echo \`node scripts/lanes/start.mjs 12\`' | ${sink}`), deny(DENY_REASON), sink);
+    assert.deepEqual(decide(`echo 'echo \`node scripts/lanes/queue.mjs\`' | ${sink}`), deny(QUEUE_DENY_REASON), sink);
+  }
+});
+
+test("#246 edge (test-hunter): a heredoc in a later segment feeding a shell is read live; one whose pipe is earlier is not", () => {
+  const body = "echo `node scripts/lanes/start.mjs 12`";
+  assert.deepEqual(decide(`echo hi; cat <<'EOF' | sh\n${body}\nEOF`), deny(DENY_REASON));
+  assert.equal(decide(`cat a | sh; cat <<'EOF'\n${body}\nEOF`), null);
+});
+
+test("#240 edge (test-hunter): a $( substitution in a gh word keeps a literal heredoc body read", () => {
+  assert.notEqual(decide("gh issue comment 1 --body \"$(bash c.md)\" <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF"), null);
+});
