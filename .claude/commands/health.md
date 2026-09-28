@@ -14,5 +14,11 @@ Report, in at most 15 lines:
 5. `node scripts/lanes/delivery-metrics.mjs --days 7`: report lead time (median, p90, mean), merge-queue bounce rate, and change-failure rate; compare to the previous week.
 6. `node scripts/lanes/review-metrics.mjs --days 7`: report, per tier, tokens per real finding and the share of runs with no real finding, plus how many runs had no metrics and how many verdict comments were unreadable.
 7. `node scripts/lanes/cleanup.mjs`: report which merged lanes it removed, which it skipped and why, and any failed step.
+8. `node scripts/lanes/structure-report.mjs --days 7 --jscpd`: report the module map's violation, cycle and unmapped
+   counts, the top 3 lane hotspots, and the duplicate-code line (or `skipped`). Then, each weekly run, spawn the
+   architecture-advisor as a fresh subagent with the full report and ADR 0008. It files at most 3 refactor issues
+   for the worst structural problems it finds (none is a fine answer), each from the Task form's layout with
+   `gh issue create --label lane-filed --body-file <file>`, and each Scope naming the file paths to change. Report
+   the issues it filed.
 File one task issue per real problem (tier skip or quick). Do not fix anything in this session, with one exception:
 step 7's cleanup of merged lanes, which removes only lanes whose PR merged and whose worktree is clean.
