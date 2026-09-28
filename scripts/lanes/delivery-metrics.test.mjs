@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { SCHEMA_VERSION, buildReport, metricsSettings, normalizePr, parseArgs, parseGraphql, percentile, renderMarkdown, runsErrorMessage, safeReason, weekStart } from "./delivery-metrics.mjs";
+import { SCHEMA_VERSION, buildReport, fetchMergedPrs, metricsSettings, normalizePr, normalizeRichPr, parseArgs, parseGraphql, percentile, prQuery, renderMarkdown, runsErrorMessage, safeReason, weekStart } from "./delivery-metrics.mjs";
 
 const NOW = new Date("2026-09-27T12:00:00Z");
 
@@ -200,6 +200,118 @@ test("safeReason is case-insensitive for slugs and still folds free text", () =>
   assert.equal(safeReason("FAILED_CHECKS"), "failed_checks");
   assert.equal(safeReason("Alice broke it"), "other");
   assert.equal(safeReason(undefined), "other");
+});
+
+// A rich GraphQL node: everything the rich query asks for, plus the personal fields a careless copy could leak.
+const richNode = (overrides = {}) => ({
+  ...node(),
+  number: 7,
+  files: { nodes: [{ path: "scripts/lanes/a.mjs", additions: 3, deletions: 1 }, { path: "docs/b.md" }, { path: 42 }] },
+  commits: { nodes: [
+    { commit: { committedDate: "2026-09-25T10:00:00Z", message: "wip: private-message-marker", author: { user: { login: "octo-person" }, email: "person@example.invalid" } } },
+    { commit: { committedDate: "not-a-date", message: "private-message-marker" } },
+    { commit: { committedDate: "2026-09-25T12:00:00Z" } },
+  ] },
+  lastCommit: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: [
+    { __typename: "StatusContext", context: "lanes/gate", state: "PENDING", createdAt: "2026-09-26T01:00:00Z", creator: { login: "octo-person" }, description: "private-message-marker" },
+    { __typename: "StatusContext", context: "Alice's private-title-marker", state: "SUCCESS", createdAt: "2026-09-26T02:00:00Z" },
+    { __typename: "CheckRun", name: "private-title-marker", checkSuite: { workflowRun: { runAttempt: 2 } } },
+    { __typename: "CheckRun", name: "verify", checkSuite: { workflowRun: { runAttempt: 1 } } },
+    { __typename: "CheckRun", name: "no-suite", checkSuite: null },
+  ] } } } }] },
+  closingIssuesReferences: { nodes: [{
+    number: 295, title: "private-title-marker", author: { login: "octo-person" },
+    body: "### Goal\nprivate-body-marker\n### Acceptance criteria\n\n- [ ] one\n- [x] two\n- [ ] three\n",
+    userContentEdits: { nodes: [{ editedAt: "2026-09-24T00:00:00Z", editor: { login: "octo-person" }, diff: "private-body-marker" }, { editedAt: "bad" }] },
+  }] },
+  ...overrides,
+});
+
+test("normalizeRichPr keeps paths, dates, states and counts, and no login, title, message or body text", () => {
+  const rich = normalizeRichPr(richNode());
+  assert.equal(rich.number, 7);
+  assert.equal(rich.createdAt, "2026-09-26T00:00:00Z");
+  assert.equal(rich.linesChanged, 15);
+  assert.deepEqual(rich.files, ["scripts/lanes/a.mjs", "docs/b.md"]);
+  assert.deepEqual(rich.commitDates, ["2026-09-25T10:00:00Z", "2026-09-25T12:00:00Z"]);
+  assert.deepEqual(rich.statuses, [
+    { context: "lanes/gate", state: "pending", at: "2026-09-26T01:00:00Z" },
+    { context: "other", state: "success", at: "2026-09-26T02:00:00Z" },
+  ]);
+  assert.deepEqual(rich.checkRunAttempts, [2, 1]);
+  assert.deepEqual(rich.closingIssue, { number: 295, criteria: 3, criteriaDone: 1, bodyChars: 86, editedAt: ["2026-09-24T00:00:00Z"] });
+  const text = JSON.stringify(rich);
+  for (const marker of ["octo-person", "person@example.invalid", "Real Name", "private-title-marker", "private-message-marker", "private-body-marker", "private-branch-marker", "Alice"]) {
+    assert.ok(!text.includes(marker), `${marker} survived normalizeRichPr`);
+  }
+});
+
+test("normalizeRichPr on a bare node gives empty lists and a null closing issue; a non-merged node is skipped", () => {
+  const rich = normalizeRichPr({ ...node(), number: 1 });
+  assert.deepEqual([rich.files, rich.commitDates, rich.statuses, rich.checkRunAttempts, rich.closingIssue], [[], [], [], [], null]);
+  assert.equal(normalizeRichPr({ number: 2, createdAt: "2026-09-26T00:00:00Z" }), undefined);
+  assert.equal(normalizeRichPr(null), undefined);
+});
+
+test("normalizeRichPr ignores malformed attempts, missing edit lists and a closing issue with no body", () => {
+  const rich = normalizeRichPr(richNode({
+    lastCommit: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: [{ __typename: "CheckRun", checkSuite: { workflowRun: { runAttempt: "x" } } }, { __typename: "CheckRun", checkSuite: { workflowRun: { runAttempt: 0 } } }] } } } }] },
+    closingIssuesReferences: { nodes: [{ number: 9 }] },
+  }));
+  assert.deepEqual(rich.checkRunAttempts, []);
+  assert.deepEqual(rich.closingIssue, { number: 9, criteria: 0, criteriaDone: 0, bodyChars: 0, editedAt: [] });
+});
+
+test("prQuery: the plain query has no rich fields, the rich one adds them on the same paginated query", () => {
+  const plain = prQuery(false);
+  for (const field of ["files", "commits", "statusCheckRollup", "runAttempt", "closingIssuesReferences", "userContentEdits"]) {
+    assert.ok(!plain.includes(field), `plain query has ${field}`);
+    assert.ok(prQuery(true).includes(field), `rich query lacks ${field}`);
+  }
+  assert.ok(plain.includes("$cursor") && prQuery(true).includes("$cursor"));
+  assert.ok(!/\b(login|message|author|headRefName)\b/.test(prQuery(true)), "the rich query must not ask for personal fields");
+});
+
+// A fake `gh` that serves pages of nodes and records the queries it was sent.
+const fakeGh = (pages) => {
+  const calls = [];
+  const run = (args) => {
+    if (args[0] === "repo") return "o/r\n";
+    calls.push(args);
+    const index = calls.length - 1;
+    return JSON.stringify({ data: { repository: { pullRequests: { nodes: pages[index], pageInfo: { hasNextPage: index < pages.length - 1, endCursor: `c${index}` } } } } });
+  };
+  return { run, calls };
+};
+
+test("fetchMergedPrs pages until a whole page was last updated before the window, and counts a shifted PR once", () => {
+  const from = new Date("2026-09-20T00:00:00Z");
+  const fresh = (number) => ({ ...node(), number, updatedAt: "2026-09-25T00:00:00Z" });
+  const old = (number) => ({ ...node(), number, updatedAt: "2026-09-01T00:00:00Z" });
+  const { run, calls } = fakeGh([[fresh(1), fresh(2)], [fresh(2), old(3)], [old(4), old(5)], [fresh(6)]]);
+  const prs = fetchMergedPrs(from, { run });
+  assert.equal(prs.length, 5); // 1, 2 (once), 3, and the all-old third page's 4 and 5; page four is never requested
+  assert.equal(calls.length, 3);
+  assert.ok(calls[1].includes("cursor=c0"));
+});
+
+test("fetchMergedPrs without rich sends the plain query and returns normalizePr output; rich sends the rich query", () => {
+  const from = new Date("2026-09-20T00:00:00Z");
+  const page = [{ ...richNode(), updatedAt: "2026-09-25T00:00:00Z" }];
+  const plain = fakeGh([page]);
+  const [plainPr] = fetchMergedPrs(from, { run: plain.run });
+  assert.ok(plain.calls[0].includes(`query=${prQuery(false)}`));
+  assert.deepEqual(plainPr, normalizePr(page[0]));
+  const rich = fakeGh([page]);
+  const [richPr] = fetchMergedPrs(from, { rich: true, run: rich.run });
+  assert.ok(rich.calls[0].includes(`query=${prQuery(true)}`));
+  assert.deepEqual(richPr, normalizeRichPr(page[0]));
+});
+
+test("fetchMergedPrs stops on an empty page", () => {
+  const { run, calls } = fakeGh([[]]);
+  assert.deepEqual(fetchMergedPrs(new Date("2026-09-20T00:00:00Z"), { run }), []);
+  assert.equal(calls.length, 1);
 });
 
 test("parseGraphql never echoes raw API text in an error", () => {
