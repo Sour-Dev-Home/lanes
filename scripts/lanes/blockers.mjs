@@ -24,6 +24,34 @@ export function blockerReport(blockedBy, states) {
   return { ok: open.length === 0 && unreadable.length === 0, open, unreadable };
 }
 
+/** An issue body's distinct "Blocked by" numbers, or `{ error }` when that field is missing or malformed. */
+export function parseBlockedBy(body) {
+  // Only the "Blocked by" field matters here; the issue contract check owns the rest of the form.
+  const form = parseIssueForm(body);
+  const errors = form.errors.filter((e) => /blocked by/.test(e));
+  return errors.length ? { error: errors.join("; ") } : { blockedBy: [...new Set(form.fields.blockedBy)] };
+}
+
+/**
+ * The one "Blocked by" reader, shared by this CLI and lanes/gate (#36): `blockerReport` for an issue body, calling
+ * `readState(b)` once per distinct blocker. A throw, or any state but "open" or "closed", makes that blocker
+ * unreadable. A missing or malformed field reads nothing and returns `{ ok: false, open: [], unreadable: [], error }`.
+ */
+export function readBlockerReport(body, readState) {
+  const { blockedBy, error } = parseBlockedBy(body);
+  if (error) return { ok: false, open: [], unreadable: [], error };
+  const states = new Map();
+  for (const b of blockedBy) {
+    try {
+      const state = readState(b);
+      states.set(b, state === "open" || state === "closed" ? state : null);
+    } catch {
+      states.set(b, null);
+    }
+  }
+  return blockerReport(blockedBy, states);
+}
+
 const reason = (err) => String(err?.stderr || err?.message || err).trim().split("\n")[0];
 
 /** `run` takes full `gh` arguments and returns stdout; tests pass a fake. Returns the exit code and the line to print. */
@@ -40,24 +68,9 @@ export function main(argv, run = gh) {
     return cannot(`issue #${n} not found or unreadable (${reason(err)})`);
   }
 
-  // Only the "Blocked by" field matters here; the issue contract check owns the rest of the form.
-  const form = parseIssueForm(body);
-  const fieldErrors = form.errors.filter((e) => /blocked by/.test(e));
-  if (fieldErrors.length) return cannot(fieldErrors.join("; "));
-  const blockedBy = [...new Set(form.fields.blockedBy)];
-
-  const states = new Map();
-  for (const b of blockedBy) {
-    try {
-      // The issues API also answers for a PR, so a PR used as a blocker counts by its own state.
-      const state = JSON.parse(run(["api", `repos/{owner}/{repo}/issues/${b}`])).state;
-      states.set(b, state === "open" || state === "closed" ? state : null);
-    } catch {
-      states.set(b, null);
-    }
-  }
-
-  const report = blockerReport(blockedBy, states);
+  // The issues API also answers for a PR, so a PR used as a blocker counts by its own state.
+  const report = readBlockerReport(body, (b) => JSON.parse(run(["api", `repos/{owner}/{repo}/issues/${b}`])).state);
+  if (report.error) return cannot(report.error);
   if (report.unreadable.length) return cannot(`${report.unreadable.map((b) => `#${b}`).join(", ")} not found or unreadable`);
   if (report.open.length) return { code: 1, message: `#${n}: blocked by ${report.open.map((b) => `#${b} (open)`).join(", ")}` };
   return { code: 0, message: `#${n}: no open blockers` };

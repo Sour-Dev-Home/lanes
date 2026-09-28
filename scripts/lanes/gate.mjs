@@ -10,7 +10,6 @@ import {
   latestByContext,
   loadAdrs,
   loadConfig,
-  parseIssueForm,
   parsePrBody,
   parseVerdictComment,
   REUSABLE_REVIEWER,
@@ -18,7 +17,7 @@ import {
   testHunterReusable,
   trustedStatuses,
 } from "./lib.mjs";
-import { blockerReport } from "./blockers.mjs";
+import { parseBlockedBy, readBlockerReport } from "./blockers.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -156,32 +155,12 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   return { pr, decision };
 }
 
-/** The linked task issue's "Blocked by" issue numbers, or `{ error }` when the field is missing or malformed. */
-function blockedByOf(issueBody) {
-  const form = parseIssueForm(issueBody);
-  // Only the "Blocked by" field matters here, as in blockers.mjs; the issue contract check owns the rest of the form.
-  const errors = form.errors.filter((e) => /blocked by/.test(e));
-  return errors.length ? { error: errors.join("; ") } : { blockedBy: [...new Set(form.fields.blockedBy)] };
-}
-
 /**
- * #36: `blockerReport` for a task issue's body, reading each blocker's state with one API call. A blocker that cannot
- * be read, or has any state but open or closed, is unreadable, so the gate fails closed on it.
+ * #36: `blockerReport` for a task issue's body through blockers.mjs's shared reader, one API call per blocker. The
+ * issues API also answers for a PR, so a PR used as a blocker counts by its own state.
  */
 export function readBlockers(api, repo, issueBody) {
-  const { blockedBy, error } = blockedByOf(issueBody);
-  if (error) return { ok: false, open: [], unreadable: [], error };
-  const states = new Map();
-  for (const b of blockedBy) {
-    try {
-      // The issues API also answers for a PR, so a PR used as a blocker counts by its own state.
-      const state = JSON.parse(api([`repos/${repo}/issues/${b}`])).state;
-      states.set(b, state === "open" || state === "closed" ? state : null);
-    } catch {
-      states.set(b, null);
-    }
-  }
-  return blockerReport(blockedBy, states);
+  return readBlockerReport(issueBody, (b) => JSON.parse(api([`repos/${repo}/issues/${b}`])).state);
 }
 
 /**
@@ -194,7 +173,7 @@ export function reevaluateBlocked(api, repo, closed, config, adrs = []) {
   const listsClosed = (n) => {
     if (!lists.has(n)) {
       try {
-        lists.set(n, blockedByOf(JSON.parse(api([`repos/${repo}/issues/${n}`])).body).blockedBy?.includes(closed) === true);
+        lists.set(n, parseBlockedBy(JSON.parse(api([`repos/${repo}/issues/${n}`])).body).blockedBy?.includes(closed) === true);
       } catch {
         lists.set(n, false);
       }
