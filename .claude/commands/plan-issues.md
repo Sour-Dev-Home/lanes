@@ -36,6 +36,10 @@ You are the planner. The idea: $ARGUMENTS
    an interface, the draft adds the contract issue first and lists it under "Blocked by", with the spanning issue's
    Interface contract naming a path that the contract issue's Scope contains. Do this before showing the draft, so `issue-contract.mjs` never has to refuse
    the issue after it is filed. With no `modules` key, skip this.
+   Scope must also hold the files the criteria force a lane to change, or the lane edits files outside it (as #82 did).
+   With a module map, for each new file a draft names, check that the module map in `lanes.config.json` claims it, and
+   add the `lanes.config.json` entry to Scope when it doesn't. Always grep the existing tests for strings the draft
+   changes (a permission, env name, pinned text), and add each test that pins one to Scope.
    For each new issue, propose blockers among the open issues and PRs from step 2 whose Scope, Interface contract or
    goal overlaps it (for a PR, its changed files against the new issue's Scope). Put them in a separate table, one
    line each, `Blocked by existing: #N, because <one-line reason>`, so the owner confirms or removes each. Below it,
