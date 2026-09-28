@@ -301,7 +301,7 @@ export const shOptions = (opts = {}) => ({ encoding: "utf8", stdio: ["ignore", "
 const sh = (cmd, args, opts) => execFileSync(cmd, args, shOptions(opts));
 
 // Lanes run in worktrees of the main checkout, so the root is the common git dir's parent, not --show-toplevel.
-const repoRoot = () => dirname(sh("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim());
+const repoRoot = (run = sh) => dirname(run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim());
 
 function porcelain(path, sh) {
   try {
@@ -323,8 +323,9 @@ function unpushedCount(branch, sh) {
 // The inputs to planCleanup, read from git, gh, `claude agents --json` and the .claude/worktrees folder. Throws when
 // any of them cannot be read: cleaning without knowing the sessions could remove a worktree from under one.
 // `run(cmd, args)` returns stdout or throws, and defaults to `sh`; every read goes through it.
-export function loadCleanupInputs(root = repoRoot(), run = sh) {
+export function loadCleanupInputs(rootArg, run = sh) {
   const sh = run;
+  const root = rootArg ?? repoRoot(run);
   const trees = parseWorktrees(sh("git", ["worktree", "list", "--porcelain"]));
   const onBranch = new Set(trees.map((t) => t.branch));
   const worktrees = trees.map((t) => {

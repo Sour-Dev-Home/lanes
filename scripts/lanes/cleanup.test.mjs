@@ -1389,6 +1389,33 @@ test("loadCleanupInputs reads git, gh and claude only through the injected run",
   assert.deepEqual([...new Set(calls)].sort(), ["claude", "gh", "git"]);
 });
 
+test("edge: loadCleanupInputs finds the repository root through the injected run when none is given", () => {
+  const seen = [];
+  const run = (cmd, args) => {
+    seen.push(args[0]);
+    if (args[0] === "rev-parse") return `${ROOT}/.git\n`;
+    if (args[0] === "worktree") return "";
+    if (cmd === "git") return "";
+    if (cmd === "gh") return "[]";
+    return "[]";
+  };
+  assert.equal(loadCleanupInputs(undefined, run).root, ROOT);
+  assert.ok(seen.includes("rev-parse"));
+});
+
+test("cleanupMerged with only a run injected reads every input through it", () => {
+  const seen = new Set();
+  const run = (cmd, args) => {
+    seen.add(cmd);
+    if (args[0] === "rev-parse") return `${ROOT}/.git\n`;
+    if (args[0] === "worktree") return `worktree ${ROOT}\nHEAD ${HEAD}\nbranch refs/heads/main\n`;
+    if (cmd === "git") return "";
+    return "[]";
+  };
+  assert.doesNotThrow(() => cleanupMerged({ dryRun: true, deps: { run } }));
+  assert.deepEqual([...seen].sort(), ["claude", "gh", "git"]);
+});
+
 test("edge: loadCleanupInputs lets an injected run's failure through", () => {
   assert.throws(() => loadCleanupInputs(ROOT, () => { throw new Error("gh down"); }), /gh down/);
 });
