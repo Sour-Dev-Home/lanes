@@ -1,5 +1,5 @@
 ---
-area: general
+area: queue
 pattern: injected-dependency-default-bypass
 severity: important
 reviewer: test-hunter
