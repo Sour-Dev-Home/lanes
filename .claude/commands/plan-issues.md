@@ -25,8 +25,16 @@ You are the planner. The idea: $ARGUMENTS
    contract (a file path, or none), Scope (in and out), Blocked by, Tier (skip, quick or full). If two issues meet at
    an interface, the first issue is the contract itself (a type plus schema plus contract test) and the others list
    it under Blocked by. Prefer fewer, sharper issues; leave anything speculative out and list it under "Not planned"
-   at the end. Follow `planning-and-task-breakdown`: each issue is one vertical slice of roughly 100 changed lines of
-   code or less; split anything larger.
+   at the end. Follow `planning-and-task-breakdown`: each issue is one vertical slice; aim for roughly 50 to 150
+   changed lines per issue and split anything larger. Every lane pays a fixed cost, so if two drafted issues would each
+   change fewer than about 30 lines and share a file, merge them into one issue, unless they need different tiers or
+   one is a contract the other depends on. Before drafting a new issue, check the open issues from step 2 for one that
+   changes the same files for a related goal, and propose extending it instead (as #145 was merged into #105).
+   When a module map exists (a `modules` key in `lanes.config.json`; ADR 0008), each drafted issue names its module
+   from the map, and its Interface contract and Scope "In:" paths must resolve to exactly one module. If an issue
+   spans more than one module, split it, or, where the modules meet at an interface, the draft adds the contract issue
+   first and lists it under "Blocked by". Do this before showing the draft, so `issue-contract.mjs` never has to refuse
+   the issue after it is filed. With no `modules` key, skip this.
    For each new issue, propose blockers among the open issues and PRs from step 2 whose Scope, Interface contract or
    goal overlaps it (for a PR, its changed files against the new issue's Scope). Put them in a separate table, one
    line each, `Blocked by existing: #N, because <one-line reason>`, so the owner confirms or removes each. Below it,
