@@ -106,6 +106,17 @@ test("a PR still in review, starting or queued is not waiting on the owner", () 
   assert.deepEqual(out.waiting, []);
 });
 
+// Extra: none of criterion 3's tests feed PRs out of number order, so `waiting`'s sort was never exercised.
+test("edge: waiting is sorted by PR number even when the snapshot lists the higher one first", () => {
+  const out = tick({
+    prs: [
+      pr(90, 6, ["src/x.mjs"], [{ name: "test", conclusion: "FAILURE" }]),
+      pr(80, 7, ["src/y.mjs"], [{ name: "test", conclusion: "FAILURE" }]),
+    ],
+  });
+  assert.deepEqual(out.waiting.map((w) => w.number), [80, 90]);
+});
+
 // Criterion 4
 test("idle only when nothing is in flight and launch is empty", () => {
   assert.equal(tick().idle, true);
