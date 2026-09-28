@@ -57,6 +57,8 @@ export const MANIFEST = [
   "scripts/lanes/pick.mjs",
   "scripts/lanes/cleanup.mjs",
   "scripts/lanes/review-metrics.mjs",
+  "scripts/lanes/modules.mjs",
+  "scripts/lanes/structure-report.mjs",
   "docs/USING.md",
 ];
 

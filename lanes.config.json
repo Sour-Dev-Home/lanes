@@ -10,6 +10,7 @@
     "entries": [
       { "id": "preflight", "paths": ["scripts/preflight."], "imports": [] },
       { "id": "modules", "paths": ["scripts/lanes/modules."], "imports": [] },
+      { "id": "structure", "paths": ["scripts/lanes/structure-report."], "imports": ["modules"] },
       { "id": "lib", "paths": ["scripts/lanes/lib."], "imports": [] },
       {
         "id": "gate",
