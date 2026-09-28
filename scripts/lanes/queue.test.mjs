@@ -539,3 +539,40 @@ test("CLI: conflicting issues launch one after the other, a newly ready issue jo
   assert.equal(run.ticks(), 6);
   assert.ok(run.out.some((l) => /#2: skipped: overlaps #1 on src\/a\.mjs/.test(l)));
 });
+
+// Extra case (test-hunter, #97): `claude agents --json` printing something other than a list is not covered by any
+// numbered criterion or by the notes' "edge:" list, but readSnapshot has its own guard against it and that guard
+// had no test.
+test("edge: claude agents --json printing something other than a list is a read failure, retried next tick", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  let bad = true;
+  const run = fakeRun(world, {
+    onSleep: (t) => {
+      if (t === 1) bad = false;
+      if (t === 2) world.issues = [];
+    },
+  });
+  run.deps.claude = (args, opts) => {
+    run.calls.push(["claude", ...args, opts?.cwd]);
+    if (args[0] === "agents") return bad ? JSON.stringify({ not: "a list" }) : JSON.stringify(world.sessions);
+    const n = Number(args.at(-1).match(/^\/lane (\d+)$/)[1]);
+    run.launched.push({ n, tick: run.ticks() });
+    world.sessions.push(session(n));
+    return `backgrounded · sess-${n}\n`;
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.ok(run.out.some((l) => /cannot read GitHub or the sessions:.*printed no list.*retrying next tick/.test(l)), run.out.join("\n"));
+  assert.deepEqual(run.launched.map((l) => l.n), [1], "the issue launches once the sessions can be read again");
+});
+
+// Extra case: the same truncation guard queue.mjs copies from start.mjs (a possibly-truncated issue list would hide
+// a blocker and let a claim be lost) had no test in this file either.
+test("edge: 1000+ open issues is a read failure naming the count, retried next tick", async () => {
+  const { main } = await import("./queue.mjs");
+  const many = Array.from({ length: 1000 }, (_, i) => issue(i + 1, [`src/${i}.mjs`]));
+  const world = { issues: many, prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  assert.ok(run.out.some((l) => /1000\+ open issues: too many to plan from, retrying next tick/.test(l)), run.out.join("\n"));
+});
