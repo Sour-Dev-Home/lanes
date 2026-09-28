@@ -38,8 +38,11 @@ cycle never fails the check but always appears in the report, so it stays visibl
 Fixing that cycle for real is a separate, ordinary refactor issue, not a precondition for turning the checker on.
 
 `/health` (`.claude/commands/health.md`) gains a structural report step: `modules.mjs`'s cycles and boundary
-violations, growth and hotspots from `git log --numstat` over the report's window (no new dependency), and
-duplicated code from `npx jscpd` run on demand in that step only — never added to `package.json`, never run in CI.
+violations, growth from `git log --numstat` over the report's window, lane hotspots from the merged lane PRs of
+that window (one `gh pr list` call, keeping the PRs whose head branch starts with `issue-`; not from
+`git log --numstat`), and duplicated code from `npx jscpd` run on demand in that step only, pinned to 5.3.3 and run
+with `npm_config_ignore_scripts=true` so none of its install scripts run. None of these adds a dependency:
+jscpd is never added to `package.json` and never runs in CI.
 The architecture-advisor reads this report weekly as part of `/health` and files refactor issues the normal way:
 Task issues carrying `lane-filed`, which wait for the owner before they can become `ready` (I4), same as every other
 lane-filed follow-up.
@@ -54,8 +57,9 @@ split it or add a blocking contract issue itself, before showing the draft to th
 
 ## Decisions for the owner
 
-- Whether `npx jscpd` (fetching an unpinned package from the registry on every `/health` run, on demand, never in
-  CI) is acceptable, or duplicate-code detection should wait until it can be vendored or pinned.
+- Whether `npx jscpd` (fetching a package pinned to 5.3.3 from the registry on every `/health` run, with install
+  scripts off, on demand, never in CI) is acceptable, or duplicate-code detection should wait until it can be
+  vendored.
 - Whether to draw the first `modules` entries for `scripts/lanes/` itself as part of the first implementing issue
   (dogfooding), and whether the `pick.mjs`/`status.mjs` cycle is allow-listed or fixed first; this ADR permits
   either but does not choose.
@@ -72,8 +76,10 @@ split it or add a blocking contract issue itself, before showing the draft to th
 - An issue whose Scope spans modules now needs either a single-module Scope or an explicit contract issue in
   "Blocked by" before it can reach `ready`; this is a new, declared dependency between lanes, not a hidden one, and
   it is enforced by the same owner-gated `issue-contract.mjs` that already enforces I4 and C1.
-- `git log --numstat` and `npx jscpd` add runtime cost only to `/health`, an owner-triggered, weekly path, never to
-  `verify` or any lane.
+- `git log --numstat`, the `gh pr list` call and `npx jscpd` add runtime cost only to `/health`, an owner-triggered,
+  weekly path, never to `verify` or any lane. The `gh pr list` call needs `gh` authenticated on the machine that
+  runs the report, and the report says the hotspots are unavailable when it fails; `npx jscpd` needs the registry
+  reachable, and runs pinned to 5.3.3 with `npm_config_ignore_scripts=true`.
 
 ## Governs
 
