@@ -1110,3 +1110,24 @@ test("#113 edge: an unterminated backtick that names a lane script fails closed"
   assert.equal(findQueueInvocations("echo `node scripts/lanes/queue.mjs"), true);
   assert.equal(decide("echo `date"), null);
 });
+
+test("#113 edge (test-hunter): 'eval', 'source' or '.' used as an ordinary word, not the command itself, does not make a later quoted word's backticks live", () => {
+  for (const cmd of ["echo eval 'note: `start.mjs` was renamed'", "grep . 'about `start.mjs`' file.txt", "cp source 'note about `start.mjs`'"]) {
+    assert.equal(decide(cmd), null, cmd);
+  }
+  // The real forms (the command word itself is eval, source or .) still run; a shell found anywhere earlier still
+  // counts for -c (so a wrapper like `env bash -c` or `timeout 5 bash -c` is still read), even where that costs a
+  // false positive on an unrelated command whose own -c flag happens to follow a "bash"-named argument.
+  assert.deepEqual(decide("bash -c 'echo `node scripts/lanes/start.mjs 12`'"), { decision: "deny", reason: DENY_REASON });
+  assert.deepEqual(decide("env bash -c 'echo `node scripts/lanes/start.mjs 12`'"), { decision: "deny", reason: DENY_REASON });
+  assert.deepEqual(decide("eval 'echo `node scripts/lanes/start.mjs 12`'"), { decision: "deny", reason: DENY_REASON });
+});
+
+// test-hunter extra: not covered by any #113/#191/#197 criterion or its listed edge cases, which only exercise the
+// backtick form of a redirection target (criteria 9-10) or the $(...) form for start.mjs (criterion 7): a $(...)
+// redirection target names queue.mjs or claude --bg too, denied with their own reason, the same as the backtick form.
+test("#113 edge (test-hunter): a $(...) redirection target naming queue.mjs or claude --bg is denied with its own reason", () => {
+  assert.deepEqual(decide('printf x > "$(node scripts/lanes/queue.mjs 12)"'), { decision: "deny", reason: QUEUE_DENY_REASON });
+  assert.deepEqual(decide("printf x > $(node scripts/lanes/queue.mjs 12)"), { decision: "deny", reason: QUEUE_DENY_REASON });
+  assert.deepEqual(decide('printf x > "$(claude --bg -p hi)"'), { decision: "deny", reason: BG_DENY_REASON });
+});

@@ -355,12 +355,19 @@ const isNestedScript = (w) => /[\s;&|()<>]/.test(w);
 
 const SHELL_RE = /^(bash|sh|zsh|dash|ksh|ash)(\.exe)?$/i;
 /**
- * True when word `i` is a script a shell runs: the value of a shell's `-c` (`-lc`, `-ec`, …), or an argument of eval
- * or source. Its literal backticks then run too, while a literal message elsewhere ('Fix `start.mjs`') stays text.
+ * True when word `i` is a script a shell runs: the value of a shell's `-c` (`-lc`, `-ec`, …), with a shell named
+ * anywhere earlier (so `env bash -c`, `timeout 5 bash -c` still count, the same as node is found behind a wrapper
+ * elsewhere in this file), or an argument of eval or source when the command word itself (not merely some earlier
+ * one) is eval, source or `.`: unlike a shell run through a wrapper, eval and source are shell builtins, so nothing
+ * can run them but the shell itself as the command word, and anchoring there keeps an unrelated word that happens to
+ * equal "." or "eval" (a grep pattern, a commit message word, a directory) from turning a later quoted word live.
+ * Its literal backticks then run too, while a literal message elsewhere ('Fix `start.mjs`') stays text.
  */
-const runsAsShell = (words, i) =>
-  (i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(words[i - 1]) && words.slice(0, i - 1).some((w) => SHELL_RE.test(basename(w)))) ||
-  words.slice(0, i).some((w) => w === "eval" || w === "source" || w === ".");
+const runsAsShell = (words, i) => {
+  if (i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(words[i - 1]) && words.slice(0, i - 1).some((w) => SHELL_RE.test(basename(w)))) return true;
+  const cmdAt = words.findIndex((w) => !ASSIGN_RE.test(w));
+  return cmdAt !== -1 && cmdAt < i && (words[cmdAt] === "eval" || words[cmdAt] === "source" || words[cmdAt] === ".");
+};
 const unliteralLive = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, "`");
 
 // Programs that write what they are given to a file, and never run it (#89); cd and mkdir may come alongside.
