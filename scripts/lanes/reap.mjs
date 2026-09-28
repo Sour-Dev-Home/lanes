@@ -2,6 +2,8 @@
 // One lane's reaper (ADR 0010): each poll it reads the issue, its `issue-N-*` PRs and the lane's session, and
 // `reapTick` says whether to wait, remove the lane (through cleanup.mjs's own logic), or give up and leave it for the
 // next /start or /health. One reaper per issue holds `.lanes/reap/<issue>.json` and logs to `.lanes/reap/<issue>.log`.
+// A relaunch's reaper takes that lock over from an old reaper whose session is gone (#248), and an old reaper that
+// loses the lock this way exits at its next poll rather than acting on a lane it no longer owns.
 // Usage: node scripts/lanes/reap.mjs --issue N --session ID
 // Exit: 0 removed (or another reaper already holds the lock), 1 gave up, 2 bad arguments.
 import { execFileSync } from "node:child_process";
@@ -154,9 +156,23 @@ function readLock(file) {
   }
 }
 
+// The ids `claude agents --json` currently lists, or null when that read failed or was malformed.
+function listedSessions(run) {
+  try {
+    const agents = JSON.parse(run("claude", ["agents", "--json"]));
+    if (!Array.isArray(agents)) throw new Error("not a list");
+    return new Set(agents.map((a) => a?.id).filter((id) => typeof id === "string"));
+  } catch {
+    return null;
+  }
+}
+
 // Writes the lock unless a live reaper holds it; `{ held }` names that reaper. A stale lock (malformed, its pid not
-// running, or older than any reaper lives) is replaced.
-function takeLock(file, lock, { isRunning, now }) {
+// running, or older than any reaper lives) is replaced. A live lock naming a different session is taken over
+// (`{ tookOver }` names the old session) once `listed()` (called only for this check, `claude agents --json`) no
+// longer lists that session (#248); while it still does, or that read failed, this reaper leaves the lock alone, as
+// before.
+function takeLock(file, lock, { isRunning, now, listed }) {
   mkdirSync(dirname(file), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -168,7 +184,13 @@ function takeLock(file, lock, { isRunning, now }) {
     const held = readLock(file);
     const started = Date.parse(held?.started);
     const live = Number.isInteger(held?.pid) && isRunning(held.pid) && Number.isFinite(started) && now - started < LOCK_MAX_AGE;
-    if (live) return { held };
+    if (live) {
+      if (held.session === lock.session) return { held };
+      const set = listed();
+      if (set == null || set.has(held.session)) return { held };
+      writeFileSync(file, `${JSON.stringify(lock)}\n`);
+      return { tookOver: held.session };
+    }
     rmSync(file, { force: true });
   }
   return { held: readLock(file) ?? {} };
@@ -229,8 +251,11 @@ function removeLane(issue, { root, cleanupDeps = {} }) {
 }
 
 /**
- * Runs one lane's reaper until it removes the lane or gives up; returns the exit code (0 removed or lock held by a
- * live reaper, 1 gave up, 2 bad arguments). Polls first FIRST_POLL_MS after it starts and then every POLL_MS; logs started, waiting (when the
+ * Runs one lane's reaper until it removes the lane or gives up; returns the exit code (0 removed, lock held by a
+ * live reaper, or lock taken over by another session; 1 gave up, 2 bad arguments). A live lock naming a different,
+ * no-longer-listed session is taken over at start (logged "took over"); on every later poll this reaper re-reads
+ * the lock and exits at once (logged "lock taken over") the moment it names a different session, before touching
+ * the lane. Polls first FIRST_POLL_MS after it starts and then every POLL_MS; logs started, waiting (when the
  * reason changes), removed, gave up and error lines to `<root>/.lanes/reap/<issue>.log`. A poll fails when a read
  * fails or the removal fails; GIVE_UP_FAILURES failed polls in a row give up.
  * @param {string[]} argv
@@ -254,7 +279,7 @@ export async function main(argv, deps) {
   const startedAt = now();
   const lock = { pid: deps.pid, session, started: new Date(startedAt).toISOString() };
 
-  const { held } = takeLock(lockPath, lock, { isRunning: deps.isRunning, now: startedAt });
+  const { held, tookOver } = takeLock(lockPath, lock, { isRunning: deps.isRunning, now: startedAt, listed: () => listedSessions(run) });
   if (held) {
     deps.err(`reap: issue #${issue} already has a live reaper (pid ${held.pid ?? "unknown"}); exiting`);
     return 0;
@@ -264,6 +289,7 @@ export async function main(argv, deps) {
   const log = (event, detail) => appendFileSync(logPath, `${new Date(now()).toISOString()} ${event}: ${oneLine(detail)}\n`);
 
   try {
+    if (tookOver) log("took over", `from session ${tookOver}`);
     log("started", `issue #${issue}, session ${session}`);
     let failures = 0;
     let lastWait = null;
@@ -273,6 +299,11 @@ export async function main(argv, deps) {
     };
     await sleep(FIRST_POLL_MS);
     for (;;) {
+      const current = readLock(lockPath);
+      if (current && current.session !== session) {
+        log("lock taken over", `by session ${current.session}`);
+        return 0;
+      }
       const state = readState({ issue, root, run });
       for (const e of state.errors) log("error", e);
       let failed = state.errors.length > 0;

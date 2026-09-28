@@ -558,6 +558,60 @@ test("edge: a live pid in a lock older than any reaper can run is taken as reuse
     assert.equal(w.cleanupLoads.length, 1);
   }));
 
+// #248: a relaunch's reaper takes over the lock from an old reaper whose session is gone.
+test("edge: a live lock naming a different session is taken over once that session is no longer listed", () =>
+  withRoot(async (root) => {
+    writeLock(root, { pid: 999, session: "s6", started: new Date(T0).toISOString() });
+    const w = world(root, { issue: "CLOSED", prs: merged });
+    w.deps.isRunning = (pid) => pid === 999 || pid === MY_PID;
+    assert.equal(await main(ARGS, w.deps), 0);
+    assert.equal(w.cleanupLoads.length, 1);
+    assert.match(logLines(root).join("\n"), /took over: from session s6/);
+    assert.equal(existsSync(lockFile(root)), false);
+  }));
+
+test("edge: a live lock naming a different session that is still listed is left alone", () =>
+  withRoot(async (root) => {
+    const held = JSON.stringify({ pid: 999, session: "s6", started: new Date(T0).toISOString() });
+    writeLock(root, held);
+    const w = world(root, { agents: [{ kind: "background", id: "s6", cwd: "C:\\elsewhere", status: "idle", state: "idle" }] });
+    w.deps.isRunning = (pid) => pid === 999;
+    assert.equal(await main(ARGS, w.deps), 0);
+    assert.deepEqual(w.calls, ["claude agents --json"]);
+    assert.equal(readFileSync(lockFile(root), "utf8"), held);
+    assert.match(w.errs.join("\n"), /pid 999/);
+  }));
+
+test("edge: a claude agents read failure while checking a different-session lock keeps today's behavior (no takeover)", () =>
+  withRoot(async (root) => {
+    const held = JSON.stringify({ pid: 999, session: "s6", started: new Date(T0).toISOString() });
+    writeLock(root, held);
+    const w = world(root, { agents: new Error("claude down") });
+    w.deps.isRunning = (pid) => pid === 999;
+    assert.equal(await main(ARGS, w.deps), 0);
+    assert.deepEqual(w.calls, ["claude agents --json"]);
+    assert.equal(readFileSync(lockFile(root), "utf8"), held);
+    assert.match(w.errs.join("\n"), /pid 999/);
+  }));
+
+test("edge: an old reaper exits at its next poll once another session takes its lock", () =>
+  withRoot(async (root) => {
+    const w = world(root);
+    const sleep = w.deps.sleep;
+    let interjected = false;
+    w.deps.sleep = async (ms) => {
+      await sleep(ms);
+      if (!interjected) {
+        interjected = true;
+        writeFileSync(lockFile(root), JSON.stringify({ pid: 9999, session: "s7", started: new Date(T0).toISOString() }));
+      }
+    };
+    assert.equal(await main(["--issue", "7", "--session", "s6"], w.deps), 0);
+    assert.match(logLines(root).join("\n"), /lock taken over: by session s7/);
+    assert.equal(w.cleanupLoads.length, 0);
+    assert.equal(readFileSync(lockFile(root), "utf8"), JSON.stringify({ pid: 9999, session: "s7", started: new Date(T0).toISOString() }));
+  }));
+
 test("edge: on exit it does not remove a lock another reaper wrote over its own", () =>
   withRoot(async (root) => {
     const other = JSON.stringify({ pid: 555, session: "s7", started: new Date(T0).toISOString() });
