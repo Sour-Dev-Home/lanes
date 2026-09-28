@@ -18,6 +18,9 @@ const SOURCE = /\.(m?js|jsx|m?ts|tsx)$/;
 const SKIP_DIRS = /(^|\/)(node_modules|\.git)\//;
 // After one of these, a `/` starts a regex literal rather than a division.
 const REGEX_AFTER_NAME = new Set(["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "instanceof", "yield", "await"]);
+// A `(` right after one of these opens a control-flow header, not a call or grouping; a `/` right after its matching
+// `)` starts a new statement, so a regex literal (not division) may follow (`if (x) /re/.test(s)`).
+const CONTROL_KEYWORD = new Set(["if", "while", "for", "switch", "catch", "with"]);
 
 /**
  * Splits JS source into name, string and punctuation tokens, dropping comments, regex literals and template text,
@@ -26,13 +29,14 @@ const REGEX_AFTER_NAME = new Set(["return", "typeof", "case", "do", "else", "in"
 function tokenize(src) {
   const tokens = [];
   const braces = []; // one entry per open `{`: true when it is a template's `${`
+  const parens = []; // one entry per open `(`: true when it follows a control-flow keyword
   let i = 0;
   const last = () => tokens[tokens.length - 1];
   const regexAllowed = () => {
     const t = last();
     if (!t) return true;
     if (t.type === "name") return REGEX_AFTER_NAME.has(t.value);
-    if (t.type === "punct") return !")]}".includes(t.value);
+    if (t.type === "punct") return t.value === ")" ? !!t.control : !")]}".includes(t.value);
     return false;
   };
   // Reads template text from i (just past "`" or a closing "}") to its end or to the next "${".
@@ -82,6 +86,8 @@ function tokenize(src) {
       tokens.push(closed ? { type: "string", value: text } : { type: "template" });
       continue;
     }
+    if (c === "(") { parens.push(last()?.type === "name" && CONTROL_KEYWORD.has(last().value)); tokens.push({ type: "punct", value: c }); i++; continue; }
+    if (c === ")") { tokens.push({ type: "punct", value: c, control: parens.pop() ?? false }); i++; continue; }
     if (c === "{") { braces.push(false); tokens.push({ type: "punct", value: c }); i++; continue; }
     if (c === "}") {
       i++;
@@ -135,6 +141,9 @@ function compileMap(map) {
     if (!isStringArray(e.paths) || e.paths.length === 0 || e.paths.some((p) => !p)) {
       throw new Error(`${where}.entries[${n}].paths must be a non-empty array of path prefixes`);
     }
+    // main() scans the directories these name, so each must stay inside the repo.
+    const outside = e.paths.find((p) => /^([\\/]|[a-z]:)/i.test(p) || p.includes("\\") || p.split("/").includes(".."));
+    if (outside !== undefined) throw new Error(`${where}.entries[${n}].paths: "${outside}" must be repo-relative, with / and no ..`);
     if (!isStringArray(e.imports)) throw new Error(`${where}.entries[${n}].imports must be an array of module ids`);
   }
   for (const e of map.entries) {
@@ -151,18 +160,51 @@ function compileMap(map) {
 
 const cycleKey = (files) => [...new Set(files)].sort().join("\n");
 
+// Enumerating every elementary cycle is exponential in the worst case, and source files are written by ordinary
+// lanes, so the walk is bounded: past either limit checkModules throws rather than hang verify.
+export const MAX_CYCLES = 1000;
+export const MAX_STEPS = 1_000_000;
+
+/** Each node's strongly connected component id (Tarjan): a cycle never leaves its component. */
+function components(graph) {
+  const index = new Map();
+  const low = new Map();
+  const comp = new Map();
+  const stack = [];
+  const visit = (v) => {
+    index.set(v, index.size);
+    low.set(v, index.get(v));
+    stack.push(v);
+    for (const w of graph.get(v)) {
+      if (!index.has(w)) { visit(w); low.set(v, Math.min(low.get(v), low.get(w))); }
+      else if (!comp.has(w)) low.set(v, Math.min(low.get(v), index.get(w)));
+    }
+    if (low.get(v) === index.get(v)) {
+      let w;
+      do { w = stack.pop(); comp.set(w, v); } while (w !== v);
+    }
+  };
+  for (const v of graph.keys()) if (!index.has(v)) visit(v);
+  return comp;
+}
+
 /** Every elementary cycle, each starting at its smallest file and following import order. */
 function findCycles(graph) {
   const nodes = [...graph.keys()].sort();
   const rank = new Map(nodes.map((n, k) => [n, k]));
+  const comp = components(graph);
   const cycles = [];
+  let steps = 0;
   for (const start of nodes) {
     const path = [start];
     const onPath = new Set(path);
     const walk = (node) => {
       for (const next of graph.get(node)) {
-        if (next === start) cycles.push([...path]);
-        else if (rank.get(next) > rank.get(start) && !onPath.has(next)) {
+        if (++steps > MAX_STEPS) throw new Error(`import graph too tangled to list its cycles (over ${MAX_STEPS} steps)`);
+        if (next === start) {
+          cycles.push([...path]);
+          if (cycles.length > MAX_CYCLES) throw new Error(`more than ${MAX_CYCLES} import cycles`);
+        } else if (rank.get(next) > rank.get(start) && comp.get(next) === comp.get(start) && !onPath.has(next)) {
           path.push(next);
           onPath.add(next);
           walk(next);

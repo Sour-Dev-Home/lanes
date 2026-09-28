@@ -1,7 +1,7 @@
 // scripts/lanes/modules.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkModules, importSpecifiers, main } from "./modules.mjs";
+import { checkModules, importSpecifiers, main, MAX_CYCLES, MAX_STEPS } from "./modules.mjs";
 
 // Fixture sources are built with `q` so this file's own text never holds a literal `from "./..."` import it doesn't make.
 const q = (s) => JSON.stringify(s);
@@ -107,6 +107,15 @@ test("edge: import text inside strings, templates, comments and regexes is not a
   assert.deepEqual(importSpecifiers(src), ["./real.mjs"]);
 });
 
+test("edge: a regex literal right after a control-flow `)` is not read as division", () => {
+  const src = [
+    `if (check) /from ${q("./fake.mjs")}/.test(s);`,
+    `while (more()) /export \\* from ${q("./loop.mjs")}/.test(s);`,
+    `import real from ${q("./real.mjs")};`,
+  ].join("\n");
+  assert.deepEqual(importSpecifiers(src), ["./real.mjs"]);
+});
+
 test("edge: a multi-line import and single-quoted specifiers are read", () => {
   const src = "import {\n  a,\n  b,\n} from './m.mjs';\nexport {\n  c } from '../n.mjs'\n";
   assert.deepEqual(importSpecifiers(src), ["./m.mjs", "../n.mjs"]);
@@ -161,6 +170,27 @@ test("edge: a malformed map is refused with the reason", () => {
     [{ entries: [], allowCycles: ["a.mjs"] }, /allowCycles must be an array of file arrays/],
   ];
   for (const [m, re] of bad) assert.throws(() => checkModules({ map: m, files: {} }), re);
+});
+
+test("edge: a path prefix outside the repo is refused", () => {
+  for (const p of ["/etc/", "../up/", "src/../../x/", "C:/Users/", "src\\core\\"]) {
+    const m = { entries: [{ id: "a", paths: [p], imports: [] }] };
+    assert.throws(() => checkModules({ map: m, files: {} }), /must be repo-relative/, p);
+  }
+});
+
+test("edge: a graph with too many cycles is refused rather than enumerated", () => {
+  // 12 files each importing every other: far more than MAX_CYCLES elementary cycles.
+  const names = Array.from({ length: 12 }, (_, k) => `src/core/f${String(k).padStart(2, "0")}.mjs`);
+  const files = Object.fromEntries(names.map((f) => [f, names.filter((g) => g !== f).map((g) => imp(`./${g.slice(9)}`)).join("")]));
+  assert.throws(() => checkModules({ map, files }), new RegExp(`more than ${MAX_CYCLES} import cycles|over ${MAX_STEPS} steps`));
+});
+
+test("edge: a large acyclic graph with exponentially many paths is cheap, not refused", () => {
+  // 60 files, each importing every later one: ~2^59 paths, no cycles. Only strongly connected files are walked.
+  const names = Array.from({ length: 60 }, (_, k) => `src/core/f${String(k).padStart(2, "0")}.mjs`);
+  const files = Object.fromEntries(names.map((f, k) => [f, names.slice(k + 1).map((g) => imp(`./${g.slice(9)}`)).join("")]));
+  assert.deepEqual(checkModules({ map, files }).cycles, []);
 });
 
 // ---- main -------------------------------------------------------------------------------------------------------
