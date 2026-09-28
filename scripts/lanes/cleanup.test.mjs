@@ -1013,6 +1013,20 @@ test("edge: the failure text is one line of at most 200 characters, from stderr,
   assert.equal(first(new Error("spawn claude ENOENT")), "spawn claude ENOENT");
 });
 
+test("edge: control characters and lone carriage returns are dropped from the failure line", () => {
+  const first = (err) => runCleanup(stopRmPlan(), { run: () => { throw err; }, stillThere: () => true })[0].error;
+  assert.equal(first(failure("\u001b[31mError: red\u001b[0m\u0008\u0007")), "[31mError: red[0m");
+  assert.equal(first(failure("\rfirst\rsecond")), "first");
+});
+
+test("edge: a waitStopped that throws does not fail the stop step, and rm still runs", () => {
+  const log = [];
+  const run = (cmd, args) => { log.push(args[0]); };
+  const [r] = runCleanup(stopRmPlan(), { run, stillThere: () => true, waitStopped: () => { throw new Error("boom"); } });
+  assert.deepEqual(log, ["stop", "rm"]);
+  assert.equal(r.status, "removed");
+});
+
 test("claude rm right after claude stop waits for the session to stop, then removes it", () => {
   const log = [];
   const run = (cmd, args) => { log.push(`${cmd} ${args.join(" ")}`); };
@@ -1123,4 +1137,13 @@ test("cleanupMerged waits for the stop and retries rm through its default deps",
   const lines = cleanupMerged({ deps });
   assert.match(lines[0], /^removed /);
   assert.deepEqual(log.filter((l) => /stop|agents|rm|sleep/.test(l)), ["claude stop s7", AGENTS, "claude rm s7", "sleep 2000", "claude rm s7"]);
+});
+
+test("edge: a claimed-worktree refusal is handled by the claimant path, not the 2 second retry, even with a sleep dep", () => {
+  const { run, ran } = claimedRun("x9");
+  const sleeps = [];
+  const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded: () => true, sleep: (ms) => sleeps.push(ms) });
+  assert.deepEqual(sleeps, []);
+  assert.deepEqual(ran.slice(0, 2), ["claude rm x9", "claude rm s7"]);
+  assert.equal(r.status, "removed");
 });

@@ -211,7 +211,6 @@ export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, remov
       if (isSessionStep(step)) logFirst(step.args[1]);
       try {
         exec(step);
-        if (isStop(step) && waitStopped) waitStopped(step.args[1]);
       } catch (err) {
         const claimant = isRm(step) && sessionEnded ? CLAIMED.exec(errorOutput(err))?.[1] : undefined;
         if (!claimant && isRm(step) && sleep) {
@@ -242,6 +241,13 @@ export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, remov
         }
       }
       ran.push(formatStep(step));
+      if (isStop(step) && waitStopped) {
+        try {
+          waitStopped(step.args[1]);
+        } catch {
+          // A wait that breaks must not fail a stop that worked; the `claude rm` retry covers a session still exiting.
+        }
+      }
     }
     return { ...base, status: "removed", ran };
   });
@@ -253,7 +259,9 @@ const errorOutput = (err) => `${err.stderr ?? ""}\n${err.stdout ?? ""}\n${err.me
 const OPEN_FILES_HINT = "(a process still has files open in the worktree; close it and re-run)";
 
 const MAX_ERROR_CHARS = 200;
-const firstLine = (text) => String(text ?? "").split(/\r?\n/).map((l) => l.trim()).find(Boolean);
+// Other control characters (an ANSI escape, a backspace) are dropped: the line is echoed to the owner's terminal.
+const firstLine = (text) =>
+  String(text ?? "").split(/\r\n|\r|\n/).map((l) => l.replace(/[\x00-\x1f\x7f]/g, "").trim()).find(Boolean);
 
 // The command's own words on why it failed: its stderr, else its stdout (some claude commands print errors there),
 // else the error's message; one line of at most MAX_ERROR_CHARS characters.
