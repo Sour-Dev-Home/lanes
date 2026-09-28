@@ -189,6 +189,17 @@ test("edge: summarizeJscpd names up to 5 largest clones by file and line range, 
   assert.ok(!lines.some((l) => l.includes("k:")));
 });
 
+test("edge: summarizeJscpd skips a malformed duplicate entry (missing firstFile or secondFile) instead of throwing", () => {
+  const dup = (lines, a, b) => ({ lines, firstFile: { name: a, start: 1, end: lines }, secondFile: { name: b, start: 10, end: 9 + lines } });
+  const report = {
+    statistics: { total: { clones: 3, duplicatedLines: 40, percentage: 2, sources: 2 } },
+    duplicates: [{ lines: 99 }, dup(5, "a.mjs", "b.mjs")],
+  };
+  const lines = summarizeJscpd(report).split("\n");
+  assert.equal(lines.length, 2);
+  assert.equal(lines[1], "  5 lines: a.mjs:1-5 ~ b.mjs:10-14");
+});
+
 test("edge: summarizeJscpd on a report without statistics throws, so main reports skipped", () => {
   assert.throws(() => summarizeJscpd({}), /jscpd report/);
   const { message } = main(["--jscpd"], io({ jscpd: () => ({ nonsense: true }) }));
@@ -221,6 +232,8 @@ test("edge: a modules check that cannot run is printed and the report carries on
 test("edge: parseArgs defaults to 7 days, takes --days and --jscpd, and rejects anything else", () => {
   assert.deepEqual(parseArgs([]), { days: 7, jscpd: false });
   assert.deepEqual(parseArgs(["--days", "30", "--jscpd"]), { days: 30, jscpd: true });
+  assert.equal(parseArgs(["--days", "1"]).days, 1);
+  assert.equal(parseArgs(["--days", "365"]).days, 365);
   for (const bad of [["--days"], ["--days", "0"], ["--days", "366"], ["--days", "1.5"], ["--days", "0x10"], ["--days", "--jscpd"]]) {
     assert.throws(() => parseArgs(bad), /--days/);
   }
