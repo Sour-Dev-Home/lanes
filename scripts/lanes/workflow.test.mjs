@@ -140,6 +140,33 @@ test("each reviewer agent has Claude Code subagent frontmatter, runs on sonnet a
   }
 });
 
+// ADR 0004: a new way to reach the owner approval is a minor follow-up; a regression stays critical
+function acceptedRiskRule(name) {
+  const text = readFileSync(`.claude/agents/${name}.md`, "utf8").replace(/\r\n/g, "\n");
+  const match = text.match(/^Accepted risk \(ADR 0004\b[^)]*\):[\s\S]*?(?=\n\n|(?![\s\S]))/m);
+  assert.ok(match, `${name}: no "Accepted risk (ADR 0004 ...):" paragraph`);
+  return match[0].replace(/\s+/g, " ");
+}
+
+for (const name of ["security-reviewer", "test-hunter"]) {
+  test(`${name} states ADR 0004's accepted-risk rule: new bypasses minor with a lane-filed follow-up, regressions critical`, () => {
+    const rule = acceptedRiskRule(name);
+    assert.match(rule, /docs\/adr\/0004-approve-guard-accepted-risk\.md/);
+    assert.match(rule, /`post-review\.mjs owner`/);
+    assert.match(rule, /`review\/owner`/);
+    // within one sentence: a dot only counts as a sentence end when whitespace follows it (post-review.mjs has one)
+    const sentence = (a, b) => new RegExp(`${a}(?:[^.]|\\.\\S)*${b}`);
+    assert.match(rule, sentence("newly found way", "`post-review\\.mjs owner`(?:[^.]|\\.\\S)*`review/owner`(?:[^.]|\\.\\S)*\\bis `minor`"));
+    assert.match(rule, sentence("follow-up issue", "`lane-filed`"));
+    assert.match(rule, sentence("regression", "\\bis `critical`"));
+    assert.match(rule, sentence("previously caught", "now passes"));
+  });
+}
+
+test("the ADR 0004 rule is the same in both briefs", () => {
+  assert.equal(acceptedRiskRule("security-reviewer"), acceptedRiskRule("test-hunter"));
+});
+
 test("the reviewer agents are installed into other repos", () => {
   const installText = readFileSync("scripts/lanes/install.mjs", "utf8");
   for (const name of AGENTS) assert.match(installText, new RegExp(`\\.claude/agents/${name}\\.md`), name);
