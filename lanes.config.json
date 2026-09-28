@@ -24,7 +24,7 @@
       {
         "id": "queue",
         "paths": [
-          "scripts/lanes/pick.", "scripts/lanes/status.", "scripts/lanes/start.", "scripts/lanes/start-guard.",
+          "scripts/lanes/pick.", "scripts/lanes/status.", "scripts/lanes/paths.","scripts/lanes/start.", "scripts/lanes/start-guard.",
           "scripts/lanes/queue.", "scripts/lanes/cleanup.", "scripts/lanes/reap."
         ],
         "imports": ["lib", "gate"]
@@ -36,7 +36,7 @@
         "imports": ["lib", "preflight"]
       }
     ],
-    "allowCycles": [["scripts/lanes/pick.mjs", "scripts/lanes/status.mjs"]]
+    "allowCycles": []
   },
   "paths": {
     "skip": ["^docs/", "\\.md$", "\\.test\\.m?[jt]sx?$", "(^|/)__tests__/", "(^|/)test/"],
