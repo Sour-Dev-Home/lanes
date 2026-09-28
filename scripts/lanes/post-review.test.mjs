@@ -75,6 +75,40 @@ test("the security reviewer may leave criteria empty", () => {
   assert.equal(r.status.description, "0 fixed: 4 tests added, 1 bug fixed");
 });
 
+test("a description shows no criteria count when every criterion is not-applicable", () => {
+  const allNa = [
+    { index: 1, result: "not-applicable", evidence: "no auth in this change" },
+    { index: 2, result: "not-applicable", evidence: "no input handling" },
+  ];
+  const r = validateVerdict(verdict({ reviewer: "security-reviewer", criteria: allNa, findings: [] }), { criteriaCount: 2 });
+  assert.equal(r.ok, true);
+  assert.equal(r.status.description, "0 fixed: 4 tests added, 1 bug fixed");
+});
+
+test("a description shows the count for a mix of pass and fail", () => {
+  const mix = [
+    { index: 1, result: "pass", evidence: "ok" },
+    { index: 2, result: "fail", evidence: "misses the empty case" },
+    { index: 3, result: "not-applicable", evidence: "no UI" },
+  ];
+  const r = validateVerdict(verdict({ verdict: "failure", criteria: mix }), { criteriaCount: 3 });
+  assert.equal(r.status.description, "1/3 criteria pass, 1 fixed: 4 tests added, 1 bug fixed");
+});
+
+test("a description shows the count when only failing criteria were assessed", () => {
+  const allFail = [{ index: 1, result: "fail", evidence: "x" }, { index: 2, result: "not-applicable", evidence: "y" }];
+  const r = validateVerdict(verdict({ verdict: "failure", criteria: allFail }), { criteriaCount: 2 });
+  assert.equal(r.status.description, "0/2 criteria pass, 1 fixed: 4 tests added, 1 bug fixed");
+});
+
+test("edge: one pass among not-applicable criteria still shows the count, and a null criterion is refused", () => {
+  const some = [{ index: 1, result: "pass", evidence: "ok" }, { index: 2, result: "not-applicable", evidence: "no UI" }];
+  assert.equal(validateVerdict(verdict({ criteria: some }), { criteriaCount: 2 }).status.description, "1/2 criteria pass, 1 fixed: 4 tests added, 1 bug fixed");
+  const bad = validateVerdict(verdict({ reviewer: "security-reviewer", criteria: [null] }), { criteriaCount: 2 });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.status, null);
+});
+
 // M1 + T7: strict argument parsing, so a malformed command line cannot reach the owner form without a prompt
 test("--file takes a value and then no positional arguments", () => {
   assert.deepEqual(parseArgs(["--file", "v.json"]), { file: "v.json", pr: undefined, sha: undefined, positional: [] });
