@@ -217,8 +217,9 @@ function finishedIssues(deps, prs, sessions) {
 
 // Spawns lane n's reaper (ADR 0010): `node scripts/lanes/reap.mjs --issue n --session id` from the root, detached,
 // its output appended to `.lanes/reap/<n>.log`, and unref'd so it outlives this process. Returns null, or the line
-// saying why it did not start; it never throws, so a reaper failure never fails the launch.
-function startReaper(n, id, deps, root) {
+// saying why it did not start; it never throws, so a reaper failure never fails the launch. `deps` needs `spawn` and
+// `reaperLog`; /start and the owner-run queue both call this one function.
+export function startReaper(n, id, deps, root) {
   let log;
   try {
     log = deps.reaperLog(root, n);
@@ -247,7 +248,7 @@ function startReaper(n, id, deps, root) {
 }
 
 // `.lanes/reap/<n>.log` under root, created as needed and opened for appending, as { fd, close }.
-function reaperLog(root, n) {
+export function reaperLog(root, n) {
   const dir = join(root, ".lanes", "reap");
   mkdirSync(dir, { recursive: true });
   const fd = openSync(join(dir, `${n}.log`), "a");

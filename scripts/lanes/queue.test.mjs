@@ -1,6 +1,7 @@
 // scripts/lanes/queue.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { planTick } from "./queue.mjs";
 
 // A task issue body naming `inPaths` in its Scope and blocked by `blockedBy`.
@@ -313,7 +314,9 @@ const STAMP = /^\d\d:\d\d:\d\d /;
 
 // A fake GitHub and claude. `world.issues`, `world.prs` and `world.sessions` are read each tick; `onSleep(tickNo)`
 // changes them between ticks. A launch adds a background session in the issue's worktree.
-function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFails = () => false, ghFails = () => false } = {}) {
+function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFails = () => false, ghFails = () => false, spawnChild = null } = {}) {
+  const reapers = [];
+  const logs = [];
   const out = [];
   const calls = [];
   const launched = [];
@@ -344,6 +347,16 @@ function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFai
       calls.push(["cleanup"]);
       return [];
     },
+    spawn: (cmd, args, options) => {
+      const child = spawnChild ? spawnChild(cmd, args, options) : { pid: 4242, on() {}, unref() { this.unrefed = true; } };
+      reapers.push({ cmd, args, options, child });
+      return child;
+    },
+    reaperLog: (root, n) => {
+      const log = { root, n, fd: 100 + n, closed: false };
+      logs.push(log);
+      return { fd: log.fd, close: () => (log.closed = true) };
+    },
     now: () => clock,
     sleep: async (ms) => {
       assert.equal(ms, TICK_MS);
@@ -354,7 +367,7 @@ function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFai
     },
     print: (line) => out.push(line),
   };
-  return { deps, out, calls, launched, ticks: () => ticks };
+  return { deps, out, calls, launched, reapers, logs, ticks: () => ticks };
 }
 
 test("CLI: any argument prints a usage line and exits 2 before reading anything", async () => {
@@ -575,4 +588,61 @@ test("edge: 1000+ open issues is a read failure naming the count, retried next t
   const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
   assert.equal(await main([], run.deps), 0);
   assert.ok(run.out.some((l) => /1000\+ open issues: too many to plan from, retrying next tick/.test(l)), run.out.join("\n"));
+});
+
+// --- #251: queue-launched lanes get the reaper /start starts (ADR 0010). ---
+
+const reapScript = join("/repo", "scripts", "lanes", "reap.mjs");
+
+test("CLI: one detached, unref'd reaper per launched lane, logging to its own log", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/b.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(
+    run.reapers.map((r) => [r.cmd, r.args]),
+    [
+      [process.execPath, [reapScript, "--issue", "1", "--session", "sess-1"]],
+      [process.execPath, [reapScript, "--issue", "2", "--session", "sess-2"]],
+    ],
+  );
+  for (const [i, r] of run.reapers.entries()) {
+    assert.equal(r.options.detached, true);
+    assert.equal(r.options.cwd, "/repo");
+    assert.deepEqual(r.options.stdio, ["ignore", run.logs[i].fd, run.logs[i].fd]);
+    assert.equal(r.child.unrefed, true);
+  }
+  assert.deepEqual(run.logs.map((l) => [l.root, l.n, l.closed]), [["/repo", 1, true], ["/repo", 2, true]]);
+});
+
+test("CLI: a failed launch starts no reaper", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/b.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { launchFails: (n) => n === 1, onSleep: (t) => t === 1 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.reapers.map((r) => r.args[2]), ["2"]);
+  assert.deepEqual(run.logs.map((l) => l.n), [2]);
+});
+
+test("edge: a reaper that cannot start prints one line, and the queue still launches the rest and finishes", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const spawnChild of [() => { throw new Error("spawn EACCES"); }, () => ({ pid: undefined, on() {}, unref() {} })]) {
+    const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/b.mjs"])], prs: [], sessions: [] };
+    const run = fakeRun(world, { spawnChild, onSleep: (t) => t === 1 && (world.issues = []) });
+    assert.equal(await main([], run.deps), 0);
+    assert.deepEqual(run.launched.map((l) => l.n), [1, 2]);
+    assert.equal(run.out.filter((l) => /#1: reaper not started: /.test(l)).length, 1, run.out.join("\n"));
+    assert.equal(run.out.filter((l) => /#2: reaper not started: /.test(l)).length, 1);
+    assert.ok(run.out.some((l) => /#1 → sess-1/.test(l)));
+  }
+});
+
+test("edge: a reaper log that cannot be opened prints one line and the launch still stands", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  run.deps.reaperLog = () => { throw new Error("EACCES: permission denied"); };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.reapers, []);
+  assert.equal(run.out.filter((l) => /#1: reaper not started: EACCES/.test(l)).length, 1, run.out.join("\n"));
 });

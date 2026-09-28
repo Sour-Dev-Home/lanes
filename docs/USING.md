@@ -39,8 +39,9 @@
    time-stamped. A PR waiting on you (`/approve`, a failing check or review, a failing gate) is printed once each time
    its state changes, and the queue keeps working the rest. A failed launch is printed and that issue is not tried
    again until you restart the queue. A GitHub read that fails is retried next tick; three in a row exit 1. It exits
-   0 after three idle ticks in a row (nothing in flight, nothing to launch); Ctrl-C stops it at any time. Its lanes
-   get no reaper (ADR 0010), so run `cleanup.mjs` for lanes that merge after it exits.
+   0 after three idle ticks in a row (nothing in flight, nothing to launch); Ctrl-C stops it at any time. Each lane it
+   launches gets the same detached reaper `/start` starts (ADR 0010, logged to `.lanes/reap/<N>.log`), so a lane that
+   merges after the queue exits is still cleaned up; a reaper that fails to start prints one line and the queue goes on.
 3. **Watch with `/status`**: WAITING ON YOU, IN FLIGHT (each PR's stage), READY TO START, MERGED.
    A `Notification` hook (`scripts/lanes/notify-hook.mjs`) pops a notification when a lane stops at a permission
    prompt or needs input (with the `claude attach <id>` to reach it), or finishes with its PR waiting on you or failing.

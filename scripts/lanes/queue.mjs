@@ -4,7 +4,7 @@
 // GitHub and the sessions, cleans up merged lanes and launches, every 3 minutes until it is idle.
 // Usage: node scripts/lanes/queue.mjs, in the owner's own terminal. Exit 0: idle for three ticks in a row.
 // 1: three GitHub reads failed in a row. 2: an argument, a bad lanes.config.json, or run inside Claude (CLAUDECODE).
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,7 +12,7 @@ import { parseBlockedBy } from "./blockers.mjs";
 import { cleanupMerged } from "./cleanup.mjs";
 import { GATE_CONTEXT } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
-import { inFlightIssues, launchArgs, parseSessionId, START_DEFAULTS, startConfig } from "./start.mjs";
+import { inFlightIssues, launchArgs, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
 import { gateDescriptions, prStage } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
@@ -127,7 +127,8 @@ function readSnapshot(deps, root) {
  * wait prints once per change. Resolves to the exit code: 0 after three idle ticks in a row, 1 after three failed
  * reads in a row, 2 for an argument, a bad config, or a run inside Claude. `deps` holds fakes in tests: `env`,
  * `gh(args)` and `claude(args, { cwd })` return stdout, `root()` the main checkout, `config()` the parsed
- * lanes.config.json (undefined when missing), `cleanup()` cleanupMerged's lines, `now()` ms, `sleep(ms)` a promise,
+ * lanes.config.json (undefined when missing), `cleanup()` cleanupMerged's lines, `spawn` and `reaperLog(root, n)` for
+ * each launched lane's reaper (as in start.mjs), `now()` ms, `sleep(ms)` a promise,
  * `print(line)`.
  */
 export async function main(argv, deps = DEFAULT_DEPS) {
@@ -198,8 +199,12 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       } catch (err) {
         why = reason(err);
       }
-      if (id) say(`#${n} → ${id}`);
-      else {
+      if (id) {
+        say(`#${n} → ${id}`);
+        // ADR 0010: the reaper cleans the lane up after it merges, even once the queue has exited.
+        const reaperFailed = startReaper(n, id, deps, dir);
+        if (reaperFailed) say(reaperFailed);
+      } else {
         failedLaunches.add(n);
         say(`#${n}: launch failed: ${why}, not retried`);
       }
@@ -222,6 +227,8 @@ const DEFAULT_DEPS = {
   gh: run("gh"),
   claude: run("claude"),
   root: repoRoot,
+  spawn,
+  reaperLog,
   config: () => {
     let text;
     try {
