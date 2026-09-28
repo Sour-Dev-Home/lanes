@@ -524,6 +524,50 @@ test("plan-issues.md: open work and the ADR decision come before drafting, and t
   assert.match(md, /the ADR issue first/);
 });
 
+// #131 (ADR 0008): the module map decides which module each drafted issue lives in.
+const draftStep = () => {
+  const md = planIssues();
+  const at = md.search(/^\d+\. Draft /m);
+  assert.ok(at >= 0, "expected a numbered `Draft ...` step in plan-issues.md");
+  const rest = md.slice(at);
+  const next = rest.slice(1).search(/^\d+\. /m);
+  return next < 0 ? rest : rest.slice(0, next + 1);
+};
+
+test("plan-issues.md step 5 names each issue's module from the map, and adds a blocking contract issue for one spanning modules", () => {
+  const step = draftStep();
+  assert.match(step, /`modules` key in `lanes\.config\.json`/);
+  assert.match(step, /module map exists/);
+  assert.match(step, /names its module from the map/);
+  assert.match(step, /exactly one module/);
+  assert.match(step, /spans more than one module/);
+  assert.match(step, /adds the contract issue first and lists it under "Blocked by"/);
+  // ADR 0008: the spanning issue clears issue-contract.mjs only if its contract path is in the blocker's Scope.
+  assert.match(step, /a note in the draft, not a field of the Task form/);
+  assert.match(step, /Interface contract naming a path that the contract issue's Scope contains/);
+  // With no map the step must not invent modules.
+  assert.match(step, /no `modules` key[^.]*skip this/);
+});
+
+test("plan-issues.md step 5 sizes issues at roughly 50 to 150 changed lines and merges two tiny issues that share a file", () => {
+  const step = draftStep();
+  assert.match(step, /roughly 50 to 150 changed lines/);
+  assert.match(step, /fewer than about 30 lines/);
+  assert.match(step, /share a file/);
+  assert.match(step, /merge them into one issue/);
+  assert.match(step, /unless they need different tiers or one is a contract the other depends on/);
+  // The old "100 lines or less" cap contradicts the new range, so it must be gone.
+  assert.doesNotMatch(step, /roughly 100 changed lines/);
+});
+
+test("plan-issues.md step 5 checks open issues for the same files before drafting and proposes extending one", () => {
+  const step = draftStep();
+  assert.match(step, /[Bb]efore drafting a new issue, check the open issues from step 2/);
+  assert.match(step, /changes the same files for a related goal/);
+  assert.match(step, /propose extending it instead/);
+  assert.match(step, /#145 was merged into #105/);
+});
+
 test("plan-issues.md steps are numbered 1..N without gaps or repeats", () => {
   const steps = [...planIssues().matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
   assert.ok(steps.length > 0);
