@@ -278,8 +278,9 @@ function topLevelCommas(s) {
 
 /**
  * A regex source matching everything a glob and brace pattern can expand to, as bash reads it: a list `{a,b}` or a
- * sequence `{a..c}`/`{1..3}` expands, any other brace is literal text. null when a brace is left unclosed, which fails
- * closed.
+ * sequence `{a..c}`/`{1..3}` expands, any other brace is literal text. An unclosed `{` is literal to bash too (#123),
+ * but it is read as optional, so a word such as post-review{.mjs that names the script once the stray brace is dropped
+ * still fails closed.
  */
 function patternRe(s) {
   let re = "";
@@ -296,25 +297,21 @@ function patternRe(s) {
       }
     } else if (c === "{") {
       const end = closingBrace(s, i);
-      if (end === -1) return null;
+      if (end === -1) {
+        re += "\\{?";
+        continue;
+      }
       const inner = s.slice(i + 1, end);
       const parts = topLevelCommas(inner);
       let seq;
-      if (parts.length > 1) {
-        const alts = parts.map(patternRe);
-        if (alts.includes(null)) return null;
-        re += `(?:${alts.join("|")})`;
-      } else if (INT_SEQ_RE.test(inner)) re += "-?[0-9]+";
+      if (parts.length > 1) re += `(?:${parts.map(patternRe).join("|")})`;
+      else if (INT_SEQ_RE.test(inner)) re += "-?[0-9]+";
       else if ((seq = CHAR_SEQ_RE.exec(inner))) {
         const [lo, hi] = [seq[1].charCodeAt(0), seq[2].charCodeAt(0)].sort((a, b) => a - b);
         let chars = "";
         for (let code = lo; code <= hi; code += 1) chars += String.fromCharCode(code);
         re += `[${escapeRe(chars)}]`;
-      } else {
-        const lit = patternRe(inner);
-        if (lit === null) return null;
-        re += `\\{${lit}\\}`;
-      }
+      } else re += `\\{${patternRe(inner)}\\}`;
       i = end;
     } else re += escapeRe(c);
   }
@@ -323,13 +320,12 @@ function patternRe(s) {
 
 /**
  * Whether a word bash would glob- or brace-expand could expand to post-review.mjs: its last path component, as a
- * pattern, matches the name. A brace holding a `/` or a pattern that cannot be read counts as a match.
+ * pattern, matches the name. A brace holding a `/` counts as a match.
  */
 function mayExpandToPostReview(w) {
   if (!GLOB_RE.test(w)) return false;
-  if (/\{[^}]*\//.test(w)) return true;
+  if (/\{[^}]*\/[^}]*\}/.test(w)) return true;
   const re = patternRe(w.slice(w.lastIndexOf("/") + 1));
-  if (re === null) return true;
   const pattern = new RegExp(`^${re}$`, "i");
   return pattern.test("post-review.mjs") || pattern.test("post-review");
 }
