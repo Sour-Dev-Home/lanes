@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { main, splitCommand } from "./validate.mjs";
+import { main, splitCommand, resolveCommand } from "./validate.mjs";
 
 const line = (cmd, tail = "(\\d+) passed >= 3 (attempts: 3)") => `validate: ${cmd} — ${tail}`;
 const body = (...criteria) =>
@@ -135,6 +135,47 @@ test("the real runner executes an argument array without a shell", () => {
   const t = setup(line("node -e console.log(7)", "(\\d+) >= 7 (attempts: 1)"), []);
   delete t.deps.run;
   assert.equal(main(args, t.deps).code, 0);
+  t.cleanup();
+});
+
+const win = (files) => ({
+  platform: "win32",
+  env: { PATH: "C:\\bin;C:\\tools", PATHEXT: ".COM;.EXE;.BAT;.CMD", ComSpec: "C:\\Windows\\System32\\cmd.exe" },
+  exists: (p) => files.includes(p),
+});
+
+test("resolveCommand runs a .cmd shim through cmd.exe with each argument quoted, verbatim", () => {
+  const r = resolveCommand(["npm", "test", "a b"], win(["C:\\bin\\npm.CMD"]));
+  assert.equal(r.file, "C:\\Windows\\System32\\cmd.exe");
+  assert.deepEqual(r.args, ["/d", "/s", "/c", '""C:\\bin\\npm.CMD" "test" "a b""']);
+  assert.equal(r.verbatim, true);
+});
+
+test("resolveCommand leaves an .exe, a non-Windows platform and a missing command unchanged", () => {
+  assert.deepEqual(resolveCommand(["node", "x"], win(["C:\\bin\\node.EXE"])), { file: "node", args: ["x"], verbatim: false });
+  assert.deepEqual(resolveCommand(["npm", "test"], { ...win(["C:\\bin\\npm.CMD"]), platform: "linux" }), { file: "npm", args: ["test"], verbatim: false });
+  assert.deepEqual(resolveCommand(["nonexistent-cmd", "1"], win([])), { file: "nonexistent-cmd", args: ["1"], verbatim: false });
+});
+
+test("edge: resolveCommand refuses .cmd arguments with cmd.exe metacharacters, so issue text is never interpreted", () => {
+  for (const bad of ["a&calc", "%PATH%", 'a"b', "a|b", "a^b", "a!b", "a\nb", "a>b"]) {
+    assert.throws(() => resolveCommand(["npm", bad], win(["C:\\bin\\npm.CMD"])), /unsafe/);
+  }
+});
+
+test("the real runner runs npm (a .cmd shim on Windows) and measures its output", () => {
+  const t = setup(line("npm --version", "^(\\d+) >= 1 (attempts: 1)"), []);
+  delete t.deps.run;
+  assert.equal(main(args, t.deps).code, 0);
+  t.cleanup();
+});
+
+test("a command that does not exist is a failed attempt with a spawn reason, not a crash", () => {
+  const t = setup(line("lanes-no-such-command-xyz", "(\\d+) >= 7 (attempts: 1)"), []);
+  delete t.deps.run;
+  const r = main(args, t.deps);
+  assert.equal(r.code, 2);
+  assert.match(t.log()[0].reason, /command failed to run/);
   t.cleanup();
 });
 
