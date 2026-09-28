@@ -6,9 +6,11 @@
 //   node scripts/lanes/structure-report.mjs                    # last 7 days
 //   node scripts/lanes/structure-report.mjs --days 30 --jscpd  # also runs jscpd through npx
 //
-// Both rankings read `git log --first-parent --numstat` of HEAD over the window. Growth sums the lines each commit
-// added. A hotspot counts lane merges: a merge commit naming an `issue-<n>` branch, or, since lanes merges squash
-// only, a single-parent commit whose subject ends in the PR number GitHub appends, `(#N)`.
+// Growth reads `git log --first-parent --numstat` of HEAD over the window and sums the lines each commit added.
+// A hotspot counts lane PRs: merged PRs whose head branch starts with `issue-`, from one `gh pr list` call over the
+// window, each PR's changed files counted once. The owner's own PRs are not lane PRs and are not counted.
+// jscpd runs through `npx --yes` with npm install scripts turned off, so no install script of jscpd or of its
+// (unpinned) dependencies runs.
 import { execFileSync } from "node:child_process";
 import { readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -54,10 +56,9 @@ export function parseLog(text) {
   return commits;
 }
 
-/** A merge commit naming an `issue-<n>` branch, or a squash-merged PR commit (one parent, subject ending `(#N)`). */
-export function isLaneMerge(commit) {
-  if (commit.parents >= 2) return /(^|[\s/'"])issue-\d+/.test(commit.subject);
-  return commit.parents === 1 && /\(#\d+\)\s*$/.test(commit.subject);
+/** A merged PR from a lane: its head branch starts with `issue-`. */
+export function isLanePr(pr) {
+  return typeof pr?.headRefName === "string" && pr.headRefName.startsWith("issue-");
 }
 
 /** The top `n` of a path -> count map, most first, ties by path. Zero counts are left out. */
@@ -76,11 +77,15 @@ export function rankGrowth(commits, n = TOP) {
   return top(counts, n);
 }
 
-/** The files touched by the most lane merges (each merge counts a file once), as `[{ path, count }]`. */
-export function rankHotspots(commits, n = TOP) {
+/**
+ * The files touched by the most lane PRs (each PR counts a file once), as `[{ path, count }]`. `prs` is `gh pr list
+ * --json headRefName,files` output; anything but an array is no PRs.
+ */
+export function rankHotspots(prs, n = TOP) {
   const counts = new Map();
-  for (const c of commits.filter(isLaneMerge)) {
-    for (const path of new Set(c.files.map((f) => f.path))) counts.set(path, (counts.get(path) ?? 0) + 1);
+  for (const pr of (Array.isArray(prs) ? prs : []).filter(isLanePr)) {
+    const paths = (Array.isArray(pr.files) ? pr.files : []).map((f) => f?.path).filter((p) => typeof p === "string" && p);
+    for (const path of new Set(paths)) counts.set(path, (counts.get(path) ?? 0) + 1);
   }
   return top(counts, n);
 }
@@ -118,7 +123,12 @@ export function main(argv = process.argv.slice(2), io = realIo) {
   }
   const lines = [`structure report, last ${options.days} days`, io.modules().message];
   lines.push(...ranking("fastest-growing files (lines added)", rankGrowth(commits), (r) => `+${r.count} ${r.path}`));
-  lines.push(...ranking("lane hotspots (lane merges touching the file)", rankHotspots(commits), (r) => `${r.count} ${r.path}`));
+  try {
+    const title = `lane hotspots (lane PRs merged in the last ${options.days} days)`;
+    lines.push(...ranking(title, rankHotspots(io.mergedPrs(options.days)), (r) => `${r.count} ${r.path}`));
+  } catch (err) {
+    lines.push(`lane hotspots: unavailable (${firstLine(err)})`);
+  }
   if (!options.jscpd) lines.push("duplicates: not run (pass --jscpd)");
   else {
     try {
@@ -138,19 +148,42 @@ const JSCPD_ARGS = [
   "--ignore", "**/node_modules/**,**/vendor/**,**/.claude/worktrees/**", "--reporters", "json", "--output", JSCPD_OUT, ".",
 ];
 
+// The most merged PRs one report reads; a week of lane work is far below it.
+const PR_LIMIT = 500;
+
+/**
+ * Starts jscpd through npx with npm install scripts off. `run`, `platform` and `baseEnv` are parameters so a test can
+ * see the command and environment without spawning anything.
+ */
+export function spawnJscpd(run = execFileSync, platform = process.platform, baseEnv = process.env) {
+  // Drop any inherited spelling of the setting (npm reads env keys case-insensitively), then set it.
+  const env = Object.fromEntries(Object.entries(baseEnv).filter(([k]) => k.toLowerCase() !== "npm_config_ignore_scripts"));
+  env.npm_config_ignore_scripts = "true";
+  const opts = { stdio: ["ignore", "ignore", "pipe"], timeout: 300_000, env };
+  // npx is a .cmd shim on Windows, which execFile cannot start without a shell. Every argument is a constant
+  // above, quoted here, so nothing from outside reaches that shell.
+  if (platform === "win32") run(`npx ${JSCPD_ARGS.map((a) => `"${a}"`).join(" ")}`, [], { ...opts, shell: true });
+  else run("npx", JSCPD_ARGS, opts);
+}
+
 const realIo = {
   gitLog: (days) => execFileSync("git", [
     "-c", "core.quotePath=false", "log", "--first-parent", "--diff-merges=first-parent", "--no-renames", "--numstat",
     `--since=${days}.days.ago`, `--format=${GIT_LOG_FORMAT}`, "HEAD",
   ], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }),
+  // The search narrows to the day; mergedAt then trims to the exact window.
+  mergedPrs: (days) => {
+    const since = new Date(Date.now() - days * 86_400_000);
+    const out = execFileSync("gh", [
+      "pr", "list", "--state", "merged", "--search", `merged:>=${since.toISOString().slice(0, 10)}`,
+      "--limit", String(PR_LIMIT), "--json", "headRefName,files,mergedAt",
+    ], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+    return JSON.parse(out).filter((pr) => Date.parse(pr.mergedAt) >= since.getTime());
+  },
   modules: () => modulesMain(),
   jscpd: () => {
     try {
-      // npx is a .cmd shim on Windows, which execFile cannot start without a shell. Every argument is a constant
-      // above, quoted here, so nothing from outside reaches that shell.
-      const opts = { stdio: ["ignore", "ignore", "pipe"], timeout: 300_000 };
-      if (process.platform === "win32") execFileSync(`npx ${JSCPD_ARGS.map((a) => `"${a}"`).join(" ")}`, { ...opts, shell: true });
-      else execFileSync("npx", JSCPD_ARGS, opts);
+      spawnJscpd();
       return JSON.parse(readFileSync(`${JSCPD_OUT}/jscpd-report.json`, "utf8"));
     } finally {
       rmSync(JSCPD_OUT, { recursive: true, force: true });

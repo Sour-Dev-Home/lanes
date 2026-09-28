@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
-  GIT_LOG_FORMAT, JSCPD_PACKAGE, isLaneMerge, main, parseArgs, parseLog, rankGrowth, rankHotspots, summarizeJscpd,
+  GIT_LOG_FORMAT, JSCPD_PACKAGE, isLanePr, main, parseArgs, parseLog, rankGrowth, rankHotspots, spawnJscpd, summarizeJscpd,
 } from "./structure-report.mjs";
 
 // One commit as `git log --numstat --format=%x1e%P%x1f%s` prints it: a record separator, the parents, a unit
@@ -36,13 +36,17 @@ test("parseLog counts a binary file's `-` as 0 lines", () => {
   assert.deepEqual(parseLog(LOG)[4].files[0], { path: "docs/logo.png", added: 0, deleted: 0 });
 });
 
-test("isLaneMerge: a merge commit naming an issue-* branch, or a squash-merged PR commit ending (#N)", () => {
-  const [squash, laneMerge, otherMerge, direct, squash2] = parseLog(LOG);
-  assert.equal(isLaneMerge(squash), true);
-  assert.equal(isLaneMerge(laneMerge), true);
-  assert.equal(isLaneMerge(otherMerge), false);
-  assert.equal(isLaneMerge(direct), false);
-  assert.equal(isLaneMerge(squash2), true);
+// A merged PR as `gh pr list --state merged --json headRefName,files,mergedAt` prints it.
+const pr = (headRefName, paths) => ({ headRefName, mergedAt: "2026-09-27T10:00:00Z", files: paths.map((path) => ({ path, additions: 1, deletions: 0 })) });
+const PRS = [
+  pr("issue-192-reap", ["scripts/lanes/reap.mjs", "scripts/lanes/cleanup.mjs"]),
+  pr("issue-188-cleanup", ["scripts/lanes/cleanup.mjs", "docs/logo.png"]),
+  pr("owner-typo-fix", ["scripts/lanes/cleanup.mjs", "README.md"]),
+];
+
+test("isLanePr: a head branch starting with issue- is a lane's", () => {
+  assert.equal(isLanePr(PRS[0]), true);
+  assert.equal(isLanePr(PRS[2]), false);
 });
 
 test("rankGrowth ranks files by lines added across every commit, most first", () => {
@@ -54,11 +58,10 @@ test("rankGrowth ranks files by lines added across every commit, most first", ()
   ]);
 });
 
-test("rankHotspots ranks files by how many lane merges touched them", () => {
-  assert.deepEqual(rankHotspots(parseLog(LOG)), [
-    { path: "scripts/lanes/cleanup.mjs", count: 3 },
+test("rankHotspots counts each lane PR's files once each and leaves a non-lane PR out", () => {
+  assert.deepEqual(rankHotspots(PRS), [
+    { path: "scripts/lanes/cleanup.mjs", count: 2 },
     { path: "docs/logo.png", count: 1 },
-    { path: "scripts/lanes/gate.mjs", count: 1 },
     { path: "scripts/lanes/reap.mjs", count: 1 },
   ]);
 });
@@ -68,13 +71,15 @@ test("rankGrowth and rankHotspots keep the top 10, ties broken by path", () => {
   const growth = rankGrowth(parseLog(many));
   assert.equal(growth.length, 10);
   assert.deepEqual(growth.map((r) => r.path), Array.from({ length: 10 }, (_, n) => `f${String(n).padStart(2, "0")}.mjs`));
-  assert.equal(rankHotspots(parseLog(many)).length, 10);
+  const paths = Array.from({ length: 12 }, (_, n) => `f${String(n).padStart(2, "0")}.mjs`);
+  assert.equal(rankHotspots([pr("issue-1-x", paths)]).length, 10);
 });
 
 // ---- criterion 1: the report ----
 
 const io = (over = {}) => ({
   gitLog: () => LOG,
+  mergedPrs: () => PRS,
   modules: () => ({ code: 1, message: "cycle: a.mjs -> b.mjs -> a.mjs\nmodules: 2 files, 0 violations, 1 cycles (0 allowed), 0 unmapped" }),
   jscpd: () => ({ statistics: { total: { clones: 2, duplicatedLines: 30, percentage: 1.234, sources: 9 } }, duplicates: [] }),
   ...over,
@@ -87,7 +92,60 @@ test("main prints the modules results, the growth and hotspot rankings, and exit
   assert.match(message, /^cycle: a\.mjs -> b\.mjs -> a\.mjs$/m);
   assert.match(message, /^modules: 2 files, 0 violations, 1 cycles/m);
   assert.match(message, /^fastest-growing files \(lines added\):\n {2}\+400 scripts\/lanes\/big\.mjs$/m);
-  assert.match(message, /^lane hotspots \(lane merges touching the file\):\n {2}3 scripts\/lanes\/cleanup\.mjs$/m);
+  assert.match(message, /^lane hotspots \(lane PRs merged in the last 7 days\):\n {2}2 scripts\/lanes\/cleanup\.mjs$/m);
+  assert.doesNotMatch(message, /README\.md/);
+});
+
+test("main names the hotspot source in one line, with the window", () => {
+  const { message } = main(["--days", "30"], io());
+  assert.match(message, /^lane hotspots \(lane PRs merged in the last 30 days\):$/m);
+});
+
+test("main passes --days to the merged-PR query", () => {
+  let seen;
+  main(["--days", "14"], io({ mergedPrs: (days) => { seen = days; return PRS; } }));
+  assert.equal(seen, 14);
+});
+
+test("a merged-PR query that fails prints `unavailable` under hotspots and the report still exits 0", () => {
+  const { code, message } = main([], io({ mergedPrs: () => { throw new Error("gh: not logged in\nrun gh auth login"); } }));
+  assert.equal(code, 0);
+  assert.match(message, /^lane hotspots: unavailable \(gh: not logged in\)$/m);
+  assert.match(message, /^fastest-growing files/m);
+});
+
+// ---- criterion 1: jscpd runs without install scripts ----
+
+const spawnSeen = (baseEnv, platform = "linux") => {
+  const calls = [];
+  spawnJscpd((...args) => calls.push(args), platform, baseEnv);
+  assert.equal(calls.length, 1);
+  return calls[0];
+};
+
+test("jscpd is spawned with npm_config_ignore_scripts=true in its environment", () => {
+  const [, , opts] = spawnSeen({ PATH: "/bin" });
+  assert.equal(opts.env.npm_config_ignore_scripts, "true");
+  assert.equal(opts.env.PATH, "/bin");
+});
+
+test("edge: jscpd overrides an inherited npm_config_ignore_scripts=false, in any letter case", () => {
+  const [, , opts] = spawnSeen({ npm_config_ignore_scripts: "false", NPM_CONFIG_IGNORE_SCRIPTS: "false" });
+  assert.equal(opts.env.npm_config_ignore_scripts, "true");
+  assert.deepEqual(Object.keys(opts.env).filter((k) => /^npm_config_ignore_scripts$/i.test(k)), ["npm_config_ignore_scripts"]);
+});
+
+test("edge: the environment passed on Windows, where npx runs through a shell, also has scripts ignored", () => {
+  const [cmd, , opts] = spawnSeen({}, "win32");
+  assert.match(cmd, new RegExp(`^npx "--yes" "${JSCPD_PACKAGE}"`));
+  assert.equal(opts.shell, true);
+  assert.equal(opts.env.npm_config_ignore_scripts, "true");
+});
+
+test("edge: spawnJscpd does not change the environment it was given", () => {
+  const base = { npm_config_ignore_scripts: "false" };
+  spawnSeen(base);
+  assert.equal(base.npm_config_ignore_scripts, "false");
 });
 
 test("main passes --days to the git log", () => {
@@ -157,19 +215,30 @@ test("edge: parseLog keeps a tab inside a path, and CRLF line ends", () => {
   assert.deepEqual(c.files, [{ path: "dir/we\tird.mjs", added: 4, deleted: 0 }]);
 });
 
-test("edge: a root commit (no parents) is not a lane merge", () => {
-  assert.equal(isLaneMerge({ parents: 0, subject: "initial (#1)", files: [] }), false);
+test("edge: isLanePr needs the issue- prefix at the start, and tolerates a missing or non-string branch", () => {
+  assert.equal(isLanePr({ headRefName: "tissue-12-x" }), false);
+  assert.equal(isLanePr({ headRefName: "fix/issue-12" }), false);
+  assert.equal(isLanePr({ headRefName: "Issue-12" }), false);
+  assert.equal(isLanePr({}), false);
+  assert.equal(isLanePr({ headRefName: 5 }), false);
+  assert.equal(isLanePr(null), false);
 });
 
-test("edge: a subject that only mentions (#N) mid-line, or issue-N in a non-merge, is not a lane merge", () => {
-  assert.equal(isLaneMerge({ parents: 1, subject: "see (#5) for details", files: [] }), false);
-  assert.equal(isLaneMerge({ parents: 1, subject: "fix issue-12 notes", files: [] }), false);
-  assert.equal(isLaneMerge({ parents: 2, subject: "Merge branch 'tissue-12'", files: [] }), false);
+test("edge: a file listed twice in one lane PR counts once", () => {
+  assert.deepEqual(rankHotspots([pr("issue-1-x", ["a.mjs", "a.mjs"])]), [{ path: "a.mjs", count: 1 }]);
 });
 
-test("edge: a file touched twice by one lane merge counts once", () => {
-  const text = commit("a", "x (#1)", [["1", "0", "a.mjs"], ["2", "0", "a.mjs"]]);
-  assert.deepEqual(rankHotspots(parseLog(text)), [{ path: "a.mjs", count: 1 }]);
+test("edge: a lane PR with no files, or with no files field, adds nothing", () => {
+  assert.deepEqual(rankHotspots([pr("issue-1-x", []), { headRefName: "issue-2-y" }]), []);
+});
+
+test("edge: a file entry without a path is skipped", () => {
+  assert.deepEqual(rankHotspots([{ headRefName: "issue-1-x", files: [{ additions: 1 }, { path: "a.mjs" }] }]), [{ path: "a.mjs", count: 1 }]);
+});
+
+test("edge: a merged-PR result that is not an array is no PRs", () => {
+  assert.deepEqual(rankHotspots(null), []);
+  assert.deepEqual(rankHotspots({}), []);
 });
 
 test("edge: files with no lines added are left out of the growth ranking", () => {
@@ -211,10 +280,10 @@ test("edge: a multi-line jscpd error is reported on one line", () => {
   assert.match(message, /^duplicates: skipped \(first line\)$/m);
 });
 
-test("edge: an empty log prints `none` under both rankings", () => {
-  const { message } = main([], io({ gitLog: () => "" }));
+test("edge: an empty log and no merged PRs print `none` under both rankings", () => {
+  const { message } = main([], io({ gitLog: () => "", mergedPrs: () => [] }));
   assert.match(message, /^fastest-growing files \(lines added\):\n {2}none$/m);
-  assert.match(message, /^lane hotspots \(lane merges touching the file\):\n {2}none$/m);
+  assert.match(message, /^lane hotspots \(lane PRs merged in the last 7 days\):\n {2}none$/m);
 });
 
 test("edge: a failing git log exits 2 with the reason", () => {
