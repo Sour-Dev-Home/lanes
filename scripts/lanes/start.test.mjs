@@ -720,6 +720,20 @@ test("a failed cleanup step is printed as cleanup failed: <reason>, other cleanu
   assert.deepEqual(lines, ["cleanup failed: issue-7-x (PR #90) at git worktree remove /w: fatal: cannot remove", "skipped issue-8-y: not merged", "#1 → id1"]);
 });
 
+test("edge: two failed cleanup lanes are each rewritten independently, and a removed one is untouched", () => {
+  const failedA = "failed issue-7-x (PR #90) at git worktree remove /w7: fatal: cannot remove";
+  const failedB = "failed issue-9-z (PR #91) at claude rm s9: session has unpushed commits";
+  const removed = "removed issue-8-y (PR #92): git branch -D issue-8-y";
+  const { deps } = fakes({ issues: { 1: {} }, cleanup: () => [failedA, removed, failedB] });
+  const { lines } = main(["1"], deps);
+  assert.deepEqual(lines, [
+    "cleanup failed: issue-7-x (PR #90) at git worktree remove /w7: fatal: cannot remove",
+    removed,
+    "cleanup failed: issue-9-z (PR #91) at claude rm s9: session has unpushed commits",
+    "#1 → id1",
+  ]);
+});
+
 test("edge: a cleanup throw with a stderr uses its first line as the reason", () => {
   const cleanup = () => {
     throw Object.assign(new Error("Command failed"), { stderr: "claude: agents failed\n" });
