@@ -6,7 +6,9 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { authorCanWrite, parseIssueForm, parseSections, parseValidation, ValidationParseError } from "./lib.mjs";
 
-export const MARKER = "<!-- lanes:issue-contract -->";
+const MAX_VALIDATE_LINE = 500;
+
+export const MARKER ="<!-- lanes:issue-contract -->";
 
 /**
  * @param {string} body the issue body
@@ -19,10 +21,13 @@ export function issuePlan(body, labels, canWrite) {
   // ADR 0012: a `validate:` criterion that will not parse would only fail once a lane is running it.
   r.fields.criteria.forEach((c, i) => {
     try {
+      // The line pattern backtracks badly on long whitespace runs, so a hostile body is bounded before it is matched.
+      if (c.startsWith("validate:") && c.length > MAX_VALIDATE_LINE) throw new ValidationParseError(`validate: line is longer than ${MAX_VALIDATE_LINE} characters`);
       parseValidation(c);
     } catch (e) {
       if (!(e instanceof ValidationParseError)) throw e;
-      r.errors.push(`acceptance criterion ${i + 1}: ${e.message}`);
+      // The message can echo the issue author's regex into a public comment: show it as inert code.
+      r.errors.push(`acceptance criterion ${i + 1}: \`${e.message.replace(/[`\r\n]/g, " ")}\``);
       r.ok = false;
     }
   });
