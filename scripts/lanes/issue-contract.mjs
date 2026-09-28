@@ -4,7 +4,9 @@
 // GH_TOKEN.
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { authorCanWrite, parseIssueForm, parseSections } from "./lib.mjs";
+import { authorCanWrite, parseIssueForm, parseSections, parseValidation, ValidationParseError } from "./lib.mjs";
+
+const MAX_VALIDATE_LINE = 500;
 
 export const MARKER = "<!-- lanes:issue-contract -->";
 
@@ -16,6 +18,19 @@ export const MARKER = "<!-- lanes:issue-contract -->";
 export function issuePlan(body, labels, canWrite) {
   if (!/^### Goal\s*$/m.test(String(body ?? "").replace(/\r\n/g, "\n"))) return { isTask: false, add: [], remove: [], comment: "" };
   const r = parseIssueForm(body);
+  // ADR 0012: a `validate:` criterion that will not parse would only fail once a lane is running it.
+  r.fields.criteria.forEach((c, i) => {
+    try {
+      // The line pattern backtracks badly on long whitespace runs, so a hostile body is bounded before it is matched.
+      if (c.startsWith("validate:") && c.length > MAX_VALIDATE_LINE) throw new ValidationParseError(`validate: line is longer than ${MAX_VALIDATE_LINE} characters`);
+      parseValidation(c);
+    } catch (e) {
+      if (!(e instanceof ValidationParseError)) throw e;
+      // The message can echo the issue author's regex into a public comment: show it as inert code.
+      r.errors.push(`acceptance criterion ${i + 1}: \`${e.message.replace(/[`\r\n]/g, " ")}\``);
+      r.ok = false;
+    }
+  });
   const tierLabels = labels.filter((l) => l.startsWith("tier:"));
   const hadReady = labels.includes("ready");
   if (!r.ok) {

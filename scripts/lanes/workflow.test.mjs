@@ -744,6 +744,22 @@ test("lane.md step 4b runs lessons.mjs --paths on the Scope and gives the output
   assert.match(s, /known patterns to look for/);
 });
 
+test("lane.md step 5 loops on validate.mjs for a validate: criterion, tables the attempts under it, and stops on exit 2 with the best value", () => {
+  const s = lessonsLaneStep("5", "6");
+  assert.match(s, /`validate:` criterion/);
+  assert.match(s, /node scripts\/lanes\/validate\.mjs --issue \$ARGUMENTS --criterion <index>/);
+  assert.match(s, /until it exits 0 or 2/);
+  assert.match(s, /attempt table under that criterion in "What changed"/);
+  assert.match(s, /exit 2 reports the best value and stops/);
+});
+
+test("lane.md step 1 makes a spike issue findings only: no test-first, and the PR adds only a findings file or an ADR draft", () => {
+  const s = lessonsLaneStep("1", "2");
+  assert.match(s, /labelled `spike`/);
+  assert.match(s, /skips test-first/);
+  assert.match(s, /adds only a findings file or an ADR draft/);
+});
+
 test("lane.md step 6 writes a docs/lessons.d fragment per fixed critical or important finding and runs lessons.mjs --check", () => {
   const s = lessonsLaneStep("6", "7");
   assert.match(s, /severity critical or important and `fixed: true`/);

@@ -341,3 +341,41 @@ test("main edge: an error without stderr still yields a one-line reason", () => 
   main({ ...env, ISSUE_BODY: withBlocked(body, "#3") }, run);
   assert.match(commentBody(calls), /dependencies API.*ENOENT/);
 });
+
+const withCriteria = (lines) => body.replace("- [ ] a\n", lines.map((l) => `- [ ] ${l}\n`).join(""));
+
+test("a malformed validate: criterion is a contract error and the issue loses ready", () => {
+  const p = issuePlan(withCriteria(["validate: npm run bench — took (\\d+) ms"]), ["ready", "tier:full"], true);
+  assert.deepEqual(p.remove, ["ready"]);
+  assert.match(p.comment, /acceptance criterion 1: `malformed validate: line/);
+});
+
+test("plain criteria and a valid validate: criterion pass the contract", () => {
+  const p = issuePlan(withCriteria(["plain one", "validate: npm run bench — took (\\d+) ms < 500 (attempts: 3)"]), ["tier:full"], true);
+  assert.deepEqual(p.add, ["tier:full", "ready"]);
+});
+
+test("edge: a hostile whitespace-heavy validate: criterion is rejected by length, fast, without running the regex", () => {
+  const t = Date.now();
+  const p = issuePlan(withCriteria([`validate: a — ${" ".repeat(20000)}x`]), ["ready"], true);
+  assert.ok(Date.now() - t < 1000);
+  assert.deepEqual(p.remove, ["ready"]);
+  assert.match(p.comment, /criterion 1: `validate: line is longer than 500 characters/);
+});
+
+test("edge: an engine message echoing the regex is quoted as code with backticks removed, so it cannot inject markdown", () => {
+  const p = issuePlan(withCriteria(["validate: x — (@someone`[ < 1 (attempts: 2)"]), [], true);
+  assert.match(p.comment, /criterion 1: `[^`\n]*`/);
+  assert.equal((p.comment.split("\n").find((l) => l.includes("criterion 1")).match(/`/g) ?? []).length, 2);
+});
+
+test("edge: each bad validate: form is reported with its criterion index; a plain line mentioning validate: mid-text is fine", () => {
+  const p = issuePlan(
+    withCriteria(["ok", "validate: x — (\\d+) < 1 (attempts: 0)", "validate: x — \\d+ < 1 (attempts: 2)", "we validate: things"]),
+    [],
+    true,
+  );
+  assert.match(p.comment, /criterion 2: `validate: attempts must be 1 to 10/);
+  assert.match(p.comment, /criterion 3: `validate: regex needs a capture group/);
+  assert.doesNotMatch(p.comment, /criterion 4/);
+});
