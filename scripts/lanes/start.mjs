@@ -1,5 +1,6 @@
 // scripts/lanes/start.mjs
-// /start: checks each requested issue the way /lane does and launches the rest as background lanes.
+// /start: removes merged lanes (cleanup.mjs), then checks each requested issue the way /lane does and launches the
+// rest as background lanes.
 // Usage: node scripts/lanes/start.mjs <N> [<N> ...]. Exit 0: every requested issue launched. 1: something was
 // refused or failed to launch. 2: bad arguments or config, or the lanes in flight could not be counted (nothing launched).
 // Or: node scripts/lanes/start.mjs --auto [--go]. Picks from every ready issue with pickStartable and prints the plan;
@@ -10,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main as checkBlockers } from "./blockers.mjs";
+import { cleanupMerged } from "./cleanup.mjs";
 import { parseIssueForm } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { issuePaths, pathsOverlap } from "./status.mjs";
@@ -224,11 +226,12 @@ function autoStart(go, deps, { maxLanes, softPaths }) {
 }
 
 /**
- * Reads the issues, plans and launches. `deps` holds fakes in tests: `gh(args)` and `claude(args, { cwd })` return
- * stdout, `root()` the main repository root, `config()` the parsed lanes.config.json (undefined when there is none).
- * Returns the exit code and the lines to print.
+ * Removes merged lanes, then reads the issues, plans and launches. `deps` holds fakes in tests: `gh(args)` and
+ * `claude(args, { cwd })` return stdout, `root()` the main repository root, `config()` the parsed lanes.config.json
+ * (undefined when there is none), `cleanup({ dryRun })` cleanupMerged's lines.
+ * Returns the exit code and the lines to print, cleanup's first.
  */
-export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig }) {
+export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig, cleanup: cleanupMerged }) {
   const args = argv.map((a) => String(a).replace(/^#/, ""));
   const auto = args[0] === "--auto";
   if (auto ? args.length > 2 || (args.length === 2 && args[1] !== "--go") : !args.length || args.some((a) => !/^[1-9]\d*$/.test(a))) {
@@ -246,8 +249,27 @@ export function main(argv, deps = { gh, claude, root: repoRoot, config: readConf
   } catch (err) {
     return { code: 2, lines: [`cannot read lanes.config.json, nothing launched: ${reason(err)}`] };
   }
-  if (auto) return autoStart(args[1] === "--go", deps, config);
+  const go = args[1] === "--go";
+  // Merged lanes go first, so their sessions no longer count as in flight; only --auto without --go is a dry run.
+  const cleaned = cleanupLines(deps, auto && !go);
+  const { code, lines } = auto ? autoStart(go, deps, config) : startIssues(args, deps, config);
+  return { code, lines: [...cleaned, ...lines] };
+}
 
+// cleanupMerged's lines, best-effort: a throw, or a step it reports failed, becomes `cleanup failed: <reason>`, and
+// never changes the start run's plan or exit code.
+function cleanupLines(deps, dryRun) {
+  try {
+    const lines = deps.cleanup({ dryRun });
+    if (!Array.isArray(lines)) throw new Error("cleanup returned no lines");
+    return lines.map((line) => (line.startsWith("failed ") ? `cleanup failed: ${line.slice("failed ".length)}` : line));
+  } catch (err) {
+    return [`cleanup failed: ${reason(err)}`];
+  }
+}
+
+// <N...>: checks each requested issue the way /lane does and launches what passes.
+function startIssues(args, deps, config) {
   const numbers = [...new Set(args.map(Number))];
   let inFlight;
   try {

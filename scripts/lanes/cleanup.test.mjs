@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { cleanableCount, formatStep, parseWorktrees, planCleanup, render, runCleanup, sessionsFrom } from "./cleanup.mjs";
 
 const ROOT = "C:/repo";
@@ -301,4 +302,76 @@ test("/health runs cleanup.mjs and states it as its one exception; /status only 
   assert.match(health, /Do not fix anything in this session, with one exception/);
   assert.match(read("status.md"), /Do not act on anything it lists/);
   assert.doesNotMatch(read("status.md"), /cleanup\.mjs/);
+});
+
+// cleanupMerged with fake inputs: `load()` returns planCleanup's inputs, `run` records each command.
+function cleanupFakes({ inputs = { worktrees: [main], sessions: [], prs: [] }, fail = [], gone = [] } = {}) {
+  const ran = [];
+  const deps = {
+    load: () => inputs,
+    run: (cmd, args) => {
+      const line = `${cmd} ${args.join(" ")}`;
+      if (fail.includes(line)) throw Object.assign(new Error("exit 1"), { stderr: "fatal: cannot remove\nmore" });
+      ran.push(line);
+    },
+    stillThere: (onlyIf) => !gone.includes(onlyIf.path ?? onlyIf.branch),
+  };
+  return { deps, ran };
+}
+
+test("cleanupMerged returns the rendered lines as an array: nothing to clean", async () => {
+  const { cleanupMerged } = await import("./cleanup.mjs");
+  const { deps, ran } = cleanupFakes();
+  assert.deepEqual(cleanupMerged({ deps }), ["no lanes to clean up"]);
+  assert.deepEqual(ran, []);
+});
+
+test("cleanupMerged removes one merged lane and returns one line per lane, as render prints it", async () => {
+  const { cleanupMerged } = await import("./cleanup.mjs");
+  const inputs = { worktrees: [main, wt("issue-7-x"), wt("issue-8-y")], sessions: [session("s7", "issue-7-x")], prs: [merged("issue-7-x"), { ...merged("issue-8-y"), state: "OPEN" }] };
+  const { deps, ran } = cleanupFakes({ inputs });
+  const lines = cleanupMerged({ dryRun: false, deps });
+  const path = `${ROOT}/.claude/worktrees/issue-7-x`;
+  assert.deepEqual(ran, ["claude rm s7", `git worktree remove ${path}`, "git branch -D issue-7-x"]);
+  assert.deepEqual(lines, [
+    `removed issue-7-x (PR #90): claude rm s7; git worktree remove ${path}; git branch -D issue-7-x`,
+    "skipped issue-8-y: not merged",
+  ]);
+  const results = runCleanup(planCleanup(inputs), { run: () => {}, stillThere: () => true });
+  assert.deepEqual(lines, render(results).split("\n"));
+});
+
+test("cleanupMerged with dryRun: true runs nothing and says what it would remove", async () => {
+  const { cleanupMerged } = await import("./cleanup.mjs");
+  const { deps, ran } = cleanupFakes({ inputs: { worktrees: [main, wt("issue-7-x")], sessions: [], prs: [merged("issue-7-x")] } });
+  const lines = cleanupMerged({ dryRun: true, deps });
+  assert.deepEqual(ran, []);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^would remove issue-7-x \(PR #90\): git worktree remove .*; git branch -D issue-7-x$/);
+});
+
+test("cleanupMerged throws when its inputs cannot be read, and returns a failed step as a failed line", async () => {
+  const { cleanupMerged } = await import("./cleanup.mjs");
+  assert.throws(() => cleanupMerged({ deps: { load: () => { throw new Error("gh: not logged in"); } } }), /gh: not logged in/);
+  const path = `${ROOT}/.claude/worktrees/issue-7-x`;
+  const { deps, ran } = cleanupFakes({ inputs: { worktrees: [main, wt("issue-7-x")], sessions: [], prs: [merged("issue-7-x")] }, fail: [`git worktree remove ${path}`] });
+  assert.deepEqual(cleanupMerged({ deps }), [`failed issue-7-x (PR #90) at git worktree remove ${path}: fatal: cannot remove`]);
+  assert.deepEqual(ran, []);
+});
+
+test("edge: cleanupMerged skips a step whose target is already gone", async () => {
+  const { cleanupMerged } = await import("./cleanup.mjs");
+  const path = `${ROOT}/.claude/worktrees/issue-7-x`;
+  const { deps, ran } = cleanupFakes({ inputs: { worktrees: [main, wt("issue-7-x")], sessions: [], prs: [merged("issue-7-x")] }, gone: [path] });
+  assert.deepEqual(cleanupMerged({ deps }), ["removed issue-7-x (PR #90): git branch -D issue-7-x"]);
+  assert.deepEqual(ran, ["git branch -D issue-7-x"]);
+});
+
+test("cleanup.mjs's CLI calls cleanupMerged and keeps its output and exit code", () => {
+  const src = readFileSync(new URL("./cleanup.mjs", import.meta.url), "utf8");
+  const cli = src.slice(src.indexOf("function main("));
+  assert.match(cli, /cleanupMerged\(\{ dryRun: argv\.includes\("--dry-run"\) \}\)/);
+  assert.match(cli, /console\.log\(lines\.join\("\\n"\)\)/);
+  assert.match(cli, /process\.exitCode = 1/);
+  assert.doesNotMatch(cli, /planCleanup|runCleanup/);
 });
