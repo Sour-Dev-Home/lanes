@@ -659,3 +659,55 @@ test("start.md tells the model to run its pull step on its own, never chained to
     /Run each of these git commands on its own, never chained to the `start\.mjs` run below/,
   );
 });
+
+// #232: CI also runs the suite on Windows and on Node 24
+const verifyYml = () => readFileSync(".github/workflows/verify.yml", "utf8");
+
+test("verify.yml's test job matrix covers ubuntu-latest on Node 22 and 24, and windows-latest on Node 22", () => {
+  const yml = verifyYml();
+  assert.match(yml, /- os: ubuntu-latest\n\s+node: 22\n/);
+  assert.match(yml, /- os: ubuntu-latest\n\s+node: 24\n/);
+  assert.match(yml, /- os: windows-latest\n\s+node: 22\n/);
+  assert.match(yml, /- run: npm test/);
+});
+
+// #232: a final job named verify needs the matrix and fails when any required entry fails
+test("verify.yml's final job is named verify, needs the test matrix, and fails the required check when it doesn't succeed", () => {
+  const yml = verifyYml();
+  assert.match(yml, /\n {2}verify:\n {4}needs: test\n {4}if: always\(\)\n/);
+  assert.match(yml, /needs\.test\.result != 'success'/);
+});
+
+// #232: the windows entry is informational at first, kept out of the required result, with a linked follow-up
+test("verify.yml's windows entry is informational: continue-on-error, and a comment links the promotion follow-up", () => {
+  const yml = verifyYml();
+  assert.match(yml, /informational: true/);
+  assert.match(yml, /continue-on-error: \$\{\{ matrix\.informational == true \}\}/);
+  assert.match(yml, /# Informational until #\d+ confirms the suite is green on the hosted windows-latest runner\./);
+});
+
+test("verify.yml's matrix uses fail-fast: false, so one failing entry does not cancel the others", () => {
+  assert.match(verifyYml(), /strategy:\n {6}fail-fast: false\n/);
+});
+
+test("verify.yml pins actions/checkout and actions/setup-node by full commit SHA with a version comment, and keeps contents: read", () => {
+  const yml = verifyYml();
+  assert.match(yml, /uses: actions\/checkout@[0-9a-f]{40} # v\d+/);
+  assert.match(yml, /uses: actions\/setup-node@[0-9a-f]{40} # v\d+/);
+  assert.match(yml, /\npermissions:\n {2}contents: read\n/);
+});
+
+// #232: Dependabot keeps the SHA-pinned Actions current, grouped into one PR, nothing else
+test("dependabot.yml updates github-actions weekly, grouped into one PR, and declares no other ecosystem", () => {
+  const yml = readFileSync(".github/dependabot.yml", "utf8");
+  assert.match(yml, /package-ecosystem: "github-actions"/);
+  assert.match(yml, /interval: "weekly"/);
+  assert.match(yml, /groups:\n {6}github-actions:/);
+  assert.equal((yml.match(/package-ecosystem:/g) ?? []).length, 1);
+});
+
+// edge: the verify job must run even when the test job fails outright, or a required check would go missing
+// (skipped) instead of reporting failure, which a branch-protection ruleset would not catch as a block.
+test("edge: verify.yml's final job runs on always(), so a hard test failure reports as a failed check, not a skipped one", () => {
+  assert.match(verifyYml(), /\n {2}verify:\n {4}needs: test\n {4}if: always\(\)\n/);
+});
