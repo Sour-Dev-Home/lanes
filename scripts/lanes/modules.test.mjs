@@ -1,0 +1,223 @@
+// scripts/lanes/modules.test.mjs
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { checkModules, importSpecifiers, main } from "./modules.mjs";
+
+// Fixture sources are built with `q` so this file's own text never holds a literal `from "./..."` import it doesn't make.
+const q = (s) => JSON.stringify(s);
+const imp = (spec) => `import { x } from ${q(spec)};\n`;
+
+const map = {
+  entries: [
+    { id: "core", paths: ["src/core/"], imports: [] },
+    { id: "app", paths: ["src/app/"], imports: ["core"] },
+  ],
+};
+
+test("an import the map allows is not a violation", () => {
+  const files = { "src/app/a.mjs": imp("../core/c.mjs"), "src/core/c.mjs": "" };
+  assert.deepEqual(checkModules({ map, files }), { violations: [], cycles: [], allowedCycles: [], unmapped: [] });
+});
+
+test("an import across a boundary the map does not allow is a violation", () => {
+  const files = { "src/core/c.mjs": imp("../app/a.mjs"), "src/app/a.mjs": "" };
+  assert.deepEqual(checkModules({ map, files }).violations, [
+    { from: "src/core/c.mjs", to: "src/app/a.mjs", fromModule: "core", toModule: "app" },
+  ]);
+});
+
+test("imports inside one module are always allowed", () => {
+  const files = { "src/core/a.mjs": imp("./b.mjs"), "src/core/b.mjs": "" };
+  assert.deepEqual(checkModules({ map, files }).violations, []);
+});
+
+test("a two-file cycle is reported once", () => {
+  const files = { "src/core/b.mjs": imp("./a.mjs"), "src/core/a.mjs": imp("./b.mjs") };
+  assert.deepEqual(checkModules({ map, files }).cycles, [["src/core/a.mjs", "src/core/b.mjs"]]);
+});
+
+test("a three-file cycle is reported once, in import order", () => {
+  const files = {
+    "src/core/a.mjs": imp("./c.mjs"),
+    "src/core/c.mjs": imp("./b.mjs"),
+    "src/core/b.mjs": imp("./a.mjs"),
+  };
+  assert.deepEqual(checkModules({ map, files }).cycles, [["src/core/a.mjs", "src/core/c.mjs", "src/core/b.mjs"]]);
+});
+
+test("a cycle in allowCycles goes to allowedCycles, never to cycles, whatever order it is listed in", () => {
+  const files = { "src/core/a.mjs": imp("./b.mjs"), "src/core/b.mjs": imp("./a.mjs") };
+  const result = checkModules({ map: { ...map, allowCycles: [["src/core/b.mjs", "src/core/a.mjs"]] }, files });
+  assert.deepEqual(result.cycles, []);
+  assert.deepEqual(result.allowedCycles, [["src/core/a.mjs", "src/core/b.mjs"]]);
+});
+
+test("a new cycle through an allow-listed pair is still reported", () => {
+  const files = {
+    "src/core/a.mjs": imp("./b.mjs"),
+    "src/core/b.mjs": imp("./a.mjs") + imp("./c.mjs"),
+    "src/core/c.mjs": imp("./a.mjs"),
+  };
+  const result = checkModules({ map: { ...map, allowCycles: [["src/core/a.mjs", "src/core/b.mjs"]] }, files });
+  assert.deepEqual(result.allowedCycles, [["src/core/a.mjs", "src/core/b.mjs"]]);
+  assert.deepEqual(result.cycles, [["src/core/a.mjs", "src/core/b.mjs", "src/core/c.mjs"]]);
+});
+
+test("a dynamic import with a string literal is an edge", () => {
+  const files = { "src/core/c.mjs": `const m = await import(${q("../app/a.mjs")});\n`, "src/app/a.mjs": "" };
+  assert.deepEqual(checkModules({ map, files }).violations.map((v) => v.to), ["src/app/a.mjs"]);
+});
+
+test("re-exports and side-effect imports are edges", () => {
+  const src = `export { a } from ${q("./a.mjs")};\nexport * from ${q("./b.mjs")};\nimport ${q("./c.mjs")};\n`;
+  assert.deepEqual(importSpecifiers(src), ["./a.mjs", "./b.mjs", "./c.mjs"]);
+});
+
+test("a file under no module's path is unmapped", () => {
+  const files = { "src/other/o.mjs": "", "src/core/c.mjs": "" };
+  assert.deepEqual(checkModules({ map, files }).unmapped, ["src/other/o.mjs"]);
+});
+
+test("checkModules reads nothing from disk: a missing target is judged by its path alone", () => {
+  const files = { "src/core/c.mjs": imp("../app/missing.mjs") };
+  assert.deepEqual(checkModules({ map, files }).violations, [
+    { from: "src/core/c.mjs", to: "src/app/missing.mjs", fromModule: "core", toModule: "app" },
+  ]);
+});
+
+// ---- edge cases -------------------------------------------------------------------------------------------------
+
+test("edge: bare and absolute specifiers are ignored", () => {
+  assert.deepEqual(importSpecifiers(`import a from ${q("node:fs")};\nimport b from ${q("/abs/x.mjs")};\n`), []);
+});
+
+test("edge: a dynamic import of a non-literal is ignored", () => {
+  assert.deepEqual(importSpecifiers("const m = await import(name);\nimport(`./t${x}.mjs`);\n"), []);
+});
+
+test("edge: import text inside strings, templates, comments and regexes is not an edge", () => {
+  const src = [
+    `const s = 'import x from "./s.mjs"';`,
+    "const t = `export * from './t.mjs'`;",
+    `// import x from "./line.mjs"`,
+    `/* import(${q("./block.mjs")}) */`,
+    `const re = /from ["']\\.\\/re\\.mjs["']/;`,
+    `import real from ${q("./real.mjs")};`,
+  ].join("\n");
+  assert.deepEqual(importSpecifiers(src), ["./real.mjs"]);
+});
+
+test("edge: a multi-line import and single-quoted specifiers are read", () => {
+  const src = "import {\n  a,\n  b,\n} from './m.mjs';\nexport {\n  c } from '../n.mjs'\n";
+  assert.deepEqual(importSpecifiers(src), ["./m.mjs", "../n.mjs"]);
+});
+
+test("edge: a method or property named from/import is not an import", () => {
+  assert.deepEqual(importSpecifiers(`Array.from(${q("./a.mjs")});\nobj.import(${q("./b.mjs")});\n`), []);
+});
+
+test("edge: an import resolving outside every module is a violation with toModule null", () => {
+  const files = { "src/core/c.mjs": imp("../../lib/x.mjs") };
+  assert.deepEqual(checkModules({ map, files }).violations, [
+    { from: "src/core/c.mjs", to: "lib/x.mjs", fromModule: "core", toModule: null },
+  ]);
+});
+
+test("edge: an unmapped file's imports are not violations but still form cycles", () => {
+  const files = { "src/x/a.mjs": imp("../core/c.mjs"), "src/core/c.mjs": imp("../x/a.mjs") };
+  const result = checkModules({ map, files });
+  assert.deepEqual(result.unmapped, ["src/x/a.mjs"]);
+  assert.deepEqual(result.violations.map((v) => v.from), ["src/core/c.mjs"]);
+  assert.deepEqual(result.cycles, [["src/core/c.mjs", "src/x/a.mjs"]]);
+});
+
+test("edge: a file importing itself is a one-file cycle", () => {
+  assert.deepEqual(checkModules({ map, files: { "src/core/a.mjs": imp("./a.mjs") } }).cycles, [["src/core/a.mjs"]]);
+});
+
+test("edge: the longest matching path prefix decides a file's module", () => {
+  const nested = { entries: [{ id: "outer", paths: ["src/"], imports: [] }, { id: "inner", paths: ["src/in/"], imports: ["outer"] }] };
+  const files = { "src/in/a.mjs": imp("../b.mjs"), "src/b.mjs": "" };
+  assert.deepEqual(checkModules({ map: nested, files }).violations, []);
+});
+
+test("edge: a repeated import is one edge, reported once", () => {
+  const files = { "src/core/c.mjs": imp("../app/a.mjs") + imp("../app/./a.mjs"), "src/app/a.mjs": "" };
+  assert.equal(checkModules({ map, files }).violations.length, 1);
+});
+
+test("edge: an empty file set is a clean report", () => {
+  assert.deepEqual(checkModules({ map, files: {} }), { violations: [], cycles: [], allowedCycles: [], unmapped: [] });
+});
+
+test("edge: a malformed map is refused with the reason", () => {
+  const bad = [
+    [null, /modules must be an object/],
+    [{}, /modules\.entries must be an array/],
+    [{ entries: [{ id: "a", paths: "src/", imports: [] }] }, /paths must be a non-empty array/],
+    [{ entries: [{ id: "a", paths: ["src/"] }] }, /imports must be an array/],
+    [{ entries: [{ id: "a", paths: ["src/"], imports: ["nope"] }] }, /unknown module "nope"/],
+    [{ entries: [{ id: "a", paths: ["x/"], imports: [] }, { id: "a", paths: ["y/"], imports: [] }] }, /duplicate module id "a"/],
+    [{ entries: [], allowCycles: ["a.mjs"] }, /allowCycles must be an array of file arrays/],
+  ];
+  for (const [m, re] of bad) assert.throws(() => checkModules({ map: m, files: {} }), re);
+});
+
+// ---- main -------------------------------------------------------------------------------------------------------
+
+/** A fake disk: `tree` maps repo-relative paths to contents; `config` is the parsed lanes.config.json. */
+function fakeIo(config, tree = {}) {
+  return {
+    readConfig: () => config,
+    listFiles: (dir) => Object.keys(tree).filter((f) => f.startsWith(dir)),
+    readFile: (f) => tree[f],
+  };
+}
+
+test("main: no modules key prints `no module map configured` and exits 0", () => {
+  assert.deepEqual(main(fakeIo({ requiredChecks: ["verify"] })), { code: 0, message: "no module map configured" });
+});
+
+test("main: a clean map exits 0 and still lists allowed cycles", () => {
+  const tree = { "src/core/a.mjs": imp("./b.mjs"), "src/core/b.mjs": imp("./a.mjs") };
+  const { code, message } = main(fakeIo({ modules: { ...map, allowCycles: [["src/core/a.mjs", "src/core/b.mjs"]] } }, tree));
+  assert.equal(code, 0);
+  assert.match(message, /allowed cycle: src\/core\/a\.mjs -> src\/core\/b\.mjs -> src\/core\/a\.mjs/);
+});
+
+test("main: a violation exits 1 and names it", () => {
+  const { code, message } = main(fakeIo({ modules: map }, { "src/core/c.mjs": imp("../app/a.mjs"), "src/app/a.mjs": "" }));
+  assert.equal(code, 1);
+  assert.match(message, /violation: src\/core\/c\.mjs -> src\/app\/a\.mjs \(core may not import app\)/);
+});
+
+test("main: an unallowed cycle exits 1", () => {
+  const { code, message } = main(fakeIo({ modules: map }, { "src/core/a.mjs": imp("./b.mjs"), "src/core/b.mjs": imp("./a.mjs") }));
+  assert.equal(code, 1);
+  assert.match(message, /^cycle: src\/core\/a\.mjs -> src\/core\/b\.mjs -> src\/core\/a\.mjs$/m);
+});
+
+test("main: an unmapped file beside a mapped path exits 1", () => {
+  const one = { entries: [{ id: "core", paths: ["src/core/a"], imports: [] }] };
+  const { code, message } = main(fakeIo({ modules: one }, { "src/core/a.mjs": "", "src/core/new.mjs": "" }));
+  assert.equal(code, 1);
+  assert.match(message, /unmapped: src\/core\/new\.mjs/);
+});
+
+test("edge: main scans only source files", () => {
+  const tree = { "src/core/a.mjs": "", "src/core/notes.md": imp("../app/a.mjs"), "src/core/data.json": "{}" };
+  assert.equal(main(fakeIo({ modules: map }, tree)).code, 0);
+});
+
+test("edge: main refuses a malformed map with exit 2", () => {
+  const { code, message } = main(fakeIo({ modules: { entries: "x" } }));
+  assert.equal(code, 2);
+  assert.match(message, /^modules: .*entries must be an array/);
+});
+
+test("edge: main reports an unreadable lanes.config.json with exit 2", () => {
+  const io = { ...fakeIo({}), readConfig: () => { throw new Error("ENOENT"); } };
+  const { code, message } = main(io);
+  assert.equal(code, 2);
+  assert.match(message, /cannot read lanes\.config\.json: ENOENT/);
+});
