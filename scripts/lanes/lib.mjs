@@ -248,7 +248,27 @@ export class ValidationParseError extends Error {
 }
 
 const VALIDATE_FORM = "validate: <command> — <regex> <op> <threshold> (attempts: N)";
-const VALIDATE_LINE = /^validate:\s*(.*?)\s+—\s+(.+)\s+(<=|>=|<|>)\s+(-?\d+(?:\.\d+)?)\s+\(attempts:\s*(\d+)\)$/;
+// The line is split in three passes (attempts suffix, operator and threshold, command separator) so no
+// single pattern has overlapping groups: each pass is linear, whatever the line holds.
+const VALIDATE_ATTEMPTS = /\(attempts:\s*(\d+)\)$/;
+const VALIDATE_OP_THRESHOLD = /\s(<=|>=|<|>)\s+(-?\d+(?:\.\d+)?)\s+$/;
+const VALIDATE_SEPARATOR = /\s+—\s+/g;
+export const VALIDATE_MAX_LENGTH = 500;
+
+function splitValidateLine(body) {
+  const att = VALIDATE_ATTEMPTS.exec(body);
+  if (!att) return null;
+  const head = body.slice(0, att.index);
+  const ot = VALIDATE_OP_THRESHOLD.exec(head);
+  if (!ot) return null;
+  const rest = head.slice(0, ot.index);
+  for (const sep of rest.matchAll(VALIDATE_SEPARATOR)) {
+    const end = sep.index + sep[0].length;
+    // the old `.` groups never matched a line terminator, so a multi-line command or regex stays malformed
+    if (end < rest.length && !/[\n\r\p{Zl}\p{Zp}]/u.test(rest.slice(0, sep.index) + rest.slice(end))) return [rest.slice(0, sep.index), rest.slice(end), ot[1], ot[2], att[1]];
+  }
+  return null;
+}
 
 /**
  * Parses a validation-loop criterion (ADR 0012): `validate: <command> — <regex> <op> <threshold> (attempts: N)`.
@@ -259,9 +279,10 @@ const VALIDATE_LINE = /^validate:\s*(.*?)\s+—\s+(.+)\s+(<=|>=|<|>)\s+(-?\d+(?:
 export function parseValidation(line) {
   const text = String(line ?? "").trim();
   if (!text.startsWith("validate:")) return null;
-  const m = VALIDATE_LINE.exec(text);
-  if (!m) throw new ValidationParseError(`malformed validate: line, expected "${VALIDATE_FORM}"`);
-  const [, command, regex, op, threshold, attempts] = m;
+  if (text.length > VALIDATE_MAX_LENGTH) throw new ValidationParseError(`validate: line is over ${VALIDATE_MAX_LENGTH} characters`);
+  const parts = splitValidateLine(text.slice("validate:".length));
+  if (!parts) throw new ValidationParseError(`malformed validate: line, expected "${VALIDATE_FORM}"`);
+  const [command, regex, op, threshold, attempts] = parts;
   if (!command.trim()) throw new ValidationParseError("validate: line has an empty command");
   const n = Number(attempts);
   if (!Number.isInteger(n) || n < 1 || n > 10) throw new ValidationParseError(`validate: attempts must be 1 to 10, got ${attempts}`);

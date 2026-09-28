@@ -706,6 +706,32 @@ test("parseValidation: null for a plain criterion, negative thresholds parse", (
   assert.equal(parseValidation(V("(\\d+) > -2 (attempts: 2)")).threshold, -2);
 });
 
+test("parseValidation stays fast on a 65,000-character hostile criterion of spaces or repeated separators", () => {
+  for (const hostile of [`validate:${" ".repeat(65000)}`, `validate: ${" — ".repeat(21600)}`, `validate: a — ${" ".repeat(65000)}x`]) {
+    const start = performance.now();
+    assert.throws(() => parseValidation(hostile), { name: "ValidationParseError" });
+    assert.ok(performance.now() - start < 100, "parse time over 100 ms");
+  }
+});
+
+test("parseValidation rejects a line over 500 characters and accepts one of exactly 500", () => {
+  const tail = " >= 1 (attempts: 2)";
+  const at = (len) => `validate: node --test — (${"a".repeat(len - "validate: node --test — ()".length - tail.length)})${tail}`;
+  assert.equal(at(500).length, 500);
+  assert.equal(parseValidation(at(500)).attempts, 2);
+  assert.throws(() => parseValidation(at(501)), { name: "ValidationParseError", message: /500/ });
+});
+
+test("edge: parseValidation keeps a separator inside the regex and whitespace variants", () => {
+  assert.deepEqual(parseValidation("validate:  node --test  —  (a — b) >=  3   (attempts:2)"), { command: "node --test", regex: "(a — b)", op: ">=", threshold: 3, attempts: 2 });
+  assert.throws(() => parseValidation("validate: node —  >= 3 (attempts: 2)"), { name: "ValidationParseError" });
+});
+
+test("edge: parseValidation rejects a newline inside the command or the regex, as the old pattern did", () => {
+  assert.throws(() => parseValidation("validate: a — x\ny < 1 (attempts: 1)"), { name: "ValidationParseError" });
+  assert.throws(() => parseValidation("validate: a\nb — (x) < 1 (attempts: 1)"), { name: "ValidationParseError" });
+});
+
 test("edge: parseValidation throws a named error for malformed validate lines", () => {
   for (const bad of [
     "validate:",
