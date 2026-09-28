@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-  cleanableCount, cleanupMerged, formatStep, parseWorktrees, pidRunning, planCleanup, render, runCleanup, sessionEnded, sessionsFrom,
+  cleanableCount, cleanupMerged, findOrphans, formatStep, parseWorktrees, pidRunning, planCleanup, removeEmptyDir, render, runCleanup,
+  saveSessionLog, sessionEnded, sessionsFrom,
 } from "./cleanup.mjs";
 
 const ROOT = "C:/repo";
@@ -639,4 +642,256 @@ test("edge: a leftover session in a bare issue-<N> folder is skipped, not remove
   const plan = planCleanup({ worktrees: [main], sessions, prs: [merged("issue-7-x", { state: "OPEN" })] });
   assert.equal(plan[0].skip, "not merged");
   assert.equal(plan[0].steps, undefined);
+});
+
+// #143: idle-but-alive sessions, orphan folders, closed-issue lanes, and each removed session's log.
+const TREE7 = `${ROOT}/.claude/worktrees/issue-7-x`;
+const ORPHAN = `${ROOT}/.claude/worktrees/issue-9-gone`;
+const closedIssue = (number) => ({ number, state: "CLOSED" });
+const aliveLock = { locked: "claude session issue-7-x (pid 41)", lockRunning: true };
+const aliveIdle = (extra = {}) => session("s7", "issue-7-x", { status: "idle", pid: 41, alive: true, ...extra });
+
+test("an idle session of a merged lane whose process is alive is stopped, then removed with its lane", () => {
+  const [entry] = planCleanup({ worktrees: [main, wt("issue-7-x", aliveLock)], sessions: [aliveIdle()], prs: [merged("issue-7-x")] });
+  assert.deepEqual(cmds(entry), ["claude stop s7", "claude rm s7", `git worktree unlock ${TREE7}`, `git worktree remove ${TREE7}`, "git branch -D issue-7-x"]);
+});
+
+test("a busy session of a merged lane is never stopped: session still working", () => {
+  const [entry] = planCleanup({ worktrees: [main, wt("issue-7-x", aliveLock)], sessions: [aliveIdle({ status: "busy" })], prs: [merged("issue-7-x")] });
+  assert.equal(entry.skip, "session still working");
+  assert.equal(entry.steps, undefined);
+});
+
+test("edge: a lock held by a running pid that no listed session has is still skipped: locked by running pid", () => {
+  const [entry] = planCleanup({ worktrees: [main, wt("issue-7-x", aliveLock)], sessions: [aliveIdle({ pid: 99, alive: false })], prs: [merged("issue-7-x")] });
+  assert.equal(entry.skip, "locked by running pid 41");
+});
+
+test("edge: an alive idle session whose worktree is already gone is stopped, then removed", () => {
+  const plan = planCleanup({ worktrees: [main], sessions: [aliveIdle()], prs: [merged("issue-7-x")] });
+  assert.deepEqual(plan.map(cmds), [["claude stop s7", "claude rm s7"]]);
+});
+
+test("an empty orphan folder under .claude/worktrees is removed", () => {
+  const plan = planCleanup({ worktrees: [main], orphans: [{ path: ORPHAN, files: 0 }] });
+  assert.deepEqual(plan.map(cmds), [[`rmdir ${ORPHAN}`]]);
+  const removed = [];
+  const results = runCleanup(plan, { run: () => assert.fail("no command runs"), stillThere: () => true, removeDir: (p) => removed.push(p) });
+  assert.deepEqual(removed, [ORPHAN]);
+  assert.equal(render(results), `removed orphan folder ${ORPHAN}: rmdir ${ORPHAN}`);
+});
+
+test("an orphan folder that still holds files is reported and never deleted", () => {
+  const plan = planCleanup({ worktrees: [main], orphans: [{ path: ORPHAN, files: 3 }] });
+  const results = runCleanup(plan, { run: () => assert.fail("no command runs"), stillThere: () => true, removeDir: () => assert.fail("never deleted") });
+  assert.equal(render(results), `orphan folder ${ORPHAN} has 3 files; left in place`);
+});
+
+test("edge: an orphan folder whose files cannot be counted, or that holds a session's cwd, is left in place", () => {
+  const plan = planCleanup({ worktrees: [main], sessions: [session("s9", "issue-9-gone", { status: "busy" })], orphans: [{ path: ORPHAN, files: 0 }, { path: `${ROOT}/.claude/worktrees/x`, files: null }] });
+  assert.deepEqual(plan.filter((e) => e.orphan).map((e) => e.skip), ["session s9 is in it", "cannot count its files"]);
+});
+
+test("a closed issue's lane with no open or merged PR, clean and not busy, is removed like a merged lane", () => {
+  const [entry] = planCleanup({ worktrees: [main, wt("issue-7-x", { unpushed: 0 })], sessions: [session("s7", "issue-7-x", { status: "idle" })], prs: [], issues: [closedIssue(7)] });
+  assert.deepEqual(cmds(entry), ["claude rm s7", `git worktree remove ${TREE7}`, "git branch -D issue-7-x"]);
+  const results = runCleanup([entry], { run: () => {}, stillThere: () => true });
+  assert.match(render(results), /^removed issue-7-x \(issue #7 closed\): claude rm s7/);
+});
+
+test("a closed issue's lane with commits not on any remote is kept and reported", () => {
+  const [entry] = planCleanup({ worktrees: [main, wt("issue-7-x", { unpushed: 2 })], prs: [], issues: [closedIssue(7)] });
+  assert.equal(entry.skip, "2 commits not on any remote");
+});
+
+test("edge: closed-issue lanes: an open PR, a busy session, a dirty tree or unreadable unpushed count keeps them; a closed-unmerged PR does not", () => {
+  const plan = (tree, extra = {}) => planCleanup({ worktrees: [main, wt("issue-7-x", { unpushed: 0, ...tree })], prs: [], issues: [closedIssue(7)], ...extra })[0];
+  assert.equal(plan({}, { prs: [merged("issue-7-x", { state: "OPEN" })] }).skip, "not merged");
+  assert.equal(plan({}, { sessions: [session("s7", "issue-7-x", { status: "busy" })] }).skip, "session still working");
+  assert.equal(plan({ dirty: true }).skip, "dirty worktree");
+  assert.equal(plan({ unpushed: null }).skip, "cannot read unpushed commits");
+  assert.equal(plan({ unpushed: undefined }).skip, "cannot read unpushed commits");
+  assert.equal(plan({ unpushed: 1 }).skip, "1 commit not on any remote");
+  assert.ok(plan({}, { prs: [merged("issue-7-x", { state: "CLOSED" })] }).steps);
+  assert.equal(plan({}, { issues: [{ number: 7, state: "OPEN" }] }).skip, "not merged");
+  assert.equal(plan({}, { issues: [] }).skip, "not merged");
+});
+
+test("edge: a closed issue's leftover session whose worktree is gone is removed; a busy one is kept", () => {
+  const plan = (status) => planCleanup({ worktrees: [main], sessions: [session("s7", "issue-7-x", { status })], issues: [closedIssue(7)] })[0];
+  assert.deepEqual(cmds(plan("idle")), ["claude rm s7"]);
+  assert.equal(plan("busy").skip, "session still working");
+});
+
+test("--dry-run lists every kind of removal and deletes nothing", () => {
+  const plan = planCleanup({
+    worktrees: [main, wt("issue-7-x", aliveLock), wt("issue-8-y", { unpushed: 0 })],
+    sessions: [aliveIdle()],
+    prs: [merged("issue-7-x")], issues: [closedIssue(8)], orphans: [{ path: ORPHAN, files: 0 }, { path: `${ORPHAN}2`, files: 1 }],
+  });
+  const never = () => assert.fail("dry run touches nothing");
+  const lines = render(runCleanup(plan, { dryRun: true, run: never, stillThere: never, removeDir: never, saveLog: never })).split("\n");
+  assert.deepEqual(lines, [
+    `would remove issue-7-x (PR #90): claude stop s7; claude rm s7; git worktree unlock ${TREE7}; git worktree remove ${TREE7}; git branch -D issue-7-x`,
+    `would remove issue-8-y (issue #8 closed): git worktree remove ${ROOT}/.claude/worktrees/issue-8-y; git branch -D issue-8-y`,
+    `would remove orphan folder ${ORPHAN}: rmdir ${ORPHAN}`,
+    `orphan folder ${ORPHAN}2 has 1 file; left in place`,
+  ]);
+});
+
+test("each session's log is saved before it is stopped or removed, and the result line names the file", () => {
+  const plan = planCleanup({ worktrees: [main, wt("issue-7-x", aliveLock)], sessions: [aliveIdle()], prs: [merged("issue-7-x")] });
+  const order = [];
+  const results = runCleanup(plan, {
+    run: (cmd, args) => order.push(`${cmd} ${args.join(" ")}`),
+    stillThere: () => true,
+    saveLog: (id, issue) => {
+      order.push(`save ${id} ${issue}`);
+      return `.lanes/logs/issue-${issue}-${id}.txt`;
+    },
+  });
+  assert.deepEqual(order.slice(0, 3), ["save s7 7", "claude stop s7", "claude rm s7"]);
+  assert.match(render(results), /^removed issue-7-x \(PR #90\): log saved to \.lanes\/logs\/issue-7-s7\.txt; claude stop s7; claude rm s7;/);
+});
+
+test("edge: a log that cannot be written is reported and the session is still removed", () => {
+  const plan = planCleanup({ worktrees: [main], sessions: [session("s7", "issue-7-x", { status: "idle" })], prs: [merged("issue-7-x")] });
+  const ran = [];
+  const saveLog = () => {
+    throw new Error("EACCES: permission denied");
+  };
+  const results = runCleanup(plan, { run: (cmd, args) => ran.push(`${cmd} ${args.join(" ")}`), stillThere: () => true, saveLog });
+  assert.deepEqual(ran, ["claude rm s7"]);
+  assert.equal(render(results), "removed #7 session (PR #90): log not saved (EACCES: permission denied); claude rm s7");
+});
+
+test("edge: a claimant session removed to clear a claim has its log saved first", () => {
+  const { run } = claimedRun("x9");
+  const saved = [];
+  const saveLog = (id) => {
+    saved.push(id);
+    return `.lanes/logs/issue-7-${id}.txt`;
+  };
+  const [result] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded: () => true, saveLog });
+  assert.equal(result.status, "removed");
+  assert.deepEqual(saved, ["s7", "x9"]);
+});
+
+// saveSessionLog, findOrphans and removeEmptyDir against a real temporary folder.
+const tempRoot = (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "lanes-cleanup-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+};
+const readLog = (root, name) => readFileSync(join(root, ".lanes", "logs", name), "utf8");
+
+test("saveSessionLog writes the last 200 lines of claude logs to .lanes/logs/issue-<N>-<id>.txt", (t) => {
+  const root = tempRoot(t);
+  const lines = Array.from({ length: 250 }, (_, i) => `line ${i + 1}`);
+  const calls = [];
+  const run = (cmd, args) => {
+    calls.push(`${cmd} ${args.join(" ")}`);
+    return `${lines.join("\r\n")}\r\n`;
+  };
+  assert.equal(saveSessionLog("s7", 7, { root, run }), ".lanes/logs/issue-7-s7.txt");
+  assert.deepEqual(calls, ["claude logs s7"]);
+  const text = readLog(root, "issue-7-s7.txt").split("\n").filter(Boolean);
+  assert.equal(text.length, 200);
+  assert.equal(text[0], "line 51");
+  assert.equal(text.at(-1), "line 250");
+});
+
+test("saveSessionLog strips terminal escape codes", (t) => {
+  const root = tempRoot(t);
+  const raw = "\x1b[1m\x1b[32mdone\x1b[0m ok\n\x1b]0;title\x07state: \x1b[31mblocked\x1b[39m\nbar 10%\rbar 100%\n\x1b[2K\x1b[1Gend\x07\n";
+  saveSessionLog("s7", 7, { root, run: () => raw });
+  const text = readLog(root, "issue-7-s7.txt");
+  assert.doesNotMatch(text, /[\x00-\x08\x0b-\x1f\x7f]/);
+  assert.deepEqual(text.split("\n").filter(Boolean), ["done ok", "state: blocked", "bar 10%", "bar 100%", "end"]);
+});
+
+test("saveSessionLog writes one line when claude logs fails, and still returns the file", (t) => {
+  const root = tempRoot(t);
+  const run = () => {
+    throw Object.assign(new Error("exit 1"), { stderr: "No job matching 's7'.\nmore" });
+  };
+  assert.equal(saveSessionLog("s7", 7, { root, run }), ".lanes/logs/issue-7-s7.txt");
+  assert.equal(readLog(root, "issue-7-s7.txt"), "claude logs s7 failed: No job matching 's7'.\n");
+});
+
+test("edge: saveSessionLog notes empty output, and never lets a session id leave .lanes/logs", (t) => {
+  const root = tempRoot(t);
+  assert.equal(saveSessionLog("s7", 7, { root, run: () => "" }), ".lanes/logs/issue-7-s7.txt");
+  assert.equal(readLog(root, "issue-7-s7.txt"), "claude logs s7 printed nothing\n");
+  assert.equal(saveSessionLog("../../x", 7, { root, run: () => "hi" }), ".lanes/logs/issue-7-______x.txt");
+  assert.deepEqual(readdirSync(join(root, ".lanes", "logs")).sort(), ["issue-7-______x.txt", "issue-7-s7.txt"]);
+});
+
+test("saveSessionLog keeps the 50 newest files in .lanes/logs and deletes older ones", (t) => {
+  const root = tempRoot(t);
+  const dir = join(root, ".lanes", "logs");
+  mkdirSync(join(dir, "keep-dir"), { recursive: true });
+  for (let i = 0; i < 55; i++) {
+    const file = join(dir, `old-${String(i).padStart(2, "0")}.txt`);
+    writeFileSync(file, "x");
+    utimesSync(file, 1_000_000 + i, 1_000_000 + i);
+  }
+  saveSessionLog("s7", 7, { root, run: () => "hi" });
+  const left = readdirSync(dir).filter((f) => f !== "keep-dir");
+  assert.equal(left.length, 50);
+  assert.ok(left.includes("issue-7-s7.txt"));
+  assert.ok(!left.includes("old-05.txt") && left.includes("old-06.txt") && left.includes("old-54.txt"));
+  assert.ok(existsSync(join(dir, "keep-dir")));
+});
+
+test("findOrphans lists untracked folders under .claude/worktrees with their file counts", (t) => {
+  const root = tempRoot(t);
+  const base = join(root, ".claude", "worktrees");
+  for (const d of ["tracked", "empty", "nested/deeper", "full/sub"]) mkdirSync(join(base, d), { recursive: true });
+  writeFileSync(join(base, "full", "a.txt"), "x");
+  writeFileSync(join(base, "full", "sub", "b.txt"), "x");
+  writeFileSync(join(base, "stray.txt"), "x");
+  const tracked = [root, join(base, "tracked").replace(/\\/g, "/")];
+  const orphans = findOrphans(root, tracked).map((o) => ({ ...o, path: o.path.replace(/\\/g, "/").split("/").pop() }));
+  assert.deepEqual(orphans.sort((a, b) => a.path.localeCompare(b.path)), [{ path: "empty", files: 0 }, { path: "full", files: 2 }, { path: "nested", files: 0 }]);
+  assert.deepEqual(findOrphans(join(root, "none"), []), []);
+});
+
+test("edge: a folder under .claude/worktrees that holds a tracked worktree deeper down is not an orphan", (t) => {
+  const root = tempRoot(t);
+  const deep = join(root, ".claude", "worktrees", "group", "issue-7-x");
+  mkdirSync(deep, { recursive: true });
+  writeFileSync(join(deep, "a.txt"), "x");
+  assert.deepEqual(findOrphans(root, [root, deep]), []);
+});
+
+test("edge: cleanupMerged saves each removed session's log under the loaded root and names it in the line", (t) => {
+  const root = tempRoot(t);
+  const inputs = { root, worktrees: [main], sessions: [session("s7", "issue-7-x", { status: "idle" })], prs: [merged("issue-7-x")] };
+  const run = (cmd, args) => (args[0] === "logs" ? "\x1b[31mblocked\x1b[0m: waiting\n" : "");
+  const lines = cleanupMerged({ deps: { load: () => inputs, run, stillThere: () => true } });
+  assert.deepEqual(lines, ["removed #7 session (PR #90): log saved to .lanes/logs/issue-7-s7.txt; claude rm s7"]);
+  assert.equal(readLog(root, "issue-7-s7.txt"), "blocked: waiting\n");
+});
+
+test("removeEmptyDir deletes a folder with no files and refuses one that holds files", (t) => {
+  const root = tempRoot(t);
+  mkdirSync(join(root, "empty", "sub"), { recursive: true });
+  mkdirSync(join(root, "full"));
+  writeFileSync(join(root, "full", "a.txt"), "x");
+  removeEmptyDir(join(root, "empty"));
+  assert.ok(!existsSync(join(root, "empty")));
+  assert.throws(() => removeEmptyDir(join(root, "full")), /has 1 file; left in place/);
+  assert.ok(existsSync(join(root, "full", "a.txt")));
+});
+
+test("edge: removeEmptyDir never deletes a file that appears after it counted none", (t) => {
+  const root = tempRoot(t);
+  mkdirSync(join(root, "late", "a", "b"), { recursive: true });
+  removeEmptyDir(join(root, "late"));
+  assert.ok(!existsSync(join(root, "late")));
+  const src = readFileSync(new URL("./cleanup.mjs", import.meta.url), "utf8");
+  const body = src.slice(src.indexOf("export function removeEmptyDir"), src.indexOf("export const LOG_LINES"));
+  assert.doesNotMatch(body, /rmSync\(/);
+  assert.match(body, /rmdirSync\(dir\)/);
 });
