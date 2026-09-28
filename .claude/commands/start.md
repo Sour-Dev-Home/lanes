@@ -21,7 +21,9 @@ commands on its own, never chained to the `start.mjs` run below, which the guard
    lanes and open PRs (as `--auto` does, ignoring `start.softPaths`) and anything past `start.maxLanes` lanes in flight (from
    `lanes.config.json`, 8 by default, at most 10), counting open `issue-*` PRs and running background sessions in
    `issue-<N>-` worktrees. It launches the rest from the repository root with `claude --bg --name lane-<N> "/lane <N>"`,
-   one attempt each.
+   one attempt each. An issue labelled `model:opus` launches with `--model opus` over its tier's model (use it for
+   security-critical parsing, guards and contracts the reviewers found hard); any other `model:*` label is ignored
+   and printed as `#N: ignored label model:<x>`.
 2. With `--auto`, run `node scripts/lanes/start.mjs --auto`. It is a dry run: it checks every ready issue the same
    way, picks the ones that overlap neither each other nor the files open PRs and running lanes touch (paths in
    `start.softPaths` never count), up to the cap, and prints `#<N>: would start` or `#<N>: skipped: <reason>` for each.
