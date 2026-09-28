@@ -769,9 +769,12 @@ const PS_SHELL_RE = /^(powershell|pwsh)$/i;
 // Commands that start their first argument as a program, or open it with its file association (node, for a .mjs):
 // each reads as node, with every string argument split into words, as Start-Process joins -ArgumentList.
 const PS_LAUNCH_RE = /^(start-process|saps|start|invoke-item|ii)$/i;
-// .NET, COM, script-block and alias routes to running code or a program that no word shows (an alias renames node or
-// claude): a command using any of them fails closed as a whole.
-const PS_OPAQUE_RE = /scriptblock|invokescript|invokecommand|add-type|process\]?::start|processstartinfo|diagnostics\.process|activator\]|comobject|set-alias|new-alias|\b(sal|nal)\b/i;
+// .NET, COM, script-block and alias-drive routes to running code or a program that no word shows: a command using any
+// of them fails closed as a whole.
+const PS_OPAQUE_RE = /scriptblock|invokescript|invokecommand|add-type|process\]?::start|processstartinfo|diagnostics\.process|activator\]|comobject|alias:/i;
+// Commands that rename a program (an alias for node or claude): as a command word, their statement fails closed. Only
+// the command word counts, so a word such as "sal" in a message or file name does not (#61 test-hunter round 2).
+const PS_ALIAS_RE = /^(set-alias|new-alias|sal|nal)$/i;
 // The names a PowerShell quote or backtick inside a string could hide from a Bash reading.
 const PS_NAMES_RE = /start\.mjs|queue\.mjs|post-review|--(?:bg|background)|claude/gi;
 const psDequoted = (s) => s.replace(/['"`‘-„]/g, "");
@@ -976,6 +979,7 @@ function psStatementText(stmt, extra, depth) {
     const shown = psNames(w.value);
     if ([...psNames(psDequoted(w.value))].some((n) => !shown.has(n))) extra.push(psOpaque(w.value));
   }
+  if (PS_ALIAS_RE.test(name)) extra.push(psOpaque(words.map((w) => w.value).join(" ")));
   if (runner || launch) {
     const args = words.slice(1);
     // What a runner runs, or a launcher starts, is only known at run time when any argument (or, for a runner,

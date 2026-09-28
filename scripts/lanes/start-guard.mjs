@@ -22,7 +22,7 @@
 //     approve-guard.mjs) and scanned as the Bash command with the same words, under the same grant rules; one that
 //     cannot be read is denied when it names start.mjs, queue.mjs or --bg. Raw-text checks drop quotes first, so a
 //     name split by quoting (st"art.mjs, --"bg") still reads whole. A jq program or gh --jq/--template value keeps its
-//     `$` literal, and a node -e script counts as a run only when it can load or launch code.
+//     `$` literal, and a node -e script that names a target counts as a run unless it is provably inert (inertScript).
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -438,19 +438,112 @@ function programWords(words) {
   return at;
 }
 
-// What a node -e script needs to load or launch other code (#61): a process, worker or module API, a dynamic import or
-// require, eval or Function, any use of a root that reaches them (process, global, globalThis, this, arguments, self,
-// module: a computed key such as `const {[k]: g} = process` spells no API name, #61 security review), a computed
-// member (`x[k]`), an escape that could spell a name, or an import of anything but a file-system, path, URL, OS or
-// util builtin. A script with none of these can only compute
-// and write text, so a string in it that names start.mjs, queue.mjs or claude --bg is no run.
-const JS_LAUNCH_RE = /child_process|worker_threads|\bspawn|\bexec|\bfork\b|getBuiltinModule|binding|dlopen|\bimport\s*\(|\brequire\b|\bWorker\b|\beval\b|\bFunction\b|\bReflect\b|\bconstructor\b|\bglobal(This)?\b|\bprocess\b|\bthis\b|\barguments\b|\bself\b|\bmodule\b|\bDeno\b|\bBun\b|\\[ux]|[\w)\]]\s*\[\s*[^\]\s\d]/;
-const JS_IMPORT_RE = /\b(?:from|import)\s*(["'])(.*?)\1/g;
+// A node -e script that names start.mjs, queue.mjs or claude --bg is a run unless it is provably inert (#61): an
+// allowlist, since any list of dangerous names is beaten by building them from strings ("constr" + "uctor", "proc" +
+// "ess", #61 security review round 2). Inert means: outside its string, template and regex literals and comments, every
+// name is a keyword or safe global below, or a name no global or module variable has (so it can only be the script's
+// own binding); every member read after `.` is one below; and there is no computed member or key (`x[k]`,
+// `{[k]: v}`), template substitution, backslash, non-ASCII character, dynamic import, or import of anything but a
+// file-system, path, URL, OS or util builtin. Such a script can only compute and read or write text.
 const SAFE_IMPORT_RE = /^(node:)?(fs|fs\/promises|path|url|os|util)$/;
-const launches = (js) => JS_LAUNCH_RE.test(js) || [...js.matchAll(JS_IMPORT_RE)].some((m) => !SAFE_IMPORT_RE.test(m[2]));
-// Read as written and with every comment turned into a space, so `import/*x*/(…)` still reads as a dynamic import (#61
-// test-hunter). Both readings count: a `//` inside a string would make the second one drop real code.
-const mayLaunch = (js) => launches(js) || launches(js.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, " "));
+const SAFE_JS_KEYWORDS = new Set(["const", "let", "var", "of", "in", "for", "if", "else", "return", "true", "false", "null", "typeof", "function", "while", "break", "continue", "do", "switch", "case", "default", "import", "from", "as"]);
+// Keywords after which a `/` starts a regex literal rather than a division.
+const JS_EXPRESSION_KEYWORDS = new Set(["return", "typeof", "case", "in", "of", "else", "do"]);
+const SAFE_JS_GLOBALS = new Set(["console", "JSON", "String", "Number", "Math", "parseInt", "undefined", "NaN"]);
+// Names that are no property of globalThis but still reach code: module-scope variables, and keywords not listed above.
+const UNSAFE_JS_NAMES = new Set(["require", "module", "exports", "__filename", "__dirname", "arguments", "this", "self", "super", "new", "class", "extends", "delete", "void", "yield", "async", "await", "with", "debugger", "export", "eval"]);
+const SAFE_JS_MEMBERS = new Set([
+  "log", "error", "warn", "info", "parse", "stringify", "readFileSync", "writeFileSync", "appendFileSync", "existsSync", "mkdirSync",
+  "readdirSync", "replace", "replaceAll", "split", "join", "trim", "trimEnd", "trimStart", "includes", "startsWith", "endsWith",
+  "slice", "substring", "indexOf", "lastIndexOf", "length", "map", "filter", "forEach", "find", "findIndex", "some", "every", "push",
+  "pop", "concat", "reverse", "sort", "toUpperCase", "toLowerCase", "match", "test", "padStart", "padEnd", "repeat", "at", "keys",
+  "values", "entries", "max", "min", "floor", "ceil", "round", "abs", "toFixed", "resolve", "dirname", "basename", "extname",
+  "relative", "normalize", "sep",
+]);
+
+/** True when a node -e script is inert as described above; false for anything it cannot read. */
+function inertScript(js) {
+  const src = js.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, "`").replaceAll(QUOTED_TICK, "`");
+  // The last token's kind ("id", "num", "str" or a punctuation character), the last name, and whether a `.` came before.
+  let prev = "";
+  let prevWord = "";
+  let afterDot = false;
+  const operandBefore = () => ["num", "str", ")", "]", "}"].includes(prev) || (prev === "id" && !JS_EXPRESSION_KEYWORDS.has(prevWord));
+  for (let i = 0; i < src.length; ) {
+    const c = src[i];
+    if (c.charCodeAt(0) > 126) return false;
+    if (/\s/.test(c)) {
+      i += 1;
+    } else if (src.startsWith("//", i)) {
+      const e = src.indexOf("\n", i);
+      i = e === -1 ? src.length : e;
+    } else if (src.startsWith("/*", i)) {
+      const e = src.indexOf("*/", i + 2);
+      if (e === -1) return false;
+      i = e + 2;
+    } else if ((afterDot && !/[A-Za-z_$]/.test(c)) || (prev === "id" && prevWord === "import" && (c === "(" || c === "."))) {
+      // A member that is no name (`x.#p`, `x?.[k]`), or a dynamic import or import.meta, comments between or not.
+      return false;
+    } else if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      for (; j < src.length && src[j] !== c; j += 1) {
+        if (src[j] === "\\") j += 1;
+        else if (c === "`" && src[j] === "$" && src[j + 1] === "{") return false;
+      }
+      if (j >= src.length) return false;
+      if (prev === "id" && (prevWord === "from" || prevWord === "import") && !SAFE_IMPORT_RE.test(src.slice(i + 1, j))) return false;
+      prev = "str";
+      i = j + 1;
+    } else if (c === "/" && !operandBefore()) {
+      // A regex literal: data, like a string.
+      let j = i + 1;
+      for (let inClass = false; j < src.length && (src[j] !== "/" || inClass); j += 1) {
+        if (src[j] === "\n") return false;
+        if (src[j] === "\\") j += 1;
+        else if (src[j] === "[") inClass = true;
+        else if (src[j] === "]") inClass = false;
+      }
+      if (j >= src.length) return false;
+      i = j + 1;
+      while (i < src.length && /\w/.test(src[i])) i += 1;
+      prev = "str";
+    } else if (/[A-Za-z_$]/.test(c)) {
+      let j = i;
+      while (j < src.length && /[\w$]/.test(src[j])) j += 1;
+      const word = src.slice(i, j);
+      if (afterDot) {
+        if (!SAFE_JS_MEMBERS.has(word)) return false;
+      } else if (!SAFE_JS_KEYWORDS.has(word) && !SAFE_JS_GLOBALS.has(word) && (UNSAFE_JS_NAMES.has(word) || word in globalThis)) {
+        return false;
+      }
+      prev = "id";
+      prevWord = word;
+      afterDot = false;
+      i = j;
+    } else if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(src[i + 1] ?? ""))) {
+      while (i < src.length && /[\w.]/.test(src[i])) i += 1;
+      prev = "num";
+    } else if (c === "." && src.startsWith("...", i)) {
+      prev = "...";
+      i += 3;
+    } else if (c === "." || (c === "?" && src[i + 1] === ".")) {
+      afterDot = true;
+      i += c === "." ? 1 : 2;
+    } else if (c === "\\" || (c === "[" && operandBefore())) {
+      // A backslash could spell a name; `x[k]` reads a member no name shows.
+      return false;
+    } else if (c === "]" && /^\s*:/.test(src.slice(i + 1))) {
+      // `{[k]: v}`: a computed key.
+      return false;
+    } else {
+      prev = c;
+      i += 1;
+    }
+  }
+  return !afterDot;
+}
+
+const mayLaunch = (js) => !inertScript(js);
 // A node -e script's text as names are looked for in it: quotes, `+` and whitespace dropped, so "st" + "art.mjs" reads whole.
 const jsNames = (js) => js.replace(new RegExp(`["'\`+\\s${LIT_TICK}]`, "g"), "");
 

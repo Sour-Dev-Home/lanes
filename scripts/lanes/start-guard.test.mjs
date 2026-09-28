@@ -1742,6 +1742,24 @@ test("#61 edge (security review): a private-use character no longer turns a comp
   }
 });
 
+test("#61 edge (test-hunter round 2): a PowerShell 7 `u{…} escape that spells a name is resolved, and a malformed one fails closed on a name", () => {
+  for (const c of ['node "scripts/lanes/`u{73}tart.mjs" 5', 'claude "--`u{62}g" x']) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+  // A malformed escape cannot be read; with a name beside it the command is held, without one it is left alone.
+  assert.equal(decideFor(ps('node scripts/lanes/start.mjs "`u{zz}"'), grant())?.decision, "deny");
+  assert.equal(decideFor(ps('git status "`u{zz}"'), grant()), null);
+});
+
+test("#61 edge (test-hunter round 2): each root object alone, with no computed key or API name, marks a node -e script as able to launch", () => {
+  // Each root is the only launch marker in its script: removing any one from JS_LAUNCH_RE lets its case through.
+  for (const root of ["process", "global", "globalThis", "this", "arguments", "self", "module"]) {
+    const c = `node -e "Object.values(${root}).map(f=>f('claude ${BG}'))"`;
+    assert.equal(decideFor(bash(c), grant())?.decision, "deny", c);
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+});
+
 test("#61 edge (security review): a node -e script reaching process, global, this or arguments by a computed key can launch", () => {
   for (const c of [
     `node -e "const k='getBuilt'+'inModule';const {[k]:g}=process;const m=g('node:child'+'_process');const {['spa'+'wnSync']:sp}=m;sp('node',['scripts/lanes/start.mjs','5'])"`,
@@ -1750,6 +1768,51 @@ test("#61 edge (security review): a node -e script reaching process, global, thi
     `node -e "this[k].x('claude ${BG}')"`,
   ]) {
     assert.equal(decideFor(bash(c), grant())?.decision, "deny", c);
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+});
+
+test("#61 edge (security review round 2): a node -e script that builds API names from strings is not inert", () => {
+  const reflect = `var G=Object.getOwnPropertyDescriptor; var F=G(Object.getPrototypeOf(()=>{}),"constr"+"uctor").value; var m=F("return proc"+"ess.getBuiltin"+"Module(\\"child_\\"+\\"proc\\"+\\"ess\\")")(); G(m,"spa"+"wnSync").value`;
+  for (const [target, reason] of [["scripts/lanes/start.mjs", DENY_REASON], ["scripts/lanes/queue.mjs", QUEUE_DENY_REASON]]) {
+    const c = `node -e '${reflect}("node",["${target}"])'`;
+    assert.deepEqual(decideFor(bash(c), grant()), { decision: "deny", reason }, c);
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+  assert.deepEqual(decideFor(bash(`node -e '${reflect}("claude",["${BG}"])'`), grant()), { decision: "deny", reason: BG_DENY_REASON });
+  // Each shape the allowlist refuses, alone.
+  for (const js of [
+    `const x = {}; x.constructor("claude ${BG}")`,
+    `const k = "a"; const o = {}; o[k]("claude ${BG}")`,
+    `const {[k]: f} = {}; f("claude ${BG}")`,
+    `const f = \`\${"claude ${BG}"}\``,
+    `const s = "claude ${BG}"; setTimeout(s)`,
+    `const x = new Date(); "claude ${BG}"`,
+    `const s = "claude ${BG}"; s.call()`,
+    `const c\\u0061ll = 1; "claude ${BG}"`,
+    `import("node:fs"); "claude ${BG}"`,
+    `import m from "node:vm"; "claude ${BG}"`,
+    `x = {} / process.exit() / 1; "claude ${BG}"`,
+    `"claude ${BG}"; const p = globalThis`,
+  ]) {
+    assert.deepEqual(decideFor(bash(`node --input-type=module -e '${js}'`), grant()), { decision: "deny", reason: BG_DENY_REASON }, js);
+  }
+});
+
+test("#61 edge (security review round 2): inert node -e scripts that name a target still get no decision", () => {
+  for (const js of [
+    `import { readFileSync, writeFileSync } from "node:fs"; const f = "b.md"; writeFileSync(f, readFileSync(f, "utf8").replace(/old \\/ x/g, "claude ${BG}").trim())`,
+    `import path from "node:path"; console.log(path.join("scripts", "lanes", "start.mjs"), JSON.stringify({ a: [1, 2], b: "claude ${BG}" }))`,
+    `const lines = ["queue.mjs", "start.mjs"].map((l) => l.toUpperCase()); console.log(lines.length / 2, lines)`,
+    `// claude ${BG}\nconsole.log(Math.max(1, 2) > 1 ? "start.mjs" : "queue.mjs")`,
+  ]) {
+    assert.equal(decideFor(bash(`node --input-type=module -e '${js}'`)), null, js);
+  }
+});
+
+test("#61 edge (test-hunter round 2): only an alias command word fails closed, not the word sal in text", () => {
+  for (const c of ["git commit -m 'add sal column'", "Get-Content sal.txt", "Write-Output nal"]) assert.equal(decideFor(ps(c)), null, c);
+  for (const c of ["sal n node; n scripts/lanes/start.mjs 5", "& 'Set-Alias' c claude; c --bg", "Set-Item alias:n node; n scripts/lanes/start.mjs 5", "nal c claude"]) {
     assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
   }
 });
