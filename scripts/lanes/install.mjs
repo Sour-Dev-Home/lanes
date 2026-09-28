@@ -50,6 +50,9 @@ export const MANIFEST = [
   "scripts/lanes/status.mjs",
   "scripts/lanes/setup-repo.mjs",
   "scripts/lanes/delivery-metrics.mjs",
+  "scripts/lanes/approve-guard.mjs",
+  "scripts/lanes/start-guard.mjs",
+  "scripts/lanes/notify-hook.mjs",
   "docs/USING.md",
 ];
 

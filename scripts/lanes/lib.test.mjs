@@ -93,6 +93,8 @@ const OWNER_SAMPLES = {
   "^scripts/lanes/(gate|lib|approve-guard|post-review|issue-contract)(\\.test)?\\.mjs$": ["scripts/lanes/approve-guard.test.mjs", "scripts/lanes/gatekeeper.mjs"],
   "^scripts/lanes/gate-decision\\.test\\.mjs$": ["scripts/lanes/gate-decision.test.mjs", "scripts/lanes/gate-decision.mjs"],
   "^scripts/lanes/workflow\\.test\\.mjs$": ["scripts/lanes/workflow.test.mjs", "scripts/lanes/workflow.mjs"],
+  "^scripts/lanes/contracts\\.test\\.mjs$": ["scripts/lanes/contracts.test.mjs", "scripts/lanes/contracts.test.mjs.bak"],
+  "^scripts/lanes/start-guard(\\.test)?\\.mjs$": ["scripts/lanes/start-guard.test.mjs", "scripts/lanes/start-guards.mjs"],
   "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$": ["scripts/lanes/setup-repo.mjs", "scripts/lanes/new-project-x.mjs"],
   "^\\.claude/settings\\.json$": [".claude/settings.json", ".claude/settings.local.json"],
   "^\\.github/": [".github/workflows/verify.yml", "docs/github/x.md"],
@@ -126,6 +128,34 @@ test("every regex in lanes.config.json paths.owner matches its sample and not it
     assert.equal(classifyFiles([sample], real).owner, true, sample);
     assert.equal(classifyFiles([nearMiss], real).owner, false, nearMiss);
   }
+});
+
+test("the real config: start-guard.mjs and contracts.test.mjs are owner-only, reviewers.mjs is not (ADR 0003)", () => {
+  const real = loadConfig();
+  for (const file of ["scripts/lanes/contracts.test.mjs", "scripts/lanes/start-guard.mjs", "scripts/lanes/start-guard.test.mjs"]) {
+    assert.equal(classifyFiles([file], real).owner, true, file);
+  }
+  for (const file of [
+    "scripts/lanes/reviewers.mjs",
+    "scripts/lanes/reviewers.test.mjs",
+    "scripts/lanes/contracts.mjs",
+    "scripts/lanes/start-guard.mjs.orig",
+    "scripts/lanes/start.mjs",
+    // edge: the new regexes are anchored to scripts/lanes/ exactly, not any nested directory under it.
+    "scripts/lanes/sub/contracts.test.mjs",
+    "scripts/lanes/sub/start-guard.mjs",
+  ]) {
+    assert.equal(classifyFiles([file], real).owner, false, file);
+  }
+});
+
+test("ADR 0003 is accepted, parses, and governs lanes.config.json", () => {
+  const adr = parseAdr(readFileSync("docs/adr/0003-owner-only-amendment.md", "utf8"));
+  assert.equal(adr.error, undefined, adr.error);
+  assert.equal(adr.number, 3);
+  assert.equal(adr.status, "accepted");
+  assert.deepEqual(adr.governs, ["lanes.config.json"]);
+  assert.ok(adrGoverns(loadAdrs(), "lanes.config.json").includes(3));
 });
 
 test("the real config: tooling scripts and non-lane commands are sensitive but not owner-only", () => {

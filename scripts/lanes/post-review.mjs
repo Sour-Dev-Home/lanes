@@ -3,7 +3,8 @@
 // A reviewer's success or failure is a JSON verdict (the reviewer contract), validated first:
 //   node scripts/lanes/post-review.mjs --file .lanes/verdicts/test-hunter.json [--pr N]
 // Free text only for the owner's approval and for a reviewer the tier does not need:
-//   node scripts/lanes/post-review.mjs owner success "approved by owner" --pr N   (asks for permission)
+//   node scripts/lanes/post-review.mjs owner success "approved by owner" --pr N
+//     (the approve guard allows this only from /approve <N>)
 //   node scripts/lanes/post-review.mjs ui-reviewer skipped "no visible change"
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";

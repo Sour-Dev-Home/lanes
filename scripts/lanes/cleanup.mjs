@@ -40,11 +40,15 @@ function mergedPr(prs, head) {
   return exact ? { pr: exact.number } : { skip: "local commits after the merged head" };
 }
 
+// `status` says whether a session is running now; `state` can keep saying "working" after it stopped (#83). A session
+// with no status, or one this script does not know, falls back to its state.
+const stillWorking = (s) => (s.status === "idle" ? false : s.status === "busy" ? true : s.state === "working");
+
 // One entry per `issue-<N>-…` local branch, plus one per session whose worktree and branch are already gone:
 // `{ branch, issue, pr, steps }` to clean, or `{ branch, issue, skip }` with the reason not to.
 //   worktrees: local branches, each `{ path, branch, head, dirty, main }`; path null for a branch with no worktree,
 //              dirty null when its status could not be read. Non-lane worktrees are passed too, to place sessions.
-//   sessions:  background sessions in this repo, `{ id, cwd, issue, state }` (issue from an `issue-<N>-…` folder).
+//   sessions:  background sessions in this repo, `{ id, cwd, issue, status, state }` (issue from an `issue-<N>-…` folder).
 //   prs:       `{ number, state, headRefName, headRefOid }`.
 // A lane is cleaned only when its PR merged at exactly the local branch tip (squash merges are not ancestors, so
 // that equality is what makes `git branch -D` safe), and its worktree is clean.
@@ -75,7 +79,7 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [] } = {}) {
     else if (w.main) plan.push({ ...entry, skip: "checked out in the main worktree" });
     else if (w.dirty === null) plan.push({ ...entry, skip: "cannot read worktree status" });
     else if (w.dirty) plan.push({ ...entry, skip: "dirty worktree" });
-    else if (sessionsHere.some((s) => s.state === "working")) plan.push({ ...entry, skip: "session still working" });
+    else if (sessionsHere.some(stillWorking)) plan.push({ ...entry, skip: "session still working" });
     else {
       const steps = [];
       for (const s of sessionsHere) steps.push({ cmd: "claude", args: ["rm", s.id] });
@@ -91,7 +95,7 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [] } = {}) {
     const entry = { branch: null, issue: s.issue };
     const merge = mergedPr(prs.filter((p) => Number(LANE_BRANCH.exec(p.headRefName ?? "")?.[1]) === s.issue));
     if (merge.skip) plan.push({ ...entry, skip: merge.skip });
-    else if (s.state === "working") plan.push({ ...entry, skip: "session still working" });
+    else if (stillWorking(s)) plan.push({ ...entry, skip: "session still working" });
     else plan.push({ ...entry, pr: merge.pr, steps: [{ cmd: "claude", args: ["rm", s.id] }] });
   }
   return plan;
@@ -159,16 +163,21 @@ export function loadCleanupInputs(root = repoRoot()) {
     if (LANE_BRANCH.test(branch ?? "") && !onBranch.has(branch)) worktrees.push({ path: null, branch, head, dirty: false, main: false });
   }
   const prs = JSON.parse(sh("gh", ["pr", "list", "--state", "all", "--limit", String(PR_LIMIT), "--json", "number,state,headRefName,headRefOid"]));
+  return { worktrees, sessions: sessionsFrom(JSON.parse(sh("claude", ["agents", "--json"])), root), prs };
+}
+
+// The background sessions under `root` from `claude agents --json`, as planCleanup's `sessions`.
+export function sessionsFrom(agents, root) {
   const top = `${normalPath(root)}/`;
   const sessions = [];
-  for (const a of JSON.parse(sh("claude", ["agents", "--json"]))) {
+  for (const a of agents) {
     if (a?.kind !== "background" || typeof a.id !== "string" || typeof a.cwd !== "string") continue;
     const cwd = normalPath(a.cwd);
     if (!cwd.startsWith(top)) continue;
     const issue = Number(cwd.slice(top.length).split("/").map((s) => LANE_BRANCH.exec(s)?.[1]).find(Boolean)) || null;
-    sessions.push({ id: a.id, cwd: a.cwd, issue, state: a.state });
+    sessions.push({ id: a.id, cwd: a.cwd, issue, status: a.status, state: a.state });
   }
-  return { worktrees, sessions, prs };
+  return sessions;
 }
 
 const branchExists = (branch) => {
