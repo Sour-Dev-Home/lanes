@@ -583,6 +583,16 @@ test("plan-issues.md step 5 greps the existing tests for strings the draft chang
   assert.match(step, /add each test that pins one to Scope/);
 });
 
+// edge: the test grep is unconditional, so it must not sit inside the module-map-only skip clause.
+test("plan-issues.md step 5 test grep is unconditional, not gated on a module map", () => {
+  const step = draftStep();
+  assert.match(step, /Always grep the existing tests/);
+  assert.ok(
+    step.indexOf("Always grep the existing tests") > step.indexOf("With no `modules` key, skip this."),
+    "the test grep must come after the module-map skip clause so `skip this` cannot swallow it",
+  );
+});
+
 test("plan-issues.md steps are numbered 1..N without gaps or repeats", () => {
   const steps = [...planIssues().matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
   assert.ok(steps.length > 0);
