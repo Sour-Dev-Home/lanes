@@ -1276,6 +1276,12 @@ test("the session-id pattern is written out once across cleanup.mjs and reap.mjs
   assert.equal(count("./reap.mjs"), 0);
 });
 
+// CLAIMED is built from SESSION_ID.source with its anchors sliced off, which only works for this plain form.
+test("edge: SESSION_ID stays a plain anchored pattern with no flags, so CLAIMED can be built from its source", () => {
+  assert.equal(SESSION_ID.flags, "");
+  assert.match(SESSION_ID.source, /^\^[^|^$]*\$$/);
+});
+
 test("the CLAIMED capture takes the claimant id by SESSION_ID: a valid id is captured, a flag-like one is not", () => {
   const plan = () => [{ branch: "issue-7-x", issue: 7, pr: 90, steps: [{ cmd: "claude", args: ["rm", "s7"] }] }];
   for (const [claimant, expected] of [["x9", "claude rm x9"], ["-x9", undefined]]) {
@@ -1329,8 +1335,13 @@ test("no execFileSync, spawnSync or spawn call in cleanup.mjs or reap.mjs runs w
   for (const file of ["./cleanup.mjs", "./reap.mjs"]) {
     const calls = processCalls(readFileSync(new URL(file, import.meta.url), "utf8"));
     assert.ok(calls.length >= 1, `${file} has process calls`);
-    for (const call of calls) assert.match(call, /windowsHide: true|shOptions\(|runOptions\(/, `${file}: ${call.slice(0, 80)}`);
+    for (const call of calls) assert.match(call, /windowsHide: true|,\s*(shOptions|runOptions)\([^()]*\)\s*\)$/, `${file}: ${call.slice(0, 80)}`);
   }
+});
+
+test("edge: the sh runner the default deps use builds its execFileSync options through shOptions", () => {
+  const source = readFileSync(new URL("./cleanup.mjs", import.meta.url), "utf8");
+  assert.match(source, /const sh = \(cmd, args, opts\) => execFileSync\(cmd, args, shOptions\(opts\)\);/);
 });
 
 test("edge: the call scanner flags a call left without windowsHide", () => {

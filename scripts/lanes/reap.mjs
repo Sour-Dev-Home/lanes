@@ -52,7 +52,7 @@ const time = (v, name) => {
  * @param {"OPEN"|"CLOSED"|null} input.issueState the issue's state; null or undefined when it could not be read
  * @param {{ number: number, state: "OPEN"|"MERGED"|"CLOSED", headRefName: string }[] | null} input.prs PRs to look
  *   through (any others than `issue-<issue>-*` heads are ignored); null or undefined when they could not be read
- * @param {{ id: string, cwd?: string, status?: string, state?: string }[] | null} input.sessions background sessions
+ * @param {{ id?: string, cwd?: string, status?: string, state?: string }[] | null} input.sessions background sessions
  *   (`claude agents --json` entries or cleanup.mjs's `sessionsFrom`); null or undefined when they could not be read
  * @param {number|Date} input.startedAt when the reaper started
  * @param {number|Date} input.now this poll's time
