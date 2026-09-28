@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { cleanableCount, formatStep, parseWorktrees, pidRunning, planCleanup, render, runCleanup, sessionsFrom } from "./cleanup.mjs";
+import {
+  cleanableCount, cleanupMerged, formatStep, parseWorktrees, pidRunning, planCleanup, render, runCleanup, sessionEnded, sessionsFrom,
+} from "./cleanup.mjs";
 
 const ROOT = "C:/repo";
 const HEAD = "a".repeat(40);
@@ -386,6 +388,130 @@ test("edge: pidRunning treats EPERM (a pid owned by someone else) as running, no
   } finally {
     process.kill = original;
   }
+});
+
+// A `run` whose `claude rm <id>` refuses while another session claims the worktree, until that session is removed.
+const CLAIM = (x) => Object.assign(new Error("exit 1"), { stderr: `Error: Another running background session (${x}) claims this worktree.\n` });
+function claimedRun(claimant) {
+  const ran = [];
+  const run = (cmd, args) => {
+    const line = `${cmd} ${args.join(" ")}`;
+    if (line === "claude rm s7" && !ran.includes(`claude rm ${claimant}`)) throw CLAIM(claimant);
+    ran.push(line);
+  };
+  return { run, ran };
+}
+const claimedPlan = () =>
+  planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x")], prs: [merged("issue-7-x")] });
+
+test("a stale second session claiming the worktree is removed, then claude rm is retried once and the lane cleaned", () => {
+  const { run, ran } = claimedRun("x9");
+  const asked = [];
+  const sessionEnded = (id) => (asked.push(id), true);
+  const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded });
+  assert.deepEqual(asked, ["x9"]);
+  assert.deepEqual(ran, ["claude rm x9", "claude rm s7", `git worktree remove ${ROOT}/.claude/worktrees/issue-7-x`, "git branch -D issue-7-x"]);
+  assert.equal(r.status, "removed");
+});
+
+test("a still-running session claiming the worktree is reported and never stopped", () => {
+  const { run, ran } = claimedRun("x9");
+  const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded: () => false });
+  assert.deepEqual(ran, []);
+  assert.equal(r.status, "failed");
+  assert.equal(r.failedStep, "claude rm s7");
+  assert.match(r.error, /claims this worktree\. \(session x9 is still running; it was not stopped\)$/);
+});
+
+test("edge: claude rm is retried only once; a second refusal is reported as it is", () => {
+  const ran = [];
+  const run = (cmd, args) => {
+    const line = `${cmd} ${args.join(" ")}`;
+    if (line === "claude rm s7") throw CLAIM(ran.length === 0 ? "x9" : "x10");
+    ran.push(line);
+  };
+  const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded: () => true });
+  assert.deepEqual(ran, ["claude rm x9"]);
+  assert.equal(r.status, "failed");
+  assert.match(r.error, /\(x10\) claims this worktree/);
+});
+
+test("edge: a claimant that is also listed in the worktree is not removed a second time by its own step", () => {
+  const plan = planCleanup({
+    worktrees: [wt("issue-7-x")],
+    sessions: [session("s7", "issue-7-x"), session("x9", "issue-7-x")],
+    prs: [merged("issue-7-x")],
+  });
+  const { run, ran } = claimedRun("x9");
+  const [r] = runCleanup(plan, { run, stillThere: () => true, sessionEnded: () => true });
+  assert.deepEqual(ran.filter((l) => l === "claude rm x9"), ["claude rm x9"]);
+  assert.equal(r.status, "removed");
+});
+
+test("edge: a claimant that fails to be removed stops the lane at that step", () => {
+  const run = (cmd, args) => {
+    if (args[1] === "x9") throw Object.assign(new Error("exit 1"), { stderr: "Error: cannot remove x9" });
+    if (args[1] === "s7") throw CLAIM("x9");
+  };
+  const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded: () => true });
+  assert.equal(r.failedStep, "claude rm x9");
+  assert.equal(r.error, "Error: cannot remove x9");
+});
+
+test("edge: a claim refusal is left as it is without sessionEnded, or on a step other than claude rm", () => {
+  const { run } = claimedRun("x9");
+  const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true });
+  assert.match(r.error, /claims this worktree\.$/);
+  const plan = planCleanup({ worktrees: [wt("issue-7-x")], prs: [merged("issue-7-x")] });
+  const asked = [];
+  const run2 = (cmd, args) => {
+    if (args[1] === "remove") throw CLAIM("x9");
+  };
+  runCleanup(plan, { run: run2, stillThere: () => true, sessionEnded: (id) => (asked.push(id), true) });
+  assert.deepEqual(asked, []);
+});
+
+test("edge: a claimant id that is not a plain session id is never passed to claude", () => {
+  for (const bad of ["-rf", "a b", "x;y"]) {
+    const asked = [];
+    const run = (cmd, args) => {
+      if (args[1] === "s7") throw CLAIM(bad);
+    };
+    const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded: (id) => (asked.push(id), true) });
+    assert.deepEqual(asked, [], bad);
+    assert.equal(r.status, "failed");
+  }
+});
+
+test("sessionEnded: ended when its pid is not running, or claude logs finds no job; running otherwise", () => {
+  const noJob = () => {
+    throw Object.assign(new Error("exit 1"), { stderr: "No job matching 'x9'. Run 'claude agents' to list running sessions." });
+  };
+  const logsOk = () => "recent output";
+  const sessions = [{ id: "x9", pid: 41 }];
+  assert.equal(sessionEnded("x9", { sessions, run: logsOk, isRunning: () => false }), true);
+  assert.equal(sessionEnded("x9", { sessions, run: logsOk, isRunning: () => true }), false);
+  assert.equal(sessionEnded("x9", { sessions: [], run: noJob }), true);
+  assert.equal(sessionEnded("x9", { sessions: [], run: () => { throw Object.assign(new Error("x"), { stderr: "Error: job not found" }); } }), true);
+  assert.equal(sessionEnded("x9", { sessions: [], run: logsOk }), false);
+});
+
+test("edge: sessionEnded treats any other claude logs failure as still running", () => {
+  const timeout = () => { throw Object.assign(new Error("spawnSync claude ETIMEDOUT"), { stderr: "" }); };
+  assert.equal(sessionEnded("x9", { sessions: [], run: timeout }), false);
+  assert.equal(sessionEnded("x9", { sessions: [{ id: "x9" }], run: timeout }), false);
+});
+
+test("edge: sessionsFrom keeps each session's pid", () => {
+  const agents = [{ kind: "background", id: "s7", cwd: `${ROOT}/.claude/worktrees/issue-7-x`, pid: 41, status: "idle" }];
+  assert.equal(sessionsFrom(agents, ROOT)[0].pid, 41);
+});
+
+test("cleanupMerged retries a claimed claude rm with a sessionEnded dep, and reports a live claimant as failed", () => {
+  const inputs = { worktrees: [main, wt("issue-7-x")], sessions: [session("s7", "issue-7-x")], prs: [merged("issue-7-x")] };
+  const { run } = claimedRun("x9");
+  const lines = cleanupMerged({ deps: { load: () => inputs, run, stillThere: () => true, sessionEnded: () => false } });
+  assert.match(lines[0], /^failed issue-7-x \(PR #90\) at claude rm s7: .*session x9 is still running/);
 });
 
 test("/health runs cleanup.mjs and states it as its one exception; /status only shows output and runs nothing", async () => {

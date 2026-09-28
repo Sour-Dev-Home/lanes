@@ -125,26 +125,51 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [] } = {}) {
 
 export const cleanableCount = (plan) => plan.filter((e) => e.steps).length;
 
+// `claude rm` refuses while another session's entry claims the same worktree; the claimant id is plain, never a flag.
+const CLAIMED = /Another running background session \(([A-Za-z0-9][A-Za-z0-9_-]*)\) claims this worktree/;
+const isRm = (step) => step.cmd === "claude" && step.args[0] === "rm";
+
 // Runs each lane's steps in order; a failed step skips that lane's later steps, and other lanes continue.
-// `run(cmd, args)` throws on failure; `stillThere(onlyIf)` says whether a step's target still exists.
-export function runCleanup(plan, { run, stillThere, dryRun = false }) {
+// `run(cmd, args)` throws on failure; `stillThere(onlyIf)` says whether a step's target still exists;
+// `sessionEnded(id)`, when given, says whether a session claiming the worktree has ended: an ended claimant is
+// removed and the refused `claude rm` retried once, and a running one is reported, never stopped.
+export function runCleanup(plan, { run, stillThere, sessionEnded, dryRun = false }) {
   return plan.map((entry) => {
     const base = { branch: entry.branch, issue: entry.issue, pr: entry.pr };
     if (entry.skip) return { ...base, status: "skipped", skip: entry.skip };
     if (dryRun) return { ...base, status: "planned", ran: entry.steps.map(formatStep) };
     const ran = [];
+    const fail = (step, error) => ({ ...base, status: "failed", ran, failedStep: formatStep(step), error });
     for (const step of entry.steps) {
       if (step.onlyIf && !stillThere(step.onlyIf)) continue;
+      // A claimant cleared below may be one of this worktree's own sessions; it is gone already.
+      if (isRm(step) && ran.includes(formatStep(step))) continue;
       try {
         run(step.cmd, step.args);
       } catch (err) {
-        return { ...base, status: "failed", ran, failedStep: formatStep(step), error: errorText(err, step) };
+        const claimant = isRm(step) && sessionEnded ? CLAIMED.exec(errorOutput(err))?.[1] : undefined;
+        if (!claimant) return fail(step, errorText(err, step));
+        if (!sessionEnded(claimant)) return fail(step, `${errorText(err, step)} (session ${claimant} is still running; it was not stopped)`);
+        const clear = { cmd: "claude", args: ["rm", claimant] };
+        try {
+          run(clear.cmd, clear.args);
+        } catch (clearErr) {
+          return fail(clear, errorText(clearErr, clear));
+        }
+        ran.push(formatStep(clear));
+        try {
+          run(step.cmd, step.args);
+        } catch (retryErr) {
+          return fail(step, errorText(retryErr, step));
+        }
       }
       ran.push(formatStep(step));
     }
     return { ...base, status: "removed", ran };
   });
 }
+
+const errorOutput = (err) => `${err.stderr ?? ""}\n${err.stdout ?? ""}\n${err.message ?? ""}`;
 
 // Windows refuses to delete a worktree while any process has a file in it open.
 const OPEN_FILES_HINT = "(a process still has files open in the worktree; close it and re-run)";
@@ -208,9 +233,28 @@ export function sessionsFrom(agents, root) {
     const cwd = normalPath(a.cwd);
     if (!cwd.startsWith(top)) continue;
     const issue = Number(cwd.slice(top.length).split("/").map((s) => LANE_BRANCH.exec(s)?.[1]).find(Boolean)) || null;
-    sessions.push({ id: a.id, cwd: a.cwd, issue, status: a.status, state: a.state });
+    const session = { id: a.id, cwd: a.cwd, issue, status: a.status, state: a.state };
+    sessions.push(Number.isInteger(a.pid) ? { ...session, pid: a.pid } : session);
   }
   return sessions;
+}
+
+const NO_JOB = /job not found|no job matching/i;
+
+/**
+ * Whether session `id` has ended: its pid (from `sessions`) is not running, or `claude logs <id>` finds no job. Any
+ * other answer, a logs failure included, counts as still running.
+ * @param {string} id
+ * @param {{ sessions?: { id: string, pid?: number }[], run: Function, isRunning?: (pid: number) => boolean }} deps
+ */
+export function sessionEnded(id, { sessions = [], run, isRunning = pidRunning }) {
+  const pid = sessions.find((s) => s.id === id)?.pid;
+  if (Number.isInteger(pid) && pid > 0 && !isRunning(pid)) return true;
+  try {
+    return NO_JOB.test(String(run("claude", ["logs", id]) ?? ""));
+  } catch (err) {
+    return NO_JOB.test(String(err.stderr ?? "")) || NO_JOB.test(String(err.stdout ?? ""));
+  }
 }
 
 const branchExists = (branch) => {
@@ -231,13 +275,16 @@ const DEFAULT_DEPS = {
 /**
  * Removes every merged lane (or, with `dryRun`, only plans it) and returns render's lines, one per lane or
  * `["no lanes to clean up"]`; a failed step's line starts with `failed `. Throws when the inputs cannot be read.
- * `deps` holds fakes in tests: `load()` returns planCleanup's inputs, and `run` and `stillThere` are runCleanup's.
- * @param {{ dryRun?: boolean, deps?: { load?: Function, run?: Function, stillThere?: Function } }} [options]
+ * `deps` holds fakes in tests: `load()` returns planCleanup's inputs, and `run`, `stillThere` and `sessionEnded` are
+ * runCleanup's (`sessionEnded` defaults to the exported one, over the loaded sessions and `run`).
+ * @param {{ dryRun?: boolean, deps?: { load?: Function, run?: Function, stillThere?: Function, sessionEnded?: Function } }} [options]
  * @returns {string[]}
  */
 export function cleanupMerged({ dryRun = false, deps = {} } = {}) {
-  const { load, run, stillThere } = { ...DEFAULT_DEPS, ...deps };
-  return render(runCleanup(planCleanup(load()), { dryRun, run, stillThere })).split("\n");
+  const { load, run, stillThere, sessionEnded: ended } = { ...DEFAULT_DEPS, ...deps };
+  const inputs = load();
+  const isEnded = ended ?? ((id) => sessionEnded(id, { sessions: inputs.sessions, run }));
+  return render(runCleanup(planCleanup(inputs), { dryRun, run, stillThere, sessionEnded: isEnded })).split("\n");
 }
 
 function main(argv = process.argv.slice(2)) {
