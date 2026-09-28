@@ -1,6 +1,6 @@
 // Pre-push preflight: run `npm run preflight` before every push. It catches, locally and in about a second, the
 // things that otherwise cost a CI round or a review round:
-//   1. the PR for this branch is still OPEN and not CONFLICTING (a merged PR must not be pushed to; branch fresh from main);
+//   1. the PR for this branch is still OPEN and not CONFLICTING unless origin/main is already merged into HEAD (a merged PR must not be pushed to; branch fresh from main);
 //   2. the diff against origin/main (committed and uncommitted) and the commit messages hold no local absolute path
 //      (a Windows, Linux or macOS user-profile path: see PATH_PATTERNS) and none of the identifiers listed in PREFLIGHT_PATTERNS_FILE (an optional,
 //      git-ignored file, one fixed string per line; the real list lives in CI's PII_PATTERNS secret, not here).
@@ -150,14 +150,15 @@ export function scanMessages(message, patterns) {
 
 /**
  * @param {{ state: string; mergeable: string } | undefined} pr `gh pr view --json state,mergeable`, undefined when the branch has no PR
+ * @param {boolean} [mainMerged] whether `origin/main` is already an ancestor of HEAD: GitHub keeps reporting CONFLICTING until the resolving merge is pushed, so a locally resolved conflict must not block that push
  * @returns {string[]} problems
  */
-export function checkPr(pr) {
+export function checkPr(pr, mainMerged = false) {
   if (pr === undefined) return [];
   const problems = [];
   if (pr.state !== "OPEN") {
     problems.push(`The PR for this branch is ${pr.state}, not OPEN: do not push to it. Branch fresh from origin/main.`);
-  } else if (pr.mergeable === "CONFLICTING") {
+  } else if (pr.mergeable === "CONFLICTING" && !mainMerged) {
     problems.push("The PR is CONFLICTING with main: rebase or merge origin/main and resolve it before pushing.");
   }
   return problems;
@@ -188,6 +189,16 @@ function hasOriginMain() {
   }
 }
 
+/** @returns {boolean} whether `origin/main` is an ancestor of HEAD (false when it is not, never throws) */
+function isMainMerged() {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", "origin/main", "HEAD"], { stdio: ["ignore", "ignore", "ignore"] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** @returns {{ pr?: { state: string; mergeable: string }; problem?: string }} only "no pull requests found" means "no PR"; any other gh failure is a problem */
 function prForBranch() {
   try {
@@ -210,7 +221,7 @@ function runChecks() {
   if (originMain) {
     const { pr, problem } = prForBranch();
     if (problem) problems.push(problem);
-    problems.push(...checkPr(pr));
+    problems.push(...checkPr(pr, isMainMerged()));
   } else {
     console.log("preflight: no origin/main yet: scanning all tracked files; PR checks skipped");
   }

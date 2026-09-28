@@ -242,3 +242,16 @@ test("a PR that is not OPEN blocks the push; a CONFLICTING one too; a clean one 
   assert.deepEqual(checkPr({ state: "OPEN", mergeable: "UNKNOWN" }), []);
   assert.deepEqual(checkPr(undefined), []);
 });
+
+test("a CONFLICTING PR does not block the push once origin/main is already merged into HEAD", () => {
+  assert.deepEqual(checkPr({ state: "OPEN", mergeable: "CONFLICTING" }, true), []);
+});
+
+test("a CONFLICTING PR still blocks when origin/main is not an ancestor of HEAD", () => {
+  assert.match(checkPr({ state: "OPEN", mergeable: "CONFLICTING" }, false)[0], /CONFLICTING/);
+  assert.match(checkPr({ state: "OPEN", mergeable: "CONFLICTING" })[0], /CONFLICTING/);
+});
+
+test("edge: a resolved conflict never excuses a PR that is not OPEN", () => {
+  assert.match(checkPr({ state: "MERGED", mergeable: "CONFLICTING" }, true)[0], /MERGED/);
+});
