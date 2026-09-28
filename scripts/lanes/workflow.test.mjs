@@ -788,3 +788,15 @@ test("health.md step 8 hands the same advisor spawn the week's merged files with
   assert.match(s, /same spawn as the structural report/);
   assert.match(s, /not a second subagent/);
 });
+
+// #282: the worktree starts on its issue-N branch; EnterWorktree with `name` would make worktree-<name> and force a rename
+test("lane.md step 3 creates the worktree with git worktree add -b issue-$ARGUMENTS- and enters it by EnterWorktree path", () => {
+  const step3 = laneStep(3);
+  assert.ok(step3.includes("git worktree add -b issue-$ARGUMENTS-<short-slug> .claude/worktrees/issue-$ARGUMENTS-<short-slug> origin/main"));
+  assert.match(step3, /EnterWorktree tool's `path` parameter/);
+  assert.doesNotMatch(step3, /EnterWorktree tool when available/);
+});
+
+test("lane.md step 3 never tells the lane to rename a branch", () => {
+  assert.doesNotMatch(laneStep(3), /git branch -m|rename/i);
+});

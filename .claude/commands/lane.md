@@ -18,8 +18,10 @@ path, command or CI output, secret, token or personal data (point to the PR or i
 2. Run `node scripts/lanes/blockers.mjs $ARGUMENTS`, and stop and report its line on any non-zero exit (1: a
    blocker is open; 2: the blockers cannot be checked, which also stops the lane). A refusal in
    step 1 or 2 notifies `lanes #$ARGUMENTS: cannot start: <reason>`.
-3. `git fetch origin`, then work in a new worktree on branch `issue-$ARGUMENTS-<short-slug>` from `origin/main`
-   (use the EnterWorktree tool when available, otherwise `git worktree add`). Run `npm run setup` in it.
+3. `git fetch origin`, then create the worktree on branch `issue-$ARGUMENTS-<short-slug>` from `origin/main` with
+   `git worktree add -b issue-$ARGUMENTS-<short-slug> .claude/worktrees/issue-$ARGUMENTS-<short-slug> origin/main`,
+   and enter it with the EnterWorktree tool's `path` parameter when available (otherwise `cd` into it). Do not call
+   EnterWorktree with `name`: it creates a `worktree-<name>` branch. Run `npm run setup` in it.
 4. Read the issue's Interface contract and Scope. Touch nothing out of scope. If the contract is wrong or missing,
    stop and file a new task issue for the contract instead of inventing one.
 4b. Practice (the project skills, agent-skills): build in thin vertical slices with `incremental-implementation` and
