@@ -718,6 +718,9 @@ test("an awk program holding backticks and $ is allowed (#148)", () => {
 
 test("a heredoc that only feeds data gives no decision; one that runs post-review.mjs owner is denied (#100)", () => {
   allowed("git commit -m \"$(cat <<'EOF'\nfix: post-review.mjs owner check reads $PR; `x`\n\nCo-Authored-By: a <b@c>\nEOF\n)\"");
+  // A backslash-led delimiter (`$(cat <<\EOF … EOF)`) suppresses expansion exactly like a quoted one (regression,
+  // found in review: this word's delimiter regex captured the backslash without recording it as quoting).
+  allowed('git commit -m "$(cat <<\\EOF\nfix: mentions $(node scripts/lanes/post-review.mjs owner --pr 16) but is just text\nEOF\n)"');
   denied("bash <<'EOF'\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF");
   denied("cat <<'EOF' | sh\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF");
 });
@@ -734,6 +737,11 @@ test("edge: heredocs a data command reads stay data, and every heredoc that can 
   allowed("cat <<-EOF\n\tnode $S owner\n\tEOF");
   allowed("git commit -F - <<EOF\nfix $X handling\nEOF");
   allowed("cat <<'EOF\nnot a delimiter");
+  // A backslash before the delimiter (`<<\EOF`) suppresses expansion exactly like a quoted delimiter (regression,
+  // found in review: the delimiter regex captured the backslash without recording it, so this body was misread as
+  // unquoted and denied even though bash never runs its `$(…)`).
+  allowed("git commit -F - <<\\EOF\nfix: mentions $(node scripts/lanes/post-review.mjs owner --pr 16) but is just text\nEOF");
+  denied("bash <<\\EOF\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF");
   // An unquoted body still runs its $(…) and backticks, even when a data command reads it.
   denied("cat <<EOF\n$(node scripts/lanes/post-review.mjs owner --pr 16)\nEOF");
   denied("cat <<EOF > out.txt\n`node scripts/lanes/post-review.mjs owner --pr 16`\nEOF");
@@ -749,6 +757,20 @@ test("edge: heredocs a data command reads stay data, and every heredoc that can 
   denied("git log -1 --format=\"$(cat <<'EOF'\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF\n)\" | sh");
   // The commands after a heredoc's body are still read as commands.
   denied("cat <<'EOF'\nhello\nEOF\nnode scripts/lanes/post-review.mjs owner --pr 16");
+});
+
+// Found by the #140 security-reviewer: origin/main denied these (by misreading the body as commands), and the first
+// cut of #100 let them through. awk and sed can run their input, and a body written to a file can be run later.
+test("edge: a heredoc fed to awk or sed, or written to a file a later command may run, is still scanned (#140 review)", () => {
+  denied("sed 's/.*/&/e' <<'EOF'\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF");
+  denied("awk '{system($0)}' <<'EOF'\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF");
+  denied("tee script.sh <<'EOF'\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF\nbash script.sh");
+  denied("cat > script.sh <<'EOF'\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF\nchmod +x script.sh && ./script.sh");
+  denied("cat <<'EOF' > script.sh; source script.sh\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF");
+  // Written to a file with nothing run after it, or only data commands after it: still data.
+  allowed("cat > notes.md <<'EOF'\nrun node scripts/lanes/post-review.mjs owner --pr 16 after /approve 16\nEOF");
+  allowed("cat > notes.md <<'EOF'\n$ npm test\nEOF\ngit add notes.md && git commit -m notes");
+  allowed("tee notes.md <<'EOF' > /dev/null\n## Needs the owner: $0\nEOF");
 });
 
 test("edge: assignment words are only the leading ones and export's; the rest are arguments (#152)", () => {

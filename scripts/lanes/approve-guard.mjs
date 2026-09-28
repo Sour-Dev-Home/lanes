@@ -70,10 +70,11 @@ function skipRedirectTarget(cmd, i) {
   return j;
 }
 
-// `<<D`, `<<-D`, `<<'D'`, `<<"D"` or `<<\D`; a quoted delimiter makes the body literal. `<<<` is a here-string, not this.
-const HEREDOC_RE = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([^\s;&|()<>'"`$]+))/;
+// `<<D`, `<<-D`, `<<'D'`, `<<"D"` or `<<\D`; a quoted delimiter, or one led by a backslash, makes the body literal
+// (bash expands neither in it). `<<<` is a here-string, not this.
+const HEREDOC_RE = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|(\\)?([^\s;&|()<>'"`$]+))/;
 // `$(cat <<D` and the end of its line: the start of a substitution whose output is only a heredoc's body.
-const CAT_HEREDOC_RE = /^\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z0-9_.-]+))[ \t]*\r?\n/;
+const CAT_HEREDOC_RE = /^\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|(\\)?([A-Za-z0-9_.-]+))[ \t]*\r?\n/;
 // Text in an unquoted heredoc body that runs a command while bash expands it.
 const RUNS_ON_EXPANSION_RE = /\$\(|`/;
 
@@ -104,8 +105,8 @@ function readHeredoc(cmd, from, delim, stripTabs) {
 function literalSubstitution(cmd, i) {
   const m = CAT_HEREDOC_RE.exec(cmd.slice(i));
   if (!m) return null;
-  const quoted = m[4] === undefined;
-  const { body, end, terminated } = readHeredoc(cmd, i + m[0].length, m[2] ?? m[3] ?? m[4], m[1] === "-");
+  const quoted = m[5] === undefined || m[4] !== undefined;
+  const { body, end, terminated } = readHeredoc(cmd, i + m[0].length, m[2] ?? m[3] ?? m[5], m[1] === "-");
   if (!terminated || (!quoted && RUNS_ON_EXPANSION_RE.test(body))) return null;
   const close = /^\s*\)/.exec(cmd.slice(end));
   return close ? { body, end: end + close[0].length - 1 } : null;
@@ -120,7 +121,7 @@ function literalSubstitution(cmd, i) {
  * to its segment's `heredocs`, and a literal `$(cat <<'EOF' … EOF)` reads as its body, with that word's index in the
  * segment's `literal`. A segment whose output a `|` or `|&` feeds into the next one has `pipedOut` set
  * (`(echo …) | sh` marks the echo). Throws on an unterminated quote.
- * @returns {(string[] & { pipedOut?: true, redirects?: { text: string, herestring: boolean }[], heredocs?: { body: string, quoted: boolean }[], literal?: Set<number> })[]}
+ * @returns {(string[] & { pipedOut?: true, redirects?: { text: string, herestring: boolean, toFile: boolean }[], heredocs?: { body: string, quoted: boolean }[], literal?: Set<number> })[]}
  */
 function lex(cmd) {
   const segments = [[]];
@@ -201,7 +202,7 @@ function lex(cmd) {
       else endWord();
       const doc = c === "<" && cmd[i + 1] === "<" && cmd[i + 2] !== "<" ? HEREDOC_RE.exec(cmd.slice(i)) : null;
       if (doc) {
-        pending.push({ segment: segments.at(-1), delim: doc[2] ?? doc[3] ?? doc[4], stripTabs: doc[1] === "-", quoted: doc[4] === undefined });
+        pending.push({ segment: segments.at(-1), delim: doc[2] ?? doc[3] ?? doc[5], stripTabs: doc[1] === "-", quoted: doc[5] === undefined || doc[4] !== undefined });
         i += doc[0].length - 1;
         continue;
       }
@@ -210,7 +211,8 @@ function lex(cmd) {
       const herestring = c === "<" && cmd[j] === "<";
       if (herestring) j += 1;
       const end = skipRedirectTarget(cmd, j);
-      (segments.at(-1).redirects ??= []).push({ text: cmd.slice(j, end), herestring });
+      // `toFile`: output written to a file (`>`, `>>`), not duplicated onto another fd (`2>&1`).
+      (segments.at(-1).redirects ??= []).push({ text: cmd.slice(j, end), herestring, toFile: c === ">" && cmd[i + 1] !== "&" });
       i = end - 1;
     } else if (/\s/.test(c)) {
       endWord();
@@ -490,13 +492,18 @@ function scan(cmd, depth, out) {
     const nodeRange = new Set();
     // A command that only prints or searches its arguments runs none of them, unless its output feeds a runner.
     const runsArgs = !NON_RUNNING_COMMANDS.has(name) || feedsRunner(k);
-    // Heredocs and literal `$(cat <<'EOF' … EOF)` words given to a command that reads them as data are not scripts.
+    // Literal `$(cat <<'EOF' … EOF)` words given to a command that reads them as data are not scripts.
     const readsData = (DATA_COMMANDS.has(name) || PROGRAM_RE.test(name ?? "")) && !feedsRunner(k);
     // An awk, sed or jq program is scanned only when it names post-review (#148).
     const programArgs = PROGRAM_RE.test(name ?? "") && !feedsRunner(k);
-    // A heredoc body is a script unless a data command reads it; an unquoted one still runs its `$(…)` and backticks.
+    // A heredoc body is a script unless a data command reads it. awk and sed are no data commands here: they can run
+    // their input (system($0), sed's e). A body written to a file (tee, `>`) that a later command in this one may run
+    // is scanned too (#140 security review), and an unquoted body still runs its `$(…)` and backticks.
+    const writesFile = name === "tee" || (segments[k].redirects ?? []).some((r) => r.toFile);
+    const laterRuns = () => plains.some((p, m) => m > k && p.length > 0 && !DATA_COMMANDS.has(commandName(p)));
+    const heredocIsData = DATA_COMMANDS.has(name) && !feedsRunner(k) && !(writesFile && laterRuns());
     for (const { body, quoted } of segments[k].heredocs ?? []) {
-      if (!readsData || (!quoted && RUNS_ON_EXPANSION_RE.test(body))) scanScript(body, depth, out);
+      if (!heredocIsData || (!quoted && RUNS_ON_EXPANSION_RE.test(body))) scanScript(body, depth, out);
     }
     plain.forEach((p, at) => {
       if ((at > 0 && !runsArgs) || !NODE_RE.test(p.split(/[\\/]/).at(-1))) return;
