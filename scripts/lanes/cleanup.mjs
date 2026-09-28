@@ -16,8 +16,12 @@ const inside = (dir, p) => p === dir || p.startsWith(`${dir}/`);
 
 export const formatStep = (step) => `${step.cmd} ${step.args.join(" ")}`;
 
-// `git worktree list --porcelain` → `[{ path, branch, head, main }]`; the first entry is the main worktree, and a
-// detached one has branch null.
+// A lock Claude Code puts on a session's worktree; the session has ended once no process has that pid.
+const SESSION_LOCK = /^claude session .* \(pid (\d+)\)$/;
+const lockPid = (locked) => Number(SESSION_LOCK.exec(locked ?? "")?.[1]) || null;
+
+// `git worktree list --porcelain` → `[{ path, branch, head, main, locked? }]`; the first entry is the main worktree, a
+// detached one has branch null, and a locked one has its lock reason ("" when it has none).
 export function parseWorktrees(text) {
   return text
     .split(/\r?\n\r?\n/)
@@ -25,8 +29,21 @@ export function parseWorktrees(text) {
     .filter((lines) => lines[0]?.startsWith("worktree "))
     .map((lines, i) => {
       const value = (key) => lines.find((l) => l.startsWith(`${key} `))?.slice(key.length + 1);
-      return { path: value("worktree"), branch: value("branch")?.replace(/^refs\/heads\//, "") ?? null, head: value("HEAD"), main: i === 0 };
+      const tree = { path: value("worktree"), branch: value("branch")?.replace(/^refs\/heads\//, "") ?? null, head: value("HEAD"), main: i === 0 };
+      const lock = lines.find((l) => l === "locked" || l.startsWith("locked "));
+      return lock === undefined ? tree : { ...tree, locked: lock.slice("locked ".length) };
     });
+}
+
+// Whether a process with this pid exists now (EPERM: it exists but belongs to someone else).
+export function pidRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
 }
 
 // Whether a lane is merged: `{ pr }` for the merged PR whose head is `head`, else `{ skip }`. An open PR on the lane
@@ -46,8 +63,10 @@ const stillWorking = (s) => (s.status === "idle" ? false : s.status === "busy" ?
 
 // One entry per `issue-<N>-…` local branch, plus one per session whose worktree and branch are already gone:
 // `{ branch, issue, pr, steps }` to clean, or `{ branch, issue, skip }` with the reason not to.
-//   worktrees: local branches, each `{ path, branch, head, dirty, main }`; path null for a branch with no worktree,
-//              dirty null when its status could not be read. Non-lane worktrees are passed too, to place sessions.
+//   worktrees: local branches, each `{ path, branch, head, dirty, main, locked?, lockRunning? }`; path null for a branch
+//              with no worktree, dirty null when its status could not be read, lockRunning whether the pid in a
+//              Claude session lock is running (unknown counts as running). Non-lane worktrees are passed too, to
+//              place sessions.
 //   sessions:  background sessions in this repo, `{ id, cwd, issue, status, state }` (issue from an `issue-<N>-…` folder).
 //   prs:       `{ number, state, headRefName, headRefOid }`.
 // A lane is cleaned only when its PR merged at exactly the local branch tip (squash merges are not ancestors, so
@@ -74,16 +93,19 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [] } = {}) {
     if (!issue) continue;
     const sessionsHere = sessionOf.get(w) ?? [];
     const entry = { branch: w.branch, issue };
+    const pid = lockPid(w.locked);
     const merge = mergedPr(prs.filter((p) => p.headRefName === w.branch), w.head);
     if (merge.skip) plan.push({ ...entry, skip: merge.skip });
     else if (w.main) plan.push({ ...entry, skip: "checked out in the main worktree" });
     else if (w.dirty === null) plan.push({ ...entry, skip: "cannot read worktree status" });
     else if (w.dirty) plan.push({ ...entry, skip: "dirty worktree" });
     else if (sessionsHere.some(stillWorking)) plan.push({ ...entry, skip: "session still working" });
+    else if (pid && w.lockRunning !== false) plan.push({ ...entry, skip: `locked by running pid ${pid}` });
     else {
       const steps = [];
       for (const s of sessionsHere) steps.push({ cmd: "claude", args: ["rm", s.id] });
-      // `claude rm` may already have removed the worktree, so these two run only if their target is still there.
+      // `claude rm` may already have removed the worktree, so these run only if their target is still there.
+      if (w.path && pid) steps.push({ cmd: "git", args: ["worktree", "unlock", w.path], onlyIf: { path: w.path } });
       if (w.path) steps.push({ cmd: "git", args: ["worktree", "remove", w.path], onlyIf: { path: w.path } });
       steps.push({ cmd: "git", args: ["branch", "-D", w.branch], onlyIf: { branch: w.branch } });
       plan.push({ ...entry, pr: merge.pr, steps });
@@ -103,20 +125,43 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [] } = {}) {
 
 export const cleanableCount = (plan) => plan.filter((e) => e.steps).length;
 
+// `claude rm` refuses while another session's entry claims the same worktree; the claimant id is plain, never a flag.
+const CLAIMED = /Another running background session \(([A-Za-z0-9][A-Za-z0-9_-]*)\) claims this worktree/;
+const isRm = (step) => step.cmd === "claude" && step.args[0] === "rm";
+
 // Runs each lane's steps in order; a failed step skips that lane's later steps, and other lanes continue.
-// `run(cmd, args)` throws on failure; `stillThere(onlyIf)` says whether a step's target still exists.
-export function runCleanup(plan, { run, stillThere, dryRun = false }) {
+// `run(cmd, args)` throws on failure; `stillThere(onlyIf)` says whether a step's target still exists;
+// `sessionEnded(id)`, when given, says whether a session claiming the worktree has ended: an ended claimant is
+// removed and the refused `claude rm` retried once, and a running one is reported, never stopped.
+export function runCleanup(plan, { run, stillThere, sessionEnded, dryRun = false }) {
   return plan.map((entry) => {
     const base = { branch: entry.branch, issue: entry.issue, pr: entry.pr };
     if (entry.skip) return { ...base, status: "skipped", skip: entry.skip };
     if (dryRun) return { ...base, status: "planned", ran: entry.steps.map(formatStep) };
     const ran = [];
+    const fail = (step, error) => ({ ...base, status: "failed", ran, failedStep: formatStep(step), error });
     for (const step of entry.steps) {
       if (step.onlyIf && !stillThere(step.onlyIf)) continue;
+      // A claimant cleared below may be one of this worktree's own sessions; it is gone already.
+      if (isRm(step) && ran.includes(formatStep(step))) continue;
       try {
         run(step.cmd, step.args);
       } catch (err) {
-        return { ...base, status: "failed", ran, failedStep: formatStep(step), error: errorText(err) };
+        const claimant = isRm(step) && sessionEnded ? CLAIMED.exec(errorOutput(err))?.[1] : undefined;
+        if (!claimant) return fail(step, errorText(err, step));
+        if (!sessionEnded(claimant)) return fail(step, `${errorText(err, step)} (session ${claimant} is still running; it was not stopped)`);
+        const clear = { cmd: "claude", args: ["rm", claimant] };
+        try {
+          run(clear.cmd, clear.args);
+        } catch (clearErr) {
+          return fail(clear, errorText(clearErr, clear));
+        }
+        ran.push(formatStep(clear));
+        try {
+          run(step.cmd, step.args);
+        } catch (retryErr) {
+          return fail(step, errorText(retryErr, step));
+        }
       }
       ran.push(formatStep(step));
     }
@@ -124,7 +169,16 @@ export function runCleanup(plan, { run, stillThere, dryRun = false }) {
   });
 }
 
-const errorText = (err) => (String(err.stderr ?? "").trim() || err.message).split(/\r?\n/)[0];
+const errorOutput = (err) => `${err.stderr ?? ""}\n${err.stdout ?? ""}\n${err.message ?? ""}`;
+
+// Windows refuses to delete a worktree while any process has a file in it open.
+const OPEN_FILES_HINT = "(a process still has files open in the worktree; close it and re-run)";
+
+function errorText(err, step) {
+  const line = (String(err.stderr ?? "").trim() || err.message).split(/\r?\n/)[0];
+  const removing = step.args[0] === "worktree" && step.args[1] === "remove";
+  return removing && /Permission denied/i.test(line) ? `${line} ${OPEN_FILES_HINT}` : line;
+}
 
 export function render(results) {
   if (results.length === 0) return "no lanes to clean up";
@@ -157,7 +211,11 @@ function porcelain(path) {
 export function loadCleanupInputs(root = repoRoot()) {
   const trees = parseWorktrees(sh("git", ["worktree", "list", "--porcelain"]));
   const onBranch = new Set(trees.map((t) => t.branch));
-  const worktrees = trees.map((t) => ({ ...t, dirty: LANE_BRANCH.test(t.branch ?? "") && !t.main ? porcelain(t.path) : false }));
+  const worktrees = trees.map((t) => {
+    const tree = { ...t, dirty: LANE_BRANCH.test(t.branch ?? "") && !t.main ? porcelain(t.path) : false };
+    const pid = lockPid(t.locked);
+    return pid ? { ...tree, lockRunning: pidRunning(pid) } : tree;
+  });
   for (const line of sh("git", ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/"]).split(/\r?\n/)) {
     const [branch, head] = line.split(" ");
     if (LANE_BRANCH.test(branch ?? "") && !onBranch.has(branch)) worktrees.push({ path: null, branch, head, dirty: false, main: false });
@@ -175,9 +233,28 @@ export function sessionsFrom(agents, root) {
     const cwd = normalPath(a.cwd);
     if (!cwd.startsWith(top)) continue;
     const issue = Number(cwd.slice(top.length).split("/").map((s) => LANE_BRANCH.exec(s)?.[1]).find(Boolean)) || null;
-    sessions.push({ id: a.id, cwd: a.cwd, issue, status: a.status, state: a.state });
+    const session = { id: a.id, cwd: a.cwd, issue, status: a.status, state: a.state };
+    sessions.push(Number.isInteger(a.pid) ? { ...session, pid: a.pid } : session);
   }
   return sessions;
+}
+
+const NO_JOB = /job not found|no job matching/i;
+
+/**
+ * Whether session `id` has ended: its pid (from `sessions`) is not running, or `claude logs <id>` finds no job. Any
+ * other answer, a logs failure included, counts as still running.
+ * @param {string} id
+ * @param {{ sessions?: { id: string, pid?: number }[], run: Function, isRunning?: (pid: number) => boolean }} deps
+ */
+export function sessionEnded(id, { sessions = [], run, isRunning = pidRunning }) {
+  const pid = sessions.find((s) => s.id === id)?.pid;
+  if (Number.isInteger(pid) && pid > 0 && !isRunning(pid)) return true;
+  try {
+    return NO_JOB.test(String(run("claude", ["logs", id]) ?? ""));
+  } catch (err) {
+    return NO_JOB.test(String(err.stderr ?? "")) || NO_JOB.test(String(err.stdout ?? ""));
+  }
 }
 
 const branchExists = (branch) => {
@@ -198,13 +275,16 @@ const DEFAULT_DEPS = {
 /**
  * Removes every merged lane (or, with `dryRun`, only plans it) and returns render's lines, one per lane or
  * `["no lanes to clean up"]`; a failed step's line starts with `failed `. Throws when the inputs cannot be read.
- * `deps` holds fakes in tests: `load()` returns planCleanup's inputs, and `run` and `stillThere` are runCleanup's.
- * @param {{ dryRun?: boolean, deps?: { load?: Function, run?: Function, stillThere?: Function } }} [options]
+ * `deps` holds fakes in tests: `load()` returns planCleanup's inputs, and `run`, `stillThere` and `sessionEnded` are
+ * runCleanup's (`sessionEnded` defaults to the exported one, over the loaded sessions and `run`).
+ * @param {{ dryRun?: boolean, deps?: { load?: Function, run?: Function, stillThere?: Function, sessionEnded?: Function } }} [options]
  * @returns {string[]}
  */
 export function cleanupMerged({ dryRun = false, deps = {} } = {}) {
-  const { load, run, stillThere } = { ...DEFAULT_DEPS, ...deps };
-  return render(runCleanup(planCleanup(load()), { dryRun, run, stillThere })).split("\n");
+  const { load, run, stillThere, sessionEnded: ended } = { ...DEFAULT_DEPS, ...deps };
+  const inputs = load();
+  const isEnded = ended ?? ((id) => sessionEnded(id, { sessions: inputs.sessions, run }));
+  return render(runCleanup(planCleanup(inputs), { dryRun, run, stillThere, sessionEnded: isEnded })).split("\n");
 }
 
 function main(argv = process.argv.slice(2)) {

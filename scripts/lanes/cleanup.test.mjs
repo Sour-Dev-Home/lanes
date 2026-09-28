@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { cleanableCount, formatStep, parseWorktrees, planCleanup, render, runCleanup, sessionsFrom } from "./cleanup.mjs";
+import {
+  cleanableCount, cleanupMerged, formatStep, parseWorktrees, pidRunning, planCleanup, render, runCleanup, sessionEnded, sessionsFrom,
+} from "./cleanup.mjs";
 
 const ROOT = "C:/repo";
 const HEAD = "a".repeat(40);
@@ -288,10 +290,243 @@ test("edge: parseWorktrees reads porcelain output, marks the first as main and a
   ].join("\n");
   assert.deepEqual(parseWorktrees(text), [
     { path: "C:/repo", branch: "main", head: "f".repeat(40), main: true },
-    { path: "C:/repo/.claude/worktrees/issue-7-x", branch: "issue-7-x", head: HEAD, main: false },
+    { path: "C:/repo/.claude/worktrees/issue-7-x", branch: "issue-7-x", head: HEAD, main: false, locked: "claude session x (pid 1)" },
     { path: "C:/repo/d", branch: null, head: HEAD, main: false },
   ]);
   assert.deepEqual(parseWorktrees(""), []);
+});
+
+const lockedBy = (pid, lockRunning) => ({ locked: `claude session issue-7-x (pid ${pid})`, lockRunning });
+
+test("a merged lane locked by an ended Claude session is unlocked, then removed", () => {
+  const [entry] = planCleanup({ worktrees: [wt("issue-7-x", lockedBy(18124, false))], prs: [merged("issue-7-x")] });
+  const path = `${ROOT}/.claude/worktrees/issue-7-x`;
+  assert.deepEqual(cmds(entry), [`git worktree unlock ${path}`, `git worktree remove ${path}`, "git branch -D issue-7-x"]);
+  assert.deepEqual(entry.steps[0].onlyIf, { path });
+});
+
+test("a merged lane locked by a running Claude session is skipped: locked by running pid N", () => {
+  const [entry] = planCleanup({ worktrees: [wt("issue-7-x", lockedBy(18124, true))], prs: [merged("issue-7-x")] });
+  assert.deepEqual(entry, { branch: "issue-7-x", issue: 7, skip: "locked by running pid 18124" });
+});
+
+test("a Permission denied from git worktree remove is explained, and the branch is not deleted", () => {
+  const path = `${ROOT}/.claude/worktrees/issue-7-x`;
+  const plan = planCleanup({ worktrees: [wt("issue-7-x")], prs: [merged("issue-7-x")] });
+  const ran = [];
+  const run = (cmd, args) => {
+    if (args[1] === "remove") throw Object.assign(new Error("exit 1"), { stderr: `error: failed to delete '${path}': Permission denied\n` });
+    ran.push(`${cmd} ${args.join(" ")}`);
+  };
+  const results = runCleanup(plan, { run, stillThere: () => true });
+  assert.deepEqual(ran, []);
+  assert.equal(results[0].status, "failed");
+  assert.equal(
+    render(results),
+    `failed issue-7-x (PR #90) at git worktree remove ${path}: error: failed to delete '${path}': Permission denied ` +
+      "(a process still has files open in the worktree; close it and re-run)",
+  );
+});
+
+test("edge: a lock held by a session whose liveness is unknown is treated as running and skipped", () => {
+  const [entry] = planCleanup({ worktrees: [wt("issue-7-x", lockedBy(5, undefined))], prs: [merged("issue-7-x")] });
+  assert.equal(entry.skip, "locked by running pid 5");
+});
+
+test("edge: a stale lock on an unmerged or dirty lane still skips for that reason, and nothing is unlocked", () => {
+  const [open] = planCleanup({ worktrees: [wt("issue-7-x", lockedBy(5, false))], prs: [merged("issue-7-x", { state: "OPEN" })] });
+  assert.equal(open.skip, "not merged");
+  const [dirty] = planCleanup({ worktrees: [wt("issue-7-x", { ...lockedBy(5, false), dirty: true })], prs: [merged("issue-7-x")] });
+  assert.equal(dirty.skip, "dirty worktree");
+});
+
+test("edge: a lock with any other reason is not unlocked (git worktree remove reports it)", () => {
+  for (const locked of ["", "manual hold", "claude session x (pid abc)", "claude session x (pid 5) extra"]) {
+    const [entry] = planCleanup({ worktrees: [wt("issue-7-x", { locked })], prs: [merged("issue-7-x")] });
+    assert.ok(!cmds(entry).some((c) => c.includes("unlock")), locked);
+  }
+});
+
+test("edge: a stale lock is unlocked after claude rm of the lane's idle session", () => {
+  const [entry] = planCleanup({
+    worktrees: [wt("issue-7-x", lockedBy(9, false))],
+    sessions: [session("s7", "issue-7-x")],
+    prs: [merged("issue-7-x")],
+  });
+  assert.deepEqual(cmds(entry).slice(0, 2), ["claude rm s7", `git worktree unlock ${ROOT}/.claude/worktrees/issue-7-x`]);
+});
+
+test("edge: a failure other than Permission denied keeps its message without the open-files hint", () => {
+  const plan = planCleanup({ worktrees: [wt("issue-7-x")], prs: [merged("issue-7-x")] });
+  const run = (cmd, args) => {
+    if (args[1] === "remove") throw Object.assign(new Error("exit 1"), { stderr: "fatal: cannot remove a locked working tree" });
+  };
+  const [r] = runCleanup(plan, { run, stillThere: () => true });
+  assert.equal(r.error, "fatal: cannot remove a locked working tree");
+});
+
+test("edge: a Permission denied from a step other than git worktree remove gets no open-files hint", () => {
+  const plan = planCleanup({ worktrees: [wt("issue-7-x")], prs: [merged("issue-7-x")] });
+  const run = (cmd, args) => {
+    if (args[0] === "branch") throw Object.assign(new Error("exit 1"), { stderr: "error: Permission denied" });
+  };
+  const [r] = runCleanup(plan, { run, stillThere: () => true });
+  assert.equal(r.error, "error: Permission denied");
+});
+
+test("edge: pidRunning is false for a pid no process has and true for this process; bad pids are not running", () => {
+  assert.equal(pidRunning(process.pid), true);
+  assert.equal(pidRunning(2 ** 30), false);
+  for (const bad of [0, -1, NaN, 1.5]) assert.equal(pidRunning(bad), false, String(bad));
+});
+
+test("edge: pidRunning treats EPERM (a pid owned by someone else) as running, not absent", () => {
+  const original = process.kill;
+  process.kill = () => { throw Object.assign(new Error("no permission"), { code: "EPERM" }); };
+  try {
+    assert.equal(pidRunning(123), true);
+  } finally {
+    process.kill = original;
+  }
+});
+
+// A `run` whose `claude rm <id>` refuses while another session claims the worktree, until that session is removed.
+const CLAIM = (x) => Object.assign(new Error("exit 1"), { stderr: `Error: Another running background session (${x}) claims this worktree.\n` });
+function claimedRun(claimant) {
+  const ran = [];
+  const run = (cmd, args) => {
+    const line = `${cmd} ${args.join(" ")}`;
+    if (line === "claude rm s7" && !ran.includes(`claude rm ${claimant}`)) throw CLAIM(claimant);
+    ran.push(line);
+  };
+  return { run, ran };
+}
+const claimedPlan = () =>
+  planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x")], prs: [merged("issue-7-x")] });
+
+test("a stale second session claiming the worktree is removed, then claude rm is retried once and the lane cleaned", () => {
+  const { run, ran } = claimedRun("x9");
+  const asked = [];
+  const sessionEnded = (id) => (asked.push(id), true);
+  const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded });
+  assert.deepEqual(asked, ["x9"]);
+  assert.deepEqual(ran, ["claude rm x9", "claude rm s7", `git worktree remove ${ROOT}/.claude/worktrees/issue-7-x`, "git branch -D issue-7-x"]);
+  assert.equal(r.status, "removed");
+});
+
+test("a still-running session claiming the worktree is reported and never stopped", () => {
+  const { run, ran } = claimedRun("x9");
+  const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded: () => false });
+  assert.deepEqual(ran, []);
+  assert.equal(r.status, "failed");
+  assert.equal(r.failedStep, "claude rm s7");
+  assert.match(r.error, /claims this worktree\. \(session x9 is still running; it was not stopped\)$/);
+});
+
+test("edge: claude rm is retried only once; a second refusal is reported as it is", () => {
+  const ran = [];
+  const run = (cmd, args) => {
+    const line = `${cmd} ${args.join(" ")}`;
+    if (line === "claude rm s7") throw CLAIM(ran.length === 0 ? "x9" : "x10");
+    ran.push(line);
+  };
+  const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded: () => true });
+  assert.deepEqual(ran, ["claude rm x9"]);
+  assert.equal(r.status, "failed");
+  assert.match(r.error, /\(x10\) claims this worktree/);
+});
+
+test("edge: a claimant that is also listed in the worktree is not removed a second time by its own step", () => {
+  const plan = planCleanup({
+    worktrees: [wt("issue-7-x")],
+    sessions: [session("s7", "issue-7-x"), session("x9", "issue-7-x")],
+    prs: [merged("issue-7-x")],
+  });
+  const { run, ran } = claimedRun("x9");
+  const [r] = runCleanup(plan, { run, stillThere: () => true, sessionEnded: () => true });
+  assert.deepEqual(ran.filter((l) => l === "claude rm x9"), ["claude rm x9"]);
+  assert.equal(r.status, "removed");
+});
+
+test("edge: a claimant that fails to be removed stops the lane at that step", () => {
+  const run = (cmd, args) => {
+    if (args[1] === "x9") throw Object.assign(new Error("exit 1"), { stderr: "Error: cannot remove x9" });
+    if (args[1] === "s7") throw CLAIM("x9");
+  };
+  const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded: () => true });
+  assert.equal(r.failedStep, "claude rm x9");
+  assert.equal(r.error, "Error: cannot remove x9");
+});
+
+test("edge: a claim refusal is left as it is without sessionEnded, or on a step other than claude rm", () => {
+  const { run } = claimedRun("x9");
+  const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true });
+  assert.match(r.error, /claims this worktree\.$/);
+  const plan = planCleanup({ worktrees: [wt("issue-7-x")], prs: [merged("issue-7-x")] });
+  const asked = [];
+  const run2 = (cmd, args) => {
+    if (args[1] === "remove") throw CLAIM("x9");
+  };
+  runCleanup(plan, { run: run2, stillThere: () => true, sessionEnded: (id) => (asked.push(id), true) });
+  assert.deepEqual(asked, []);
+});
+
+test("edge: a claimant id that is not a plain session id is never passed to claude", () => {
+  for (const bad of ["-rf", "a b", "x;y"]) {
+    const asked = [];
+    const run = (cmd, args) => {
+      if (args[1] === "s7") throw CLAIM(bad);
+    };
+    const [r] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded: (id) => (asked.push(id), true) });
+    assert.deepEqual(asked, [], bad);
+    assert.equal(r.status, "failed");
+  }
+});
+
+test("sessionEnded: ended when its pid is not running, or claude logs finds no job; running otherwise", () => {
+  const noJob = () => {
+    throw Object.assign(new Error("exit 1"), { stderr: "No job matching 'x9'. Run 'claude agents' to list running sessions." });
+  };
+  const logsOk = () => "recent output";
+  const sessions = [{ id: "x9", pid: 41 }];
+  assert.equal(sessionEnded("x9", { sessions, run: logsOk, isRunning: () => false }), true);
+  assert.equal(sessionEnded("x9", { sessions, run: logsOk, isRunning: () => true }), false);
+  assert.equal(sessionEnded("x9", { sessions: [], run: noJob }), true);
+  assert.equal(sessionEnded("x9", { sessions: [], run: () => { throw Object.assign(new Error("x"), { stderr: "Error: job not found" }); } }), true);
+  assert.equal(sessionEnded("x9", { sessions: [], run: logsOk }), false);
+});
+
+test("edge: sessionEnded treats any other claude logs failure as still running", () => {
+  const timeout = () => { throw Object.assign(new Error("spawnSync claude ETIMEDOUT"), { stderr: "" }); };
+  assert.equal(sessionEnded("x9", { sessions: [], run: timeout }), false);
+  assert.equal(sessionEnded("x9", { sessions: [{ id: "x9" }], run: timeout }), false);
+});
+
+test("edge: sessionsFrom keeps each session's pid", () => {
+  const agents = [{ kind: "background", id: "s7", cwd: `${ROOT}/.claude/worktrees/issue-7-x`, pid: 41, status: "idle" }];
+  assert.equal(sessionsFrom(agents, ROOT)[0].pid, 41);
+});
+
+test("cleanupMerged retries a claimed claude rm with a sessionEnded dep, and reports a live claimant as failed", () => {
+  const inputs = { worktrees: [main, wt("issue-7-x")], sessions: [session("s7", "issue-7-x")], prs: [merged("issue-7-x")] };
+  const { run } = claimedRun("x9");
+  const lines = cleanupMerged({ deps: { load: () => inputs, run, stillThere: () => true, sessionEnded: () => false } });
+  assert.match(lines[0], /^failed issue-7-x \(PR #90\) at claude rm s7: .*session x9 is still running/);
+});
+
+test("edge: cleanupMerged's default sessionEnded consults the loaded sessions and run, not a stub", () => {
+  const inputs = { worktrees: [main, wt("issue-7-x")], sessions: [session("s7", "issue-7-x")], prs: [merged("issue-7-x")] };
+  const path = `${ROOT}/.claude/worktrees/issue-7-x`;
+  const ran = [];
+  const run = (cmd, args) => {
+    const line = `${cmd} ${args.join(" ")}`;
+    if (line === "claude rm s7" && !ran.includes("claude rm x9")) throw CLAIM("x9");
+    if (line === "claude logs x9") throw Object.assign(new Error("exit 1"), { stderr: "No job matching 'x9'." });
+    ran.push(line);
+  };
+  const lines = cleanupMerged({ deps: { load: () => inputs, run, stillThere: () => true } });
+  assert.deepEqual(ran, ["claude rm x9", "claude rm s7", `git worktree remove ${path}`, "git branch -D issue-7-x"]);
+  assert.match(lines[0], /^removed issue-7-x \(PR #90\)/);
 });
 
 test("/health runs cleanup.mjs and states it as its one exception; /status only shows output and runs nothing", async () => {
