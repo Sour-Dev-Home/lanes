@@ -245,6 +245,13 @@ test("test-hunter.md adds the mutation step for tier full only: at most 5 mutant
   assert.match(step, /Tier quick skips this\s+step/);
 });
 
+test("edge: parseDiff does not read a removed '-- x' line or an added '++ x' line as a file header", () => {
+  const text = ["--- a/a.mjs", "+++ b/a.mjs", "@@ -3,2 +3,2 @@", "--- x", "-y", "+++ b/evil.mjs", "+z", ""].join("\n");
+  const changed = parseDiff(text);
+  assert.deepEqual([...changed.keys()], ["a.mjs"]);
+  assert.deepEqual(changed.get("a.mjs"), [{ line: 3, text: "++ b/evil.mjs" }, { line: 4, text: "z" }]);
+});
+
 test("lanes.config.json maps scripts/lanes/diff-coverage. into the metrics module", () => {
   const config = JSON.parse(readFileSync("lanes.config.json", "utf8"));
   const metrics = config.modules.entries.find((entry) => entry.id === "metrics");
