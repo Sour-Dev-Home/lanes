@@ -99,7 +99,9 @@ export function validateVerdict(v, { criteriaCount }) {
 
   const fixed = findings.filter((f) => f.fixed).length;
   const pass = criteria.filter((c) => c.result === "pass").length;
-  const counts = criteria.length ? `${pass}/${criteriaCount} criteria pass, ${fixed} fixed` : `${fixed} fixed`;
+  // A count only reads right when the reviewer assessed something: "0/4 criteria pass" on an all-not-applicable review looks like a failure.
+  const assessed = criteria.some((c) => c.result === "pass" || c.result === "fail");
+  const counts = assessed ? `${pass}/${criteriaCount} criteria pass, ${fixed} fixed` : `${fixed} fixed`;
   return {
     ok: true,
     errors: [],
