@@ -24,9 +24,40 @@ const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const QUEUE_REF = /^(?:refs\/heads\/)?gh-readonly-queue\/[^/]+\/pr-([1-9][0-9]{0,8})-[0-9a-f]{40}$/;
 
-export function ghApi(args) {
-  return execFileSync("gh", ["api", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+// #281: a transient GitHub error (HTTP 500, 502, 503, 504 or no HTTP answer at all) is retried after 2, 4 and 8 seconds.
+// One budget covers the whole run, so a GitHub outage adds at most RETRY_BUDGET_MS of waiting, never 14 seconds per call.
+const RETRY_DELAYS_MS = [2000, 4000, 8000];
+const RETRY_BUDGET_MS = 45000;
+const TRANSIENT = new Set([500, 502, 503, 504]);
+
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const runGh = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+/** The call as "GET path" or "POST path", without the query string, so it is safe to show in a status description. */
+const describeCall = (args) => `${args.includes("-f") ? "POST" : "GET"} ${String(args[0]).split("?")[0]}`;
+
+export function makeGhApi({ run = runGh, sleep = sleepSync, budgetMs = RETRY_BUDGET_MS } = {}) {
+  let left = budgetMs;
+  return (args) => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return run("gh", ["api", ...args]);
+      } catch (e) {
+        const httpStatus = Number(/HTTP (\d{3})/.exec(String(e?.stderr ?? ""))?.[1]) || undefined;
+        const transient = httpStatus === undefined ? e?.code !== "ENOENT" : TRANSIENT.has(httpStatus);
+        const delay = RETRY_DELAYS_MS[attempt];
+        if (transient && delay !== undefined && delay <= left) {
+          left -= delay;
+          sleep(delay);
+          continue;
+        }
+        throw Object.assign(e, { ghCall: describeCall(args), httpStatus });
+      }
+    }
+  };
 }
+
+export const ghApi = makeGhApi();
 
 function post(api, repo, sha, { state, description }) {
   api([`repos/${repo}/statuses/${sha}`, "-f", `state=${state}`, "-f", `context=${GATE_CONTEXT}`, "-f", `description=${description.slice(0, 140)}`]);
@@ -288,7 +319,34 @@ export function carry(api, repo, headRef, groupSha, config, adrs = []) {
   return decision;
 }
 
+/** Runs the gate; when it cannot finish it posts `lanes/gate` = error on the commit it was deciding, then rethrows (non-zero exit). */
 export function main(env = process.env, api = ghApi) {
+  try {
+    return decide(env, api);
+  } catch (e) {
+    // Only a failed GitHub call: other failures (a malformed input) keep their own outcome. A failed notice call also lands here,
+    // which overwrites an already-posted status with error: the safe direction.
+    if (e?.ghCall) postError(env, api, e);
+    throw e;
+  }
+}
+
+function postError(env, api, e) {
+  try {
+    let sha;
+    if (env.EVENT_NAME === "merge_group") sha = env.GROUP_SHA;
+    else if (env.EVENT_NAME === "status") sha = env.STATUS_SHA;
+    else if (/^[1-9][0-9]{0,8}$/.test(env.PR_NUMBER ?? "")) {
+      try {
+        sha = JSON.parse(api([`repos/${env.REPO}/pulls/${env.PR_NUMBER}`])).head?.sha;
+      } catch {}
+    }
+    if (!SHA.test(sha ?? "")) return;
+    post(api, env.REPO, sha, { state: "error", description: `gate error: ${e.ghCall} failed (${e.httpStatus ? `HTTP ${e.httpStatus}` : "no response"})` });
+  } catch {}
+}
+
+function decide(env, api) {
   const repo = env.REPO ?? "";
   if (!REPO.test(repo)) throw new Error("REPO is missing or malformed");
   const config = loadConfig();
