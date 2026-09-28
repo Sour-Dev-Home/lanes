@@ -1642,10 +1642,11 @@ test("#61 edge: PowerShell variables of every spelling, splatting and code-runni
   for (const c of ["[scriptblock]::Create('Get-Date').Invoke()", "Add-Type -TypeDefinition $code", "$ExecutionContext.InvokeCommand.InvokeScript($s)", "$p = New-Object System.Diagnostics.ProcessStartInfo"]) {
     assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
   }
-  // A private-use character (the guards' own markers) or nesting too deep cannot be read.
-  assert.deepEqual(decideFor(ps("node scripts/lanes/start.mjs ''"), grant()), { decision: "deny", reason: PARSE_DENY_REASON });
+  // A private-use character (the guards' own markers) is read as U+FFFD; nesting deeper than the reader goes is denied
+  // whatever it names, since PowerShell itself still runs it.
+  assert.deepEqual(decideFor(ps("node scripts/lanes/start.mjs ''"), grant()), { decision: "deny", reason: DENY_REASON });
   assert.deepEqual(decideFor(ps(`${"(".repeat(40)}node scripts/lanes/start.mjs 12${")".repeat(40)}`), grant()), { decision: "deny", reason: PARSE_DENY_REASON });
-  assert.equal(decideFor(ps(`${"(".repeat(40)}Get-Date${")".repeat(40)}`)), null);
+  assert.deepEqual(decideFor(ps(`${"(".repeat(40)}Get-Date${")".repeat(40)}`)), { decision: "deny", reason: PARSE_DENY_REASON });
 });
 
 test("#61 edge: a node -e script that names start.mjs or queue.mjs and can load or launch code is still denied", () => {
@@ -1659,4 +1660,96 @@ test("#61 edge: a node -e script that names start.mjs or queue.mjs and can load 
   assert.deepEqual(decideFor(bash(`node -e 'require("./scripts/lanes/queue.mjs")'`), grant()), { decision: "deny", reason: QUEUE_DENY_REASON });
   // A $ the shell expands inside the script could be any code at all.
   assert.equal(decideFor(bash('node -e "console.log($X)"'), grant())?.decision, "deny");
+});
+
+test("#61 edge (test-hunter): launch-free commands chained through PowerShell get no decision, and a real run chained after them is still denied", () => {
+  for (const cmd of ["gh pr merge 5 --auto; node scripts/lanes/status.mjs", "node scripts/lanes/status.mjs && gh pr merge 5 --auto", `gh pr view 5 --jq '.a as $s | $s'; git status`]) {
+    assert.equal(decideFor(ps(cmd), grant()), null, cmd);
+  }
+  for (const cmd of ["gh pr merge 5 --auto; node scripts/lanes/start.mjs 5", "git status && node scripts/lanes/start.mjs 5", `git status; claude ${BG} x`]) {
+    assert.equal(decideFor(ps(cmd), grant())?.decision, "deny", cmd);
+  }
+  // A static import of start.mjs from a node -e script is a launch, even when only a bare string follows `import`.
+  assert.equal(decideFor(bash(`node -e "import './scripts/lanes/start.mjs'"`), grant())?.decision, "deny");
+});
+
+test("#61 edge (test-hunter): a comment between import and its paren or string does not hide a dynamic or static import", () => {
+  for (const c of [
+    `node -e "import/*x*/('./scripts/lanes/start.mjs')"`,
+    "node -e \"import//x\n('./scripts/lanes/start.mjs')\"",
+    `node -e "import/**/'./scripts/lanes/start.mjs'"`,
+  ]) {
+    assert.deepEqual(decideFor(bash(c), grant()), { decision: "deny", reason: DENY_REASON }, c);
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+  assert.deepEqual(decideFor(bash(`node -e "import/*x*/('./scripts/lanes/queue.mjs')"`), grant()), { decision: "deny", reason: QUEUE_DENY_REASON });
+  assert.deepEqual(decideFor(bash(`node -e "import/**/('child_pro'+'cess').then((m) => m.spawn('claude', ['${BG}']))"`), grant()), { decision: "deny", reason: BG_DENY_REASON });
+  // A // inside a string does not make real code after it vanish.
+  assert.deepEqual(decideFor(bash(`node -e 'const u = "http://x"; require("child_process").spawn("claude", ["${BG}"])'`), grant()), { decision: "deny", reason: BG_DENY_REASON });
+  // Comments alone still launch nothing.
+  assert.equal(decideFor(bash(`node -e '/* claude ${BG} */ console.log(1)'`)), null);
+});
+
+test("#61 edge (test-hunter): a PowerShell alias or COM object that hides node or claude fails closed", () => {
+  for (const c of [
+    "sal n node; n scripts/lanes/start.mjs 5",
+    "Set-Alias n node; n scripts/lanes/start.mjs 5",
+    `New-Alias c claude; c ${BG} x`,
+    "(New-Object -ComObject WScript.Shell).Run('node scripts/lanes/st'+'art.mjs 5')",
+  ]) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+  assert.equal(decideFor(ps("Get-Content salary.txt")), null);
+});
+
+test("#61 edge (security review): the PowerShell reader stays fast on nested type brackets", () => {
+  const started = Date.now();
+  for (const n of [28, 200]) {
+    decideFor(ps(`${"[a]".repeat(n)}x; node scripts/lanes/start.mjs 5`), grant());
+    decideFor(ps(`${"[a] ".repeat(n)}$x = 1`), grant());
+  }
+  assert.ok(Date.now() - started < 2000, `took ${Date.now() - started} ms`);
+  assert.equal(decideFor(ps(`${"[a]".repeat(40)}x; node scripts/lanes/start.mjs 5`), grant())?.decision, "deny");
+  // A typed assignment is still read as one, its right side a statement of its own.
+  assert.equal(decideFor(ps("[System.Collections.Generic.List[string]]$l = node scripts/lanes/start.mjs 5"), grant())?.decision, "deny");
+});
+
+test("#61 edge (security review): Start-Process with an argument known only at run time fails closed", () => {
+  for (const c of [
+    "$a='scripts/lanes/start.mjs'; Start-Process node -ArgumentList $a",
+    "Start-Process node -ArgumentList ('scripts/lanes/sta'+'rt.mjs','5')",
+    "Start-Process node @rest",
+    "Start-Process cmd -ArgumentList $a",
+    "saps $exe",
+    `Start-Process powershell -ArgumentList '-EncodedCommand','${encodedPs("node scripts/lanes/start.mjs 5")}'`,
+  ]) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+  assert.equal(decideFor(ps("Start-Process notepad -ArgumentList 'notes.txt'")), null);
+});
+
+test("#61 edge (security review): every PowerShell line end ends a comment and a statement", () => {
+  for (const eol of ["\r", "\r\n", ...[0x85, 0x2028, 0x2029].map((c) => String.fromCharCode(c))]) {
+    assert.equal(decideFor(ps(`# c${eol}node scripts/lanes/start.mjs 5`), grant())?.decision, "deny", JSON.stringify(eol));
+    assert.equal(decideFor(ps(`echo a # c${eol}claude ${BG} x`), grant())?.decision, "deny", JSON.stringify(eol));
+    assert.equal(decideFor(ps(`Get-Date${eol}node scripts/lanes/start.mjs 12 14`), grant())?.decision, "deny", JSON.stringify(eol));
+  }
+});
+
+test("#61 edge (security review): a private-use character no longer turns a computed name into no decision", () => {
+  for (const c of ["node ('scripts/lanes/sta'+'rt.mjs') 5 # ", `$c='cla'+'ude'; & $c ('--'+'bg') # `]) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+});
+
+test("#61 edge (security review): a node -e script reaching process, global, this or arguments by a computed key can launch", () => {
+  for (const c of [
+    `node -e "const k='getBuilt'+'inModule';const {[k]:g}=process;const m=g('node:child'+'_process');const {['spa'+'wnSync']:sp}=m;sp('node',['scripts/lanes/start.mjs','5'])"`,
+    `node -e "const {[k]:r}=global; r('scripts/lanes/start.mjs')"`,
+    `node -e "arguments[1]('child_'+'process').spawn('claude', ['${BG}'])"`,
+    `node -e "this[k].x('claude ${BG}')"`,
+  ]) {
+    assert.equal(decideFor(bash(c), grant())?.decision, "deny", c);
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
 });

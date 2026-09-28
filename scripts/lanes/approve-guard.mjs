@@ -757,7 +757,9 @@ const PS_NAME_CHAR_RE = /[\p{L}\p{N}_:]/u;
 // A statement whose first character is one of these starts with a value, not a command name.
 const PS_EXPRESSION_START = `$@([{-${PS_SINGLE}${PS_DOUBLE}`;
 // `$x =`, `[string]$x +=`, `$a, $b =`, `$h['k'].v =`: an assignment, whose right side is a statement of its own.
-const PS_ASSIGN_RE = /^(?:\[[\p{L}\p{N}_.,[\] ]+\]\s*)*\$(?:\{[^}\n]*\}|[\p{L}\p{N}_:]+)(?:\.[\p{L}\p{N}_]+|\[[^\]()\n]*\])*(?:\s*,\s*\$(?:\{[^}\n]*\}|[\p{L}\p{N}_:]+))*\s*(?:[-+*/%]|\?\?)?=(?!=)/u;
+// The type part allows one nested `[…]` and no space, so no two ways to match the same text (a nested quantifier over
+// an ambiguous class made `[a][a]…[a]x` take seconds per statement, #61 security review).
+const PS_ASSIGN_RE = /^(?:\[[\p{L}\p{N}_.,]+(?:\[[\p{L}\p{N}_.,]*\])?\]\s*)*\$(?:\{[^}\n]*\}|[\p{L}\p{N}_:]+)(?:\.[\p{L}\p{N}_]+|\[[^\]()\n]*\])*(?:\s*,\s*\$(?:\{[^}\n]*\}|[\p{L}\p{N}_:]+))*\s*(?:[-+*/%]|\?\?)?=(?!=)/u;
 // `>`, `>>`, `2>`, `*>>`, `2>&1`: PowerShell's redirections. `<` is reserved and never parses.
 const PS_REDIRECT_RE = /^([1-6*])?(>>?)(&[1-6])?/;
 // Commands that run a string as PowerShell code: each reads as Bash's eval, with its string arguments read as
@@ -767,15 +769,21 @@ const PS_SHELL_RE = /^(powershell|pwsh)$/i;
 // Commands that start their first argument as a program, or open it with its file association (node, for a .mjs):
 // each reads as node, with every string argument split into words, as Start-Process joins -ArgumentList.
 const PS_LAUNCH_RE = /^(start-process|saps|start|invoke-item|ii)$/i;
-// .NET and script-block routes to running code or a program that no word shows: a command using any of them fails
-// closed as a whole.
-const PS_OPAQUE_RE = /scriptblock|invokescript|invokecommand|add-type|process\]?::start|processstartinfo|diagnostics\.process|activator\]/i;
+// .NET, COM, script-block and alias routes to running code or a program that no word shows (an alias renames node or
+// claude): a command using any of them fails closed as a whole.
+const PS_OPAQUE_RE = /scriptblock|invokescript|invokecommand|add-type|process\]?::start|processstartinfo|diagnostics\.process|activator\]|comobject|set-alias|new-alias|\b(sal|nal)\b/i;
 // The names a PowerShell quote or backtick inside a string could hide from a Bash reading.
 const PS_NAMES_RE = /start\.mjs|queue\.mjs|post-review|--(?:bg|background)|claude/gi;
 const psDequoted = (s) => s.replace(/['"`‘-„]/g, "");
 const bashQuote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
 const psNames = (s) => new Set([...s.matchAll(PS_NAMES_RE)].map((m) => m[0].toLowerCase()));
 // Every word of `text`, quotes and backticks dropped, behind `$1`: a command no guard can resolve, so it fails closed.
+// Source as the reader takes it (#61 security review). Every line end PowerShell knows (CR, CRLF, NEL, LS, PS) becomes
+// LF, so a comment or statement ends where PowerShell ends it; and a private-use character, which the guards use as a
+// marker, becomes U+FFFD, so it can neither pose as a marker nor make the reader give up.
+// Built from code points: a raw U+2028 or U+2029 in a regex literal is a line break to JavaScript.
+const PS_LINE_END_RE = new RegExp(`\\r\\n?|[${String.fromCharCode(0x85, 0x2028, 0x2029)}]`, "g");
+const psSource = (s) => s.replace(PS_LINE_END_RE, "\n").replace(/[-]/g, "�");
 const psOpaque = (text) => [PS_VAR, ...psDequoted(text).split(/\s+/).filter(Boolean).map(bashQuote)].join(" ");
 
 /** A word's parts as Bash text: literal runs single-quoted, everything else as it is. */
@@ -947,7 +955,7 @@ const psCommandName = (value) => value.split(/[\\/]/).at(-1).toLowerCase().repla
 /** Text PowerShell will run as a command, read as PowerShell: its Bash text, or an opaque command when unreadable. */
 function psShadow(text, depth) {
   try {
-    return psStatements(text, 0, null, depth + 1).text;
+    return psStatements(psSource(text), 0, null, depth + 1).text;
   } catch {
     return psOpaque(text);
   }
@@ -968,11 +976,13 @@ function psStatementText(stmt, extra, depth) {
     const shown = psNames(w.value);
     if ([...psNames(psDequoted(w.value))].some((n) => !shown.has(n))) extra.push(psOpaque(w.value));
   }
-  if (runner) {
+  if (runner || launch) {
     const args = words.slice(1);
-    // What a runner runs is only known at run time when any argument, or anything piped into it, expands.
-    if (args.some((w) => !w.literal) || (stmt.pipedInto && stmt.pipedLive)) extra.push(PS_VAR);
-    if (args.length > 0) extra.push(psShadow(args.map((w) => w.value).join(" "), depth));
+    // What a runner runs, or a launcher starts, is only known at run time when any argument (or, for a runner,
+    // anything piped into it) expands (#61 security review: Start-Process node -ArgumentList $a).
+    if (args.some((w) => !w.literal) || (runner && stmt.pipedInto && stmt.pipedLive)) extra.push(PS_VAR);
+    if (runner && args.length > 0) extra.push(psShadow(args.map((w) => w.value).join(" "), depth));
+    // An -EncodedCommand value, given to powershell directly or through Start-Process, is read decoded.
     for (const [k, w] of args.entries()) {
       if (k > 0 && isEncodedFlag(args[k - 1].value) && BASE64_RE.test(w.value)) extra.push(psShadow(Buffer.from(w.value, "base64").toString("utf16le"), depth));
     }
@@ -991,10 +1001,12 @@ function psStatementText(stmt, extra, depth) {
 /**
  * PowerShell statements from `start` up to `closer` (`)` or `}`, or the end of `src` when null), as Bash text. `end` is
  * the index of the closer. Throws on anything unreadable: an unterminated string, comment or group, a stray closer, a
- * `<`, nesting deeper than PS_MAX_DEPTH.
+ * `<`, nesting deeper than PS_MAX_DEPTH. `src` has gone through psSource.
  */
 function psStatements(src, start, closer, depth) {
-  if (depth > PS_MAX_DEPTH) throw new Error("nesting too deep");
+  // PowerShell itself runs deeper nesting, so this limit of the reader (not of the language) is marked for the guards
+  // to deny whatever the command names (#61 security review).
+  if (depth > PS_MAX_DEPTH) throw Object.assign(new Error("nesting too deep"), { readerLimit: true });
   const pieces = [];
   const extra = [];
   let stmt = { items: [], call: false };
@@ -1096,20 +1108,20 @@ function psStatements(src, start, closer, depth) {
 
 /**
  * A PowerShell command as a Bash command with the same words (see the note above psStatements), for the guards to scan.
- * Throws when it cannot be read with PowerShell's rules, or holds a private-use character the guards use as a marker.
+ * Throws when it cannot be read with PowerShell's rules; an error with `readerLimit` set is a limit of this reader
+ * (nesting too deep), which PowerShell itself may still run, so the guards deny it whatever it names.
  */
 export function powershellAsBash(command) {
-  const src = String(command ?? "");
-  if (/[-]/.test(src)) throw new Error("private-use character");
+  const src = psSource(String(command ?? ""));
   const { text } = psStatements(src, 0, null, 0);
   return PS_OPAQUE_RE.test(psDequoted(src)) ? `${text} ; ${psOpaque(src)}` : text;
 }
 
 /** A PowerShell command's text with every quote and backtick dropped, for the fail-closed name check. */
-export const unquotedPowerShell = (command) => psDequoted(String(command ?? ""));
+const unquotedPowerShell = (command) => psDequoted(String(command ?? ""));
 
 // The owner command through PowerShell is plain only without any character PowerShell gives a meaning of its own.
-const PS_META_RE = /[;&|`$<>(){}@,#%*?[\]\n\r\\‘-„]/;
+const PS_META_RE = new RegExp(`[;&|\`$<>(){}@,#%*?[\\]\\n\\r\\\\${String.fromCharCode(0x2018)}-${String.fromCharCode(0x201e, 0x85, 0x2028, 0x2029, 0xe000)}-${String.fromCharCode(0xf8ff)}]`);
 
 /** The directory the UserPromptSubmit hook writes grants to: .lanes/approve/ in the checkout holding this script. */
 export function grantDir() {
@@ -1145,8 +1157,8 @@ export function decidePreToolUse(input, grant, now = Date.now()) {
     let bashText;
     try {
       bashText = powershellAsBash(command);
-    } catch {
-      return /post-review/i.test(unquotedPowerShell(command)) ? { decision: "deny", reason: UNPARSED_REASON } : null;
+    } catch (e) {
+      return e?.readerLimit || /post-review/i.test(unquotedPowerShell(command)) ? { decision: "deny", reason: UNPARSED_REASON } : null;
     }
     found = ownerInvocations(bashText, command, PS_META_RE);
   } else {

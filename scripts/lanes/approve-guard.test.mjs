@@ -1216,6 +1216,6 @@ test("#61 edge: powershellAsBash reads PowerShell quoting into Bash words", () =
   }
   assert.equal(words('Write-Output "$(node scripts/lanes/post-review.mjs owner --pr 16)"').length, 1);
   assert.equal(decidePreToolUse(ps("node scripts/lanes/post-review.mjs owner success 'approved by owner' --pr 16"), grant(), NOW).decision, "allow");
-  assert.throws(() => powershellAsBash("x ''"), /private-use/);
-  assert.throws(() => powershellAsBash("(".repeat(40) + ")".repeat(40)), /too deep/);
+  assert.equal(powershellAsBash("x ''"), "'x' '�'");
+  assert.throws(() => powershellAsBash("(".repeat(40) + ")".repeat(40)), (e) => /too deep/.test(e.message) && e.readerLimit === true);
 });

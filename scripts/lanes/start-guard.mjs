@@ -439,13 +439,18 @@ function programWords(words) {
 }
 
 // What a node -e script needs to load or launch other code (#61): a process, worker or module API, a dynamic import or
-// require, eval or Function, a computed member (`process[x]`, `globalThis[k]`), an escape that could spell a name, or an
-// import of anything but a file-system, path, URL, OS or util builtin. A script with none of these can only compute
+// require, eval or Function, any use of a root that reaches them (process, global, globalThis, this, arguments, self,
+// module: a computed key such as `const {[k]: g} = process` spells no API name, #61 security review), a computed
+// member (`x[k]`), an escape that could spell a name, or an import of anything but a file-system, path, URL, OS or
+// util builtin. A script with none of these can only compute
 // and write text, so a string in it that names start.mjs, queue.mjs or claude --bg is no run.
-const JS_LAUNCH_RE = /child_process|worker_threads|\bspawn|\bexec|\bfork\b|getBuiltinModule|binding|dlopen|\bimport\s*\(|\brequire\b|\bWorker\b|\beval\b|\bFunction\b|\bReflect\b|\bconstructor\b|\bglobalThis\b|\bprocess\s*\[|\bmodule\b|\bDeno\b|\bBun\b|\\[ux]|[\w)\]]\s*\[\s*[^\]\s\d]/;
+const JS_LAUNCH_RE = /child_process|worker_threads|\bspawn|\bexec|\bfork\b|getBuiltinModule|binding|dlopen|\bimport\s*\(|\brequire\b|\bWorker\b|\beval\b|\bFunction\b|\bReflect\b|\bconstructor\b|\bglobal(This)?\b|\bprocess\b|\bthis\b|\barguments\b|\bself\b|\bmodule\b|\bDeno\b|\bBun\b|\\[ux]|[\w)\]]\s*\[\s*[^\]\s\d]/;
 const JS_IMPORT_RE = /\b(?:from|import)\s*(["'])(.*?)\1/g;
 const SAFE_IMPORT_RE = /^(node:)?(fs|fs\/promises|path|url|os|util)$/;
-const mayLaunch = (js) => JS_LAUNCH_RE.test(js) || [...js.matchAll(JS_IMPORT_RE)].some((m) => !SAFE_IMPORT_RE.test(m[2]));
+const launches = (js) => JS_LAUNCH_RE.test(js) || [...js.matchAll(JS_IMPORT_RE)].some((m) => !SAFE_IMPORT_RE.test(m[2]));
+// Read as written and with every comment turned into a space, so `import/*x*/(…)` still reads as a dynamic import (#61
+// test-hunter). Both readings count: a `//` inside a string would make the second one drop real code.
+const mayLaunch = (js) => launches(js) || launches(js.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, " "));
 // A node -e script's text as names are looked for in it: quotes, `+` and whitespace dropped, so "st" + "art.mjs" reads whole.
 const jsNames = (js) => js.replace(new RegExp(`["'\`+\\s${LIT_TICK}]`, "g"), "");
 
@@ -812,10 +817,11 @@ export function decidePreToolUse(input, grant, now = Date.now()) {
     // Read with PowerShell's rules, then scanned as Bash (#61). One that cannot be read fails closed on the names.
     try {
       command = powershellAsBash(typed);
-    } catch {
+    } catch (e) {
       const text = dequoted(typed);
       if (/queue\.mjs/i.test(text)) return { decision: "deny", reason: QUEUE_DENY_REASON };
-      return /start\.mjs|--(bg|background)/i.test(text) ? { decision: "deny", reason: PARSE_DENY_REASON } : null;
+      // A limit of the reader, not of PowerShell (nesting too deep), is denied whatever it names.
+      return e?.readerLimit || /start\.mjs|--(bg|background)/i.test(text) ? { decision: "deny", reason: PARSE_DENY_REASON } : null;
     }
   }
   const bg = scanBgLaunches(command);
