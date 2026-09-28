@@ -4,12 +4,12 @@
   "title": "Lane metrics",
   "description": "The report scripts/lanes/lane-metrics.mjs builds (ADR 0013): rework, scope drift, owner time, concurrency and CI friction over merged lane PRs, with the delivery and review summaries embedded. Medians, counts and rates only: no logins, titles, bodies or per-PR rows, and no string field beyond enums, ISO dates and tier, model and stage names. tokensByTierAndModel, relaunches and laneHours come from the git-ignored .lanes/costs.jsonl: they are optional here and absent, never zeroed, from public output (`public: true`, which --public sets). A schema cannot say 'absent when public', so contracts.test.mjs enforces that rule and checks fixtures against this file field by field.",
   "type": "object",
-  "required": ["schemaVersion", "generatedAt", "window", "rework", "scopeDrift", "ownerTime", "concurrency", "friction", "delivery", "review"],
+  "required": ["schemaVersion", "generatedAt", "public", "window", "rework", "scopeDrift", "ownerTime", "concurrency", "friction", "delivery", "review"],
   "additionalProperties": false,
   "properties": {
     "schemaVersion": { "description": "The report shape's version.", "const": 1 },
     "generatedAt": { "description": "When the report was built, as a UTC ISO 8601 time.", "$ref": "#/$defs/isoTime" },
-    "public": { "description": "True for --public output: the local-only fields below must then be absent.", "type": "boolean" },
+    "public": { "description": "Required, so a report never leaks by omission: true for --public output, where the local-only fields below must be absent; false for local output.", "type": "boolean" },
     "window": { "$ref": "#/$defs/window" },
     "rework": { "$ref": "#/$defs/rework" },
     "scopeDrift": { "$ref": "#/$defs/scopeDrift" },
@@ -39,10 +39,11 @@
   "$defs": {
     "isoTime": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$" },
     "isoDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
-    "name": { "description": "A tier, model or stage name: lower-case letters, digits, dots, dashes and spaces, never free text.", "type": "string", "pattern": "^[a-z0-9][a-z0-9. -]{0,39}$" },
+    "stage": { "description": "A stage from status.mjs's vocabulary (the same one snapshot.schema.json uses): an allowlist, never free text.", "enum": ["ready", "blocked", "not-ready", "already met", "starting", "failing", "contract", "owner", "gate", "review", "queued"] },
+    "model": { "description": "A Claude model family: an allowlist, never free text. A model outside it is reported as unknown.", "enum": ["fable", "opus", "sonnet", "haiku", "unknown"] },
     "tier": { "enum": ["skip", "quick", "full", "unknown"] },
     "count": { "type": "integer", "minimum": 0 },
-    "rate": { "description": "A share between 0 and 1, or null when there is nothing to divide.", "type": ["number", "null"], "minimum": 0 },
+    "rate": { "description": "A share between 0 and 1, or null when there is nothing to divide.", "type": ["number", "null"], "minimum": 0, "maximum": 1 },
     "median": { "description": "A median, or null when there are no values.", "type": ["number", "null"], "minimum": 0 },
     "stat": {
       "type": "object",
@@ -70,7 +71,7 @@
             "type": "object",
             "required": ["stage", "count"],
             "additionalProperties": false,
-            "properties": { "stage": { "$ref": "#/$defs/name" }, "count": { "$ref": "#/$defs/count" } }
+            "properties": { "stage": { "$ref": "#/$defs/stage" }, "count": { "$ref": "#/$defs/count" } }
           }
         },
         "pushesAfterOpen": { "$ref": "#/$defs/stat" }
@@ -164,7 +165,7 @@
         "type": "object",
         "required": ["tier", "model", "tokens"],
         "additionalProperties": false,
-        "properties": { "tier": { "$ref": "#/$defs/tier" }, "model": { "$ref": "#/$defs/name" }, "tokens": { "$ref": "#/$defs/count" } }
+        "properties": { "tier": { "$ref": "#/$defs/tier" }, "model": { "$ref": "#/$defs/model" }, "tokens": { "$ref": "#/$defs/count" } }
       }
     },
     "aggregate": {

@@ -152,7 +152,7 @@ const metricsSchema = JSON.parse(readFileSync("contracts/review-metrics.schema.j
  * The JSON Schema subset the contracts use (type, enum, const, minimum, pattern, maxLength, items, required,
  * properties, additionalProperties, plus local `$ref` to `#/$defs/<name>`). A keyword outside it makes the schema throw, so it can never pass unchecked.
  */
-const KNOWN_KEYWORDS = new Set(["$schema", "$id", "title", "description", "type", "enum", "const", "minimum", "pattern", "maxLength", "items", "required", "properties", "additionalProperties", "$defs", "$ref"]);
+const KNOWN_KEYWORDS = new Set(["$schema", "$id", "title", "description", "type", "enum", "const", "minimum", "maximum", "pattern", "maxLength", "items", "required", "properties", "additionalProperties", "$defs", "$ref"]);
 function schemaAccepts(schema, value, root = schema) {
   for (const k of Object.keys(schema)) if (!KNOWN_KEYWORDS.has(k)) throw new Error(`schemaAccepts does not implement "${k}"`);
   if (schema.$ref !== undefined) {
@@ -173,6 +173,7 @@ function schemaAccepts(schema, value, root = schema) {
   if (schema.enum && !schema.enum.includes(value)) return false;
   if ("const" in schema && value !== schema.const) return false;
   if (schema.minimum !== undefined && !(value >= schema.minimum)) return false;
+  if (schema.maximum !== undefined && !(value <= schema.maximum)) return false;
   if (schema.pattern !== undefined && !(typeof value === "string" && new RegExp(schema.pattern).test(value))) return false;
   if (schema.maxLength !== undefined && !(typeof value === "string" && value.length <= schema.maxLength)) return false;
   if (schema.items && Array.isArray(value) && !value.every((v) => schemaAccepts(schema.items, v, root))) return false;
@@ -367,6 +368,7 @@ const laneReport = (over = {}) => {
   const doc = {
     schemaVersion: 1,
     generatedAt: "2026-09-28T12:00:00Z",
+    public: false,
     window: { days: 28, from: "2026-08-31T12:00:00Z", to: "2026-09-28T12:00:00Z" },
     ...laneBlocks(),
     ...over,
@@ -385,7 +387,7 @@ const laneConforms = (doc) => schemaAccepts(laneSchema, doc) && publicLeaks(doc)
 test("the lane metrics schema defines the envelope, the aggregate blocks and the optional local-only fields", () => {
   assert.equal(laneSchema.additionalProperties, false);
   const blocks = ["rework", "scopeDrift", "ownerTime", "concurrency", "friction", "delivery", "review"];
-  assert.deepEqual([...laneSchema.required].sort(), ["generatedAt", "schemaVersion", "window", ...blocks].sort());
+  assert.deepEqual([...laneSchema.required].sort(), ["generatedAt", "public", "schemaVersion", "window", ...blocks].sort());
   assert.deepEqual(Object.keys(laneSchema.properties).sort(), ["generatedAt", "public", "schemaVersion", "split", "window", ...blocks, ...LOCAL_ONLY].sort());
   for (const k of LOCAL_ONLY) assert.ok(!laneSchema.required.includes(k), `${k} is optional`);
   assert.deepEqual([...laneSchema.$defs.aggregate.required].sort(), [...blocks].sort());
@@ -418,6 +420,8 @@ test("the lane metrics schema rejects a bad report, field by field", () => {
     ["a free-text stage", { rework: { ...b.rework, gateFailuresByStage: [{ stage: "Fix login for alice@example.com", count: 1 }] } }],
     ["a stage with a path in it", { rework: { ...b.rework, gateFailuresByStage: [{ stage: "src/a.ts", count: 1 }] } }],
     ["a per-PR list in a block", { scopeDrift: { ...b.scopeDrift, files: ["a.ts"] } }],
+    ["a rate above 1", { scopeDrift: { ...b.scopeDrift, driftRate: 1.5 } }],
+    ["a negative rate", { scopeDrift: { ...b.scopeDrift, driftRate: -0.1 } }],
     ["a negative count", { friction: { ...b.friction, ciReruns: -1 } }],
     ["a fractional count", { friction: { ...b.friction, ciReruns: 1.5 } }],
     ["a string median", { ownerTime: { ...b.ownerTime, waitHours: { count: 1, median: "5" } } }],
@@ -427,7 +431,12 @@ test("the lane metrics schema rejects a bad report, field by field", () => {
     ["a split missing after", { split: side({ after: undefined }) }],
     ["a split side with a login", { split: side({ before: { ...b, author: "x" } }) }],
     ["a split side missing a block", { split: side({ before: { ...b, rework: undefined } }) }],
+    ["a missing public flag", { public: undefined }],
+    ["local-only fields with no public flag", { public: undefined, ...laneLocal() }],
+    ["a lower-case free-text stage", { rework: { ...b.rework, gateFailuresByStage: [{ stage: "fix login for alice", count: 1 }] } }],
+    ["a login as a stage", { rework: { ...b.rework, gateFailuresByStage: [{ stage: "alice", count: 1 }] } }],
     ["a free-text model", { tokensByTierAndModel: [{ tier: "full", model: "Sonnet 5.5 (Alice's key)", tokens: 1 }] }],
+    ["a lower-case login as a model", { tokensByTierAndModel: [{ tier: "full", model: "alice", tokens: 1 }] }],
     ["a string relaunches", { relaunches: "1" }],
   ];
   for (const [name, over] of cases) assert.equal(schemaAccepts(laneSchema, JSON.parse(JSON.stringify(laneReport(over)))), false, name);
