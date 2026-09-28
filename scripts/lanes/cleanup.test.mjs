@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  cleanableCount, cleanupMerged, findOrphans, formatStep, parseWorktrees, pidRunning, planCleanup, removeEmptyDir, render, runCleanup,
-  saveSessionLog, sessionEnded, sessionsFrom, waitForStop,
+  SESSION_ID, cleanableCount, cleanupMerged, findOrphans, formatStep, parseWorktrees, pidRunning, planCleanup, removeEmptyDir, render, runCleanup,
+  saveSessionLog, sessionEnded, sessionsFrom, shOptions, waitForStop,
 } from "./cleanup.mjs";
 
 const ROOT = "C:/repo";
@@ -265,7 +265,7 @@ test("edge: a session with neither status nor state is treated as not working, n
   assert.deepEqual(cmds(entry), ["claude rm s7", `git worktree remove ${ROOT}/.claude/worktrees/issue-7-x`, "git branch -D issue-7-x"]);
 });
 
-test("sessionsFrom keeps each background session's status and state, and drops others", () => {
+test("sessionsFrom keeps each background session's status and state, marks one with no id unreadable, and drops others", () => {
   const agents = [
     { kind: "background", id: "s7", cwd: "C:\\repo\\.claude\\worktrees\\issue-7-x", status: "idle", state: "working" },
     { kind: "background", id: "s8", cwd: "C:/repo/.claude/worktrees/issue-8-y", state: "blocked" },
@@ -277,6 +277,7 @@ test("sessionsFrom keeps each background session's status and state, and drops o
   assert.deepEqual(sessionsFrom(agents, "C:/repo"), [
     { id: "s7", cwd: "C:\\repo\\.claude\\worktrees\\issue-7-x", issue: 7, status: "idle", state: "working" },
     { id: "s8", cwd: "C:/repo/.claude/worktrees/issue-8-y", issue: 8, status: undefined, state: "blocked" },
+    { unreadableId: true, cwd: "C:/repo/.claude/worktrees/issue-10-q", issue: 10, status: undefined, state: undefined },
   ]);
 });
 
@@ -1156,23 +1157,202 @@ test("sessionsFrom keeps a session whose id is a valid name", () => {
   assert.deepEqual(sessionsFrom([agentWith("s7"), agentWith("A_b-9")], ROOT).map((s) => s.id), ["s7", "A_b-9"]);
 });
 
-test("sessionsFrom drops an id that starts with a dash, so it never reaches claude stop or claude rm", () => {
+const UNREADABLE = "session with an unreadable id is in it";
+const stopsOrRemoves = (plan) => plan.flatMap((e) => (e.steps ? cmds(e) : [])).filter((c) => /^claude (stop|rm)/.test(c));
+
+test("sessionsFrom keeps an id that starts with a dash only as an unreadable session, so it never reaches claude stop or claude rm", () => {
   const sessions = sessionsFrom([agentWith("--force"), agentWith("-x")], ROOT);
-  assert.deepEqual(sessions, []);
+  assert.deepEqual(sessions.map((s) => [s.id, s.unreadableId]), [[undefined, true], [undefined, true]]);
   const plan = planCleanup({ worktrees: [main, wt("issue-7-x")], sessions, prs: [merged("issue-7-x")] });
-  const all = plan.flatMap((e) => (e.steps ? cmds(e) : []));
-  assert.ok(!all.some((c) => /^claude (stop|rm)/.test(c)), all.join("; "));
+  assert.deepEqual(stopsOrRemoves(plan), []);
 });
 
-test("edge: sessionsFrom drops an empty id", () => {
-  assert.deepEqual(sessionsFrom([agentWith("")], ROOT), []);
+test("edge: sessionsFrom marks an empty id unreadable", () => {
+  assert.deepEqual(sessionsFrom([agentWith("")], ROOT).map((s) => [s.id, s.unreadableId]), [[undefined, true]]);
 });
 
-test("edge: sessionsFrom drops a non-string id", () => {
-  assert.deepEqual(sessionsFrom([agentWith(7), agentWith(null), agentWith(undefined), agentWith(["s7"])], ROOT), []);
+test("edge: sessionsFrom marks a non-string id unreadable", () => {
+  const sessions = sessionsFrom([agentWith(7), agentWith(null), agentWith(undefined), agentWith(["s7"])], ROOT);
+  assert.equal(sessions.length, 4);
+  assert.ok(sessions.every((s) => s.unreadableId === true && s.id === undefined));
 });
 
-test("edge: sessionsFrom drops ids with spaces, slashes, dots or a trailing newline, and keeps a valid neighbour", () => {
+test("edge: sessionsFrom marks ids with spaces, slashes, dots or a trailing newline unreadable, and keeps a valid neighbour", () => {
   const ids = ["a b", "a/b", "a.b", "s7\n", "_x", "ok"];
-  assert.deepEqual(sessionsFrom(ids.map(agentWith), ROOT).map((s) => s.id), ["ok"]);
+  const sessions = sessionsFrom(ids.map(agentWith), ROOT);
+  assert.deepEqual(sessions.filter((s) => !s.unreadableId).map((s) => s.id), ["ok"]);
+  assert.equal(sessions.filter((s) => s.unreadableId).length, 5);
+});
+
+test("edge: an unreadable-id session keeps its cwd, issue, status, state and pid; a valid one has no unreadableId", () => {
+  const [bad, good] = sessionsFrom([{ ...agentWith("-x"), status: "busy", pid: 41 }, agentWith("s7")], ROOT);
+  assert.deepEqual(bad, { unreadableId: true, cwd: "C:/repo/.claude/worktrees/issue-7-x", issue: 7, status: "busy", state: "idle", pid: 41 });
+  assert.equal("unreadableId" in good, false);
+});
+
+test("edge: sessionsFrom still drops a malformed-id session outside the repo, a non-background one, or one with no cwd", () => {
+  const agents = [
+    { ...agentWith("-x"), cwd: "D:/elsewhere/issue-7-x" },
+    { ...agentWith("-x"), kind: "foreground" },
+    { ...agentWith("-x"), cwd: undefined },
+  ];
+  assert.deepEqual(sessionsFrom(agents, ROOT), []);
+});
+
+// #209: a session dropped for a malformed id was invisible, so a merged worktree it sat in had no "session is in it" skip.
+test("a merged, clean worktree holding a session with a malformed id is skipped, with no claude stop or claude rm", () => {
+  const sessions = sessionsFrom([agentWith("--force")], ROOT);
+  const plan = planCleanup({ worktrees: [main, wt("issue-7-x")], sessions, prs: [merged("issue-7-x")] });
+  assert.deepEqual(plan, [{ branch: "issue-7-x", issue: 7, skip: UNREADABLE }]);
+  assert.equal(cleanableCount(plan), 0);
+});
+
+test("a worktree that also holds a valid idle session is not removed either: the unreadable one may still be in it", () => {
+  const sessions = sessionsFrom([agentWith("s7"), agentWith("-x")], ROOT);
+  const plan = planCleanup({ worktrees: [main, wt("issue-7-x")], sessions, prs: [merged("issue-7-x")] });
+  assert.deepEqual(plan.map((e) => e.skip), [UNREADABLE]);
+  assert.deepEqual(stopsOrRemoves(plan), []);
+});
+
+test("an unreadable-id session skips its worktree even when its process is dead or its status is idle", () => {
+  const plan = planCleanup({ worktrees: [main, wt("issue-7-x")], sessions: [{ unreadableId: true, cwd: `${ROOT}/.claude/worktrees/issue-7-x`, issue: 7, status: "idle", pid: 41, alive: false }], prs: [merged("issue-7-x")] });
+  assert.equal(plan[0].skip, UNREADABLE);
+});
+
+test("edge: an unreadable-id session in one lane's worktree does not stop another lane's cleanup", () => {
+  const sessions = sessionsFrom([agentWith("-x"), { ...agentWith("s8"), cwd: "C:/repo/.claude/worktrees/issue-8-y" }], ROOT);
+  const plan = planCleanup({ worktrees: [main, wt("issue-7-x"), wt("issue-8-y")], sessions, prs: [merged("issue-7-x"), merged("issue-8-y", { number: 91 })] });
+  assert.deepEqual(plan.map((e) => [e.branch, e.skip]), [["issue-7-x", UNREADABLE], ["issue-8-y", undefined]]);
+  assert.deepEqual(stopsOrRemoves(plan), ["claude rm s8"]);
+});
+
+test("edge: an unreadable-id session whose worktree is gone is skipped, never removed", () => {
+  const sessions = sessionsFrom([agentWith("-x")], ROOT);
+  const plan = planCleanup({ worktrees: [main], sessions, prs: [merged("issue-7-x")] });
+  assert.deepEqual(plan, [{ branch: null, issue: 7, skip: UNREADABLE }]);
+});
+
+test("edge: a worktree with a working session and an unreadable one is skipped either way, never planned", () => {
+  const sessions = sessionsFrom([{ ...agentWith("s7"), status: "busy" }, agentWith("-x")], ROOT);
+  const [entry] = planCleanup({ worktrees: [main, wt("issue-7-x")], sessions, prs: [merged("issue-7-x")] });
+  assert.equal(entry.steps, undefined);
+  assert.ok(entry.skip);
+});
+
+test("edge: an unreadable-id session keeps an unmerged lane's skip reason", () => {
+  const sessions = sessionsFrom([agentWith("-x")], ROOT);
+  assert.deepEqual(planCleanup({ worktrees: [main, wt("issue-7-x")], sessions, prs: [] }), [{ branch: "issue-7-x", issue: 7, skip: "not merged" }]);
+});
+
+test("edge: an empty orphan folder holding an unreadable-id session is left in place", () => {
+  const orphan = { path: `${ROOT}/.claude/worktrees/issue-7-x`, files: 0 };
+  const sessions = sessionsFrom([agentWith("-x")], ROOT);
+  const plan = planCleanup({ worktrees: [main], sessions, prs: [], orphans: [orphan] });
+  assert.deepEqual(plan.find((e) => e.orphan), { branch: null, issue: null, orphan: orphan.path, skip: UNREADABLE });
+});
+
+test("edge: planCleanup itself refuses a raw session whose id is unsafe, so the guarantee does not rest on sessionsFrom", () => {
+  const raw = [{ id: "--force", cwd: `${ROOT}/.claude/worktrees/issue-7-x`, issue: 7, state: "idle" }];
+  const plan = planCleanup({ worktrees: [main, wt("issue-7-x")], sessions: raw, prs: [merged("issue-7-x")] });
+  assert.deepEqual(plan.map((e) => e.skip), [UNREADABLE]);
+  assert.deepEqual(stopsOrRemoves(plan), []);
+});
+
+test("render names an unreadable-id skip like any other skip", () => {
+  const plan = planCleanup({ worktrees: [main, wt("issue-7-x")], sessions: sessionsFrom([agentWith("-x")], ROOT), prs: [merged("issue-7-x")] });
+  assert.match(render(runCleanup(plan, { run: () => "", stillThere: () => true })), new RegExp(`skipped issue-7-x.*: ${UNREADABLE}`));
+});
+
+// #209: the session-id pattern is defined once, in cleanup.mjs, and everything else uses that one.
+test("SESSION_ID accepts plain names and rejects flags, empties and punctuation", () => {
+  for (const id of ["s7", "A_b-9", "0", "a"]) assert.ok(SESSION_ID.test(id), id);
+  for (const id of ["", "-x", "--force", "_x", "a b", "a/b", "a.b", "s7\n"]) assert.ok(!SESSION_ID.test(id), JSON.stringify(id));
+});
+
+test("the session-id pattern is written out once across cleanup.mjs and reap.mjs", () => {
+  const literal = "[A-Za-z0-9][A-Za-z0-9_-]*";
+  const count = (file) => readFileSync(new URL(file, import.meta.url), "utf8").split(literal).length - 1;
+  assert.equal(count("./cleanup.mjs"), 1);
+  assert.equal(count("./reap.mjs"), 0);
+});
+
+// CLAIMED is built from SESSION_ID.source with its anchors sliced off, which only works for this plain form.
+test("edge: SESSION_ID stays a plain anchored pattern with no flags, so CLAIMED can be built from its source", () => {
+  assert.equal(SESSION_ID.flags, "");
+  assert.match(SESSION_ID.source, /^\^[^|^$]*\$$/);
+});
+
+test("the CLAIMED capture takes the claimant id by SESSION_ID: a valid id is captured, a flag-like one is not", () => {
+  const plan = () => [{ branch: "issue-7-x", issue: 7, pr: 90, steps: [{ cmd: "claude", args: ["rm", "s7"] }] }];
+  for (const [claimant, expected] of [["x9", "claude rm x9"], ["-x9", undefined]]) {
+    const ran = [];
+    const run = (cmd, args) => {
+      ran.push(`${cmd} ${args.join(" ")}`);
+      if (ran.length === 1) throw Object.assign(new Error("fail"), { stderr: `Another running background session (${claimant}) claims this worktree` });
+      return "";
+    };
+    runCleanup(plan(), { run, stillThere: () => true, sessionEnded: () => true });
+    assert.equal(ran.includes("claude rm x9") || ran.includes("claude rm -x9"), expected !== undefined, `${claimant}: ${ran.join("; ")}`);
+  }
+});
+
+// #209: cleanup.mjs runs dozens of git, gh and claude commands per removal; none may open a console window on Windows.
+test("shOptions sets windowsHide, and a caller's options cannot switch it off", () => {
+  assert.equal(shOptions().windowsHide, true);
+  assert.equal(shOptions({ cwd: "/r" }).cwd, "/r");
+  assert.equal(shOptions({ windowsHide: false }).windowsHide, true);
+});
+
+test("edge: shOptions keeps the output capture, timeout and buffer cleanup relies on", () => {
+  const options = shOptions();
+  assert.equal(options.encoding, "utf8");
+  assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+  assert.equal(options.timeout, 60_000);
+  assert.ok(options.maxBuffer >= 1024 * 1024);
+});
+
+test("edge: shOptions lets a caller set its own timeout", () => {
+  assert.equal(shOptions({ timeout: 5 }).timeout, 5);
+});
+
+// The text of each execFileSync, spawnSync or spawn call in a source file, from the name to its closing parenthesis.
+function processCalls(source) {
+  const code = source.split("\n").filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line)).join("\n");
+  const calls = [];
+  for (const m of code.matchAll(/\b(execFileSync|spawnSync|spawn)\(/g)) {
+    let depth = 0;
+    let end = m.index + m[0].length - 1;
+    for (; end < code.length; end++) {
+      if (code[end] === "(") depth++;
+      else if (code[end] === ")" && --depth === 0) break;
+    }
+    calls.push(code.slice(m.index, end + 1));
+  }
+  return calls;
+}
+
+test("no execFileSync, spawnSync or spawn call in cleanup.mjs or reap.mjs runs without windowsHide: true", () => {
+  for (const file of ["./cleanup.mjs", "./reap.mjs"]) {
+    const calls = processCalls(readFileSync(new URL(file, import.meta.url), "utf8"));
+    assert.ok(calls.length >= 1, `${file} has process calls`);
+    for (const call of calls) assert.match(call, /windowsHide: true|,\s*(shOptions|runOptions)\([^()]*\)\s*\)$/, `${file}: ${call.slice(0, 80)}`);
+  }
+});
+
+test("edge: the sh runner the default deps use builds its execFileSync options through shOptions", () => {
+  const source = readFileSync(new URL("./cleanup.mjs", import.meta.url), "utf8");
+  assert.match(source, /const sh = \(cmd, args, opts\) => execFileSync\(cmd, args, shOptions\(opts\)\);/);
+});
+
+test("edge: the call scanner flags a call left without windowsHide", () => {
+  const bad = processCalls('const a = execFileSync("git", ["x"], { encoding: "utf8" });\nspawn("node", []);');
+  assert.equal(bad.length, 2);
+  assert.ok(bad.every((c) => !/windowsHide/.test(c)));
+});
+
+test("edge: the call scanner reads a multi-line call, and skips comments and the import line", () => {
+  const src = '// execFileSync(\nimport { execFileSync } from "node:child_process";\nexecFileSync("git", [\n  "a",\n], {\n  windowsHide: true,\n});';
+  const calls = processCalls(src);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /windowsHide: true/);
 });

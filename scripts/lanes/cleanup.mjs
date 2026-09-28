@@ -70,6 +70,8 @@ function laneDone(prs, head, issueClosed) {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
+const UNREADABLE_SKIP = "session with an unreadable id is in it";
+
 // A session to remove: stopped first when its process is still alive (only an idle one gets here), then removed.
 const sessionSteps = (s, stop) => [...(stop ? [{ cmd: "claude", args: ["stop", s.id] }] : []), { cmd: "claude", args: ["rm", s.id] }];
 
@@ -125,6 +127,7 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
     else if (w.main) plan.push({ ...entry, skip: "checked out in the main worktree" });
     else if (w.dirty === null) plan.push({ ...entry, skip: "cannot read worktree status" });
     else if (w.dirty) plan.push({ ...entry, skip: "dirty worktree" });
+    else if (sessionsHere.some(unreadableId)) plan.push({ ...entry, skip: UNREADABLE_SKIP });
     else if (sessionsHere.some(stillWorking)) plan.push({ ...entry, skip: "session still working" });
     else if (done.closed && !Number.isInteger(w.unpushed)) plan.push({ ...entry, skip: "cannot read unpushed commits" });
     else if (done.closed && w.unpushed > 0) plan.push({ ...entry, skip: `${plural(w.unpushed, "commit")} not on any remote` });
@@ -145,6 +148,7 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
     const entry = { branch: null, issue: s.issue };
     const done = laneDone(prs.filter((p) => Number(LANE_BRANCH.exec(p.headRefName ?? "")?.[1]) === s.issue), undefined, closedIssues.has(s.issue));
     if (done.skip) plan.push({ ...entry, skip: done.skip });
+    else if (unreadableId(s)) plan.push({ ...entry, skip: UNREADABLE_SKIP });
     else if (stillWorking(s)) plan.push({ ...entry, skip: "session still working" });
     else plan.push({ ...entry, ...doneAs(done), steps: sessionSteps(s, s.alive === true) });
   }
@@ -157,7 +161,7 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
     const user = sessions.find((s) => !removedIds.has(s.id) && inside(dir, normalPath(s.cwd)));
     if (!Number.isInteger(o.files)) plan.push({ ...entry, skip: "cannot count its files" });
     else if (o.files > 0) plan.push({ ...entry, files: o.files, skip: `has ${plural(o.files, "file")}; left in place` });
-    else if (user) plan.push({ ...entry, skip: `session ${user.id} is in it` });
+    else if (user) plan.push({ ...entry, skip: unreadableId(user) ? UNREADABLE_SKIP : `session ${user.id} is in it` });
     else plan.push({ ...entry, steps: [{ cmd: "rmdir", args: [o.path], onlyIf: { path: o.path } }] });
   }
   return plan;
@@ -167,8 +171,13 @@ const doneAs = (done) => (done.closed ? { closed: true } : { pr: done.pr });
 
 export const cleanableCount = (plan) => plan.filter((e) => e.steps).length;
 
+// A session id is passed to `claude stop` and `claude rm` as an argv item, so it must not start with `-` (a flag).
+// The one place the pattern is written out: reap.mjs and CLAIMED use this.
+export const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const unreadableId = (s) => s.unreadableId === true || typeof s.id !== "string" || !SESSION_ID.test(s.id);
+
 // `claude rm` refuses while another session's entry claims the same worktree; the claimant id is plain, never a flag.
-const CLAIMED = /Another running background session \(([A-Za-z0-9][A-Za-z0-9_-]*)\) claims this worktree/;
+const CLAIMED = new RegExp(`Another running background session \\((${SESSION_ID.source.slice(1, -1)})\\) claims this worktree`);
 const isRm = (step) => step.cmd === "claude" && step.args[0] === "rm";
 const isStop = (step) => step.cmd === "claude" && step.args[0] === "stop";
 const RM_RETRY_MS = 2000;
@@ -286,9 +295,10 @@ export function render(results) {
     .join("\n");
 }
 
-// A large maxBuffer: `claude logs` of a long session can pass the 1 MB default.
-const sh = (cmd, args, opts = {}) =>
-  execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, maxBuffer: 64 * 1024 * 1024, ...opts });
+// A large maxBuffer: `claude logs` of a long session can pass the 1 MB default. windowsHide comes last so no caller
+// can bring back the console window Windows opens for each child process.
+export const shOptions = (opts = {}) => ({ encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, maxBuffer: 64 * 1024 * 1024, ...opts, windowsHide: true });
+const sh = (cmd, args, opts) => execFileSync(cmd, args, shOptions(opts));
 
 // Lanes run in worktrees of the main checkout, so the root is the common git dir's parent, not --show-toplevel.
 const repoRoot = () => dirname(sh("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim());
@@ -438,20 +448,19 @@ export function saveSessionLog(id, issue, { run, root, keep = LOG_KEEP }) {
   return `.lanes/logs/${name}`;
 }
 
-// A session id is passed to `claude stop` and `claude rm` as an argv item, so it must not start with `-` (a flag).
-const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-
 // The background sessions under `root` from `claude agents --json`, as planCleanup's `sessions`. A session whose id is
-// not a plain name is dropped.
+// not a plain name is kept without its id and marked `unreadableId: true`: no command can name it, but planCleanup
+// still sees it sitting in a worktree and leaves that worktree alone.
 export function sessionsFrom(agents, root) {
   const top = `${normalPath(root)}/`;
   const sessions = [];
   for (const a of agents) {
-    if (a?.kind !== "background" || typeof a.id !== "string" || !SESSION_ID.test(a.id) || typeof a.cwd !== "string") continue;
+    if (a?.kind !== "background" || typeof a.cwd !== "string") continue;
     const cwd = normalPath(a.cwd);
     if (!cwd.startsWith(top)) continue;
     const issue = Number(cwd.slice(top.length).split("/").map((s) => LANE_FOLDER.exec(s)?.[1]).find(Boolean)) || null;
-    const session = { id: a.id, cwd: a.cwd, issue, status: a.status, state: a.state };
+    const readable = typeof a.id === "string" && SESSION_ID.test(a.id);
+    const session = { ...(readable ? { id: a.id } : { unreadableId: true }), cwd: a.cwd, issue, status: a.status, state: a.state };
     sessions.push(Number.isInteger(a.pid) ? { ...session, pid: a.pid } : session);
   }
   return sessions;
