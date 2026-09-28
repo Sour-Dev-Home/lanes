@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { cleanableCount, formatStep, parseWorktrees, planCleanup, render, runCleanup, sessionsFrom } from "./cleanup.mjs";
+import { cleanableCount, formatStep, parseWorktrees, pidRunning, planCleanup, render, runCleanup, sessionsFrom } from "./cleanup.mjs";
 
 const ROOT = "C:/repo";
 const HEAD = "a".repeat(40);
@@ -288,10 +288,94 @@ test("edge: parseWorktrees reads porcelain output, marks the first as main and a
   ].join("\n");
   assert.deepEqual(parseWorktrees(text), [
     { path: "C:/repo", branch: "main", head: "f".repeat(40), main: true },
-    { path: "C:/repo/.claude/worktrees/issue-7-x", branch: "issue-7-x", head: HEAD, main: false },
+    { path: "C:/repo/.claude/worktrees/issue-7-x", branch: "issue-7-x", head: HEAD, main: false, locked: "claude session x (pid 1)" },
     { path: "C:/repo/d", branch: null, head: HEAD, main: false },
   ]);
   assert.deepEqual(parseWorktrees(""), []);
+});
+
+const lockedBy = (pid, lockRunning) => ({ locked: `claude session issue-7-x (pid ${pid})`, lockRunning });
+
+test("a merged lane locked by an ended Claude session is unlocked, then removed", () => {
+  const [entry] = planCleanup({ worktrees: [wt("issue-7-x", lockedBy(18124, false))], prs: [merged("issue-7-x")] });
+  const path = `${ROOT}/.claude/worktrees/issue-7-x`;
+  assert.deepEqual(cmds(entry), [`git worktree unlock ${path}`, `git worktree remove ${path}`, "git branch -D issue-7-x"]);
+  assert.deepEqual(entry.steps[0].onlyIf, { path });
+});
+
+test("a merged lane locked by a running Claude session is skipped: locked by running pid N", () => {
+  const [entry] = planCleanup({ worktrees: [wt("issue-7-x", lockedBy(18124, true))], prs: [merged("issue-7-x")] });
+  assert.deepEqual(entry, { branch: "issue-7-x", issue: 7, skip: "locked by running pid 18124" });
+});
+
+test("a Permission denied from git worktree remove is explained, and the branch is not deleted", () => {
+  const path = `${ROOT}/.claude/worktrees/issue-7-x`;
+  const plan = planCleanup({ worktrees: [wt("issue-7-x")], prs: [merged("issue-7-x")] });
+  const ran = [];
+  const run = (cmd, args) => {
+    if (args[1] === "remove") throw Object.assign(new Error("exit 1"), { stderr: `error: failed to delete '${path}': Permission denied\n` });
+    ran.push(`${cmd} ${args.join(" ")}`);
+  };
+  const results = runCleanup(plan, { run, stillThere: () => true });
+  assert.deepEqual(ran, []);
+  assert.equal(results[0].status, "failed");
+  assert.equal(
+    render(results),
+    `failed issue-7-x (PR #90) at git worktree remove ${path}: error: failed to delete '${path}': Permission denied ` +
+      "(a process still has files open in the worktree; close it and re-run)",
+  );
+});
+
+test("edge: a lock held by a session whose liveness is unknown is treated as running and skipped", () => {
+  const [entry] = planCleanup({ worktrees: [wt("issue-7-x", lockedBy(5, undefined))], prs: [merged("issue-7-x")] });
+  assert.equal(entry.skip, "locked by running pid 5");
+});
+
+test("edge: a stale lock on an unmerged or dirty lane still skips for that reason, and nothing is unlocked", () => {
+  const [open] = planCleanup({ worktrees: [wt("issue-7-x", lockedBy(5, false))], prs: [merged("issue-7-x", { state: "OPEN" })] });
+  assert.equal(open.skip, "not merged");
+  const [dirty] = planCleanup({ worktrees: [wt("issue-7-x", { ...lockedBy(5, false), dirty: true })], prs: [merged("issue-7-x")] });
+  assert.equal(dirty.skip, "dirty worktree");
+});
+
+test("edge: a lock with any other reason is not unlocked (git worktree remove reports it)", () => {
+  for (const locked of ["", "manual hold", "claude session x (pid abc)", "claude session x (pid 5) extra"]) {
+    const [entry] = planCleanup({ worktrees: [wt("issue-7-x", { locked })], prs: [merged("issue-7-x")] });
+    assert.ok(!cmds(entry).some((c) => c.includes("unlock")), locked);
+  }
+});
+
+test("edge: a stale lock is unlocked after claude rm of the lane's idle session", () => {
+  const [entry] = planCleanup({
+    worktrees: [wt("issue-7-x", lockedBy(9, false))],
+    sessions: [session("s7", "issue-7-x")],
+    prs: [merged("issue-7-x")],
+  });
+  assert.deepEqual(cmds(entry).slice(0, 2), ["claude rm s7", `git worktree unlock ${ROOT}/.claude/worktrees/issue-7-x`]);
+});
+
+test("edge: a failure other than Permission denied keeps its message without the open-files hint", () => {
+  const plan = planCleanup({ worktrees: [wt("issue-7-x")], prs: [merged("issue-7-x")] });
+  const run = (cmd, args) => {
+    if (args[1] === "remove") throw Object.assign(new Error("exit 1"), { stderr: "fatal: cannot remove a locked working tree" });
+  };
+  const [r] = runCleanup(plan, { run, stillThere: () => true });
+  assert.equal(r.error, "fatal: cannot remove a locked working tree");
+});
+
+test("edge: a Permission denied from a step other than git worktree remove gets no open-files hint", () => {
+  const plan = planCleanup({ worktrees: [wt("issue-7-x")], prs: [merged("issue-7-x")] });
+  const run = (cmd, args) => {
+    if (args[0] === "branch") throw Object.assign(new Error("exit 1"), { stderr: "error: Permission denied" });
+  };
+  const [r] = runCleanup(plan, { run, stillThere: () => true });
+  assert.equal(r.error, "error: Permission denied");
+});
+
+test("edge: pidRunning is false for a pid no process has and true for this process; bad pids are not running", () => {
+  assert.equal(pidRunning(process.pid), true);
+  assert.equal(pidRunning(2 ** 30), false);
+  for (const bad of [0, -1, NaN, 1.5]) assert.equal(pidRunning(bad), false, String(bad));
 });
 
 test("/health runs cleanup.mjs and states it as its one exception; /status only shows output and runs nothing", async () => {
