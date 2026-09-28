@@ -788,3 +788,152 @@ test("edge: an issues event skips a PR whose issue's Blocked by field is malform
   assert.equal(posted.length, 0);
   assert.ok(!calls.includes("repos/o/r/pulls/5"), "the PR itself must never be fetched for a skipped entry");
 });
+
+// #82 (ADR 0004): an owner approval on a PR head is announced by a PR comment, whatever route posted the status.
+const OWNER = "review/owner";
+const STATUS_PULLS = `repos/o/r/commits/${SHA}/pulls`;
+const COMMENTS_5 = "repos/o/r/issues/5/comments";
+const GATE_BOT = "github-actions[bot]";
+const MARKER = `<!-- lanes:owner-approval ${SHA} -->`;
+const statusRoutes = (pulls = [{ number: 5, state: "open", head: { sha: SHA } }]) => ({
+  [STATUS_PULLS]: pulls,
+  "repos/o/r/pulls/5": { state: "open", body, head: { sha: SHA } },
+  "repos/o/r/pulls/5/files": "src/a.ts\n",
+  "repos/o/r/issues/7": { labels: [{ name: "tier:skip" }] },
+  [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
+});
+
+// The comments route is stateful: a comment the gate posts is listed on the next read, as on GitHub.
+function commentingApi(routes, existing = []) {
+  const { api, posted } = fakeApi(routes);
+  const listed = [...existing];
+  const comments = [];
+  const wrapped = (args) => {
+    if (args[0].endsWith("/comments") && args.includes("-f")) {
+      const text = args[args.indexOf("-f") + 1].slice("body=".length);
+      comments.push({ path: args[0], body: text });
+      listed.push({ login: GATE_BOT, body: text });
+      return "{}";
+    }
+    if (args[0] === COMMENTS_5) return listed.map((c) => JSON.stringify(c)).join("\n") + "\n";
+    return api(args);
+  };
+  return { api: wrapped, posted, comments };
+}
+
+const statusEvent = (context, state) => ({ REPO: "o/r", EVENT_NAME: "status", STATUS_SHA: SHA, STATUS_CONTEXT: context, STATUS_STATE: state });
+
+test("an owner success status comments once on the PR, with the sha7, UTC time and marker, then re-evaluates the gate", () => {
+  const { api, posted, comments } = commentingApi(statusRoutes());
+  main(statusEvent(OWNER, "success"), api);
+  assert.equal(comments.length, 1);
+  assert.equal(comments[0].path, COMMENTS_5);
+  assert.match(
+    comments[0].body,
+    new RegExp(`^Owner approval recorded for ${SHA.slice(0, 7)} at \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2} UTC\\. If you didn't approve this, dismiss the review/owner status and report it\\.`),
+  );
+  assert.ok(comments[0].body.includes(MARKER));
+  assert.equal(posted.length, 1, "the gate is still re-evaluated on the PR head");
+  assert.equal(posted[0].sha, SHA);
+});
+
+test("a repeat owner success event for the same SHA posts no second comment but still re-evaluates", () => {
+  const { api, posted, comments } = commentingApi(statusRoutes());
+  main(statusEvent(OWNER, "success"), api);
+  main(statusEvent(OWNER, "success"), api);
+  assert.equal(comments.length, 1);
+  assert.equal(posted.length, 2);
+});
+
+test("a review/test-hunter success posts no comment", () => {
+  const { api, posted, comments } = commentingApi(statusRoutes());
+  main(statusEvent("review/test-hunter", "success"), api);
+  assert.equal(comments.length, 0);
+  assert.equal(posted.length, 1);
+});
+
+test("an owner failure status posts no comment", () => {
+  const { api, posted, comments } = commentingApi(statusRoutes());
+  main(statusEvent(OWNER, "failure"), api);
+  assert.equal(comments.length, 0);
+  assert.equal(posted.length, 1);
+});
+
+test("an owner success on a SHA with no open PR posts no comment", () => {
+  const { api, posted, comments } = commentingApi(statusRoutes([]));
+  main(statusEvent(OWNER, "success"), api);
+  assert.equal(comments.length, 0);
+  assert.equal(posted.length, 0);
+});
+
+test("edge: a closed PR, or an open PR whose head moved on, gets no comment", () => {
+  const { api, comments } = commentingApi(
+    statusRoutes([
+      { number: 5, state: "closed", head: { sha: SHA } },
+      { number: 6, state: "open", head: { sha: "b".repeat(40) } },
+    ]),
+  );
+  main(statusEvent(OWNER, "success"), api);
+  assert.equal(comments.length, 0);
+});
+
+test("edge: a missing STATUS_STATE posts no comment", () => {
+  const { api, posted, comments } = commentingApi(statusRoutes());
+  main({ ...statusEvent(OWNER, "success"), STATUS_STATE: undefined }, api);
+  assert.equal(comments.length, 0);
+  assert.equal(posted.length, 1);
+});
+
+test("edge: an owner pending or error status posts no comment", () => {
+  for (const state of ["pending", "error"]) {
+    const { api, comments } = commentingApi(statusRoutes());
+    main(statusEvent(OWNER, state), api);
+    assert.equal(comments.length, 0, state);
+  }
+});
+
+test("edge: the marker in a comment by anyone but the gate's bot does not suppress the notice", () => {
+  const { api, comments } = commentingApi(statusRoutes(), [{ login: "leo", body: `pre-empted ${MARKER}` }]);
+  main(statusEvent(OWNER, "success"), api);
+  assert.equal(comments.length, 1);
+});
+
+test("edge: the gate's marker for a different SHA does not suppress the notice", () => {
+  const { api, comments } = commentingApi(statusRoutes(), [{ login: GATE_BOT, body: `<!-- lanes:owner-approval ${"c".repeat(40)} -->` }]);
+  main(statusEvent(OWNER, "success"), api);
+  assert.equal(comments.length, 1);
+});
+
+test("edge: malformed comment lines are skipped, and a bot marker after them still suppresses", () => {
+  const { api: inner, comments } = commentingApi(statusRoutes());
+  const api = (args) => (args[0] === COMMENTS_5 && !args.includes("-f") ? `not json\n{"login":null}\n${JSON.stringify({ login: GATE_BOT, body: MARKER })}\n` : inner(args));
+  main(statusEvent(OWNER, "success"), api);
+  assert.equal(comments.length, 0);
+});
+
+test("edge: owner success on a SHA with two open PRs comments on each", () => {
+  const routes = {
+    ...statusRoutes([
+      { number: 5, state: "open", head: { sha: SHA } },
+      { number: 6, state: "open", head: { sha: SHA } },
+    ]),
+    "repos/o/r/pulls/6": { state: "open", body, head: { sha: SHA } },
+    "repos/o/r/pulls/6/files": "src/a.ts\n",
+    "repos/o/r/issues/6/comments": "",
+  };
+  const { api, posted, comments } = commentingApi(routes);
+  main(statusEvent(OWNER, "success"), api);
+  assert.deepEqual(comments.map((c) => c.path), [COMMENTS_5, "repos/o/r/issues/6/comments"]);
+  assert.equal(posted.length, 2);
+});
+
+test("edge: an unreadable comment list still re-evaluates the gate, then fails the run naming the PR", () => {
+  const { api: inner, posted, comments } = commentingApi(statusRoutes());
+  const api = (args) => {
+    if (args[0] === COMMENTS_5) throw new Error("HTTP 502");
+    return inner(args);
+  };
+  assert.throws(() => main(statusEvent(OWNER, "success"), api), /owner approval comment failed on #5: HTTP 502/);
+  assert.equal(comments.length, 0);
+  assert.equal(posted.length, 1, "the gate status is still posted");
+});
