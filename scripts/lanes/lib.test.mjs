@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, loadAdrs, loadConfig, parseAdr, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, interfacePaths, loadAdrs, loadConfig, parseAdr, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -505,6 +505,13 @@ test("edge: an absolute or parent-relative Interface contract path matches nothi
 
 test("edge: a file renamed out of an Interface contract path still counts (old name passed too)", () => {
   assert.equal(advisorFor(["src/a.ts", "src/b.ts"], "`src/a.ts` exports `f`"), true);
+});
+
+test("edge: an Interface contract naming several paths needs the advisor when the diff changes any one of them", () => {
+  const text = "adds `src/a.ts` and updates `src/b.ts`";
+  assert.deepEqual(interfacePaths(text), ["src/a.ts", "src/b.ts"]);
+  assert.equal(advisorFor(["src/b.ts"], text), true);
+  assert.equal(advisorFor(["src/c.ts"], text), false);
 });
 
 test("edge: the tier skip still needs no reviewer, whatever the diff touches", () => {
