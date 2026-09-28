@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { gateDescriptions, issuePaths, laneSessions, loadSessions, mergeQueueEntries, pathsOverlap, render, summarize } from "./status.mjs";
+import { gateDescriptions, issuePaths, laneBranches, laneSessions, loadLaneBranches, loadSessions, mergeQueueEntries, pathsOverlap, render, summarize } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -594,4 +594,106 @@ test("laneSessions maps both issue-<N> and issue-<N>-<slug> folders to N, and ne
   );
   assert.deepEqual([...sessions.keys()], [104, 106, 7, 9, 80]);
   assert.equal(sessions.get(104).id, "aaaa0000");
+});
+
+// #121: a lane that stopped before opening its PR (a pushed or local issue-<N>-* branch, no PR, no busy session).
+const idleAgent = (id, cwd) => agent(id, cwd, { status: "idle", state: "blocked" });
+const RESTART = (n) => `no PR yet: restart with /start ${n}`;
+const branches = (n, ...names) => new Map([[n, names.length ? names : [`issue-${n}-x`]]]);
+
+test("a pushed branch with no PR and no busy session is WAITING ON YOU as stopped", () => {
+  const cases = [
+    ["no session", new Map()],
+    ["an idle session", laneSessions([idleAgent("42c93c57", wt("issue-10-x"))], ROOT)],
+  ];
+  for (const [label, sessions] of cases) {
+    const s = summarize({ prs: [], issues: [issue(10), issue(11)], merged: [], sessions, laneBranches: branches(10) });
+    assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage, i.note]), [[10, "stopped", RESTART(10)]], label);
+    assert.deepEqual([s.inFlight, s.ready.map((i) => i.number)], [[], [11]], label);
+    assert.match(render(s, "24h"), /WAITING ON YOU \(1\)\n  #10 \[stopped\] issue 10 — no PR yet: restart with \/start 10\n/, label);
+  }
+});
+
+test("--json carries the stopped stage, with the idle session when there is one", () => {
+  const sessions = laneSessions([idleAgent("42c93c57", wt("issue-10-x"))], ROOT);
+  const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions, laneBranches: branches(10) });
+  assert.deepEqual(JSON.parse(JSON.stringify(s)).waitingOnOwner, [{ number: 10, title: "issue 10", stage: "stopped", note: RESTART(10), session: { id: "42c93c57", state: "blocked" } }]);
+});
+
+test("a lane whose session is busy is running, not stopped", () => {
+  const sessions = laneSessions([agent("42c93c57", wt("issue-10-x"))], ROOT);
+  const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions, laneBranches: branches(10) });
+  assert.deepEqual([s.waitingOnOwner, s.inFlight.map((i) => [i.number, i.stage])], [[], [[10, "running"]]]);
+});
+
+test("a branch whose PR is open is not stopped, whether the PR closes the issue or only its branch matches", () => {
+  const byRef = pr(7, [gate("PENDING", "waiting for review/test-hunter")], { closingIssuesReferences: [{ number: 10 }] });
+  const byBranch = pr(7, [gate("PENDING", "waiting for review/test-hunter")], { headRefName: "issue-10-x" });
+  for (const p of [byRef, byBranch]) {
+    const s = summarize({ prs: [p], issues: [issue(10)], merged: [], laneBranches: branches(10) });
+    assert.deepEqual([s.waitingOnOwner, s.inFlight.map((i) => i.number), s.ready], [[], [7], []]);
+  }
+});
+
+test("laneBranches maps pushed branches and local lane worktrees to their issue", () => {
+  const remote = ["abc123\trefs/heads/issue-10-x", "def456\trefs/heads/main", "0a0a0a\trefs/heads/issue-5x-y", "1b1b1b\trefs/heads/issue-12"].join("\n");
+  const worktrees = [
+    `worktree ${ROOT}`, "HEAD 1", "branch refs/heads/main", "",
+    `worktree ${wt("issue-13-z")}`, "HEAD 2", "branch refs/heads/issue-13-z", "",
+    `worktree ${wt("issue-14")}`, "HEAD 3", "detached", "",
+    `worktree ${wt("other")}`, "HEAD 4", "branch refs/heads/issue-15-w", "",
+  ].join("\n");
+  assert.deepEqual([...laneBranches({ remote, worktrees })], [
+    [10, ["issue-10-x"]],
+    [12, ["issue-12"]],
+    [13, ["issue-13-z"]],
+    [14, ["issue-14"]],
+    [15, ["issue-15-w"]],
+  ]);
+});
+
+test("edge: laneBranches reads CRLF output, dedupes a branch both pushed and local, and ignores empty or malformed input", () => {
+  const remote = "abc\trefs/heads/issue-10-x\r\nnot a ref line\r\n\trefs/heads/issue-0-zero\r\n";
+  const worktrees = `worktree ${wt("issue-10-x")}\r\nHEAD 1\r\nbranch refs/heads/issue-10-x\r\n\r\nbranch refs/heads/issue-11-no-path\r\n`;
+  assert.deepEqual([...laneBranches({ remote, worktrees })], [[10, ["issue-10-x"]], [11, ["issue-11-no-path"]]]);
+  assert.equal(laneBranches({}).size, 0);
+  assert.equal(laneBranches({ remote: "", worktrees: "" }).size, 0);
+});
+
+test("edge: loadLaneBranches keeps what it could read and says what it could not", () => {
+  const worktrees = `worktree ${wt("issue-10-x")}\nbranch refs/heads/issue-10-x\n`;
+  const offline = (args) => {
+    if (args[0] === "ls-remote") throw new Error("could not resolve host");
+    return worktrees;
+  };
+  assert.deepEqual(loadLaneBranches(offline), { laneBranches: new Map([[10, ["issue-10-x"]]]), branchesUnavailable: "git ls-remote origin failed" });
+  assert.deepEqual(loadLaneBranches(() => { throw new Error("x"); }).branchesUnavailable, "git worktree list failed; git ls-remote origin failed");
+  assert.equal("branchesUnavailable" in loadLaneBranches(() => ""), false);
+  const text = render(summarize({ prs: [], issues: [issue(10)], merged: [], ...loadLaneBranches(offline) }), "24h");
+  assert.match(text, /#10 \[stopped\]/);
+  assert.ok(text.endsWith("\n\n(stopped lanes may be missing: git ls-remote origin failed)"), text);
+});
+
+test("edge: a branch on an issue without the ready label, or a closed issue, is not listed as stopped", () => {
+  const s = summarize({ prs: [], issues: [issue(10, "none", { ready: false })], merged: [], laneBranches: new Map([[10, ["issue-10-x"]], [99, ["issue-99-y"]]]) });
+  assert.deepEqual([s.waitingOnOwner, s.inFlight, s.ready], [[], [], []]);
+});
+
+test("edge: a lane on a permission prompt stays a prompt to answer, not a restart", () => {
+  const sessions = laneSessions([waitingAgent("42c93c57", wt("issue-10-x"))], ROOT);
+  const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions, laneBranches: branches(10) });
+  assert.deepEqual(s.waitingOnOwner.map((i) => [i.stage, i.note]), [["running", "waiting on a prompt: claude attach 42c93c57"]]);
+});
+
+test("edge: a stopped lane on an issue whose blockers reopened is still stopped, not blocked, and still claims its paths", () => {
+  const s = summarize({ prs: [], issues: [scoped(10, "In: `a.mjs`"), issue(11), scoped(12, "In: `a.mjs`")], merged: [], laneBranches: branches(10) });
+  assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage]), [[10, "stopped"]]);
+  const blocked = summarize({ prs: [], issues: [issue(10, "#11"), issue(11)], merged: [], laneBranches: branches(10) });
+  assert.deepEqual([blocked.waitingOnOwner.map((i) => i.number), blocked.blocked], [[10], []]);
+  assert.match(s.ready.find((i) => i.number === 12).note, /running #10/);
+});
+
+test("edge: an open PR from another issue's branch does not hide this issue's stopped lane", () => {
+  const s = summarize({ prs: [pr(7, [], { headRefName: "issue-11-y" })], issues: [issue(10)], merged: [], laneBranches: branches(10) });
+  assert.deepEqual(s.waitingOnOwner.map((i) => i.number), [10]);
 });

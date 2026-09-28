@@ -165,6 +165,50 @@ export function loadSessions(repoRoot, run = runClaudeAgents) {
   return { sessions: laneSessions(agents, repoRoot) };
 }
 
+const LANE_BRANCH = /^issue-(\d+)(?:-.*)?$/;
+
+// Issue N → the `issue-<N>-…` (or bare `issue-<N>`) branches a lane left: pushed ones from `git ls-remote --heads
+// origin` output, local ones from `git worktree list --porcelain` output, where a detached worktree counts by its folder.
+export function laneBranches({ remote = "", worktrees = "" }) {
+  const found = new Map();
+  const add = (branch) => {
+    const number = Number(LANE_BRANCH.exec(branch ?? "")?.[1]);
+    if (!number) return;
+    const list = found.get(number) ?? [];
+    if (!list.includes(branch)) list.push(branch);
+    found.set(number, list);
+  };
+  for (const line of remote.split(/\r?\n/)) add(/\trefs\/heads\/(.+)$/.exec(line)?.[1]);
+  for (const entry of worktrees.split(/\r?\n\r?\n/)) {
+    const lines = entry.split(/\r?\n/);
+    const path = lines.find((l) => l.startsWith("worktree "))?.slice(9);
+    const branch = lines.find((l) => l.startsWith("branch refs/heads/"))?.slice(18);
+    add(branch ?? path?.replace(/\\/g, "/").split("/").pop());
+  }
+  return new Map([...found].sort(([a], [b]) => a - b));
+}
+
+const git = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
+
+// `{ laneBranches }`, or local worktrees only plus `branchesUnavailable` when origin cannot be read.
+export function loadLaneBranches(run = git) {
+  let worktrees = "";
+  let remote = "";
+  const failed = [];
+  try {
+    worktrees = run(["worktree", "list", "--porcelain"]);
+  } catch {
+    failed.push("git worktree list failed");
+  }
+  try {
+    remote = run(["ls-remote", "--heads", "origin"]);
+  } catch {
+    failed.push("git ls-remote origin failed");
+  }
+  const loaded = { laneBranches: laneBranches({ remote, worktrees }) };
+  return failed.length ? { ...loaded, branchesUnavailable: failed.join("; ") } : loaded;
+}
+
 const withSession = (item, session) => {
   if (!session) return item;
   const note = session.waiting ? `waiting on a prompt: claude attach ${session.id}` : [item.note, `session ${session.id}`].filter(Boolean).join(" — ");
@@ -174,8 +218,8 @@ const withSession = (item, session) => {
 // `issues` is every open issue (with body); only those labelled `ready` are listed, the rest only block.
 // `mergeQueue` is the output of mergeQueueEntries (null or missing: no merge queue); `gateDescriptions` that of
 // gateDescriptions (missing: the rollup's own descriptions only). `sessions` and `sessionsUnavailable` come from
-// loadSessions (missing: no sessions).
-export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map(), sessions = new Map(), sessionsUnavailable }) {
+// loadSessions (missing: no sessions). `laneBranches` is the output of laneBranches (missing: no branches known).
+export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map(), sessions = new Map(), sessionsUnavailable, laneBranches = new Map(), branchesUnavailable }) {
   const out = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
   const taken = new Set();
   const queuePosition = new Map((mergeQueue ?? []).map((e) => [e.number, e.position]));
@@ -201,9 +245,21 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
   const formOf = new Map(issues.map((i) => [i.number, parseIssueForm(i.body ?? "").fields]));
   const blockedByOf = new Map([...formOf].map(([n, f]) => [n, f.blockedBy]));
   const runningIssues = [];
+  const prBranches = new Set(prs.map((pr) => pr.headRefName).filter(Boolean));
   for (const issue of issues) {
     const labels = (issue.labels ?? []).map((l) => l.name);
+    const branches = laneBranches.get(issue.number) ?? [];
+    if (!taken.has(issue.number) && branches.some((b) => prBranches.has(b))) taken.add(issue.number);
     const session = taken.has(issue.number) ? undefined : sessions.get(issue.number);
+    // A lane that pushed or kept a branch and then stopped (e.g. at a usage limit) opens no PR: the owner restarts it.
+    const idle = !session || (session.state === PROMPT_STATE && !session.waiting);
+    if (!taken.has(issue.number) && labels.includes("ready") && branches.length && idle) {
+      const item = { number: issue.number, title: issue.title, stage: "stopped", note: `no PR yet: restart with /start ${issue.number}` };
+      out.waitingOnOwner.push(session ? { ...item, session: { id: session.id, state: session.state } } : item);
+      // Its branch still holds work on the issue's paths, so other issues on those paths wait for it.
+      runningIssues.push(issue);
+      continue;
+    }
     if (session) {
       runningIssues.push(issue);
       const item = withSession({ number: issue.number, title: issue.title, stage: "running", note: "" }, session);
@@ -220,6 +276,7 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
   markParallel(out.ready, formOf, claimedPaths({ openPrs: prs, runningIssues }));
   for (const pr of merged) out.merged.push({ number: pr.number, title: pr.title, stage: "merged", note: "" });
   if (sessionsUnavailable) out.sessionsUnavailable = sessionsUnavailable;
+  if (branchesUnavailable) out.branchesUnavailable = branchesUnavailable;
   return out;
 }
 
@@ -233,6 +290,7 @@ export function render(summary, sinceLabel) {
     block("BLOCKED", summary.blocked ?? []),
     block(`MERGED, last ${sinceLabel}`, summary.merged, false),
     ...(summary.sessionsUnavailable ? [`(background sessions unavailable: ${summary.sessionsUnavailable})`] : []),
+    ...(summary.branchesUnavailable ? [`(stopped lanes may be missing: ${summary.branchesUnavailable})`] : []),
     ...(summary.toCleanUp > 0 ? [`${summary.toCleanUp} merged lane${summary.toCleanUp === 1 ? "" : "s"} to clean up: node scripts/lanes/cleanup.mjs`] : []),
   ].join("\n\n");
 }
@@ -262,6 +320,7 @@ async function main(argv = process.argv.slice(2)) {
     gateDescriptions: gateDescriptions(reply),
     // Lanes run in worktrees of the main checkout, so the root is the common git dir's parent, not --show-toplevel.
     ...loadSessions(dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim())),
+    ...loadLaneBranches(),
   };
   // A blocker missing from a truncated list would read as closed, so refuse rather than list a blocked issue as ready.
   if (data.issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
