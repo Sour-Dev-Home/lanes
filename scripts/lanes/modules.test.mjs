@@ -1,9 +1,10 @@
 // scripts/lanes/modules.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { checkModules, importSpecifiers, listFiles, main, MAX_CYCLES, MAX_STEPS } from "./modules.mjs";
 
 // Fixture sources are built with `q` so this file's own text never holds a literal `from "./..."` import it doesn't make.
@@ -277,4 +278,66 @@ test("edge: main reports an unreadable lanes.config.json with exit 2", () => {
   const { code, message } = main(io);
   assert.equal(code, 2);
   assert.match(message, /cannot read lanes\.config\.json: ENOENT/);
+});
+
+// ---- #127 / ADR 0008: lanes' own module map, checked against the repository itself ----
+const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+const realConfig = () => JSON.parse(readFileSync(join(repoRoot, "lanes.config.json"), "utf8"));
+
+// listFiles and main read paths relative to the working directory, so run them from the repository root.
+function inRepo(fn) {
+  const prev = process.cwd();
+  process.chdir(repoRoot);
+  try { return fn(); } finally { process.chdir(prev); }
+}
+
+const repoFiles = () => inRepo(() => Object.fromEntries(
+  listFiles("scripts/").filter((f) => f.endsWith(".mjs")).map((f) => [f, readFileSync(f, "utf8")]),
+));
+
+const PICK_STATUS = ["scripts/lanes/pick.mjs", "scripts/lanes/status.mjs"];
+
+test("the repository's module map has no violation, unallowed cycle or unmapped file", () => {
+  const { code, message } = inRepo(() => main());
+  assert.equal(code, 0, message);
+  assert.doesNotMatch(message, /no module map configured/);
+  assert.match(message, /, 0 violations, 0 cycles \(1 allowed\), 0 unmapped$/m);
+});
+
+test("the map claims every non-test file in scripts/lanes/ and scripts/preflight.mjs", () => {
+  const files = repoFiles();
+  const sources = Object.keys(files).filter((f) => !f.endsWith(".test.mjs") && (f.startsWith("scripts/lanes/") || f === "scripts/preflight.mjs"));
+  assert.ok(sources.includes("scripts/preflight.mjs") && sources.includes("scripts/lanes/modules.mjs"), "the scan found the expected sources");
+  const { unmapped } = checkModules({ map: realConfig().modules, files });
+  assert.deepEqual(unmapped, []);
+});
+
+test("allowCycles holds exactly the pick.mjs / status.mjs cycle, and it is the only cycle in the graph", () => {
+  const { modules } = realConfig();
+  assert.deepEqual(modules.allowCycles.map((c) => [...c].sort()), [PICK_STATUS]);
+  const r = checkModules({ map: modules, files: repoFiles() });
+  assert.deepEqual(r.allowedCycles.map((c) => [...c].sort()), [PICK_STATUS]);
+  assert.deepEqual(r.cycles, []);
+  assert.deepEqual(r.violations, []);
+});
+
+test("edge: a file in a mapped directory that no module claims is reported unmapped", () => {
+  const files = { ...repoFiles(), "scripts/lanes/brand-new.mjs": "" };
+  assert.deepEqual(checkModules({ map: realConfig().modules, files }).unmapped, ["scripts/lanes/brand-new.mjs"]);
+});
+
+test("edge: an import across a boundary the map does not allow is a violation", () => {
+  const files = repoFiles();
+  files["scripts/lanes/modules.mjs"] += imp("./lib.mjs");
+  const r = checkModules({ map: realConfig().modules, files });
+  assert.deepEqual(r.violations.map((v) => `${v.from} -> ${v.to}`), ["scripts/lanes/modules.mjs -> scripts/lanes/lib.mjs"]);
+});
+
+test("edge: a new import cycle beside the allowed one is reported", () => {
+  const files = repoFiles();
+  files["scripts/lanes/lib.mjs"] += imp("./blockers.mjs");
+  const r = checkModules({ map: realConfig().modules, files });
+  assert.equal(r.cycles.length, 1);
+  assert.ok(r.cycles[0].includes("scripts/lanes/lib.mjs") && r.cycles[0].includes("scripts/lanes/blockers.mjs"));
+  assert.equal(r.allowedCycles.length, 1);
 });
