@@ -148,6 +148,14 @@ test("edge: spawnJscpd does not change the environment it was given", () => {
   assert.equal(base.npm_config_ignore_scripts, "false");
 });
 
+test("edge: off Windows jscpd runs npx directly, with the pinned package and no shell", () => {
+  const [cmd, args, opts] = spawnSeen({}, "linux");
+  assert.equal(cmd, "npx");
+  assert.deepEqual(args.slice(0, 2), ["--yes", JSCPD_PACKAGE]);
+  assert.notEqual(opts.shell, true);
+  assert.equal(opts.env.npm_config_ignore_scripts, "true");
+});
+
 test("main passes --days to the git log", () => {
   let seen;
   main(["--days", "30"], io({ gitLog: (days) => { seen = days; return LOG; } }));
@@ -234,6 +242,14 @@ test("edge: a lane PR with no files, or with no files field, adds nothing", () =
 
 test("edge: a file entry without a path is skipped", () => {
   assert.deepEqual(rankHotspots([{ headRefName: "issue-1-x", files: [{ additions: 1 }, { path: "a.mjs" }] }]), [{ path: "a.mjs", count: 1 }]);
+});
+
+test("edge: a control character in a file path is replaced before the report prints it", () => {
+  const evil = "a\x1b[31mred\x07.mjs";
+  const { message } = main([], io({ mergedPrs: () => [pr("issue-1-x", [evil])], gitLog: () => commit("a", "x", [["3", "0", evil]]) }));
+  assert.doesNotMatch(message, /[\x00-\x08\x0b-\x1f\x7f]/);
+  assert.match(message, /^ {2}1 a\?\[31mred\?\.mjs$/m);
+  assert.match(message, /^ {2}\+3 a\?\[31mred\?\.mjs$/m);
 });
 
 test("edge: a merged-PR result that is not an array is no PRs", () => {

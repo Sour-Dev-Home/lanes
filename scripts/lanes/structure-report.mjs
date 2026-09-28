@@ -105,7 +105,9 @@ export function summarizeJscpd(report) {
   return lines.join("\n");
 }
 
-const ranking = (title, rows, show) => [`${title}:`, ...(rows.length ? rows.map((r) => `  ${show(r)}`) : ["  none"])];
+// A path is repo data, and an escape sequence in one must not reach the terminal of whoever runs the report.
+const printable = (s) => s.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "?");
+const ranking = (title, rows, show) => [`${title}:`, ...(rows.length ? rows.map((r) => `  ${printable(show(r))}`) : ["  none"])];
 
 /** Returns `{ code, message }`: 0 with the report, 2 on a bad argument or a failed git log. Tests pass fake I/O. */
 export function main(argv = process.argv.slice(2), io = realIo) {
