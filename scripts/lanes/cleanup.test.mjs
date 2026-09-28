@@ -885,6 +885,75 @@ test("removeEmptyDir deletes a folder with no files and refuses one that holds f
   assert.ok(existsSync(join(root, "full", "a.txt")));
 });
 
+// An orphan folder git pruned, leaving only its `.git` pointer file: `pointer` is the gitdir it names.
+const pointerDir = (root, name, pointer, ...others) => {
+  const dir = join(root, ".claude", "worktrees", name);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, ".git"), `gitdir: ${pointer}\n`);
+  for (const f of others) writeFileSync(join(dir, f), "x");
+  return dir;
+};
+
+test("a folder holding only a stale .git pointer is counted empty, planned for removal and deleted", (t) => {
+  const root = tempRoot(t);
+  const dir = pointerDir(root, "issue-36-x", join(root, ".git", "worktrees", "issue-36-x"));
+  assert.deepEqual(findOrphans(root, [root]).map((o) => o.files), [0]);
+  const plan = planCleanup({ orphans: findOrphans(root, [root]) });
+  assert.equal(cleanableCount(plan), 1);
+  removeEmptyDir(dir);
+  assert.ok(!existsSync(dir));
+});
+
+test("a .git pointer at a gitdir that still exists keeps its folder and is reported", (t) => {
+  const root = tempRoot(t);
+  const live = join(root, ".git", "worktrees", "issue-36-x");
+  mkdirSync(live, { recursive: true });
+  const dir = pointerDir(root, "issue-36-x", live);
+  assert.deepEqual(findOrphans(root, [root]).map((o) => o.files), [1]);
+  assert.match(planCleanup({ orphans: findOrphans(root, [root]) })[0].skip, /has 1 file; left in place/);
+  assert.throws(() => removeEmptyDir(dir), /has 1 file; left in place/);
+  assert.ok(existsSync(join(dir, ".git")));
+});
+
+test("a stale .git pointer beside another file keeps its folder and both files", (t) => {
+  const root = tempRoot(t);
+  const dir = pointerDir(root, "issue-36-x", join(root, "gone"), "notes.txt");
+  assert.deepEqual(findOrphans(root, [root]).map((o) => o.files), [1]);
+  assert.match(planCleanup({ orphans: findOrphans(root, [root]) })[0].skip, /has 1 file; left in place/);
+  assert.throws(() => removeEmptyDir(dir), /has 1 file; left in place/);
+  assert.ok(existsSync(join(dir, ".git")) && existsSync(join(dir, "notes.txt")));
+});
+
+test("edge: a relative stale gitdir resolves against the folder; a relative live one keeps it", (t) => {
+  const root = tempRoot(t);
+  const stale = pointerDir(root, "stale", "../nowhere");
+  const live = pointerDir(root, "live", "../stale");
+  assert.equal(findOrphans(root, [root]).find((o) => o.path === stale).files, 0);
+  assert.equal(findOrphans(root, [root]).find((o) => o.path === live).files, 1);
+});
+
+test("edge: a .git file that is not a gitdir pointer, an empty one, or a .git folder is not stale", (t) => {
+  const root = tempRoot(t);
+  const base = join(root, ".claude", "worktrees");
+  for (const [name, text] of [["junk", "hello\n"], ["blank", ""]]) {
+    mkdirSync(join(base, name), { recursive: true });
+    writeFileSync(join(base, name, ".git"), text);
+  }
+  mkdirSync(join(base, "dir", ".git"), { recursive: true });
+  writeFileSync(join(base, "dir", ".git", "HEAD"), "x");
+  const counts = Object.fromEntries(findOrphans(root, [root]).map((o) => [o.path.replace(/\\/g, "/").split("/").pop(), o.files]));
+  assert.deepEqual(counts, { junk: 1, blank: 1, dir: 1 });
+  assert.throws(() => removeEmptyDir(join(base, "junk")), /has 1 file; left in place/);
+});
+
+test("edge: removeEmptyDir deletes a stale pointer folder with empty subfolders too", (t) => {
+  const root = tempRoot(t);
+  const dir = pointerDir(root, "issue-36-x", join(root, "gone"));
+  mkdirSync(join(dir, "sub", "deeper"), { recursive: true });
+  removeEmptyDir(dir);
+  assert.ok(!existsSync(dir));
+});
+
 test("edge: removeEmptyDir never deletes a file that appears after it counted none", (t) => {
   const root = tempRoot(t);
   mkdirSync(join(root, "late", "a", "b"), { recursive: true });
