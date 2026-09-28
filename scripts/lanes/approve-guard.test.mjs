@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findOwnerInvocations, onUserPromptSubmit, parseApprovePrompt, runHook } from "./approve-guard.mjs";
+import { DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, readGrant, runHook, validGrant } from "./approve-guard.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const SHA = "a".repeat(40);
@@ -111,8 +111,8 @@ test("reviewer forms and unrelated commands are not owner commands", () => {
 
 // --- PreToolUse ---------------------------------------------------------------------------------------------------
 
-test("PreToolUse allows the owner command with a fresh grant for the same PR, and consumes it", () => {
-  assert.deepEqual(decidePreToolUse(bash(OWNER), grant(), NOW), { decision: "allow", reason: "owner approval from /approve 16 in this session", consumeGrant: true });
+test("PreToolUse allows the owner command with a fresh grant for the same PR, and leaves consuming it to post-review", () => {
+  assert.deepEqual(decidePreToolUse(bash(OWNER), grant(), NOW), { decision: "allow", reason: "owner approval from /approve 16 in this session" });
 });
 
 test("PreToolUse denies every other owner command with the reason", () => {
@@ -155,13 +155,61 @@ function withDir(fn) {
 }
 const decision = (out) => (out ? JSON.parse(out).hookSpecificOutput.permissionDecision : null);
 
-test("hook flow: /approve 16 then the owner command is allowed once, then denied", () => withDir((dir) => {
+test("hook flow: /approve 16 then the owner command is allowed, and the allow keeps the grant (post-review consumes it)", () => withDir((dir) => {
   runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/approve 16" }), { dir, now: NOW });
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, "s1.json"), "utf8")), { sessionId: "s1", pr: 16, at: new Date(NOW).toISOString() });
+  const file = join(dir, "s1.json");
+  const written = readFileSync(file, "utf8");
+  assert.deepEqual(JSON.parse(written), { sessionId: "s1", pr: 16, at: new Date(NOW).toISOString() });
   const first = JSON.parse(runHook("pre-tool-use", JSON.stringify(bash(OWNER)), { dir, now: NOW + 1000 }));
   assert.deepEqual(first, { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "owner approval from /approve 16 in this session" } });
-  assert.equal(existsSync(join(dir, "s1.json")), false);
+  assert.equal(readFileSync(file, "utf8"), written);
+  // Once post-review has consumed it (deleted the file), the hook denies again.
+  rmSync(file);
   assert.equal(decision(runHook("pre-tool-use", JSON.stringify(bash(OWNER)), { dir, now: NOW + 2000 })), "deny");
+}));
+
+// --- the grant reader shared with post-review.mjs (#81) ---------------------------------------------------------------
+
+test("grantDir is the repo's .lanes/approve directory, the one the hook writes to", () => {
+  assert.match(grantDir().replace(/\\/g, "/"), /\/\.lanes\/approve\/?$/);
+});
+
+test("validGrant accepts only { sessionId, pr: positive integer, at: a date }", () => {
+  assert.equal(validGrant(grant()), true);
+  for (const g of [null, undefined, "x", { unreadable: true }, grant({ pr: "16" }), grant({ pr: 0 }), grant({ pr: 1.5 }), grant({ at: "yesterday" }), grant({ sessionId: 1 })]) {
+    assert.equal(validGrant(g), false, JSON.stringify(g));
+  }
+});
+
+test("isFreshGrant: the same PR and under GRANT_TTL_MS old, nothing else", () => {
+  assert.equal(isFreshGrant(grant(), 16, NOW), true);
+  assert.equal(isFreshGrant(grant(), 17, NOW), false);
+  assert.equal(isFreshGrant(grant({ at: new Date(NOW - GRANT_TTL_MS).toISOString() }), 16, NOW), false);
+  assert.equal(isFreshGrant(grant({ at: new Date(NOW - GRANT_TTL_MS + 1).toISOString() }), 16, NOW), true);
+  assert.equal(isFreshGrant(grant({ at: new Date(NOW + 60_000).toISOString() }), 16, NOW), false);
+  assert.equal(isFreshGrant({ unreadable: true }, 16, NOW), false);
+});
+
+test("readGrant: parsed JSON, null for a missing file, { unreadable: true } for bad JSON", () => withDir((dir) => {
+  writeFileSync(join(dir, "a.json"), JSON.stringify(grant()));
+  writeFileSync(join(dir, "b.json"), "{nope");
+  assert.deepEqual(readGrant(join(dir, "a.json")), grant());
+  assert.deepEqual(readGrant(join(dir, "b.json")), { unreadable: true });
+  assert.equal(readGrant(join(dir, "missing.json")), null);
+}));
+
+test("findFreshGrant returns the file of a fresh grant for that PR, skipping the rest", () => withDir((dir) => {
+  writeFileSync(join(dir, "other.json"), JSON.stringify(grant({ sessionId: "other", pr: 17 })));
+  writeFileSync(join(dir, "old.json"), JSON.stringify(grant({ sessionId: "old", at: new Date(NOW - GRANT_TTL_MS).toISOString() })));
+  writeFileSync(join(dir, "bad.json"), "{nope");
+  writeFileSync(join(dir, "note.txt"), JSON.stringify(grant()));
+  assert.equal(findFreshGrant(dir, 16, NOW), null);
+  writeFileSync(join(dir, "s1.json"), JSON.stringify(grant()));
+  assert.equal(findFreshGrant(dir, 16, NOW), join(dir, "s1.json"));
+}));
+
+test("edge: findFreshGrant is null when the grant directory does not exist yet", () => withDir((dir) => {
+  assert.equal(findFreshGrant(join(dir, "never-made"), 16, NOW), null);
 }));
 
 test("hook flow: another prompt clears the grant", () => withDir((dir) => {
