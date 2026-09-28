@@ -1,5 +1,5 @@
 ---
-area: gate
+area: lib
 pattern: regex-on-untrusted-text
 severity: important
 reviewer: security-reviewer
