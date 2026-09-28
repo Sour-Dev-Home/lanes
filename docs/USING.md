@@ -20,8 +20,8 @@
    and `README.md` by default) never count as overlaps. Owner only: a lane or a schedule never runs it.
    `start.models` (optional) picks each lane's model by its issue's tier: it maps `skip`, `quick` and `full` to a
    model name, and `/start` adds `--model <name>` to that tier's launches. A tier left
-   out runs on your default model. This repository sets `skip` and `quick` to `sonnet` and leaves `full` unset, so
-   full-tier (security-sensitive) lanes keep the default. Any other key, or a value that is not one word (or starts
+   out runs on your default model. This repository sets all three tiers to `sonnet`: issues are scoped
+   tightly enough for it, and three independent reviewers check every full-tier lane. Any other key, or a value that is not one word (or starts
    with `-`), refuses the whole run with nothing launched.
    The start guard (`scripts/lanes/start-guard.mjs`, two hooks in `.claude/settings.json` next to the approve guard)
    enforces that: it lets `start.mjs` run only for the same issue numbers or the same `--auto` form, within 15 minutes
