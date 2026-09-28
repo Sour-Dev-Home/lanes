@@ -304,9 +304,9 @@ test("the repository's module map has no violation, unallowed cycle or unmapped 
 
 test("the map claims every non-test file in scripts/lanes/ and scripts/preflight.mjs", () => {
   const files = repoFiles();
-  const sources = Object.keys(files).filter((f) => !f.endsWith(".test.mjs") && (f.startsWith("scripts/lanes/") || f === "scripts/preflight.mjs"));
-  assert.ok(sources.includes("scripts/preflight.mjs") && sources.includes("scripts/lanes/modules.mjs"), "the scan found the expected sources");
   const sourceFiles = Object.fromEntries(Object.entries(files).filter(([f]) => !f.endsWith(".test.mjs")));
+  const sources = Object.keys(sourceFiles).filter((f) => f.startsWith("scripts/lanes/") || f === "scripts/preflight.mjs");
+  assert.ok(sources.includes("scripts/preflight.mjs") && sources.includes("scripts/lanes/modules.mjs"), "the scan found the expected sources");
   const { unmapped } = checkModules({ map: realConfig().modules, files: sourceFiles });
   assert.deepEqual(unmapped, []);
 });
@@ -322,6 +322,12 @@ test("edge: a vendor.test.mjs that imports only node: built-ins is mapped and vi
   const r = checkModules({ map: realConfig().modules, files });
   assert.deepEqual(r.unmapped, []);
   assert.deepEqual(r.violations, []);
+});
+
+test("edge: a vendor.* file that imports a lanes module is a violation (imports: [] is enforced)", () => {
+  const files = { ...repoFiles(), "scripts/lanes/vendor.test.mjs": imp("node:test") + imp("./lib.mjs") };
+  const r = checkModules({ map: realConfig().modules, files });
+  assert.ok(r.violations.length > 0, "importing ./lib.mjs from the vendor module is reported");
 });
 
 test("edge: the real map passes on a tree with no vendor.* file (a prefix that matches nothing is not an error)", () => {
