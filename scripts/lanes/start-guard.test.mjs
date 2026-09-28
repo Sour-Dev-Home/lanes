@@ -1139,16 +1139,35 @@ test("#113 edge (test-hunter): a $(...) redirection target naming queue.mjs or c
 const PROSE = "The queue script (queue.mjs) isn't run here: the owner runs `node scripts/lanes/queue.mjs` in their own terminal.";
 const deny = (reason) => ({ decision: "deny", reason });
 
-test("#240 criterion 1: a heredoc body that mentions queue.mjs, written for gh to send, gets no decision", () => {
+test("#240 criterion 1: gh --body-file <file> and git commit -F <file> get no decision, whatever the file holds", () => {
+  // The guard never reads the file, so text written first (with the Write tool) avoids the heredoc false positive.
   for (const cmd of [
-    `cat <<'EOF' > .lanes/comment.md\n${PROSE}\nEOF\ngh issue comment 97 --body-file .lanes/comment.md`,
-    `mkdir -p .lanes && cat > .lanes/pr.md <<'EOF'\n${PROSE}\nEOF\nMSYS_NO_PATHCONV=1 gh pr create --title "Queue CLI" --body-file .lanes/pr.md`,
-    `gh issue comment 97 --body-file - <<'EOF'\n${PROSE}\nEOF`,
-    `cat > .lanes/body.md <<"EOF"\n${PROSE}\nEOF\ngh pr edit 12 --body-file .lanes/body.md && gh issue create --title x --label lane-filed --body-file .lanes/body.md`,
-    "git commit -F - <<'EOF'\nDocument queue.mjs in USING.md\nEOF",
+    "gh issue comment 97 --body-file .lanes/comment.md",
+    'gh pr create --title "Queue CLI: owner-run queue.mjs" --body-file .lanes/pr.md',
+    "MSYS_NO_PATHCONV=1 gh issue create --title x --label lane-filed --body-file .lanes/issue.md",
+    "git commit -F .lanes/msg.txt",
+    "git -c core.safecrlf=false commit -q -F .lanes/msg.txt",
+    // edge: a file path that itself names a lane script is still only read as text.
+    "gh issue comment 1 --body-file scripts/lanes/queue.mjs",
+    "git commit -F scripts/lanes/start.mjs",
   ]) {
     assert.equal(findQueueInvocations(cmd), false, cmd);
+    assert.deepEqual(findStartInvocations(cmd), [], cmd);
     assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+    assert.equal(decide(cmd), null, cmd);
+  }
+});
+
+test("#240 criterion 1: no heredoc body is skipped as literal: one that reads as a run keeps main's decision", () => {
+  // Main's decisions, unchanged: a call that only writes text (#89) still has no body read; any other still reads it.
+  assert.equal(decidePreToolUse(bash(`cat > .lanes/comment.md <<'EOF'\n${PROSE}\nEOF`), null, NOW), null);
+  for (const cmd of [
+    `cat <<'EOF' > .lanes/comment.md\n${PROSE}\nEOF\ngh issue comment 97 --body-file .lanes/comment.md`,
+    `gh issue comment 97 --body-file - <<'EOF'\n${PROSE}\nEOF`,
+    "gh issue comment 97 --body-file - <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF",
+    "git commit -F - <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF",
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(QUEUE_DENY_REASON), cmd);
   }
 });
 
@@ -1218,105 +1237,21 @@ test("#247 criterion 3: a backtick substitution with a node prefix or an argumen
   }
 });
 
-test("#240 edge: a written body some other command in the call could run is still read", () => {
+test("#240 edge: a --body-file or -F run chained with a lane-script run, or its body written and run, is still denied", () => {
   for (const [cmd, reason] of [
+    ["gh issue comment 1 --body-file .lanes/c.md && node scripts/lanes/queue.mjs", QUEUE_DENY_REASON],
+    ["git commit -F .lanes/msg.txt; node scripts/lanes/start.mjs 12", DENY_REASON],
+    ['gh issue comment 1 --body-file "$(node scripts/lanes/queue.mjs)"', QUEUE_DENY_REASON],
     [`cat > .lanes/c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 --body-file .lanes/c.md && bash .lanes/c.md`, QUEUE_DENY_REASON],
-    [`cat > .lanes/c.md <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF\ngh issue comment 1 --body-file .lanes/c.md; sh .lanes/c.md`, DENY_REASON],
-    // gh commands that open a browser or an editor, echo the body (--dry-run), or are not issue/pr comment, create or edit.
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh pr create --dry-run --body-file c.md`, QUEUE_DENY_REASON],
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue create --web --body-file c.md`, QUEUE_DENY_REASON],
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 -e`, QUEUE_DENY_REASON],
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 --editor`, QUEUE_DENY_REASON],
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh api repos/o/r/issues -F body=@c.md`, QUEUE_DENY_REASON],
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue view 1`, QUEUE_DENY_REASON],
-    // An assignment other than MSYS_NO_PATHCONV, or gh reached by a path, is not the plain gh.
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\nGH_EDITOR=sh gh issue comment 1 --body-file c.md`, QUEUE_DENY_REASON],
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\n./gh issue comment 1 --body-file c.md`, QUEUE_DENY_REASON],
-    // A function named gh is defined in the same call.
-    [`gh() { bash; }\ngh issue comment 1 --body-file - <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF`, QUEUE_DENY_REASON],
-    // A substitution elsewhere in the call runs the written file.
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 --body "\`bash c.md\`"`, QUEUE_DENY_REASON],
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 --title x --body \`sh c.md\``, QUEUE_DENY_REASON],
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF\ngh issue comment 1 --body "$(bash c.md)"`, DENY_REASON],
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ncat > d.md <<EOF\n\`bash c.md\`\nEOF\ngh issue comment 1 --body-file d.md`, QUEUE_DENY_REASON],
-    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 --body-file c.md > "\`bash c.md\`"`, QUEUE_DENY_REASON],
-    // The same route with only cat and echo (denied before #240 too, as a program named at run time).
-    [`cat > c.sh <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\necho "\`bash c.sh\`" > out.txt`, QUEUE_DENY_REASON],
+    // Shapes the security review built against a heredoc-body skip (#240 PR #270), pinned: main denies each too.
+    ["gh issue comment 1 -b x # <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    ["gh issue comment 1 -b x ${x#<<'EOF'}\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    ["gh issue comment 1 --body-file - <<E\\OF\nx\nEOF\nnode scripts/lanes/queue.mjs\nE\\OF", QUEUE_DENY_REASON],
+    ["gh issue comment 1 --body-file g <<X'y'\nX\ncat > g <<'Z'\nXy\nnode scripts/lanes/queue.mjs\nZ", QUEUE_DENY_REASON],
     // gh's output piped into a shell.
     [`gh issue comment 1 --body-file - <<'EOF' | sh\necho \`node scripts/lanes/start.mjs 12\`\nEOF`, DENY_REASON],
   ]) {
     assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(reason), cmd);
-  }
-});
-
-test("#240 edge (security review): a `<<` inside a # comment opens no heredoc to bash, so the lines after it are read", () => {
-  for (const [cmd, reason] of [
-    ["gh issue comment 1 -b x # <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
-    ["gh issue comment 1 -b x #<<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF", DENY_REASON],
-    ["cat > f.md # <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
-    ["mkdir -p x; # <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
-  ]) {
-    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(reason), cmd);
-  }
-});
-
-test("#240 edge (security review, round 2): a `<<` inside an expansion, arithmetic or a group opens no heredoc to bash, so the lines after it are read", () => {
-  for (const [cmd, reason] of [
-    ["gh issue comment 1 -b x ${x#<<'EOF'}\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
-    ["gh issue comment 1 -b x $[1<<'EOF']\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
-    ["((gh issue comment 1<<'EOF'))\nnode scripts/lanes/start.mjs 12\nEOF", DENY_REASON],
-    ["gh issue comment 1 -b {x,<<'EOF'}\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
-    ["gh issue comment 1 -b x \\<<'EOF'\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
-    // The same shapes with cd or echo, which main's data-only rule let through.
-    ["cd ${x#<<'EOF'}\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
-    ["((cd<<'EOF'))\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
-    ["echo ${x#<<'EOF'} > f\nnode scripts/lanes/start.mjs 12\nEOF", DENY_REASON],
-  ]) {
-    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(reason), cmd);
-  }
-});
-
-test("#240 edge (security review, round 3): a delimiter bash unquotes differently keeps the body read", () => {
-  for (const [cmd, reason] of [
-    ["gh issue comment 1 --body-file - <<E\\OF\nx\nEOF\nnode scripts/lanes/queue.mjs\nE\\OF", QUEUE_DENY_REASON],
-    ['gh issue comment 1 --body-file - <<"E\\$F"\nE$F\nnode scripts/lanes/queue.mjs\nE\\$F', QUEUE_DENY_REASON],
-    ['gh issue comment 1 --body-file - <<"E\\\\F"\nE\\F\nnode scripts/lanes/start.mjs 12\nE\\\\F', DENY_REASON],
-    ["gh issue comment 1 --body-file - <<\\EOF\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
-    ["cat > f <<E\\OF\nx\nEOF\nnode scripts/lanes/queue.mjs\nE\\OF", QUEUE_DENY_REASON],
-    // Round 4: a quoted fragment right after the delimiter joins its word to bash (X'y' is Xy), not to the lexer.
-    ["gh issue comment 1 --body-file g <<X'y'\nX\ncat > g <<'Z'\nXy\nnode scripts/lanes/queue.mjs\nZ", QUEUE_DENY_REASON],
-    ['gh issue comment 1 --body-file g <<X"y"\nX\ncat > g <<\'Z\'\nXy\nnode scripts/lanes/queue.mjs\nZ', QUEUE_DENY_REASON],
-    ["gh issue comment 1 --body-file g <<'X'y\nX\ncat > g <<'Z'\nXy\nnode scripts/lanes/start.mjs 12\nZ", DENY_REASON],
-    ["cat > f <<X'y'\nX\ncat > g <<'Z'\nXy\nnode scripts/lanes/queue.mjs\nZ", QUEUE_DENY_REASON],
-  ]) {
-    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(reason), cmd);
-  }
-  // A plain delimiter, bare, single- or double-quoted, or after <<- and a space, still has its body skipped (a bare
-  // one only for a body with nothing to expand: PROSE's backticks would run there).
-  for (const open of ["<<EOF", "<<'EOF'", '<<"END_1.x"', "<<- 'EOF'"]) {
-    const text = open === "<<EOF" ? "The owner's queue.mjs runs in their own terminal." : PROSE;
-    const cmd = `gh issue comment 1 --body-file - ${open}\n${text}\n${open.includes("END") ? "END_1.x" : "EOF"}`;
-    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
-  }
-});
-
-test("#240 edge: a # inside a quoted word or a heredoc body is no comment and keeps the body skipped", () => {
-  for (const cmd of [
-    `cat > .lanes/c.md <<'EOF'\n# Heading for #240\n${PROSE}\nEOF\ngh issue comment 240 --body-file .lanes/c.md`,
-    `gh issue create --title "Fix it (#240)" --label lane-filed --body-file - <<'EOF'\n${PROSE}\nEOF`,
-    `gh issue comment 1 -b x#y --body-file - <<'EOF'\n${PROSE}\nEOF`,
-  ]) {
-    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
-  }
-});
-
-test("#240 edge: an empty heredoc, CRLF line ends and an unquoted body with nothing to expand, sent by gh, get no decision", () => {
-  for (const cmd of [
-    "cat > .lanes/c.md <<'EOF'\nEOF\ngh issue comment 1 --body-file .lanes/c.md",
-    "cat > .lanes/c.md <<'EOF'\r\nit's queue.mjs\r\nEOF\r\ngh issue comment 1 --body-file .lanes/c.md\r\n",
-    "cat > .lanes/c.md <<EOF\nit's queue.mjs, run by the owner\nEOF\ngh issue comment 1 --body-file .lanes/c.md",
-  ]) {
-    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, JSON.stringify(cmd));
   }
 });
 
