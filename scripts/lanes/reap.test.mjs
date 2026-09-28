@@ -610,6 +610,17 @@ test("edge: a log detail with control characters stays on one line", () =>
     for (const line of logLines(root)) assert.doesNotMatch(line, /[\x00-\x1f\x7f]/);
   }));
 
+test("edge: a Unicode line separator in a log detail ends the detail", () =>
+  withRoot(async (root) => {
+    const [ls, ps] = [String.fromCharCode(0x2028), String.fromCharCode(0x2029)];
+    const w = world(root, { issue: new Error(`first${ls}forged 2026 removed: x${ps}more`) });
+    assert.equal(await main(ARGS, w.deps), 1);
+    const log = readFileSync(join(root, ".lanes", "reap", "7.log"), "utf8");
+    assert.ok(!log.includes(ls) && !log.includes(ps));
+    assert.doesNotMatch(log, /forged/);
+    assert.match(log, / error: gh issue view: first$/m);
+  }));
+
 test("laneInputs keeps only the one lane's worktrees and sessions, no orphans, and does not change its input", () => {
   const inputs = {
     root: "/r",

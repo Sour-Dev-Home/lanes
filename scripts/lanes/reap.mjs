@@ -131,8 +131,8 @@ function parseArgs(argv) {
 // One line, control characters out, so a log line stays one line.
 const oneLine = (text) =>
   String(text)
-    .split(/\r?\n|\r/)[0]
-    .replace(/[\x00-\x1f\x7f-\x9f]/g, "")
+    .split(/\r?\n|\r|\u2028|\u2029/)[0]
+    .replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, "")
     .trim();
 const errLine = (err) => oneLine(String(err?.stderr ?? "").trim() || err?.message || err);
 
