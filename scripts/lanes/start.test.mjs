@@ -1501,6 +1501,54 @@ test("#118 edge: a grant that stops matching between the check and the claim is 
   }
 });
 
+// Extra case (not in the criteria or the lane's edge: list): the rename that claims the grant can itself race a
+// second run's own claim attempt (as opposed to the #217 test above, where the second run's *initial* check already
+// sees no file). Here the initial check still sees the still-present grant, but the file is gone by the time this
+// run tries to rename it away, exercising the renameSync catch block itself.
+test("#118 edge: a grant claimed by another run between the check and the rename is refused, not silently reused", () => {
+  const g = granted(numbered([1]));
+  g.deps.now = () => {
+    rmSync(g.file, { force: true });
+    return NOW;
+  };
+  try {
+    const { code, lines } = runStart(["1"], g.deps);
+    assert.equal(code, 2, lines.join("\n"));
+    assert.deepEqual(lines, ["nothing launched: the /start grant was already used by another run"]);
+    assert.deepEqual(g.launches, []);
+    assert.deepEqual(readdirSync(g.dir), [], "no grant or claimed copy left behind");
+  } finally {
+    g.done();
+  }
+});
+
+// Extra case: a fresh grant can be written to the session's path (by a new /start prompt) while the old one sits
+// claimed under review. If the claimed copy then turns out stale, the run must not clobber the fresh grant that has
+// since appeared at the original path, even though that leaves its own claimed copy behind unused.
+test("#118 edge: a fresh grant written while the old one is claimed is not clobbered when the claim turns out stale", () => {
+  const g = granted(numbered([1], NOW - GRANT_TTL_MS + 1));
+  const freshGrant = `${JSON.stringify(numbered([1], NOW))}\n`;
+  let calls = 0;
+  g.deps.now = () => {
+    calls++;
+    if (calls === 2) writeFileSync(g.file, freshGrant);
+    return calls === 1 ? NOW : NOW + GRANT_TTL_MS;
+  };
+  try {
+    const { code, lines } = runStart(["1"], g.deps);
+    assert.equal(code, 2, lines.join("\n"));
+    assert.deepEqual(lines, ["nothing launched: the /start grant is older than 15 minutes"]);
+    assert.deepEqual(g.launches, []);
+    const entries = readdirSync(g.dir);
+    assert.ok(entries.includes(`${OWNER}.json`), entries.join(", "));
+    assert.ok(entries.some((e) => e.includes(".claimed-")), entries.join(", "));
+    assert.equal(entries.length, 2, entries.join(", "));
+    assert.equal(readFileSync(g.file, "utf8"), freshGrant, "the fresh grant on disk is untouched");
+  } finally {
+    g.done();
+  }
+});
+
 test("#118 criterion 3, end to end: the hook allows start.mjs and leaves the grant; start.mjs then spends it", () => {
   const g = granted(null);
   try {
