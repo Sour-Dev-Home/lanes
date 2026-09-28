@@ -884,3 +884,14 @@ test("removeEmptyDir deletes a folder with no files and refuses one that holds f
   assert.throws(() => removeEmptyDir(join(root, "full")), /has 1 file; left in place/);
   assert.ok(existsSync(join(root, "full", "a.txt")));
 });
+
+test("edge: removeEmptyDir never deletes a file that appears after it counted none", (t) => {
+  const root = tempRoot(t);
+  mkdirSync(join(root, "late", "a", "b"), { recursive: true });
+  removeEmptyDir(join(root, "late"));
+  assert.ok(!existsSync(join(root, "late")));
+  const src = readFileSync(new URL("./cleanup.mjs", import.meta.url), "utf8");
+  const body = src.slice(src.indexOf("export function removeEmptyDir"), src.indexOf("export const LOG_LINES"));
+  assert.doesNotMatch(body, /rmSync\(/);
+  assert.match(body, /rmdirSync\(dir\)/);
+});

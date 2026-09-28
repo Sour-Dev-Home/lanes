@@ -3,7 +3,7 @@
 // touched. Each removed session's log is saved to .lanes/logs first (git-ignored, never posted).
 // Usage: node scripts/lanes/cleanup.mjs [--dry-run]
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 const LANE_BRANCH = /^issue-(\d+)-./;
@@ -334,12 +334,19 @@ export function findOrphans(root, tracked) {
     .map((path) => ({ path, files: countFiles(path) }));
 }
 
-/** Deletes `path` if it holds no files (empty folders inside go with it); throws, deleting nothing, otherwise. */
+/**
+ * Deletes `path` if it holds no files (empty folders inside go with it); throws otherwise. Folders are removed deepest
+ * first with a plain rmdir, which refuses a non-empty one, so a file written after the count is never deleted.
+ */
 export function removeEmptyDir(path) {
   const files = countFiles(path);
   if (files === null) throw new Error(`cannot count the files in ${path}`);
   if (files > 0) throw new Error(`${path} has ${plural(files, "file")}; left in place`);
-  rmSync(path, { recursive: true });
+  const inner = readdirSync(path, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => join(e.parentPath, e.name))
+    .sort((a, b) => b.length - a.length);
+  for (const dir of [...inner, path]) rmdirSync(dir);
 }
 
 export const LOG_LINES = 200;
