@@ -6,6 +6,8 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const LANE_BRANCH = /^issue-(\d+)-./;
+// A lane's worktree folder: `issue-<N>-<slug>`, or bare `issue-<N>` when the lane skipped the slug (#134).
+const LANE_FOLDER = /^issue-(\d+)(?:-.*)?$/;
 const PR_LIMIT = 1000;
 
 const normalPath = (p) => {
@@ -67,7 +69,7 @@ const stillWorking = (s) => (s.status === "idle" ? false : s.status === "busy" ?
 //              with no worktree, dirty null when its status could not be read, lockRunning whether the pid in a
 //              Claude session lock is running (unknown counts as running). Non-lane worktrees are passed too, to
 //              place sessions.
-//   sessions:  background sessions in this repo, `{ id, cwd, issue, status, state }` (issue from an `issue-<N>-…` folder).
+//   sessions:  background sessions in this repo, `{ id, cwd, issue, status, state }` (issue from an `issue-<N>` or `issue-<N>-…` folder).
 //   prs:       `{ number, state, headRefName, headRefOid }`.
 // A lane is cleaned only when its PR merged at exactly the local branch tip (squash merges are not ancestors, so
 // that equality is what makes `git branch -D` safe), and its worktree is clean.
@@ -232,7 +234,7 @@ export function sessionsFrom(agents, root) {
     if (a?.kind !== "background" || typeof a.id !== "string" || typeof a.cwd !== "string") continue;
     const cwd = normalPath(a.cwd);
     if (!cwd.startsWith(top)) continue;
-    const issue = Number(cwd.slice(top.length).split("/").map((s) => LANE_BRANCH.exec(s)?.[1]).find(Boolean)) || null;
+    const issue = Number(cwd.slice(top.length).split("/").map((s) => LANE_FOLDER.exec(s)?.[1]).find(Boolean)) || null;
     const session = { id: a.id, cwd: a.cwd, issue, status: a.status, state: a.state };
     sessions.push(Number.isInteger(a.pid) ? { ...session, pid: a.pid } : session);
   }

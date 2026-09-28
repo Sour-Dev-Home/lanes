@@ -547,9 +547,9 @@ test("edge: two sessions on one issue, the most recently started wins", () => {
   assert.equal(sessions.get(10).id, "new00001");
 });
 
-test("edge: malformed entries, a missing id, and a bare issue-<N> folder are skipped", () => {
+test("edge: malformed entries and a missing id are skipped; a bare issue-<N> folder is a lane (#134)", () => {
   const sessions = laneSessions([null, "x", { kind: "background" }, agent(undefined, wt("issue-10-x")), agent("aaaa0001", wt("issue-11")), agent("aaaa0002", `${wt("issue-12-y")}\\scripts`)], ROOT);
-  assert.deepEqual([...sessions.keys()], [12]);
+  assert.deepEqual([...sessions.keys()], [11, 12]);
 });
 
 test("edge: Windows paths match case-insensitively with either slash; POSIX paths match exactly", () => {
@@ -584,4 +584,14 @@ test("edge: a PR needing the owner that also has a running session keeps the ses
   const sessions = laneSessions([agent("42c93c57", wt("issue-10-x"))], ROOT);
   const s = summarize({ prs: [pr(7, [], { closingIssuesReferences: [{ number: 10 }], body: body("approve please") })], issues: [issue(10)], merged: [], sessions });
   assert.deepEqual(s.waitingOnOwner, [{ number: 7, title: "pr 7", stage: "starting", note: "needs: approve please — session 42c93c57", session: { id: "42c93c57", state: "working" } }]);
+});
+
+// #134: a lane whose worktree folder is `issue-<N>` with no slug is still that issue's lane.
+test("laneSessions maps both issue-<N> and issue-<N>-<slug> folders to N, and never a look-alike number", () => {
+  const sessions = laneSessions(
+    ["issue-104", "issue-106\\scripts\\lanes", "issue-7-slug", "issue-5x", "issue-5x-slug", "issue-", "issue-9-", "issue-80"].map((dir, i) => agent(`aaaa000${i}`, wt(dir))),
+    ROOT,
+  );
+  assert.deepEqual([...sessions.keys()], [104, 106, 7, 9, 80]);
+  assert.equal(sessions.get(104).id, "aaaa0000");
 });
