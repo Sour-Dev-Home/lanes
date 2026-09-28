@@ -4,7 +4,7 @@
   "start": {
     "maxLanes": 8,
     "softPaths": ["^docs/USING\\.md$", "^README\\.md$"],
-    "models": { "skip": "sonnet", "quick": "sonnet" }
+    "models": { "skip": "sonnet", "quick": "sonnet", "full": "sonnet" }
   },
   "modules": {
     "entries": [

@@ -762,10 +762,11 @@ test("edge: startConfig copies start.models, so the parsed config cannot change 
 });
 
 // #153 criterion 3: this repository runs skip and quick lanes on sonnet and full lanes on the default model.
-test("lanes.config.json runs skip and quick lanes on sonnet and leaves full unset", () => {
+// #259: full lanes run on sonnet too.
+test("lanes.config.json runs skip, quick and full lanes on sonnet", () => {
   const raw = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
-  assert.deepEqual(raw.start.models, { skip: "sonnet", quick: "sonnet" });
-  assert.deepEqual(startConfig(raw).models, { skip: "sonnet", quick: "sonnet" });
+  assert.deepEqual(raw.start.models, { skip: "sonnet", quick: "sonnet", full: "sonnet" });
+  assert.deepEqual(startConfig(raw).models, { skip: "sonnet", quick: "sonnet", full: "sonnet" });
 });
 
 // #153 criterion 4: docs/USING.md documents start.models.
@@ -790,7 +791,7 @@ test("edge: main launches on the models from this repository's own lanes.config.
   assert.deepEqual(launches, [
     { args: [...NAMED(1), "--model", "sonnet", "/lane 1"], cwd: "/repo" },
     { args: [...NAMED(2), "--model", "sonnet", "/lane 2"], cwd: "/repo" },
-    { args: [...NAMED(3), "/lane 3"], cwd: "/repo" },
+    { args: [...NAMED(3), "--model", "sonnet", "/lane 3"], cwd: "/repo" },
   ]);
 });
 
