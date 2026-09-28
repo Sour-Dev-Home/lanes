@@ -11,6 +11,8 @@
 //     `claude --bg` is always denied: start.mjs launches lanes itself (execFileSync, not a Bash tool call), so no
 //     session ever needs it. A `queue.mjs` run is always denied too, grant or not: the owner runs it in their own
 //     terminal (#95, ADR 0005). Anything else gets no decision. A deny holds in every permission mode.
+//     Text a call only writes to a file (cat, echo or printf with `>`, beside cd or mkdir), a `node -e` script that
+//     names no lane script, and arithmetic `$((…))` are not read as commands (#89, #102).
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -107,14 +109,52 @@ function literalSubstitution(cmd, i) {
   return close ? { body, end: end + close[0].length - 1 } : null;
 }
 
+// A `$` or backtick the shell takes literally (single-quoted, escaped, or in a literal heredoc message) is lexed as
+// one of these, so UNRESOLVED_RE sees only the ones that expand (#89). A quoted script is walked with them restored:
+// the shell that runs it (bash -c, eval) expands them.
+const LIT_DOLLAR = "";
+const LIT_TICK = "";
+const literal = (s) => s.replaceAll("$", LIT_DOLLAR).replaceAll("`", LIT_TICK);
+const unliteral = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, "`");
+
+/**
+ * `$((…))` at `i`, an arithmetic expansion (#102): its expression and the index of its closing `)`. Null for anything
+ * that is not plainly one (a quote, backtick, backslash or newline inside, `$( (…) )`, or no closing `))`), which is
+ * then lexed as before.
+ */
+function arithmetic(cmd, i) {
+  if (!cmd.startsWith("$((", i)) return null;
+  let depth = 0;
+  for (let j = i + 3; j < cmd.length; j += 1) {
+    const c = cmd[j];
+    if ("'\"`\\\n".includes(c)) return null;
+    if (c === "(") depth += 1;
+    else if (c === ")") {
+      if (depth > 0) depth -= 1;
+      else return cmd[j + 1] === ")" ? { expr: cmd.slice(i + 3, j), end: j + 1 } : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * An arithmetic expression as a script to walk: its variables are numbers there, so they read as 0. Whatever is left,
+ * such as a `$(…)` inside, is walked like any quoted script.
+ */
+const arithmeticScript = (expr) => expr.replace(/\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9#?]/g, "0");
+
 /**
  * Shell-ish lexer (the same rules as approve-guard.mjs): words (quotes and backslashes resolved, nothing expanded)
  * grouped into simple commands split on ; & | ( ) newlines and redirections. A heredoc's body is not lexed as
- * commands: it is returned in `bodies`, for the caller to read as a quoted script. Throws on an unterminated quote.
- * @returns {{ segments: string[][], bodies: string[] }}
+ * commands: it is returned in `bodies`, for the caller to read as a quoted script, as is an arithmetic expansion's
+ * expression (its word reads as `0`). A body is `literal` when the shell expands nothing in it. Throws on an
+ * unterminated quote.
+ * @returns {{ segments: string[][], writes: boolean[], bodies: { text: string, literal: boolean, start?: number, end?: number }[] }}
  */
 function lex(cmd) {
   const segments = [[]];
+  // Per segment: whether it holds an output redirection (`>`), so writes to a file.
+  const writes = [false];
   const bodies = [];
   const pending = [];
   let word = null;
@@ -124,14 +164,17 @@ function lex(cmd) {
   };
   const endSegment = () => {
     endWord();
-    if (segments.at(-1).length > 0) segments.push([]);
+    if (segments.at(-1).length > 0) {
+      segments.push([]);
+      writes.push(false);
+    }
   };
   for (let i = 0; i < cmd.length; i += 1) {
     const c = cmd[i];
     if (c === "'") {
       const end = cmd.indexOf("'", i + 1);
       if (end === -1) throw new Error("unterminated '");
-      word = (word ?? "") + cmd.slice(i + 1, end);
+      word = (word ?? "") + literal(cmd.slice(i + 1, end));
       i = end;
     } else if (c === '"') {
       let j = i + 1;
@@ -139,11 +182,22 @@ function lex(cmd) {
       for (; j < cmd.length && cmd[j] !== '"'; j += 1) {
         const lit = cmd[j] === "$" ? literalSubstitution(cmd, j) : null;
         if (lit) {
-          s += lit.body;
+          s += literal(lit.body);
           j = lit.end;
           continue;
         }
-        if (cmd[j] === "\\" && '"\\$`'.includes(cmd[j + 1] ?? "")) j += 1;
+        const arith = cmd[j] === "$" ? arithmetic(cmd, j) : null;
+        if (arith) {
+          bodies.push({ text: arithmeticScript(arith.expr), literal: false });
+          s += "0";
+          j = arith.end;
+          continue;
+        }
+        if (cmd[j] === "\\" && '"\\$`'.includes(cmd[j + 1] ?? "")) {
+          j += 1;
+          s += literal(cmd[j]);
+          continue;
+        }
         s += cmd[j];
       }
       if (j >= cmd.length) throw new Error('unterminated "');
@@ -151,10 +205,15 @@ function lex(cmd) {
       i = j;
     } else if (c === "$" && literalSubstitution(cmd, i)) {
       const lit = literalSubstitution(cmd, i);
-      word = (word ?? "") + lit.body;
+      word = (word ?? "") + literal(lit.body);
       i = lit.end;
+    } else if (c === "$" && arithmetic(cmd, i)) {
+      const arith = arithmetic(cmd, i);
+      bodies.push({ text: arithmeticScript(arith.expr), literal: false });
+      word = (word ?? "") + "0";
+      i = arith.end;
     } else if (c === "\\") {
-      if (cmd[i + 1] !== "\n") word = (word ?? "") + (cmd[i + 1] ?? "");
+      if (cmd[i + 1] !== "\n") word = (word ?? "") + literal(cmd[i + 1] ?? "");
       i += 1;
     } else if (c === "\n" && pending.length > 0) {
       // The heredocs opened on this line: their bodies follow it, each up to its delimiter line.
@@ -162,7 +221,7 @@ function lex(cmd) {
       let end = i;
       for (const h of pending.splice(0)) {
         const r = readHeredoc(cmd, end + 1, h.delim, h.stripTabs);
-        bodies.push(r.body);
+        bodies.push({ text: r.body, literal: h.quoted || !/[$`\\]/.test(r.body), start: end + 1, end: r.end });
         end = r.end;
       }
       i = end;
@@ -171,16 +230,19 @@ function lex(cmd) {
     } else if (c === "<" && cmd[i - 1] !== "<" && cmd[i + 1] === "<" && cmd[i + 2] !== "<" && HEREDOC_RE.test(cmd.slice(i))) {
       const m = HEREDOC_RE.exec(cmd.slice(i));
       endWord();
-      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-" });
+      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-", quoted: m[4] === undefined });
       i += m[0].length - 1;
     } else if ("<>".includes(c) || /\s/.test(c)) {
       endWord();
+      if (c === ">") writes[writes.length - 1] = true;
     } else {
       word = (word ?? "") + c;
     }
   }
   endSegment();
-  return { segments: segments.filter((s) => s.length > 0), bodies };
+  // Only the last segment can be empty, so `writes` stays aligned with the segments kept.
+  const kept = segments.filter((s) => s.length > 0);
+  return { segments: kept, writes: writes.slice(0, kept.length), bodies };
 }
 
 /** `cmd` without its literal `$(cat <<'D' … D)` substitutions, for the raw-text checks: their text is only data. */
@@ -224,13 +286,55 @@ function resolveSegments(segments) {
 /** A quoted script, as in bash -c "…", sh -c '…', eval "…" or node -e "…": a word holding shell syntax. */
 const isNestedScript = (w) => /[\s;&|()<>]/.test(w);
 
+// Programs that write what they are given to a file, and never run it (#89); cd and mkdir may come alongside.
+const WRITE_COMMANDS = new Set(["cat", "echo", "printf"]);
+const PLACE_COMMANDS = new Set(["cd", "mkdir"]);
+
+/**
+ * True when every simple command of a whole lexed Bash call is plainly (no assignment, variable or wrapper in front)
+ * cat, echo or printf with an output redirection, or cd or mkdir, as in
+ * `mkdir -p .lanes/verdicts && cat > .lanes/verdicts/x.json <<'EOF' … EOF`: nothing in the call can run the text it
+ * writes, not a pipe (`| sh`), a process substitution (`>(bash)`), a group or function (`{`), nor a later
+ * `bash file`. Only the top level counts: a nested script's output may be run by the command around it.
+ */
+const isDataOnly = ({ segments, writes }) =>
+  segments.every((words, k) => PLACE_COMMANDS.has(words[0]) || (WRITE_COMMANDS.has(words[0]) && writes[k]));
+
+const EVAL_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-pe"]);
+const EVAL_PROGRAM_RE = /^(node|nodejs|bun)(\.exe)?$/i;
+
+/**
+ * The indexes of the words that `node -e`/`--eval`/`-p`/`--print` (or bun's) runs as JavaScript, with their text, when
+ * node is the command word itself. Behind a wrapper (env, timeout, eval) they are read as shell text, as before #89.
+ */
+function evalScripts(words) {
+  const scripts = new Map();
+  const at = words.findIndex((w) => !ASSIGN_RE.test(w));
+  if (at === -1 || !EVAL_PROGRAM_RE.test(basename(words[at]))) return scripts;
+  let afterFlag = false;
+  for (let i = at + 1; i < words.length; i += 1) {
+    const w = words[i];
+    const eq = /^(--eval|--print)=(.*)$/s.exec(w);
+    if (eq) scripts.set(i, eq[2]);
+    else if (EVAL_FLAGS.has(w)) {
+      if (i + 1 < words.length) scripts.set(i + 1, words[i + 1]);
+      i += 1;
+    } else if (w.startsWith("-")) afterFlag = !w.includes("=");
+    else if (afterFlag) afterFlag = false;
+    else break;
+  }
+  return scripts;
+}
+
 /**
  * Walks every simple command of `cmd`, recursing into every quoted script and every heredoc body (either may be run:
  * `bash -c "…"`, `bash <<EOF`, `cat <<EOF | sh`). `visit(words)` is called per simple command; `onOpaque(text)` for a
  * part that cannot be read (unterminated quote, nesting too deep), which the caller fails closed on when the text
- * names what it looks for.
+ * names what it looks for; `onEval(text)` for a `node -e` script, which is JavaScript, not shell (#89). A whole call
+ * that only prints or writes text (isDataOnly) has only what the shell expands in it walked: a word with a `$` or
+ * backtick, a heredoc that is not literal, an arithmetic expression.
  */
-function walk(cmd, depth, visit, onOpaque) {
+function walk(cmd, depth, visit, onOpaque, onEval) {
   let lexed;
   try {
     lexed = lex(cmd);
@@ -238,12 +342,26 @@ function walk(cmd, depth, visit, onOpaque) {
     onOpaque(cmd);
     return;
   }
-  const nested = (text) => (depth >= MAX_DEPTH ? onOpaque(text) : walk(text, depth + 1, visit, onOpaque));
+  const nested = (text) => (depth >= MAX_DEPTH ? onOpaque(text) : walk(text, depth + 1, visit, onOpaque, onEval));
+  const dataOnly = depth === 0 && isDataOnly(lexed);
   for (const words of resolveSegments(lexed.segments)) {
-    visit(words);
-    for (const w of words) if (isNestedScript(w)) nested(w);
+    if (!dataOnly) visit(words);
+    const scripts = dataOnly ? new Map() : evalScripts(words);
+    words.forEach((w, i) => {
+      if (scripts.has(i)) onEval(scripts.get(i));
+      else if (isNestedScript(w) && !(dataOnly && !UNRESOLVED_RE.test(w))) nested(unliteral(w));
+    });
   }
-  for (const body of lexed.bodies) nested(body);
+  for (const body of lexed.bodies) if (!(dataOnly && body.literal)) nested(body.text);
+}
+
+/** True when a whole Bash call only writes text (isDataOnly); false when it cannot be read. */
+function writesOnly(cmd) {
+  try {
+    return isDataOnly(lex(cmd));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -299,6 +417,10 @@ export function findStartInvocations(command) {
     (text) => {
       if (/start\.mjs/i.test(text)) out.push({ issues: undefined, standalone: false, unparsed: true });
     },
+    // A node -e script that names start.mjs could import or spawn it; one the shell expands could be anything.
+    (js) => {
+      if (/start\.mjs/i.test(js) || UNRESOLVED_RE.test(js)) out.push({ issues: undefined, standalone: false });
+    },
   );
   // No raw-text fallback: `node $(echo …start.mjs)` and backticks leave `$` or a backtick in the script word, which
   // the visitor above already counts, and one would deny `git commit -m "…start.mjs" && echo "$X"`.
@@ -346,6 +468,10 @@ function scanQueueInvocations(command) {
     (text) => {
       if (/queue\.mjs/i.test(text)) found = true;
     },
+    (js) => {
+      if (/queue\.mjs/i.test(js)) found = true;
+      else if (UNRESOLVED_RE.test(js)) unresolved = true;
+    },
   );
   return { found, unresolved };
 }
@@ -374,12 +500,18 @@ function scanBgLaunches(command) {
     (text) => {
       if (/--(bg|background)/.test(text)) opaque = true;
     },
+    // A node -e script that names claude and --bg could spawn it.
+    (js) => {
+      if (/claude/i.test(js) && /--(bg|background)/.test(js)) found = true;
+    },
   );
   // `$(which claude) --bg`: the lexer splits the substitution off, so claude and its flag land in different simple
   // commands. Only a `$(` that names claude, with a --bg word in the same call, fails closed; an unrelated "$VAR" does
-  // not, nor does a literal `$(cat <<'EOF' … EOF)` message that merely names both.
+  // not, nor does a literal `$(cat <<'EOF' … EOF)` message that merely names both. A call that only writes text has
+  // no command a substitution could run as claude: every simple command in it, split-off substitutions included, is
+  // cat, echo, printf, cd or mkdir, and walk() reads each expanding part itself.
   const raw = withoutLiteralSubstitutions(cmd);
-  if (!found && /\$\([^)]*claude/i.test(raw) && /(^|[\s'"])--(bg|background)([=\s'"]|$)/.test(raw)) found = true;
+  if (!found && !writesOnly(cmd) && /\$\([^)]*claude/i.test(raw) && /(^|[\s'"])--(bg|background)([=\s'"]|$)/.test(raw)) found = true;
   return { found: found || opaque, unparsed: !found && opaque };
 }
 

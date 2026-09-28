@@ -718,3 +718,142 @@ test("#95 edge: quoted text that reads as a queue.mjs command fails closed, as i
 test("#95 edge: a background launch keeps its own reason, checked before queue.mjs", () => {
   assert.deepEqual(decidePreToolUse(bash("claude --bg x; node scripts/lanes/queue.mjs 12"), null, NOW), { decision: "deny", reason: BG_DENY_REASON });
 });
+
+// --- #89: text that only mentions lane scripts, and arithmetic (#102) ------------------------------------------------
+
+// A reviewer verdict as a lane writes it: prose naming the guard, markdown backticks, parentheses and a `$(`.
+const VERDICT = '{"reviewer": "security-reviewer", "summary": "start-guard.mjs still denies `node scripts/lanes/start.mjs 12` (bash -c) and $(which claude) --bg; it\'s fixed"}';
+// A regex check on the guard's source, as the security reviewer ran it.
+const REGEX_CHECK = `node -e "const s = require('fs').readFileSync('scripts/lanes/start-guard.mjs', 'utf8'); console.log(/scripts\\/lanes\\/start\\.mjs/.test(s), s.match(/\\$\\(/g).length)"`;
+
+test("#89 criterion 1: a command that only writes or prints text mentioning lane scripts gets no decision", () => {
+  for (const cmd of [
+    `cat > .lanes/verdicts/x.json <<'EOF'\n${VERDICT}\nEOF`,
+    `cat <<'EOF' > .lanes/verdicts/x.json\n${VERDICT}\nEOF\n`,
+    `mkdir -p .lanes/verdicts && cat > .lanes/verdicts/x.json <<"EOF"\n${VERDICT}\nEOF`,
+    `cd .lanes && cat >> verdicts/x.json <<-'EOF'\n\t${VERDICT}\n\tEOF`,
+    `echo 'node scripts/lanes/start.mjs 12 (from start-guard.mjs)' > .lanes/verdicts/note.txt`,
+    `printf '%s\\n' "the guard (start-guard.mjs) denies \\$(which claude) --bg" > .lanes/notes.md`,
+    REGEX_CHECK,
+    `node -e 'console.log(/node scripts\\/lanes\\/(start|queue)\\.mjs (\\d+)/.test(process.argv[1]), "$(x)")' x`,
+    `node --eval="console.log('scripts/lanes/start-guard.mjs'.split('/'))"`,
+  ]) {
+    for (const g of [null, grant()]) assert.equal(decidePreToolUse(bash(cmd), g, NOW), null, JSON.stringify(cmd));
+    assert.deepEqual(findStartInvocations(cmd), [], JSON.stringify(cmd));
+    assert.equal(findQueueInvocations(cmd), false, JSON.stringify(cmd));
+    assert.equal(findBgLaunches(cmd), false, JSON.stringify(cmd));
+  }
+});
+
+test("#89 criterion 3: near misses that write or print text and also run it are still refused", () => {
+  for (const [cmd, reason] of [
+    // The written file is run in the same call.
+    ["cat > run.sh <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF\nbash run.sh", DENY_REASON],
+    ["cat > run.sh <<'EOF'\nclaude --bg x\nEOF\n. run.sh", BG_DENY_REASON],
+    // The text reaches a shell through a pipe, a process substitution or a function.
+    ["echo 'node scripts/lanes/start.mjs 12' | bash", DENY_REASON],
+    ["cat > >(bash) <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF", DENY_REASON],
+    ["f() {\necho 'node scripts/lanes/start.mjs 12'\n}\nf | sh", DENY_REASON],
+    // Text that is not literal: an unquoted heredoc or a double-quoted word still runs its substitutions.
+    ["cat > x.json <<EOF\n$(node scripts/lanes/start.mjs 12)\nEOF", DENY_REASON],
+    ['echo "$(node scripts/lanes/start.mjs 12)" > .lanes/verdicts/x.json', DENY_REASON],
+    ["cat > x.json <<EOF\n`claude --bg x`\nEOF", BG_DENY_REASON],
+    // node -e whose script names start.mjs, queue.mjs or claude --bg, or is built at run time.
+    [`node -e "import('./scripts/lanes/start.mjs')"`, DENY_REASON],
+    [`node -e "require('child_process').execSync('node scripts/lanes/start.mjs 12')"`, DENY_REASON],
+    [`node -e "require('child_process').execSync('claude --bg x')"`, BG_DENY_REASON],
+    [`node -p "require('child_process').execSync('node scripts/lanes/queue.mjs')"`, QUEUE_DENY_REASON],
+    [`node -e "$(cat /tmp/x.js)"`, UNRESOLVED_DENY_REASON],
+    [`node --eval="$(cat /tmp/x.js)"`, UNRESOLVED_DENY_REASON],
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason }, JSON.stringify(cmd));
+  }
+});
+
+test("#102 criterion 1: a command whose only $((…)) is arithmetic gets no decision", () => {
+  for (const cmd of ['echo "$((5<<1))"', "N=$((N+1))"]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+    assert.equal(decidePreToolUse(bash(cmd), grant(), NOW), null, cmd);
+  }
+});
+
+test("#102 criterion 2: command substitution still fails closed", () => {
+  assert.deepEqual(decidePreToolUse(bash("$(which claude) --bg x"), grant(), NOW), { decision: "deny", reason: BG_DENY_REASON });
+  for (const cmd of ["node $(echo scripts/lanes/start.mjs) 12", "$(echo node scripts/lanes/start.mjs 12)"]) {
+    assert.ok(findStartInvocations(cmd).length > 0, cmd);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+});
+
+test("#102 criterion 3: an arithmetic expansion holding a command substitution is still a run", () => {
+  for (const cmd of ["$(( $(node scripts/lanes/start.mjs 12) ))", 'echo "$(( $(node scripts/lanes/start.mjs 12) + 1 ))"', "N=$(( $(node scripts/lanes/start.mjs 12) ))"]) {
+    assert.ok(findStartInvocations(cmd).length > 0, cmd);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  assert.deepEqual(decidePreToolUse(bash('echo "$(( $(node scripts/lanes/queue.mjs) ))"'), grant(), NOW), { decision: "deny", reason: QUEUE_DENY_REASON });
+  assert.deepEqual(decidePreToolUse(bash("echo $(( $(claude --bg x) ))"), grant(), NOW), { decision: "deny", reason: BG_DENY_REASON });
+});
+
+test("#89 criterion 7: every case named in #102 is covered", () => {
+  // #102: `echo "$((5<<1))"` was re-lexed as a nested script and the lone `$` left at command position was denied.
+  const none = ['echo "$((5<<1))"', "N=$((N+1))"];
+  const denied = ["$(which claude) --bg x", "node $(echo scripts/lanes/start.mjs) 12", "$(echo node scripts/lanes/start.mjs 12)", "$(( $(node scripts/lanes/start.mjs 12) ))"];
+  for (const cmd of none) assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  for (const cmd of denied) assert.equal(decidePreToolUse(bash(cmd), null, NOW)?.decision, "deny", cmd);
+});
+
+test("#89 edge: arithmetic with variables, nested parentheses or a bit shift gets no decision", () => {
+  for (const cmd of ['echo "$(( N * 2 ))"', "echo $(($N+1))", 'echo "$(( ${N} + (2 * 3) ))"', 'X=$((1<<2)); echo "$((X<<1))"', 'echo "$(( ))"', "for i in 1 2; do N=$((N+i)); done"]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+test("#89 edge: a subshell substitution or an unterminated arithmetic is not taken for arithmetic", () => {
+  for (const cmd of ['echo "$( (node scripts/lanes/start.mjs 12) )"', "echo $((node scripts/lanes/start.mjs 12) )"]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // No closing `))`: lexed as before, so the quoted `$((1+` stays unresolved and the start.mjs after it is still seen.
+  assert.deepEqual(decidePreToolUse(bash('echo "$((1+" && node scripts/lanes/start.mjs 12'), grant(), NOW), { decision: "deny", reason: DENY_REASON });
+  assert.deepEqual(decidePreToolUse(bash('echo "$((1+ node scripts/lanes/start.mjs'), grant(), NOW), { decision: "deny", reason: PARSE_DENY_REASON });
+});
+
+test("#89 edge: data commands that are empty, CRLF, appended or hold an apostrophe get no decision", () => {
+  for (const cmd of [
+    "cat > .lanes/verdicts/x.json <<'EOF'\nEOF",
+    "cat <<A <<B > x.txt\nx\nA\nnode scripts/lanes/start.mjs 12\nB",
+    "cat > x.json <<'EOF'\r\nit's start.mjs\r\nEOF\r\n",
+    "echo '(node scripts/lanes/start.mjs 12)' >> notes.txt && echo done > log.txt",
+    `"ca"t > x.json <<'EOF'\nnode scripts/lanes/queue.mjs 12\nEOF`,
+    "cat > x.json <<EOF\nno expansion: node scripts/lanes/start.mjs 12\nEOF",
+    "echo 'costs $5 (approx) and `x`' > notes.txt",
+    "",
+  ]) {
+    assert.equal(decidePreToolUse(bash(cmd), grant(), NOW), null, JSON.stringify(cmd));
+  }
+});
+
+test("#89 edge: a data command that only prints, or whose program word is not plainly cat, echo or printf, is walked as before", () => {
+  for (const cmd of [
+    // Printed rather than written: read as before, as the existing `cat <<A <<B` case expects.
+    "cat <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF",
+    "echo 'node scripts/lanes/start.mjs 12 (x)' && echo done > log.txt",
+    "C=cat; $C > x <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF",
+    "PATH=/tmp cat > x <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF",
+    "cat > x 2>&1 <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF",
+    "{ echo 'node scripts/lanes/start.mjs 12'; } | sh",
+    "tee x <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF",
+  ]) {
+    assert.equal(decidePreToolUse(bash(cmd), grant(), NOW)?.decision, "deny", JSON.stringify(cmd));
+  }
+});
+
+test("#89 edge: node -e that is not the command word, or has a $ escaped in its script, is read as before", () => {
+  // Behind a wrapper the script is still read as shell text, as before #89.
+  assert.deepEqual(decidePreToolUse(bash(`env node -e "import('./scripts/lanes/start.mjs')"`), grant(), NOW), { decision: "deny", reason: DENY_REASON });
+  // An escaped or single-quoted $ is literal text for node, not a substitution.
+  for (const cmd of [`node -e "console.log('\\$HOME')"`, `node -e 'console.log("$HOME")'`, `node -p "1 + 1"`]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+  // An unescaped one in double quotes is still expanded by the shell before node runs.
+  assert.deepEqual(decidePreToolUse(bash(`node -e "console.log('$HOME')"`), null, NOW), { decision: "deny", reason: UNRESOLVED_DENY_REASON });
+});
