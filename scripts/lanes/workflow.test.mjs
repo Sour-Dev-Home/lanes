@@ -216,6 +216,65 @@ test("lanes point at the practice layer", () => {
 // #28: a lane pushes one notification when it finishes or needs the owner, never for routine progress
 const laneText = () => readFileSync(".claude/commands/lane.md", "utf8");
 
+// One numbered step of lane.md, with line breaks and runs of spaces collapsed to one space.
+const laneStep = (n) => laneText().replace(/\r\n/g, "\n").match(new RegExp(`\\n${n}\\. [\\s\\S]*?\\n${n + 1}\\. `))[0].replace(/\s+/g, " ");
+
+// #105: a lane waits on the CI checks only, bounded, then reads lanes/gate once; it never watches the gate itself
+test("lane.md step 7 waits only on the CI checks, not lanes/gate, with pipefail and at most 15 minutes, then reads the gate once", () => {
+  const step7 = laneStep(7);
+  assert.match(step7, /set -o pipefail/);
+  const secs = step7.match(/timeout (\d+)/);
+  assert.ok(secs, "step 7 bounds the wait with timeout");
+  assert.ok(Number(secs[1]) > 0 && Number(secs[1]) <= 900, `timeout ${secs[1]} is over 15 minutes`);
+  assert.match(step7, /gh run watch <id> --exit-status/);
+  assert.match(step7, /select\(\.workflowName != "lanes-gate"\)/);
+  assert.match(step7, /read `lanes\/gate`'s state and description on the PR head once/);
+});
+
+test("lane.md step 7 runs a missing review the gate waits for, posts it, and reads the gate again", () => {
+  const step7 = laneStep(7);
+  assert.match(step7, /`waiting for review\/<name>`/);
+  assert.match(step7, /run that reviewer as in step 6, post its verdict with `post-review\.mjs`, and read the gate again/);
+});
+
+test("lane.md step 6 posts a verdict with an unfixed critical or important finding as failure, never holds it back", () => {
+  const step6 = laneStep(6);
+  assert.match(step6, /A verdict with an unfixed critical or important finding is still posted, as `failure`/);
+  assert.match(step6, /the gate reports the finding instead of waiting/);
+});
+
+test("lane.md step 7 stops at once on `waiting on owner (/approve)`, reports it and notifies, instead of watching", () => {
+  const step7 = laneStep(7);
+  assert.match(step7, /`waiting on owner \(\/approve\)`/);
+  assert.match(step7, /stop right away/);
+  assert.match(step7, /report "waiting on your \/approve"/);
+  assert.match(step7, /needs \/approve: <the lanes\/gate reason>/);
+});
+
+test("lane.md step 7 reports a failed CI check by name, never a success", () => {
+  const step7 = laneStep(7);
+  assert.match(step7, /a failed or cancelled CI check, report it by name/);
+  assert.match(step7, /never report success/);
+});
+
+test("edge: lane.md step 7 never runs gh pr checks --watch, which also waits on lanes/gate and cannot end while it waits on the owner", () => {
+  assert.doesNotMatch(laneStep(7), /`gh pr checks [^`]*--watch/);
+});
+
+test("edge: lane.md step 7's commands use no loop or bash -c, which a worktree session refuses around gh", () => {
+  // The commands to run, not the prose that names what to avoid (`bash -c`).
+  const commands = laneStep(7).match(/`(gh|set|timeout) [^`]*`/g).join(" ");
+  assert.doesNotMatch(commands, /bash -c|\bfor \w+ in\b|\buntil\b|\bwhile\b/);
+});
+
+test("edge: lane.md step 7 never pipes gh pr checks into tail or head, which hides a failed check's exit code", () => {
+  assert.doesNotMatch(laneStep(7), /gh pr checks[^`]*\|\s*(tail|head)\b/);
+});
+
+test("edge: lane.md step 7 treats a wait that times out as unsettled, not as passed", () => {
+  assert.match(laneStep(7), /exit 124[^.]*did not settle/i);
+});
+
 test("lane.md loads PushNotification via ToolSearch and caps each notification at one short `lanes #N:` line", () => {
   const lane = laneText();
   assert.match(lane, /ToolSearch/);

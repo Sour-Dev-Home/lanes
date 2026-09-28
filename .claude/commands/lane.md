@@ -47,12 +47,29 @@ path, command or CI output, secret, token or personal data (point to the PR or i
    no figures, leave `metrics` out (`post-review.mjs` then warns but still posts). Fix what they find (one more round
    only if they found real bugs), set `fixed` truthfully, and save each verdict to `.lanes/verdicts/<reviewer>.json`. After the final push, post each:
    `node scripts/lanes/post-review.mjs --file .lanes/verdicts/<reviewer>.json`. A refused verdict prints why; fix the
-   JSON or the code, never the facts. Never post a verdict for a review you did not run.
+   JSON or the code, never the facts. Never post a verdict for a review you did not run. A verdict with an unfixed
+   critical or important finding is still posted, as `failure`: never hold it back, so the gate reports the finding
+   instead of waiting on a review that never arrives.
 7. `npm run preflight`, push, then `gh pr create` with the PR template filled in completely: "Closes #$ARGUMENTS",
    every acceptance criterion mapped under "What changed", "Contract changes" starting with none, additive or
    breaking, and "Needs the owner" saying exactly what he must decide, or "nothing". Then `gh pr merge <N> --auto`.
-   Once its checks settle (`gh pr checks <N> --watch`), notify only if `lanes/gate` did not pass:
-   `lanes #<N>: needs /approve: <the lanes/gate reason>` (the status's description). A passing gate needs no notification.
+   Wait until the CI checks settle, and only those: `lanes/gate` can wait on the owner indefinitely, so never watch it
+   (never give `gh pr checks` a `--watch`). The CI checks are workflow runs and `lanes/gate` is a status, so watch the runs, each
+   as its own plain command (a worktree session refuses `gh` inside a loop or `bash -c`): take the head SHA from
+   `gh pr view <N> --json headRefOid --jq .headRefOid`, list its runs with
+   `gh run list --commit <sha> --json databaseId,workflowName,status --jq '.[] | select(.workflowName != "lanes-gate") | "\(.databaseId) \(.workflowName) \(.status)"'`
+   (list again once if a check `gh pr checks` shows has no run yet), then for each run not yet completed
+   `set -o pipefail; timeout 900 gh run watch <id> --exit-status --interval 20`, stopping at 15 minutes in all. Exit
+   124 means the checks did not settle, which you report as such, never as passed. Then read `lanes/gate`'s state
+   and description on the PR head once, with every check's result:
+   `gh pr checks <N> --json name,bucket,description --jq '.[] | "\(.bucket) \(.name): \(.description)"'`. Act on it:
+   - For a failed or cancelled CI check, report it by name (step 9 covers a second failure); never report success.
+   - `waiting for review/<name>`: run that reviewer as in step 6, post its verdict with `post-review.mjs`, and read
+     the gate again the same way.
+   - `waiting on owner (/approve)`: stop right away, report "waiting on your /approve" with the gate's reason, and
+     notify `lanes #<N>: needs /approve: <the lanes/gate reason>` (the status's description), instead of watching.
+   - Any other `pending` or `failure`: report the gate's description as the lane's end state.
+   - `pass`: done. A passing gate needs no notification.
    From Git Bash, prefix `gh pr create`, `gh pr edit` and `gh issue create` with `MSYS_NO_PATHCONV=1` when they pass `--title` or `--body`, or a leading `/` becomes a Windows path.
    After merging main into the branch with no other change, do not re-run the test-hunter: check that `lanes/gate`
    says `reused`, and run the test-hunter again only if it does not.
