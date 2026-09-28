@@ -175,6 +175,29 @@ test("launch arguments are exactly --bg and /lane N, with no permission flags", 
   assert.deepEqual(launchArgs(18), ["--bg", "/lane 18"]);
 });
 
+// #153 criterion 2: --model <name> goes before /lane N when the tier has a model, and nothing is added otherwise.
+test("launch arguments add --model before /lane N for a tier with a model, per tier", () => {
+  const models = { skip: "haiku", quick: "sonnet", full: "opus" };
+  for (const tier of ["skip", "quick", "full"]) {
+    assert.deepEqual(launchArgs(18, { tier, models }), ["--bg", "--model", models[tier], "/lane 18"], tier);
+  }
+});
+
+test("launch arguments carry no --model when the tier has none", () => {
+  for (const tier of ["skip", "quick", "full"]) {
+    assert.deepEqual(launchArgs(18, { tier, models: {} }), ["--bg", "/lane 18"], tier);
+    assert.deepEqual(launchArgs(18, { tier }), ["--bg", "/lane 18"], tier);
+  }
+  assert.deepEqual(launchArgs(18, { tier: "full", models: { skip: "sonnet", quick: "sonnet" } }), ["--bg", "/lane 18"]);
+});
+
+test("edge: launch arguments ignore an unknown or missing tier", () => {
+  const models = { quick: "sonnet" };
+  assert.deepEqual(launchArgs(18, { models }), ["--bg", "/lane 18"]);
+  assert.deepEqual(launchArgs(18, { tier: "toString", models }), ["--bg", "/lane 18"]);
+  assert.deepEqual(launchArgs(18, { tier: "__proto__", models }), ["--bg", "/lane 18"]);
+});
+
 // Criterion 7 and 9: id parsing.
 test("parseSessionId reads the id after 'backgrounded ·'", () => {
   assert.equal(parseSessionId("Started.\nbackgrounded · 81ddaf76\n"), "81ddaf76");
@@ -238,7 +261,7 @@ function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut
       return JSON.stringify(sessions);
     }
     launches.push({ args, cwd: opts?.cwd });
-    const n = Number(args[1].split(" ")[1]);
+    const n = Number(args.at(-1).split(" ")[1]);
     if (launchFail.includes(n)) throw new Error("claude: spawn failed");
     return launchOut[n] ?? `backgrounded · id${n}`;
   };
@@ -394,18 +417,84 @@ test("docs/USING.md describes /start", () => {
 // #54 criterion 1: the start block in lanes.config.json, its defaults and its bounds.
 test("lanes.config.json has the start block with maxLanes 8 and the two soft paths", () => {
   const raw = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
-  assert.deepEqual(raw.start, { maxLanes: 8, softPaths: ["^docs/USING\\.md$", "^README\\.md$"] });
+  assert.equal(raw.start.maxLanes, 8);
+  assert.deepEqual(raw.start.softPaths, ["^docs/USING\\.md$", "^README\\.md$"]);
   assert.deepEqual(startConfig(raw), raw.start);
 });
 
 test("startConfig falls back to the defaults when the start block or a key is missing", () => {
-  const defaults = { maxLanes: 8, softPaths: ["^docs/USING\\.md$", "^README\\.md$"] };
+  const defaults = { maxLanes: 8, softPaths: ["^docs/USING\\.md$", "^README\\.md$"], models: {} };
   assert.deepEqual(START_DEFAULTS, defaults);
   assert.deepEqual(startConfig(undefined), defaults);
   assert.deepEqual(startConfig({}), defaults);
   assert.deepEqual(startConfig({ start: {} }), defaults);
-  assert.deepEqual(startConfig({ start: { maxLanes: 3 } }), { maxLanes: 3, softPaths: defaults.softPaths });
-  assert.deepEqual(startConfig({ start: { softPaths: [] } }), { maxLanes: 8, softPaths: [] });
+  assert.deepEqual(startConfig({ start: { maxLanes: 3 } }), { ...defaults, maxLanes: 3 });
+  assert.deepEqual(startConfig({ start: { softPaths: [] } }), { ...defaults, softPaths: [] });
+});
+
+// #153 criterion 1: start.models maps tiers to model names; no models by default.
+test("startConfig takes start.models, a model name per tier, and defaults to no models", () => {
+  assert.deepEqual(startConfig({ start: {} }).models, {});
+  assert.deepEqual(startConfig({ start: { models: {} } }).models, {});
+  const models = { skip: "haiku", quick: "sonnet", full: "claude-opus-5-5" };
+  assert.deepEqual(startConfig({ start: { models } }).models, models);
+  assert.deepEqual(startConfig({ start: { models: { quick: "sonnet" } } }).models, { quick: "sonnet" });
+});
+
+test("startConfig refuses an unknown tier key in start.models", () => {
+  for (const key of ["medium", "tier:quick", "Quick", ""]) {
+    assert.throws(() => startConfig({ start: { models: { [key]: "sonnet" } } }), /start\.models: unknown tier/, key);
+  }
+});
+
+test("edge: startConfig refuses a start.models that is not an object of model names", () => {
+  for (const bad of [null, "sonnet", ["sonnet"], 1]) {
+    assert.throws(() => startConfig({ start: { models: bad } }), /start\.models must be an object/, JSON.stringify(bad));
+  }
+  // Empty, non-string, whitespace, and a leading dash (which claude would read as a flag) are not model names.
+  for (const bad of ["", "   ", 1, null, true, "--dangerously-skip-permissions", "-m", "son net", "sonnet\n"]) {
+    assert.throws(() => startConfig({ start: { models: { quick: bad } } }), /start\.models\.quick must be a model name/, JSON.stringify(bad));
+  }
+});
+
+test("edge: startConfig copies start.models, so the parsed config cannot change it later", () => {
+  const raw = { start: { models: { quick: "sonnet" } } };
+  const { models } = startConfig(raw);
+  raw.start.models.quick = "opus";
+  assert.equal(models.quick, "sonnet");
+});
+
+// #153 criterion 3: this repository runs skip and quick lanes on sonnet and full lanes on the default model.
+test("lanes.config.json runs skip and quick lanes on sonnet and leaves full unset", () => {
+  const raw = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
+  assert.deepEqual(raw.start.models, { skip: "sonnet", quick: "sonnet" });
+  assert.deepEqual(startConfig(raw).models, { skip: "sonnet", quick: "sonnet" });
+});
+
+// #153 criterion 4: docs/USING.md documents start.models.
+test("docs/USING.md documents start.models", () => {
+  const doc = readFileSync(new URL("../../docs/USING.md", import.meta.url), "utf8");
+  assert.match(doc, /`start\.models`/);
+  assert.match(doc, /--model/);
+});
+
+// Extra, not from criteria or a listed edge case: this repository's actual lanes.config.json, run through main()
+// end to end (not a hand-built fixture), launches each tier on the model criterion 3 requires.
+test("edge: main launches on the models from this repository's own lanes.config.json", () => {
+  const config = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
+  const issues = {
+    1: { labels: ["ready", "tier:skip"], body: form({ scope: "In: `a.mjs`." }) },
+    2: { labels: ["ready", "tier:quick"], body: form({ scope: "In: `b.mjs`." }) },
+    3: { labels: ["ready", "tier:full"], body: form({ scope: "In: `c.mjs`." }) },
+  };
+  const { deps, launches } = fakes({ issues, config });
+  const { code } = main(["1", "2", "3"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(launches, [
+    { args: ["--bg", "--model", "sonnet", "/lane 1"], cwd: "/repo" },
+    { args: ["--bg", "--model", "sonnet", "/lane 2"], cwd: "/repo" },
+    { args: ["--bg", "/lane 3"], cwd: "/repo" },
+  ]);
 });
 
 test("startConfig accepts maxLanes 1 and 10 and refuses anything outside 1 to 10", () => {
@@ -620,6 +709,43 @@ test("--auto --go launches exactly the dry run's picks, from the repository root
   assert.equal(code, 0);
   assert.deepEqual(launches, picks.map((n) => ({ args: launchArgs(n), cwd: "/repo" })));
   assert.deepEqual(lines, [...picks.map((n) => `#${n} → id${n}`), ...dry.lines.filter((l) => l.includes(": skipped: "))]);
+});
+
+// #153 criterion 2, end to end: each lane launches on its own issue's tier model.
+test("main launches each issue on its tier's model from start.models, in both modes", () => {
+  const config = { start: { models: { skip: "haiku", quick: "sonnet" } } };
+  const issues = {
+    1: { labels: ["ready", "tier:skip"], body: form({ scope: "In: `a.mjs`." }) },
+    2: { labels: ["ready", "tier:quick"], body: form({ scope: "In: `b.mjs`." }) },
+    3: { labels: ["ready", "tier:full"], body: form({ scope: "In: `c.mjs`." }) },
+  };
+  const expected = [
+    { args: ["--bg", "--model", "haiku", "/lane 1"], cwd: "/repo" },
+    { args: ["--bg", "--model", "sonnet", "/lane 2"], cwd: "/repo" },
+    { args: ["--bg", "/lane 3"], cwd: "/repo" },
+  ];
+  for (const argv of [["1", "2", "3"], ["--auto", "--go"]]) {
+    const { deps, launches } = fakes({ issues, config });
+    const { code } = main(argv, deps);
+    assert.equal(code, 0, argv.join(" "));
+    assert.deepEqual(launches, expected, argv.join(" "));
+  }
+});
+
+test("main launches with no --model when lanes.config.json sets no models", () => {
+  const { deps, launches } = fakes({ issues: { 1: { labels: ["ready", "tier:full"] } } });
+  assert.equal(main(["1"], deps).code, 0);
+  assert.deepEqual(launches, [{ args: ["--bg", "/lane 1"], cwd: "/repo" }]);
+});
+
+test("edge: main launches nothing when start.models is malformed, in either mode", () => {
+  for (const argv of [["1"], ["--auto", "--go"]]) {
+    const { deps, launches } = fakes({ issues: { 1: {} }, config: { start: { models: { medium: "sonnet" } } } });
+    const { code, lines } = main(argv, deps);
+    assert.equal(code, 2, argv.join(" "));
+    assert.match(lines[0], /nothing launched: .*start\.models: unknown tier/);
+    assert.equal(launches.length, 0);
+  }
 });
 
 test("edge: --auto --go reports a failed launch, does not retry it, and exits 1", () => {

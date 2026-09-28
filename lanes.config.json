@@ -1,7 +1,11 @@
 {
   "requiredChecks": ["verify", "security", "lanes/gate"],
   "metrics": { "mainWorkflow": "verify.yml", "fragmentsDir": null },
-  "start": { "maxLanes": 8, "softPaths": ["^docs/USING\\.md$", "^README\\.md$"] },
+  "start": {
+    "maxLanes": 8,
+    "softPaths": ["^docs/USING\\.md$", "^README\\.md$"],
+    "models": { "skip": "sonnet", "quick": "sonnet" }
+  },
   "paths": {
     "skip": ["^docs/", "\\.md$", "\\.test\\.m?[jt]sx?$", "(^|/)__tests__/", "(^|/)test/"],
     "contract": ["^contracts/", "\\.schema\\.json$", "(^|/)schema\\.ts$"],

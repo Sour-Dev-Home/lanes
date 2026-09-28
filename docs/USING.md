@@ -18,6 +18,11 @@
    blocker, an overlap with another pick or with files running work already touches, the cap), and launches nothing.
    `/start --auto --go` recomputes that plan and launches exactly its picks; the paths in `start.softPaths` (this file
    and `README.md` by default) never count as overlaps. Owner only: a lane or a schedule never runs it.
+   `start.models` (optional) picks each lane's model by its issue's tier: it maps `skip`, `quick` and `full` to a
+   model name, and `/start` launches that tier's lanes with `claude --bg --model <name> "/lane <issue>"`. A tier left
+   out runs on your default model. This repository sets `skip` and `quick` to `sonnet` and leaves `full` unset, so
+   full-tier (security-sensitive) lanes keep the default. Any other key, or a value that is not one word (or starts
+   with `-`), refuses the whole run with nothing launched.
    The start guard (`scripts/lanes/start-guard.mjs`, two hooks in `.claude/settings.json` next to the approve guard)
    enforces that: it lets `start.mjs` run once, for the same issue numbers or the same `--auto` form, within 15 minutes
    of you typing `/start <N ...>`, `/start --auto` or `/start --auto --go` in that session (a `/start --auto` never
