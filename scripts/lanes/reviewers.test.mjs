@@ -218,3 +218,13 @@ test("edge: an unknown tier is refused", () => {
     assert.match(r.stderr, /usage: reviewers\.mjs/);
   });
 });
+
+// edge: with an empty diff AND a bad tier, the usage error still wins over the #124 refusal (tier is validated first).
+test("edge: an unknown tier on an empty diff still reports usage, not the empty-diff message", () => {
+  atBase(({ root }) => {
+    const r = run(root, "huge");
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /usage: reviewers\.mjs/);
+    assert.doesNotMatch(r.stderr, /no diff to review/);
+  });
+});
