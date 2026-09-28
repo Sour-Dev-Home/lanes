@@ -760,3 +760,15 @@ test("health.md runs lessons.mjs --recurring and files a lane-filed quick Task p
   assert.match(s, /`lane-filed` Task issue \(tier quick\)/);
   assert.match(s, /not the architecture advisor/);
 });
+
+// #242: one weekly advisor pass checks the week's merged changes against the ADRs that govern them
+test("health.md step 8 hands the same advisor spawn the week's merged files with their governing ADRs and files at most 3 ADR-drift issues", () => {
+  const s = flatFile(".claude/commands/health.md");
+  assert.match(s, /files changed by lane PRs merged in the window/);
+  assert.match(s, /gh pr list --state merged --json files/);
+  assert.match(s, /accepted ADRs governing each/);
+  assert.match(s, /at most 3 ADR-drift issues/);
+  assert.match(s, /naming the ADR and the file/);
+  assert.match(s, /same spawn as the structural report/);
+  assert.match(s, /not a second subagent/);
+});
