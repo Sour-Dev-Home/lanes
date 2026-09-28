@@ -23,6 +23,9 @@
    out runs on your default model. This repository sets all three tiers to `sonnet`: issues are scoped
    tightly enough for it, and three independent reviewers check every full-tier lane. Any other key, or a value that is not one word (or starts
    with `-`), refuses the whole run with nothing launched.
+   An issue labelled `model:opus` launches on Opus whatever its tier's model, in `--auto` too. Use it for the issues
+   where a subtle bug is a security hole: security-critical parsing, guards, and contracts the reviewers found hard.
+   Any other `model:*` label is ignored and logged as `#N: ignored label model:<x>`.
    The start guard (`scripts/lanes/start-guard.mjs`, two hooks in `.claude/settings.json` next to the approve guard)
    enforces that: it lets `start.mjs` run only for the same issue numbers or the same `--auto` form, within 15 minutes
    of you typing `/start <N ...>`, `/start --auto` or `/start --auto --go` in that session (a `/start --auto` never
@@ -57,7 +60,7 @@
    lane. `/health` runs it; `/status` prints `N lanes or folders to clean up` when some are waiting. Every `/start`, with
    issue numbers or with `--auto`, runs the same cleanup first, so merged lanes no longer count as in flight;
    `--auto` without `--go` only prints what it would remove. Remote branches are left to GitHub's delete-on-merge, and
-   closed-unmerged lanes are never touched.
+   lanes with an open PR or unpushed commits are never touched.
 
 ## What merges without you
 
@@ -80,10 +83,15 @@ and its tier's rule holds:
   with write access, with no critical or important finding left unfixed. A verdict for an older commit, or in the
   old format without a commit, does not count.
 
-One exception (#25): when the head has no test-hunter status, the gate reuses the most recent test-hunter success from
-an earlier commit of the PR if the PR's own diff is unchanged since (so merging main in needs no new review), and
-says `test-hunter reused from <sha>`; a failure is never reused, nor any other reviewer or the owner's approval. A
-rebase or force-push drops the earlier commits, so it always needs a fresh test-hunter review.
+One exception (#25, #154): when the head has no status for the test-hunter, the security-reviewer or the
+architecture-advisor, the gate reuses that reviewer's most recent success from an earlier commit of the PR if the PR's
+own diff is unchanged since (so merging main in needs no new review). The status says `reused <reviewer> from <sha7>`,
+or `reused <a>+<b> from <sha7>` when several reviewers are reused from one commit. A failure is never reused, and
+neither is the ui-reviewer or the owner's approval. A reuse is blocked by any change since the review to the
+reviewer's brief (`.claude/agents/<reviewer>.md`), the test-hunter's two checklists (`definition-of-done.md` and
+`testing-patterns.md`), the security checklist or `vendor/owasp-cheatsheets/`, or an ADR governing the PR's files, and
+by a changed-file list of 300 or more files. A rebase or force-push drops the earlier commits, so it always needs a
+fresh review.
 
 Everything else waits for `/approve`, and the `lanes/gate` status says why (for example
 `waiting on owner (/approve) (owner-only path)`). CI decides this from the diff and the PR's

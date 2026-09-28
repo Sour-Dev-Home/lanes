@@ -1030,6 +1030,56 @@ test("main launches each issue on its tier's model from start.models, in both mo
   }
 });
 
+// #260: a model:opus label launches the lane on Opus over its tier's model; any other model:* label is ignored.
+test("main launches a model:opus issue on opus over its tier's model, in both modes", () => {
+  const config = { start: { models: { quick: "sonnet", full: "sonnet" } } };
+  const issues = {
+    1: { labels: ["ready", "tier:full", "model:opus"], body: form({ scope: "In: `a.mjs`." }) },
+    2: { labels: ["ready", "tier:quick", "model:opus"], body: form({ scope: "In: `b.mjs`." }) },
+    3: { labels: ["ready", "tier:full"], body: form({ scope: "In: `c.mjs`." }) },
+  };
+  const expected = [
+    { args: [...NAMED(1), "--model", "opus", "/lane 1"], cwd: "/repo" },
+    { args: [...NAMED(2), "--model", "opus", "/lane 2"], cwd: "/repo" },
+    { args: [...NAMED(3), "--model", "sonnet", "/lane 3"], cwd: "/repo" },
+  ];
+  for (const argv of [["1", "2", "3"], ["--auto", "--go"]]) {
+    const { deps, launches } = fakes({ issues, config });
+    assert.equal(main(argv, deps).code, 0, argv.join(" "));
+    assert.deepEqual(launches, expected, argv.join(" "));
+  }
+});
+
+test("model:opus launches on opus even when start.models sets no model", () => {
+  const { deps, launches } = fakes({ issues: { 1: { labels: ["ready", "tier:full", "model:opus"] } } });
+  assert.equal(main(["1"], deps).code, 0);
+  assert.deepEqual(launches, [{ args: [...NAMED(1), "--model", "opus", "/lane 1"], cwd: "/repo" }]);
+});
+
+test("an unknown model:* label is ignored, logged once, and never reaches claude --model", () => {
+  const config = { start: { models: { full: "sonnet" } } };
+  const issues = { 1: { labels: ["ready", "tier:full", "model:--dangerously", "model:haiku"] } };
+  for (const argv of [["1"], ["--auto", "--go"]]) {
+    const { deps, launches } = fakes({ issues, config });
+    const { code, lines } = main(argv, deps);
+    assert.equal(code, 0, argv.join(" "));
+    assert.deepEqual(launches, [{ args: [...NAMED(1), "--model", "sonnet", "/lane 1"], cwd: "/repo" }], argv.join(" "));
+    assert.deepEqual(lines, ["#1: ignored label model:--dangerously", "#1: ignored label model:haiku", "#1 → id1"], argv.join(" "));
+  }
+});
+
+test("edge: model:opus beside an unknown model:* label still launches on opus and logs the unknown one", () => {
+  const { deps, launches } = fakes({ issues: { 1: { labels: ["ready", "tier:full", "model:opus", "model:x"] } } });
+  const { lines } = main(["1"], deps);
+  assert.deepEqual(launches, [{ args: [...NAMED(1), "--model", "opus", "/lane 1"], cwd: "/repo" }]);
+  assert.deepEqual(lines, ["#1: ignored label model:x", "#1 → id1"]);
+});
+
+test("launchArgs puts --model opus first when opus is set, over the tier's model", () => {
+  assert.deepEqual(launchArgs(18, { tier: "full", models: { full: "sonnet" }, opus: true }), [...NAMED(18), "--model", "opus", "/lane 18"]);
+  assert.deepEqual(launchArgs(18, { tier: "full", models: { full: "sonnet" }, opus: false }), [...NAMED(18), "--model", "sonnet", "/lane 18"]);
+});
+
 test("main launches with no --model when lanes.config.json sets no models", () => {
   const { deps, launches } = fakes({ issues: { 1: { labels: ["ready", "tier:full"] } } });
   assert.equal(main(["1"], deps).code, 0);
@@ -1603,4 +1653,19 @@ test("#111: USING.md step 7 and start.md say /start runs the merged-lane cleanup
   const start = readFileSync(new URL("../../.claude/commands/start.md", import.meta.url), "utf8");
   assert.match(start, /prints cleanup lines first/);
   assert.match(start, /`cleanup failed: <reason>` line never changes the plan/);
+});
+
+// --- #260: the docs name the model:opus label, the reuse wording (#165) and the cleanup exclusions (#266) -----------
+
+test("#260: USING.md and start.md document model:opus, review reuse and what cleanup never touches", () => {
+  const using = readFileSync(new URL("../../docs/USING.md", import.meta.url), "utf8");
+  const start = readFileSync(new URL("../../.claude/commands/start.md", import.meta.url), "utf8");
+  for (const doc of [using, start]) assert.match(doc, /`model:opus`/);
+  assert.match(using, /ignored label model:<x>/);
+  assert.match(using, /`reused <reviewer> from <sha7>`/);
+  assert.match(using, /`reused <a>\+<b> from <sha7>`/);
+  assert.match(using, /300 or more files/);
+  assert.doesNotMatch(using, /test-hunter reused from/);
+  assert.match(using, /lanes with an open PR or unpushed commits are never touched/);
+  assert.doesNotMatch(using, /closed-unmerged lanes are never touched/);
 });

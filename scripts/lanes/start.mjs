@@ -78,16 +78,24 @@ function startModels(models) {
  * `--model <name>` before `/lane <n>` when start.models has a model for the issue's tier, and none otherwise. No
  * permission-mode flag: a lane runs under the owner's normal settings.
  * @param {number} n
- * @param {{ tier?: string, models?: { skip?: string, quick?: string, full?: string } }} [options] tier without `tier:`
+ * @param {{ tier?: string, models?: { skip?: string, quick?: string, full?: string }, opus?: boolean }} [options] tier
+ *   without `tier:`; opus (the issue's `model:opus` label) launches on Opus over the tier's model
  */
-export function launchArgs(n, { tier, models = {} } = {}) {
-  const model = TIERS.includes(tier) && Object.hasOwn(models, tier) ? models[tier] : undefined;
+export function launchArgs(n, { tier, models = {}, opus = false } = {}) {
+  const model = opus ? "opus" : TIERS.includes(tier) && Object.hasOwn(models, tier) ? models[tier] : undefined;
   const named = ["--bg", "--name", `lane-${n}`];
   return model ? [...named, "--model", model, `/lane ${n}`] : [...named, `/lane ${n}`];
 }
 
 // The tier of an issue from its label names (`tier:quick` → `quick`), or undefined.
 const tierOf = (labels) => labels.find((l) => l.startsWith("tier:"))?.slice("tier:".length);
+
+// The model:* labels of an issue: whether `model:opus` is set, and the other model:* labels, which are ignored.
+// Only the one literal label selects a model, so a label can never pass an arbitrary string to `claude --model`.
+function modelLabels(labels = []) {
+  const model = labels.filter((l) => l.startsWith("model:"));
+  return { opus: model.includes("model:opus"), ignored: model.filter((l) => l !== "model:opus") };
+}
 
 // ANSI escape sequences: CSI (colours, cursor moves) and OSC (e.g. hyperlinks), ended by BEL or ESC \.
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
@@ -248,24 +256,27 @@ function reaperLog(root, n) {
 
 // Launches each issue from the repository root, one attempt each, on its tier's model (`tiers`: issue → tier), and
 // starts a reaper for each lane that returned a session id. Returns issue → lines, and whether any launch failed.
-function launchAll(numbers, deps, { tiers, models }) {
+// `labels` (issue → label names) supplies the model:opus override; an ignored model:* label is logged once.
+function launchAll(numbers, deps, { tiers, models, labels }) {
   const lines = new Map();
   let failed = false;
   const root = numbers.length ? deps.root() : null;
   for (const n of numbers) {
+    const { opus, ignored } = modelLabels(labels.get(n));
+    const notes = ignored.map((l) => `#${n}: ignored label ${l}`);
     // One attempt only: a launch that printed no id may still have started, and a retry could start it twice.
     let id = null;
     let why = "no session id in output";
     try {
-      id = parseSessionId(deps.claude(launchArgs(n, { tier: tiers.get(n), models }), { cwd: root }));
+      id = parseSessionId(deps.claude(launchArgs(n, { tier: tiers.get(n), models, opus }), { cwd: root }));
     } catch (err) {
       why = reason(err);
     }
     if (id) {
       const reaperFailed = startReaper(n, id, deps, root);
-      lines.set(n, reaperFailed ? [`#${n} → ${id}`, reaperFailed] : [`#${n} → ${id}`]);
+      lines.set(n, [...notes, `#${n} → ${id}`, ...(reaperFailed ? [reaperFailed] : [])]);
     } else {
-      lines.set(n, [`#${n}: launch failed: ${why}, not retried`]);
+      lines.set(n, [...notes, `#${n}: launch failed: ${why}, not retried`]);
       failed = true;
     }
   }
@@ -308,7 +319,8 @@ function autoStart(go, deps, { maxLanes, softPaths, models }) {
     return { code: 0, lines: [...start.map((n) => `#${n}: would start`), ...skipLines, trailer] };
   }
   const tiers = new Map(candidates.map((i) => [i.number, tierOf(labelsOf(i))]));
-  const { lines, failed } = launchAll(start, deps, { tiers, models });
+  const labels = new Map(candidates.map((i) => [i.number, labelsOf(i)]));
+  const { lines, failed } = launchAll(start, deps, { tiers, models, labels });
   return { code: failed ? 1 : 0, lines: [...start.flatMap((n) => lines.get(n)), ...skipLines] };
 }
 
@@ -446,7 +458,8 @@ function startIssues(args, deps, config) {
 
   const { launch, refused } = planStart({ issues, inFlight, overlaps, running: (n) => runningOverlap.get(n) ?? null, maxLanes: config.maxLanes });
   const tiers = new Map(issues.filter((i) => i.labels).map((i) => [i.number, tierOf(i.labels)]));
-  const launched = launchAll(launch, deps, { tiers, models: config.models });
+  const labels = new Map(issues.filter((i) => i.labels).map((i) => [i.number, i.labels]));
+  const launched = launchAll(launch, deps, { tiers, models: config.models, labels });
   const lines = new Map([...refused.map((r) => [r.number, [`#${r.number}: refused: ${r.reason}`]]), ...launched.lines]);
   return { code: refused.length || launched.failed ? 1 : 0, lines: numbers.flatMap((n) => lines.get(n)) };
 }
