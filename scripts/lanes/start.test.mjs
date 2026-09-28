@@ -320,6 +320,26 @@ test("main spawns no reaper for a launch that printed no session id or failed", 
   assert.equal(logs.length, 1);
 });
 
+// Extra, not from criteria or a listed edge case: a failed launch interleaved between two successful ones must not
+// shift which issue or session id a reaper is attributed to (unlike the run above, where every failure comes first).
+test("edge: a failed launch between two successes does not misattribute either reaper's issue or session id", () => {
+  const { deps, reapers, logs } = fakes({
+    issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) }, 3: { body: form({ scope: "In: `c.mjs`." }) } },
+    launchFail: [2],
+  });
+  const { code, lines } = main(["1", "2", "3"], deps);
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ["#1 → id1", "#2: launch failed: claude: spawn failed, not retried", "#3 → id3"]);
+  assert.deepEqual(
+    reapers.map((r) => r.args.slice(1)),
+    [
+      ["--issue", "1", "--session", "id1"],
+      ["--issue", "3", "--session", "id3"],
+    ],
+  );
+  assert.deepEqual(logs.map((l) => l.n), [1, 3]);
+});
+
 // #164 criterion 3 and 4: the --auto dry run spawns nothing; --auto --go spawns one per launch.
 test("--auto (dry run) spawns no reaper, and --auto --go spawns one per launched lane", () => {
   const dry = fakes({ issues: autoIssues(), sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-6-y" }] });
