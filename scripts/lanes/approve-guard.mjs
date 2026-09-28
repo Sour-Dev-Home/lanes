@@ -144,9 +144,11 @@ function lex(cmd) {
     word = null;
     wordLiteral = false;
   };
+  // Every new segment (after ; & | || && newlines and parentheses) takes the process-substitution mark it is under.
   const endSegment = () => {
     endWord();
     if (segments.at(-1).length > 0) segments.push([]);
+    markProcSub();
   };
   const markPiped = () => {
     endWord();
@@ -196,7 +198,6 @@ function lex(cmd) {
         end = r.end;
       }
       i = end;
-      markProcSub();
     } else if (c === "|" && cmd[i + 1] === "|") {
       endSegment();
       i += 1;

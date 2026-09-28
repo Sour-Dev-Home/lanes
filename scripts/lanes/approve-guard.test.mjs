@@ -786,6 +786,8 @@ test("edge: a heredoc fed to awk or sed, or written to a file a later command ma
 test("edge: a heredoc inside a process substitution is a script (#140 review)", () => {
   const body = "\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF\n)";
   for (const run of ["bash <(", "bash < <(", "sh <(", "source <(", ". <(", "bash <( true; "]) denied(`${run}cat <<'EOF'${body}`);
+  // Round 3: every separator inside the substitution keeps the mark, pipes and || included.
+  for (const sep of ["|", "||", "&&", "|&", "&"]) denied(`bash <(true ${sep} cat <<'EOF'${body}`);
   // The segments after the substitution closes are outside it again.
   allowed("diff <(sort a.txt) b.txt; cat > notes.md <<'EOF'\n$ npm test\nEOF");
 });
