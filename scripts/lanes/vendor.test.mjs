@@ -26,6 +26,10 @@ export const pinnedCommit = (text) => /^- Commit: `?([0-9a-f]{40})(?![0-9a-f])/m
 // Git's blob id for these bytes, so an unchanged file can be checked against upstream's tree without a network call.
 export const gitBlobSha = (buf) => createHash("sha1").update(`blob ${buf.length}\0`).update(buf).digest("hex");
 
+// True when a file's source imports from "node:child_process", single- or double-quoted (repo style is double, but
+// the trip-wire below must not go blind just because a future script picks the other quote).
+export const importsChildProcess = (text) => /from ["']node:child_process["']/.test(text);
+
 // `| <blob sha> | <file> |` rows of VENDORED.md's hash table, as a Map of file -> sha.
 export const blobTable = (text) => new Map([...text.matchAll(/^\|\s*`?([0-9a-f]{40})`?\s*\|\s*`?([A-Za-z0-9_.-]+)`?\s*\|/gm)].map((m) => [m[2], m[1]]));
 
@@ -79,6 +83,13 @@ test("criterion 5: every sheet INDEX.md names exists in sheets/", () => {
   for (const r of refs) assert.ok(have.has(r), `INDEX.md cites sheets/${r}, which is not vendored`);
 });
 
+// The reverse direction of the check above: a vendored sheet that INDEX.md never mentions is dead weight the
+// security reviewer would not know to read, and criterion 4 requires INDEX.md to map every sheet to a reason.
+test("criterion 4: every sheet in sheets/ is referenced somewhere in INDEX.md", () => {
+  const refs = new Set(sheetRefs(index()));
+  for (const f of sheetFiles()) assert.ok(refs.has(f), `${f} is vendored but INDEX.md never mentions it`);
+});
+
 test("criterion 4: INDEX.md stays within about 2k tokens", () => {
   // ~4 characters per token for English Markdown; 9000 leaves headroom over 2k tokens without allowing a rewrite of a sheet.
   assert.ok(index().length <= 9000, `INDEX.md is ${index().length} characters`);
@@ -92,12 +103,22 @@ test("criterion 4: INDEX.md maps the guards, workflows, secrets, logging and Nod
   for (const topic of [/secret/i, /token/i, /logging/i, /Node\.js/]) assert.match(i, topic);
 });
 
+// Deliberate trip-wire: a script that gains a child process must add its line to INDEX.md, and vendor/ is an owner
+// path, so that PR needs owner review whatever its tier. New shell-out surface is exactly what the owner reviews.
 test("criterion 4: INDEX.md lists every script that runs a child process", () => {
   const i = index();
   const scripts = ["scripts/preflight.mjs", ...readdirSync("scripts/lanes").filter((f) => f.endsWith(".mjs") && !f.endsWith(".test.mjs")).map((f) => `scripts/lanes/${f}`)];
-  const spawning = scripts.filter((p) => /from "node:child_process"/.test(read(p)));
+  const spawning = scripts.filter((p) => importsChildProcess(read(p)));
   assert.ok(spawning.length > 0);
   for (const p of spawning) assert.ok(i.includes(p), `${p} imports node:child_process but INDEX.md does not list it`);
+});
+
+// Regression: the trip-wire above scans repo source with a regex, not a parser. It must not go blind just because a
+// future script imports node:child_process with single quotes instead of this repo's usual double quotes.
+test("edge: importsChildProcess matches single- and double-quoted imports alike", () => {
+  assert.ok(importsChildProcess('import { execFileSync } from "node:child_process";'));
+  assert.ok(importsChildProcess("import { execFileSync } from 'node:child_process';"));
+  assert.ok(!importsChildProcess('import { readFileSync } from "node:fs";'));
 });
 
 test("edge: sheetRefs on empty text is empty", () => {
