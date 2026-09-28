@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { carry, evaluatePr, main, noteOwnerApproval } from "./gate.mjs";
+import { carry, evaluatePr, main, makeGhApi, noteOwnerApproval } from "./gate.mjs";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1002,4 +1002,105 @@ test("edge: an unreadable comment list still re-evaluates the gate, then fails t
   assert.throws(() => main(statusEvent(OWNER, "success"), api), /owner approval comment failed on #5: HTTP 502/);
   assert.equal(comments.length, 0);
   assert.equal(posted.length, 1, "the gate status is still posted");
+});
+
+// #281: transient GitHub errors are retried, and a gate that still cannot decide posts an explicit error status.
+const ghFailure = (status) => Object.assign(new Error("Command failed: gh api"), { stderr: `gh: Server Error (HTTP ${status})\n` });
+function flakyRun(outcomes) {
+  const calls = [];
+  const run = (cmd, args) => {
+    calls.push(args);
+    const next = outcomes[Math.min(calls.length - 1, outcomes.length - 1)];
+    if (next instanceof Error) throw next;
+    return next;
+  };
+  return { run, calls };
+}
+
+test("ghApi retries one 500 and then returns the normal result", () => {
+  const { run, calls } = flakyRun([ghFailure(500), "ok"]);
+  const sleeps = [];
+  assert.equal(makeGhApi({ run, sleep: (ms) => sleeps.push(ms) })(["repos/o/r/x"]), "ok");
+  assert.equal(calls.length, 2);
+  assert.deepEqual(sleeps, [2000]);
+});
+
+test("ghApi gives up after three retries (four calls) with backoff 2, 4 and 8 seconds and a safe error", () => {
+  const { run, calls } = flakyRun([ghFailure(503)]);
+  const sleeps = [];
+  assert.throws(
+    () => makeGhApi({ run, sleep: (ms) => sleeps.push(ms) })(["repos/o/r/commits/abc/statuses?per_page=100&access_token=secret"]),
+    (e) => e.httpStatus === 503 && e.ghCall === "GET repos/o/r/commits/abc/statuses" && !e.ghCall.includes("secret"),
+  );
+  assert.equal(calls.length, 4);
+  assert.deepEqual(sleeps, [2000, 4000, 8000]);
+});
+
+test("ghApi retries 502, 504 and network errors, but never a 404 or other 4xx", () => {
+  for (const status of [502, 504]) assert.equal(makeGhApi({ run: flakyRun([ghFailure(status), "ok"]).run, sleep() {} })(["x"]), "ok");
+  const network = Object.assign(new Error("Command failed"), { stderr: "error connecting to api.github.com\n" });
+  assert.equal(makeGhApi({ run: flakyRun([network, "ok"]).run, sleep() {} })(["x"]), "ok");
+  for (const status of [404, 403, 422, 429]) {
+    const { run, calls } = flakyRun([ghFailure(status)]);
+    assert.throws(() => makeGhApi({ run, sleep() {} })(["x"]), (e) => e.httpStatus === status);
+    assert.equal(calls.length, 1, `HTTP ${status} is not retried`);
+  }
+});
+
+test("ghApi never waits more than 45 seconds in total across calls, however many fail", () => {
+  const { run } = flakyRun([ghFailure(500)]);
+  let waited = 0;
+  const api = makeGhApi({ run, sleep: (ms) => (waited += ms) });
+  for (let i = 0; i < 10; i++) assert.throws(() => api(["x"]));
+  assert.ok(waited > 0 && waited <= 45000, `waited ${waited}ms`);
+});
+
+const callFailure = (call, httpStatus) => Object.assign(new Error("boom"), { ghCall: call, httpStatus });
+
+test("main posts an error status naming the failed call and HTTP status, then rethrows, for a merge-group commit", () => {
+  const { api, posted } = fakeApi({});
+  const failing = (args) => {
+    if (args[0] === "repos/o/r/pulls/5") throw callFailure("GET repos/o/r/pulls/5", 500);
+    return api(args);
+  };
+  const env = { REPO: "o/r", EVENT_NAME: "merge_group", GROUP_SHA: SHA, HEAD_REF: `gh-readonly-queue/main/pr-5-${SHA}` };
+  assert.throws(() => main(env, failing), /boom/);
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].sha, SHA);
+  assert.ok(posted[0].fields.includes("state=error"));
+  assert.ok(posted[0].fields.includes("context=lanes/gate"));
+  assert.equal(descriptionOf(posted[0]), "gate error: GET repos/o/r/pulls/5 failed (HTTP 500)");
+});
+
+test("main posts the error status on the PR head for a pull_request run when a call fails", () => {
+  const { api, posted } = fakeApi({ "repos/o/r/pulls/5": { state: "open", body, head: { sha: SHA } } });
+  const failing = (args) => {
+    if (args[0].endsWith("/files")) throw callFailure("GET repos/o/r/pulls/5/files", 502);
+    return api(args);
+  };
+  assert.throws(() => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, failing), /boom/);
+  assert.equal(posted[0].sha, SHA);
+  assert.equal(descriptionOf(posted[0]), "gate error: GET repos/o/r/pulls/5/files failed (HTTP 502)");
+});
+
+test("main's error description never carries an unstructured error message, and a failing post does not mask the original error", () => {
+  const posts = [];
+  const api = (args) => {
+    if (args.includes("-f")) {
+      posts.push(args);
+      throw new Error("post also failed");
+    }
+    throw Object.assign(new Error("secret ghp_token in message"), { ghCall: "GET repos/o/r/x", httpStatus: undefined });
+  };
+  const env = { REPO: "o/r", EVENT_NAME: "merge_group", GROUP_SHA: SHA, HEAD_REF: `gh-readonly-queue/main/pr-5-${SHA}` };
+  assert.throws(() => main(env, api), /secret ghp_token/);
+  assert.equal(posts.length, 1);
+  assert.ok(!posts[0].join(" ").includes("ghp_token"));
+  assert.ok(posts[0].includes("description=gate error: GET repos/o/r/x failed (no response)"));
+});
+
+test("main posts no error status for a failure that is not a GitHub call", () => {
+  const { api, posted } = fakeApi({});
+  assert.throws(() => main({ REPO: "o/r", EVENT_NAME: "merge_group", GROUP_SHA: "bad" }, api), /GROUP_SHA/);
+  assert.equal(posted.length, 0);
 });
