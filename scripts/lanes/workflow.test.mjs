@@ -720,3 +720,31 @@ test("dependabot.yml updates github-actions weekly, grouped into one PR, and dec
 test("edge: verify.yml's final job runs on always(), so a hard test failure reports as a failed check, not a skipped one", () => {
   assert.match(verifyYml(), /\n {2}verify:\n {4}needs: test\n {4}if: always\(\)\n/);
 });
+
+// #238: /lane hands lessons to reviewers and records fragments; /health proposes checks for recurring patterns
+const flatFile = (p) => readFileSync(p, "utf8").replace(/\r\n/g, "\n").replace(/\s+/g, " ");
+const lessonsLaneStep = (n, next) => readFileSync(".claude/commands/lane.md", "utf8").replace(/\r\n/g, "\n").match(new RegExp(`^${n}\\. [\\s\\S]*?(?=^${next}\\. )`, "m"))[0].replace(/\s+/g, " ");
+
+test("lane.md step 4b runs lessons.mjs --paths on the Scope and gives the output to the test-hunter and security reviewer", () => {
+  const s = lessonsLaneStep("4b", "4c");
+  assert.match(s, /node scripts\/lanes\/lessons\.mjs --paths <the issue's Scope paths>/);
+  assert.match(s, /test-hunter and security reviewer/);
+  assert.match(s, /known patterns to look for/);
+});
+
+test("lane.md step 6 writes a docs/lessons.d fragment per fixed critical or important finding and runs lessons.mjs --check", () => {
+  const s = lessonsLaneStep("6", "7");
+  assert.match(s, /severity critical or important and `fixed: true`/);
+  assert.match(s, /docs\/lessons\.d\/<area>-<pattern>-<issue>\.md/);
+  assert.match(s, /reusing an existing pattern slug/);
+  assert.match(s, /node scripts\/lanes\/lessons\.mjs --check/);
+  assert.match(s, /gate does not require fragments/);
+});
+
+test("health.md runs lessons.mjs --recurring and files a lane-filed quick Task per pattern without an open lesson:<area>/<pattern> issue", () => {
+  const s = flatFile(".claude/commands/health.md");
+  assert.match(s, /node scripts\/lanes\/lessons\.mjs --recurring/);
+  assert.match(s, /lesson:<area>\/<pattern>/);
+  assert.match(s, /`lane-filed` Task issue \(tier quick\)/);
+  assert.match(s, /not the architecture advisor/);
+});

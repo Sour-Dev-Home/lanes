@@ -26,7 +26,8 @@ path, command or CI output, secret, token or personal data (point to the PR or i
     `debugging-and-error-recovery`; UI work follows `frontend-ui-engineering` and the project's design tokens.
     Hand reviewers the matching checklist from `vendor/agent-skills/references/`: the test-hunter gets
     `definition-of-done.md` and `testing-patterns.md`, the security reviewer `security-checklist.md`, the ui-reviewer
-    `accessibility-checklist.md`.
+    `accessibility-checklist.md`. Run `node scripts/lanes/lessons.mjs --paths <the issue's Scope paths>` and give its
+    output to the test-hunter and security reviewer with their checklists, as known patterns to look for.
 4c. Already built: when every acceptance criterion is already met on `origin/main`, the lane comments the evidence
     (each criterion with the file, test or commit that meets it), then removes the `ready` label and adds
     `needs-owner`, and stops without a worktree change or PR. It never closes the issue: the owner closes or rewrites
@@ -54,7 +55,10 @@ path, command or CI output, secret, token or personal data (point to the PR or i
    `node scripts/lanes/post-review.mjs --file .lanes/verdicts/<reviewer>.json`. A refused verdict prints why; fix the
    JSON or the code, never the facts. Never post a verdict for a review you did not run. A verdict with an unfixed
    critical or important finding is still posted, as `failure`: never hold it back, so the gate reports the finding
-   instead of waiting on a review that never arrives.
+   instead of waiting on a review that never arrives. For each posted finding with severity critical or important and
+   `fixed: true`, write one fragment in the same PR, `docs/lessons.d/<area>-<pattern>-<issue>.md`, reusing an existing
+   pattern slug when the lesson matches one `lessons.mjs` printed, and run `node scripts/lanes/lessons.mjs --check`
+   before pushing. The gate does not require fragments.
 7. `npm run preflight`, push, then `gh pr create` with the PR template filled in completely: "Closes #$ARGUMENTS",
    every acceptance criterion mapped under "What changed", "Contract changes" starting with none, additive or
    breaking, and "Needs the owner" saying exactly what he must decide, or "nothing". Then `gh pr merge <N> --auto`.

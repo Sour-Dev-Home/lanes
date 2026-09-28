@@ -20,5 +20,8 @@ Report, in at most 15 lines:
    for the worst structural problems it finds (none is a fine answer), each from the Task form's layout with
    `gh issue create --label lane-filed --body-file <file>`, and each Scope naming the file paths to change. Report
    the issues it filed.
+9. `node scripts/lanes/lessons.mjs --recurring`: for each pattern with no open issue whose title carries
+   `lesson:<area>/<pattern>`, file one `lane-filed` Task issue (tier quick) proposing a lint rule or test, from this
+   session, not the architecture advisor. Report the issues filed.
 File one task issue per real problem (tier skip or quick). Do not fix anything in this session, with one exception:
 step 7's cleanup of merged lanes, closed-issue lanes and empty orphan folders, which removes only finished lanes with a clean worktree and nothing unpushed.
