@@ -1147,3 +1147,32 @@ test("edge: a claimed-worktree refusal is handled by the claimant path, not the 
   assert.deepEqual(ran.slice(0, 2), ["claude rm x9", "claude rm s7"]);
   assert.equal(r.status, "removed");
 });
+
+// #186: a session id is passed to `claude stop` and `claude rm` as an argv item, so one starting with `-` would be
+// read as a flag. sessionsFrom keeps only ids matching the claimant-id pattern.
+const agentWith = (id) => ({ kind: "background", id, cwd: "C:/repo/.claude/worktrees/issue-7-x", state: "idle" });
+
+test("sessionsFrom keeps a session whose id is a valid name", () => {
+  assert.deepEqual(sessionsFrom([agentWith("s7"), agentWith("A_b-9")], ROOT).map((s) => s.id), ["s7", "A_b-9"]);
+});
+
+test("sessionsFrom drops an id that starts with a dash, so it never reaches claude stop or claude rm", () => {
+  const sessions = sessionsFrom([agentWith("--force"), agentWith("-x")], ROOT);
+  assert.deepEqual(sessions, []);
+  const plan = planCleanup({ worktrees: [main, wt("issue-7-x")], sessions, prs: [merged("issue-7-x")] });
+  const all = plan.flatMap((e) => (e.steps ? cmds(e) : []));
+  assert.ok(!all.some((c) => /^claude (stop|rm)/.test(c)), all.join("; "));
+});
+
+test("edge: sessionsFrom drops an empty id", () => {
+  assert.deepEqual(sessionsFrom([agentWith("")], ROOT), []);
+});
+
+test("edge: sessionsFrom drops a non-string id", () => {
+  assert.deepEqual(sessionsFrom([agentWith(7), agentWith(null), agentWith(undefined), agentWith(["s7"])], ROOT), []);
+});
+
+test("edge: sessionsFrom drops ids with spaces, slashes, dots or a trailing newline, and keeps a valid neighbour", () => {
+  const ids = ["a b", "a/b", "a.b", "s7\n", "_x", "ok"];
+  assert.deepEqual(sessionsFrom(ids.map(agentWith), ROOT).map((s) => s.id), ["ok"]);
+});
