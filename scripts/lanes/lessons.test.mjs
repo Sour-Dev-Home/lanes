@@ -98,6 +98,16 @@ test("edge: --paths accepts Windows separators and a leading ./", () => {
   assert.equal(out, "(x1) gate/race: Lesson for race.\n");
 });
 
+test("edge: --paths with two paths from different modules includes both areas' lessons plus general, but not an unselected module's", () => {
+  const threeModules = { entries: [...map.entries, { id: "other", paths: ["scripts/other."], imports: [] }] };
+  const fragments = [
+    frag("gate", "race", 1), frag("queue", "stale-pick", 2), frag("general", "g", 3), frag("other", "x", 4),
+  ];
+  const { out } = main(["--paths", "scripts/lanes/gate.mjs", "scripts/lanes/pick.mjs"], io(fragments, { modules: threeModules }));
+  const lines = out.split("\n").filter(Boolean).sort();
+  assert.deepEqual(lines, ["(x1) gate/race: Lesson for race.", "(x1) general/g: Lesson for g.", "(x1) queue/stale-pick: Lesson for stale-pick."]);
+});
+
 // Criterion 2: area
 
 test("area is the module id, general for a file in no module, and the first segment with no map", () => {
