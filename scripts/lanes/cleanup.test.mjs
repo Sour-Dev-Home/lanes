@@ -631,3 +631,12 @@ test("edge: a merged lane's leftover session in a bare issue-<N> folder whose wo
   const plan = planCleanup({ worktrees: [main], sessions, prs: [merged("issue-7-x")] });
   assert.deepEqual(plan.map(cmds), [["claude rm s7"]]);
 });
+
+// Not covered by the acceptance criteria or the listed edge cases: a bare-folder leftover session whose issue is
+// not yet merged must still be skipped, not removed just because sessionsFrom could read its issue number.
+test("edge: a leftover session in a bare issue-<N> folder is skipped, not removed, while its issue has no merged PR", () => {
+  const sessions = sessionsFrom([{ kind: "background", id: "s7", cwd: "C:/repo/.claude/worktrees/issue-7", state: "idle" }], ROOT);
+  const plan = planCleanup({ worktrees: [main], sessions, prs: [merged("issue-7-x", { state: "OPEN" })] });
+  assert.equal(plan[0].skip, "not merged");
+  assert.equal(plan[0].steps, undefined);
+});
