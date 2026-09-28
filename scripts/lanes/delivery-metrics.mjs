@@ -25,8 +25,6 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseIssueForm } from "./lib.mjs";
-import { issuePaths } from "./paths.mjs";
 
 export const SCHEMA_VERSION = 1;
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -270,9 +268,7 @@ export function normalizeRichPr(node) {
           number: Number(issue.number) || 0,
           criteria: (body.match(/^\s*- \[[ xX]\]/gm) ?? []).length,
           criteriaDone: (body.match(/^\s*- \[[xX]\]/gm) ?? []).length,
-          bodyChars: body.length,
-          scopePaths: (({ contract, scope }) => issuePaths({ contract, scope }))(parseIssueForm(body).fields),
-          editedAt: list(issue.userContentEdits?.nodes).map((edit) => isoDate(edit?.editedAt)).filter((date) => date !== undefined),
+          bodyChars: body.length,          editedAt: list(issue.userContentEdits?.nodes).map((edit) => isoDate(edit?.editedAt)).filter((date) => date !== undefined),
         }
       : null,
   };
