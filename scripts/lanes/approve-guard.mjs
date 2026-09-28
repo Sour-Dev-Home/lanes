@@ -41,9 +41,40 @@ export function onUserPromptSubmit(input, now = Date.now()) {
 }
 
 /**
+ * The index just past a redirection target starting at `i` (after skipping leading whitespace). Quotes inside the
+ * target are skipped, not resolved.
+ */
+function skipRedirectTarget(cmd, i) {
+  let j = i;
+  while (j < cmd.length && /\s/.test(cmd[j])) j += 1;
+  while (j < cmd.length) {
+    const c = cmd[j];
+    if (c === "'") {
+      const end = cmd.indexOf("'", j + 1);
+      j = end === -1 ? cmd.length : end + 1;
+    } else if (c === '"') {
+      j += 1;
+      while (j < cmd.length && cmd[j] !== '"') j += cmd[j] === "\\" ? 2 : 1;
+      j += 1;
+    } else if (c === "\\") {
+      j += 2;
+    } else if (/[\s;&|()<>\n\r]/.test(c)) {
+      break;
+    } else {
+      j += 1;
+    }
+  }
+  return j;
+}
+
+/**
  * Shell-ish lexer: words (quotes and backslashes resolved, nothing expanded) grouped into simple commands split on
- * ; & | ( ) newlines and redirections. Throws on an unterminated quote.
- * @returns {string[][]}
+ * ; & | ( ) newlines and redirections. A redirection's target (and a bare fd number right before it, as in `2>file`)
+ * is never a word: bash does not pass it to the program, so it must not shift argument positions such as the
+ * reviewer word. Its raw text goes to the segment's `redirects` instead, since a `$(…)` in it still runs and a
+ * herestring (`bash <<< "…"`) is a script. A segment whose output a `|` or `|&` feeds into the next one has
+ * `pipedOut` set (`(echo …) | sh` marks the echo). Throws on an unterminated quote.
+ * @returns {(string[] & { pipedOut?: true, redirects?: { text: string, herestring: boolean }[] })[]}
  */
 function lex(cmd) {
   const segments = [[]];
@@ -55,6 +86,12 @@ function lex(cmd) {
   const endSegment = () => {
     endWord();
     if (segments.at(-1).length > 0) segments.push([]);
+  };
+  const markPiped = () => {
+    endWord();
+    const last = segments.at(-1).length > 0 ? segments.at(-1) : segments.at(-2);
+    if (last) last.pipedOut = true;
+    endSegment();
   };
   for (let i = 0; i < cmd.length; i += 1) {
     const c = cmd[i];
@@ -76,16 +113,33 @@ function lex(cmd) {
     } else if (c === "\\") {
       if (cmd[i + 1] !== "\n") word = (word ?? "") + (cmd[i + 1] ?? "");
       i += 1;
-    } else if (";&|()\n\r".includes(c)) {
+    } else if (c === "|" && cmd[i + 1] === "|") {
       endSegment();
-    } else if ("<>".includes(c) || /\s/.test(c)) {
+      i += 1;
+    } else if (c === "|") {
+      markPiped();
+      if (cmd[i + 1] === "&") i += 1;
+    } else if (";&()\n\r".includes(c)) {
+      endSegment();
+    } else if (c === "<" || c === ">") {
+      // A bare fd number immediately before `<`/`>` (as in `2>file`) is part of the operator, not a word.
+      if (word !== null && /^[0-9]+$/.test(word)) word = null;
+      else endWord();
+      let j = i + 1;
+      if (cmd[j] === c || cmd[j] === "&") j += 1; // >>, <<, >&, <&
+      const herestring = c === "<" && cmd[j] === "<";
+      if (herestring) j += 1;
+      const end = skipRedirectTarget(cmd, j);
+      (segments.at(-1).redirects ??= []).push({ text: cmd.slice(j, end), herestring });
+      i = end - 1;
+    } else if (/\s/.test(c)) {
       endWord();
     } else {
       word = (word ?? "") + c;
     }
   }
   endSegment();
-  return segments.filter((s) => s.length > 0);
+  return segments.filter((s) => s.length > 0 || s.redirects);
 }
 
 /** The reviewer and --pr of one post-review invocation, from the words after the script path. */
@@ -113,26 +167,136 @@ function readPostReviewArgs(args) {
 }
 
 const ASSIGN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
-const VAR_REF_RE = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
+const VAR_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
+// What is left of a word after substitution that could still expand to anything.
+const UNRESOLVED_RE = /[$`]/;
+// bun and deno run a script too (start-guard.mjs already counts them for the analogous concern); each takes a
+// `run` subcommand ahead of its options and script, which is not itself an option or the script.
+const NODE_RE = /^(node|nodejs|bun|deno)(\.exe)?$/i;
+const RUNS_VIA_RUN_RE = /^(bun|deno)(\.exe)?$/i;
+// Commands that run their arguments as shell text: eval and source always, a shell after a -c flag.
+const EVAL_RE = /^(eval|source|\.)$/;
+const SHELL_RE = /^(sh|bash|zsh|dash|ksh|ash|busybox)(\.exe)?$/i;
+// Commands that only print, list or search their arguments: a "node" among them is never run. Every other command
+// word may be a wrapper (env, sudo, time, xargs, …), so a "node" behind it counts.
+const NON_RUNNING_COMMANDS = new Set(["echo", "printf", "grep", "egrep", "fgrep", "rg", "ls", "which", "where", "whereis", "type", "cat", "head", "tail", "wc", "file", "stat", "man"]);
+// Node options known to take no value. Any other bare option (no `=value`) may take the next word as its value, so
+// that word and the one after it are both treated as the script: an option missing here only costs a false deny.
+const NODE_BOOLEAN_FLAGS = new Set([
+  "--test", "--test-only", "--watch", "--watch-preserve-output", "--no-warnings", "--no-deprecation",
+  "--trace-warnings", "--trace-deprecation", "--throw-deprecation", "--pending-deprecation", "--enable-source-maps",
+  "--inspect", "--inspect-brk", "--inspect-wait", "--expose-gc", "--preserve-symlinks", "--preserve-symlinks-main",
+  "--experimental-strip-types", "--no-experimental-strip-types", "--experimental-transform-types",
+  "--experimental-vm-modules", "--experimental-test-coverage", "--experimental-detect-module", "--trace-uncaught",
+  "--abort-on-uncaught-exception", "--frozen-intrinsics", "--check", "-c", "--interactive", "-i",
+]);
 
-/** `NAME=value` words anywhere in the command's segments, in order, so a later assignment overrides an earlier one. */
+/**
+ * The last index of node's options and script: options, their possible values and the first word that is surely not
+ * an option's value. Every word from node up to it could load or be post-review.mjs. The last word if none is surely it.
+ */
+function nodeScriptEnd(plain, nodeAt) {
+  let maybeValue = false;
+  for (let i = nodeAt + 1; i < plain.length; i += 1) {
+    const w = plain[i];
+    if (w === "--") return Math.min(i + 1, plain.length - 1);
+    if (w.startsWith("-") && w !== "-") {
+      maybeValue = !w.includes("=") && !NODE_BOOLEAN_FLAGS.has(w);
+    } else if (maybeValue) {
+      maybeValue = false;
+    } else {
+      return i;
+    }
+  }
+  return plain.length - 1;
+}
+
+/**
+ * `NAME=value` words anywhere in the command's segments. The lexer cannot tell a sequence from exclusive branches
+ * (`true && R=own || R=xyz`, if/else, case), so a name given two different values is left out: its references stay
+ * unresolved and fail closed.
+ */
 function collectAssignments(segments) {
   const assignments = {};
+  const ambiguous = new Set();
   for (const words of segments) {
     for (const w of words) {
       const m = ASSIGN_RE.exec(w);
-      if (m) assignments[m[1]] = m[2];
+      if (!m) continue;
+      if (Object.prototype.hasOwnProperty.call(assignments, m[1]) && assignments[m[1]] !== m[2]) ambiguous.add(m[1]);
+      assignments[m[1]] = m[2];
     }
   }
+  for (const name of ambiguous) delete assignments[name];
   return assignments;
 }
 
-/** A bare `$NAME`/`${NAME}` word resolved to a same-command assignment's value; every other word is unchanged. */
+/**
+ * Every `$NAME`/`${NAME}` reference with a same-command assignment replaced by its value, whole word or spliced into
+ * one, so `S=…post-review.mjs; node $S` and `X=review; node scripts/lanes/post-$X.mjs` are both seen. Values are
+ * substituted once, not recursively: a value that still holds `$` stays unresolved.
+ */
 function resolveVars(words, assignments) {
-  return words.map((w) => {
-    const m = VAR_REF_RE.exec(w);
-    return m && Object.prototype.hasOwnProperty.call(assignments, m[1]) ? assignments[m[1]] : w;
-  });
+  return words.map((w) =>
+    w.replace(VAR_REF_RE, (ref, braced, bare) => {
+      const name = braced ?? bare;
+      return Object.prototype.hasOwnProperty.call(assignments, name) ? assignments[name] : ref;
+    }),
+  );
+}
+
+const GLOB_RE = /[*?[{]/;
+
+/**
+ * Whether a word bash would glob- or brace-expand could expand to post-review.mjs: its last path component, as a
+ * pattern, matches the name. A brace holding a `/` or a pattern that cannot be read counts as a match.
+ */
+function mayExpandToPostReview(w) {
+  if (!GLOB_RE.test(w)) return false;
+  if (/\{[^}]*\//.test(w)) return true;
+  const name = w.slice(w.lastIndexOf("/") + 1);
+  let re = "";
+  let braces = 0;
+  for (let i = 0; i < name.length; i += 1) {
+    const c = name[i];
+    if (c === "*") re += ".*";
+    else if (c === "?") re += ".";
+    else if (c === "[") {
+      const end = name.indexOf("]", i + 2);
+      if (end === -1) re += "\\[";
+      else {
+        re += ".";
+        i = end;
+      }
+    } else if (c === "{") {
+      re += "(?:";
+      braces += 1;
+    } else if (c === "}" && braces > 0) {
+      re += ")";
+      braces -= 1;
+    } else if (c === "," && braces > 0) re += "|";
+    else re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  if (braces > 0) return true;
+  const pattern = new RegExp(`^${re}$`, "i");
+  return pattern.test("post-review.mjs") || pattern.test("post-review");
+}
+
+/** Text with every quote and backslash dropped, so a name split by quoting (pos"t-review) reads whole. */
+const unquoted = (s) => s.replace(/['"\\]/g, "");
+
+/** The command word of a simple command, without its directory. */
+const commandName = (plain) => plain[0]?.split(/[\\/]/).at(-1);
+
+/**
+ * A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own. One that still holds
+ * `$` or a glob may splice a name inside it, so it is scanned too. True when `w` was such a script.
+ */
+function scanNested(w, depth, out) {
+  if (!/[\s;&|()<>]/.test(w) || !/post-review|[$`*?[{]/i.test(unquoted(w))) return false;
+  if (depth >= MAX_DEPTH) out.push({ pr: undefined, standalone: false });
+  else scan(w, depth + 1, out);
+  return true;
 }
 
 function scan(cmd, depth, out) {
@@ -140,26 +304,75 @@ function scan(cmd, depth, out) {
   try {
     segments = lex(cmd);
   } catch {
-    if (/post-review/i.test(cmd)) out.push({ pr: undefined, standalone: false });
+    // An unterminated quote: bash will not run it, but fail closed on the name with any quoting removed.
+    if (/post-review/i.test(unquoted(cmd))) out.push({ pr: undefined, standalone: false });
     return;
   }
   // `S=scripts/lanes/post-review.mjs; node $S owner … --pr N` must be caught too: resolve same-command
   // `NAME=value` assignments into later `$NAME`/`${NAME}` references before looking for the script and its args.
   const assignments = collectAssignments(segments);
-  for (const rawWords of segments) {
-    const words = resolveVars(rawWords, assignments);
-    words.forEach((w, i) => {
-      if (/[\s;&|()<>]/.test(w) && /post-review/i.test(w)) {
-        // A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own.
-        if (depth >= MAX_DEPTH) out.push({ pr: undefined, standalone: false });
-        else scan(w, depth + 1, out);
-      } else if (POST_REVIEW_RE.test(w)) {
-        const { reviewer, pr } = readPostReviewArgs(words.slice(i + 1));
-        // Fail closed: a reviewer word that could expand to anything counts as the owner.
-        if (reviewer === "owner" || (reviewer !== undefined && /[$`*?[]/.test(reviewer))) out.push({ pr, standalone: false });
+  // The command word and the script node runs (also behind env, time or sudo), counted without `NAME=value` words.
+  const plains = segments.map((rawWords) => resolveVars(rawWords, assignments).filter((w) => !ASSIGN_RE.test(w)));
+  plains.forEach((plain, k) => {
+    // Node's options and the script: any of them that still holds `$` or a backtick could load or be post-review.mjs.
+    // Every word that looks like node counts, since an earlier one may only be an argument (`sudo -u node node …`).
+    const nodeRange = new Set();
+    // A command that only prints or searches its arguments runs none of them, unless its output flows down a pipe
+    // into anything else: `echo node … | bash` runs what echo prints, `grep node … | wc -l` does not.
+    let runsArgs = !NON_RUNNING_COMMANDS.has(commandName(plain));
+    for (let m = k; !runsArgs && segments[m]?.pipedOut; m += 1) {
+      runsArgs = !NON_RUNNING_COMMANDS.has(commandName(plains[m + 1] ?? []));
+    }
+    plain.forEach((p, at) => {
+      if ((at > 0 && !runsArgs) || !NODE_RE.test(p.split(/[\\/]/).at(-1))) return;
+      // bun/deno's own `run` subcommand sits ahead of the options and script; skip over it before scanning those.
+      const start = RUNS_VIA_RUN_RE.test(p.split(/[\\/]/).at(-1)) && plain[at + 1] === "run" ? at + 1 : at;
+      for (let j = start + 1; j <= nodeScriptEnd(plain, start); j += 1) nodeRange.add(j);
+    });
+    // Words that eval, source or a shell's -c runs as shell text: one still holding `$` or a backtick could be any
+    // command at all (`eval $A$B` with both ambiguous), so it fails closed like node's script.
+    let evalFrom = Infinity;
+    plain.forEach((p, at) => {
+      if ((at > 0 && !runsArgs) || at >= evalFrom) return;
+      const name = p.split(/[\\/]/).at(-1);
+      if (EVAL_RE.test(name)) evalFrom = at + 1;
+      else if (SHELL_RE.test(name)) {
+        const c = plain.findIndex((w, j) => j > at && /^-[A-Za-z]*c[A-Za-z]*$/.test(w));
+        if (c !== -1) evalFrom = c + 1;
       }
     });
-  }
+    // An assigned value may be run later by eval or sh -c "$CMD", and an ambiguous one is never substituted: scan
+    // every value that looks like a script as a command of its own.
+    for (const w of segments[k]) {
+      const m = ASSIGN_RE.exec(w);
+      if (m) scanNested(m[2], depth, out);
+    }
+    // A redirection target is no argument, but a herestring is a script and a quoted `$(…)` or backtick in any other
+    // target runs. A plain file target ("$TMP/out file.txt") is neither.
+    for (const { text, herestring } of segments[k].redirects ?? []) {
+      if (!herestring && !/\$\(|`/.test(text)) continue;
+      let words;
+      try {
+        words = lex(text).flat();
+      } catch {
+        words = [text];
+      }
+      for (const w of words) scanNested(w, depth, out);
+    }
+    plain.forEach((w, i) => {
+      if (scanNested(w, depth, out)) {
+        // Scanned as a command of its own.
+      } else if (POST_REVIEW_RE.test(w)) {
+        const { reviewer, pr } = readPostReviewArgs(plain.slice(i + 1));
+        // Fail closed: a reviewer word that could expand to anything counts as the owner.
+        if (reviewer === "owner" || (reviewer !== undefined && /[$`*?[{]/.test(reviewer))) out.push({ pr, standalone: false });
+      } else if ((UNRESOLVED_RE.test(w) || mayExpandToPostReview(w)) && (i === 0 || nodeRange.has(i) || (i >= evalFrom && UNRESOLVED_RE.test(w)))) {
+        // The command word, a node option or the script node runs, or text a shell evaluates, that could still expand
+        // to post-review.mjs: fail closed.
+        out.push({ pr: undefined, standalone: false });
+      }
+    });
+  });
 }
 
 /**
@@ -169,12 +382,13 @@ function scan(cmd, depth, out) {
  */
 export function findOwnerInvocations(command) {
   const cmd = String(command ?? "");
-  if (!/post-review/i.test(cmd)) return [];
+  // No raw-text pre-filter: the name can be split by quotes (pos"t-review.mjs) or matched by a glob, so only the
+  // lexed words can tell.
   const out = [];
   scan(cmd, 0, out);
   // Deeper indirection (a variable built from another, `$(…)`, backticks) cannot be resolved statically: with an
   // `owner` word and a substitution anywhere, fail closed and count it as an owner command.
-  if (out.length === 0 && /[$`]/.test(cmd) && /(^|[\s'"`(])owner($|[\s'"`)])/.test(cmd)) out.push({ pr: undefined, standalone: false });
+  if (out.length === 0 && /[$`]/.test(cmd) && /(^|[\s`(])owner($|[\s`)])/.test(unquoted(cmd))) out.push({ pr: undefined, standalone: false });
   // Leading/trailing whitespace (a trailing newline the model appends to a Bash command is common) must not turn the
   // plain command into a "wrapped" one: trim before checking the exact prefix and for embedded shell metacharacters.
   const trimmedCmd = cmd.trim();

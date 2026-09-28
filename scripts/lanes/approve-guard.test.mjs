@@ -196,6 +196,328 @@ test("deeper indirection with an owner word fails closed as an owner command", (
   ]) assert.deepEqual(findOwnerInvocations(cmd), [{ pr: undefined, standalone: false }], cmd);
 });
 
+test("a variable spliced into the script name or the reviewer word does not hide an owner command (#62)", () => {
+  for (const cmd of [
+    "X=review; node scripts/lanes/post-$X.mjs owner success x --pr 16",
+    "X=review && node scripts/lanes/post-${X}.mjs owner success x --pr 16",
+    'D=scripts/lanes; node "$D/post-review.mjs" owner success x --pr 16',
+    "R=own; node scripts/lanes/post-review.mjs ${R}er success x --pr 16",
+    "R=own; node scripts/lanes/post-review.mjs \"$R\"er success x --pr 16",
+    "X=review; bash -c \"node scripts/lanes/post-$X.mjs owner success x --pr 16\"",
+    "bash -c 'X=review; node scripts/lanes/post-$X.mjs owner success x --pr 16'",
+  ]) {
+    const found = findOwnerInvocations(cmd);
+    assert.equal(found.length, 1, `not detected: ${cmd}`);
+    assert.equal(found[0].standalone, false, cmd);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // Resolved fully, the spliced form is read like the plain one: its --pr is known.
+  assert.deepEqual(findOwnerInvocations("X=review; node scripts/lanes/post-$X.mjs owner success x --pr 16"), [{ pr: "16", standalone: false }]);
+});
+
+test("a script word still holding $ or a backtick after substitution counts as an owner command (#62)", () => {
+  for (const cmd of [
+    "node scripts/lanes/post-$X.mjs owner success x --pr 16",
+    "node scripts/lanes/post-$X.mjs test-hunter success x",
+    "node $SCRIPT success x --pr 16",
+    'node "${S}" --file v.json',
+    "node --no-warnings $S owner",
+    "node `echo s.mjs` success",
+    "$RUN success x --pr 16",
+    "cd x && ${NODE_SCRIPT} --pr 16",
+    "X=$Y; node scripts/lanes/post-$X.mjs owner",
+    "node scripts/lanes/post-$1.mjs owner",
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [{ pr: undefined, standalone: false }], cmd);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+});
+
+test("edge: spliced and unresolved forms behind wrappers, empty values and odd references (#62)", () => {
+  const denied = [
+    "env node $S owner",
+    "time node \"$S\" --pr 16",
+    "X=review; env FOO=1 node scripts/lanes/post-$X.mjs owner --pr 16",
+    "X=; node scripts/lanes/post-review$X.mjs owner --pr 16",
+    "X=review; Y=post-$X.mjs; node scripts/lanes/$Y owner --pr 16",
+    "node scripts/lanes/post-${X.mjs owner",
+    "(X=review; node scripts/lanes/post-$X.mjs owner --pr 16)",
+    "X=review; sh -c 'sh -c \"node scripts/lanes/post-$X.mjs owner\"'",
+  ];
+  for (const cmd of denied) assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  // Found by the #62 security-reviewer (round at ae38a05): a script held in a variable and run by eval or sh -c is
+  // scanned from its assignment, ambiguous or not, with its own splices failing closed.
+  for (const cmd of [
+    "true && CMD='node scripts/lanes/post-review.mjs own${E}er --pr 16' || CMD='node scripts/lanes/post-review.mjs security-reviewer --pr 16'; eval $CMD",
+    "true && CMD='node scripts/lanes/post-review.mjs own${E}er --pr 16' || CMD=x; bash -c \"$CMD\"",
+    "E=; CMD='node scripts/lanes/post-review.mjs own${E}er --pr 16'; eval $CMD",
+    "export CMD='node scripts/lanes/post-review.mjs own${E}er'; sh -c \"$CMD\"",
+    // Split across two ambiguous names, neither value looks like a script: the eval text itself fails closed.
+    "true && A='node scripts/lanes/post-rev' || A=x; true && B='iew.mjs own${E}er --pr 16' || B=y; eval $A$B",
+    'eval "$X"',
+    'bash -c "$X"',
+    'bash -lc "$X"',
+    "sudo sh -c \"$X\"",
+    'source "$F"',
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  for (const cmd of ['MSG="fix the $X thing"; git commit -m "$MSG"', "OUT='a b'; ls $OUT", "eval ls", 'bash scripts/foo.sh "$PR"', "bash -c 'gh pr view 16'", 'echo eval "$X"']) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+  // A variable resolved to another script is not an owner command. One assigned the same value twice is still resolved.
+  assert.deepEqual(findOwnerInvocations("X=gate; X=gate; node scripts/lanes/$X.mjs 16"), []);
+  // Found by the #62 security-reviewer: the lexer cannot tell a sequence from exclusive branches, so a name given two
+  // different values is ambiguous and stays unresolved (fail closed), whichever comes last in the text.
+  for (const cmd of [
+    "X=review; X=gate; node scripts/lanes/post-$X.mjs 16",
+    "true && R=own || R=xyz; node scripts/lanes/post-review.mjs ${R}er --pr 16",
+    "if true; then R=own; else R=xyz; fi; node scripts/lanes/post-review.mjs ${R}er --pr 16",
+    "true && X=review || X=gate; node scripts/lanes/post-$X.mjs owner --pr 16",
+    "case a in a) S=scripts/lanes/post-review.mjs;; *) S=scripts/lanes/gate.mjs;; esac; node $S owner --pr 16",
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  assert.deepEqual(findOwnerInvocations("X=review; node scripts/lanes/post-$X.mjs test-hunter skipped x"), []);
+  // The plain owner command with a grant is still allowed: in-word substitution does not touch it.
+  assert.equal(decidePreToolUse(bash(OWNER), grant(), NOW).decision, "allow");
+});
+
+test("ordinary $ arguments get no decision (#62)", () => {
+  for (const cmd of [
+    'gh pr view "$PR"',
+    "gh pr view $PR --json state",
+    'node scripts/lanes/post-review.mjs --file "$F"',
+    "node scripts/lanes/gate.mjs $PR",
+    "node --test scripts/lanes/approve-guard.test.mjs $FILTER",
+    'X=review; echo "post-$X"',
+    'git commit -m "post-review: fix $X handling"',
+    'PR=16; gh pr checks "$PR" --watch',
+    "echo $HOME",
+    "npm test -- $ARGS",
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+// Found by the #62 test-hunter: a node flag that takes its value from the next word (--require/-r, --loader, …) must
+// not shift the script position onto that value and leave the spliced script word unchecked.
+test("edge: a node flag that takes a value does not hide a spliced script word (#62 review)", () => {
+  for (const cmd of [
+    "node --require ./setup.js scripts/lanes/post-$X.mjs $R --pr 16",
+    "node -r ./setup.js scripts/lanes/post-$X.mjs $R --pr 16",
+    "node --loader ./l.mjs scripts/lanes/post-$X.mjs $R --pr 16",
+    "node --import ./i.mjs --no-warnings $S owner --pr 16",
+    "node --require $M scripts/lanes/gate.mjs 16",
+    "node --env-file=.env $S owner",
+    // Found by the #62 security review: an option missing from any list must fail closed, not shift the script.
+    "node --allow-fs-read /tmp scripts/lanes/post-$X.mjs $R --pr 16",
+    "node --some-future-flag v scripts/lanes/post-$X.mjs",
+    "node --allow-fs-read /tmp --allow-net x scripts/lanes/post-$X.mjs",
+    "node -- $S",
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [{ pr: undefined, standalone: false }], cmd);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // A literal script behind a value flag is still an ordinary run, $ arguments after it included.
+  assert.deepEqual(findOwnerInvocations("node -r ./setup.js scripts/lanes/gate.mjs $PR"), []);
+});
+
+// Found by the #62 test-hunter (round 2): an earlier word equal to "node" (a `sudo -u node` or `chown node` target)
+// must not stand in for the real interpreter and leave the spliced script word after it unchecked.
+test("edge: a wrapper argument that itself looks like the node binary must not hide a spliced script/reviewer word (#62 finding)", () => {
+  for (const cmd of [
+    "sudo -u node node scripts/lanes/post-$X.mjs $R --pr 16",
+    "chown node node scripts/lanes/post-$X.mjs $R --pr 16",
+  ]) {
+    assert.equal(findOwnerInvocations(cmd).length, 1, `not detected: ${cmd}`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+});
+
+// Found by the #62 test-hunter (final verification): a command that only prints or searches its arguments never runs
+// the "node" it mentions, so a later `$` word is not denied. Any other command word still fails closed.
+test("edge: the word 'node' as an argument of a command that never runs it is not a false deny (#62 review)", () => {
+  for (const cmd of [
+    "grep -n node $FILE",
+    "echo node $VAR",
+    "ls /opt/node $DIR",
+    "which node $X",
+    "rg -l node $DIR",
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+  // An unknown command word may be a wrapper that runs node: still denied.
+  for (const cmd of ["mywrap node scripts/lanes/post-$X.mjs $R", "docker run node $IMAGE"]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // A nested script inside a non-running command is still scanned as a command of its own.
+  assert.deepEqual(decidePreToolUse(bash('echo "x; node $S owner"'), grant(), NOW), { decision: "deny", reason: DENY_REASON });
+});
+
+// Found by the #62 test-hunter (recheck): echo or grep output piped into a shell is run, so the exemption for
+// commands that never run their arguments does not apply once the command has a pipe.
+test("edge: a non-running command piped into a shell still counts its spliced node script (#62 review)", () => {
+  for (const cmd of [
+    "echo node scripts/lanes/post-$X.mjs $R --pr 16 | bash",
+    "echo node scripts/lanes/post-$X.mjs $R --pr 16 | sh",
+    "bash -c 'echo node scripts/lanes/post-$X.mjs $R | sh'",
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // Anything downstream that is not itself a non-running command may run what it reads.
+  for (const cmd of [
+    "echo node $VAR | cat | bash",
+    "(echo node $VAR) | bash",
+    "echo node $VAR |& bash",
+    "echo node $VAR | env bash",
+    "echo node $VAR | xargs node",
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+});
+
+// Found by the #62 test-hunter (round 3): the pipe check voided the exemption for any pipe anywhere in the command.
+test("edge: a pipe into another non-running command, or elsewhere in the command, keeps the exemption (#62 review)", () => {
+  for (const cmd of [
+    "grep -n node $FILE | wc -l",
+    "echo node $VAR | cat",
+    "grep node $F | head -5 | wc -l",
+    "gh pr list | head; echo node $VAR",
+    "echo node $VAR || echo failed",
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+// Found by the #62 test-hunter (round 3): the raw-text pre-filter ran before quotes were resolved, so a quote or a
+// backslash inside the literal name hid it. A glob matches the name without spelling it at all.
+test("edge: a quote, backslash or glob inside the script name does not hide an owner command (#62 review)", () => {
+  for (const cmd of [
+    `node scripts/lanes/pos"t-review.mjs" owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/"post-revi""ew".mjs owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/p"o"s"t"-review.mjs owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/pos't-rev'iew.mjs owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/pos\\t-review.mjs owner success ok --pr 16 --sha ${SHA}`,
+    `bash -c 'node scripts/lanes/pos"t-review.mjs" owner --pr 16'`,
+    `node scripts/lanes/post-revie?.mjs owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/p*.mjs owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/post-[r]eview.mjs owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/* owner success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/post-{review,x}.mjs owner --pr 16`,
+    `node {scripts/lanes/post-review.mjs,} owner --pr 16`,
+    `node scripts/lanes/post-review.mjs o{wner,} success ok --pr 16 --sha ${SHA}`,
+    `node scripts/lanes/pos"t-review.mjs" o"wn"er --pr 16`,
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // Found by the #62 security-reviewer: bun and deno run the script too (start-guard.mjs already counts them).
+  for (const cmd of [
+    "bun scripts/lanes/post-review.* owner ok x --pr 16",
+    "bun run scripts/lanes/p*.mjs owner ok x --pr 16",
+    "deno run -A scripts/lanes/post-revie?.mjs owner ok x --pr 16",
+    "deno.exe run scripts/lanes/post-$X.mjs $R --pr 16",
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // A glob that cannot match post-review.mjs is an ordinary argument, as in the project's own test command.
+  for (const cmd of ['node --test "scripts/**/*.test.mjs"', "node --test scripts/*.test.mjs", "ls scripts/*.mjs", "node scripts/lanes/gate.mjs *"]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+// Found by the test-hunter (this round): NODE_RE only matched node/nodejs, so `bun`/`deno` running post-review.mjs
+// owner got no decision at all (a full bypass), and bun/deno's own `run` subcommand needed skipping to still find
+// the real script and reviewer behind it, mirroring start-guard.mjs's existing bun/deno coverage.
+test("edge: bun and deno run the owner command too, run subcommand included", () => {
+  for (const cmd of [
+    "bun scripts/lanes/post-review.mjs owner success x --pr 16",
+    "bun run scripts/lanes/post-review.mjs owner success x --pr 16",
+    "deno run scripts/lanes/post-review.mjs owner success x --pr 16",
+    "deno.exe run -A scripts/lanes/post-review.mjs owner success x --pr 16",
+    "bun run scripts/lanes/post-$X.mjs owner --pr 16",
+  ]) {
+    assert.ok(findOwnerInvocations(cmd).length >= 1, `not detected: ${cmd}`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  assert.deepEqual(findOwnerInvocations("bun run scripts/lanes/post-review.mjs owner success x --pr 16"), [{ pr: "16", standalone: false }]);
+  // Ordinary bun/deno commands, including its own `run` subcommand and flags, still get no decision.
+  for (const cmd of ["bun install", "bun run build", "bun run scripts/lanes/gate.mjs 16", "deno run --allow-read scripts/lanes/gate.mjs 16"]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+// Found by the test-hunter (this round): bash drops a `<`/`>` redirection target (and a bare fd number right before
+// it, as in `2>file`) from the program's argv. Before the fix, the lexer kept it as an ordinary word, so a target
+// placed before the reviewer word displaced "owner" out of the reviewer slot and the command got no decision at all.
+test("edge: a redirection target does not steal the reviewer slot and hide an owner command", () => {
+  for (const cmd of [
+    "node scripts/lanes/post-review.mjs > out.txt owner --pr 16",
+    "node scripts/lanes/post-review.mjs>out.txt owner --pr 16",
+    "node scripts/lanes/post-review.mjs 1> out.txt owner --pr 16",
+    "node scripts/lanes/post-review.mjs 2>/dev/null owner --pr 16",
+    "node scripts/lanes/post-review.mjs < in.txt owner --pr 16",
+    "node scripts/lanes/post-review.mjs >> out.txt owner --pr 16",
+    'node scripts/lanes/post-review.mjs > "out with space.txt" owner --pr 16',
+  ]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [{ pr: "16", standalone: false }], cmd);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // The target is dropped from the arguments but not from the scan: a command substitution in it runs, and a
+  // herestring feeds a shell its script.
+  for (const cmd of [
+    'echo x > "$(node scripts/lanes/post-review.mjs owner --pr 16)"',
+    "echo x > \"`node scripts/lanes/post-review.mjs owner --pr 16`\"",
+    'bash <<< "node scripts/lanes/post-review.mjs owner --pr 16"',
+    'bash <<< "node scripts/lanes/p*.mjs owner --pr 16"',
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  for (const cmd of ['echo x > "$OUT"', "gh pr list > $LOG 2>&1", "node scripts/lanes/gate.mjs 16 > \"$TMP/out file.txt\""]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+  // A redirection after the reviewer word already worked, and must keep working.
+  assert.deepEqual(findOwnerInvocations("node scripts/lanes/post-review.mjs owner --pr 16 > out.txt"), [{ pr: "16", standalone: false }]);
+  // Ordinary commands with a redirection (including a lone digit right before it, the fd-number form) still get no decision.
+  for (const cmd of ["gh pr view 2 > out.txt", "echo 2 > out.txt", "node scripts/lanes/gate.mjs --file a.json > out.txt"]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+// test-hunter (#62 review): process substitution `<(…)`/`>(…)` is not a case the redirect handling models on
+// purpose (skipRedirectTarget stops at the `(`), so its content falls through to the generic `(`/`)` segment
+// splitting and is scanned as a command of its own either way. An unrecognized node option that consumes the next
+// word as its value must not let that word's true position (the spliced script) fall outside the cumulative range
+// nodeScriptEnd feeds into nodeRange.
+test("edge: process substitution and an unrecognized valued node flag do not hide an owner command (#62 review)", () => {
+  for (const cmd of [
+    "diff <(node scripts/lanes/post-review.mjs owner --pr 16) other.txt",
+    "diff other.txt <(node scripts/lanes/post-review.mjs owner --pr 16)",
+    "tee >(node scripts/lanes/post-review.mjs owner --pr 16) < in.txt",
+    "node --not-a-real-flag scripts/lanes/post-$X.mjs owner --pr 16",
+    "node --not-a-real-flag scripts/lanes/post-review.mjs owner --pr 16",
+  ]) {
+    assert.notDeepEqual(findOwnerInvocations(cmd), [], `bypass: ${cmd} produced no decision`);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+  // Ordinary process substitution and an ordinary unrecognized flag still get no decision.
+  for (const cmd of ["diff <(sort a.txt) <(sort b.txt)", "node --not-a-real-flag scripts/lanes/gate.mjs 16"]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
 test("the CLI answers deny, never crashes, when it cannot evaluate a PreToolUse call", () => {
   const cli = (event, input) => spawnSync(process.execPath, ["scripts/lanes/approve-guard.mjs", event], { input, encoding: "utf8" });
   for (const [event, input] of [["pre-tool-use", "{oops"], ["bogus-event", JSON.stringify(bash(OWNER))]]) {
