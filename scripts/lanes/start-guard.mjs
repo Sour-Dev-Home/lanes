@@ -17,6 +17,8 @@ import { fileURLToPath } from "node:url";
 export const GRANT_TTL_MS = 15 * 60 * 1000;
 export const DENY_REASON = "lanes are launched only from /start <N> typed by the owner in this session";
 export const BG_DENY_REASON = "claude --bg is never run directly; the owner launches lanes with /start <N>";
+export const PARSE_DENY_REASON =
+  "this command could not be parsed (an unterminated quote or nesting too deep) and it names start.mjs or --bg, so start-guard denies it; rewrite it, for example a commit message with git commit -F <file>";
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const START_PROMPT_RE = /^\/start((?:\s+[1-9][0-9]{0,8})+)$/;
 // The only form that may be allowed: the plain command with plain issue numbers, nothing chained, wrapped or redirected.
@@ -61,13 +63,55 @@ export function onUserPromptSubmit(input, now = Date.now()) {
   return { action: "grant", sessionId, grant: { sessionId, issues, at } };
 }
 
+// `<<D`, `<<-D`, `<<'D'`, `<<"D"` or `<<\D`; a quoted delimiter makes the body literal. `<<<` is a here-string, not this.
+const HEREDOC_RE = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([^\s;&|()<>'"`$]+))/;
+// `$(cat <<D` and the end of its line: the start of a substitution whose output is only a heredoc's body.
+const CAT_HEREDOC_RE = /^\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z0-9_.-]+))[ \t]*\r?\n/;
+
+/**
+ * The body of a heredoc starting at `from`: every line up to the one that is exactly `delim` (after leading tabs,
+ * for `<<-`). `end` is the index of the newline ending the delimiter line; an unterminated body runs to the end, as in
+ * bash, with `terminated` false.
+ */
+function readHeredoc(cmd, from, delim, stripTabs) {
+  const lines = [];
+  for (let pos = from; pos < cmd.length; ) {
+    const nl = cmd.indexOf("\n", pos);
+    const lineEnd = nl === -1 ? cmd.length : nl;
+    let line = cmd.slice(pos, lineEnd).replace(/\r$/, "");
+    if (stripTabs) line = line.replace(/^\t+/, "");
+    if (line === delim) return { body: lines.join("\n"), end: lineEnd, terminated: true };
+    lines.push(line);
+    pos = lineEnd + 1;
+  }
+  return { body: lines.join("\n"), end: cmd.length, terminated: false };
+}
+
+/**
+ * `$(cat <<'D' … D)` at `i`, as in `git commit -m "$(cat <<'EOF' … EOF)"`: its output is the body, known and literal,
+ * so it reads as that text, as if single-quoted. Null for any other substitution, or an unquoted delimiter whose body
+ * could still expand. `end` is the index of the closing `)`.
+ */
+function literalSubstitution(cmd, i) {
+  const m = CAT_HEREDOC_RE.exec(cmd.slice(i));
+  if (!m) return null;
+  const quoted = m[4] === undefined;
+  const { body, end, terminated } = readHeredoc(cmd, i + m[0].length, m[2] ?? m[3] ?? m[4], m[1] === "-");
+  if (!terminated || (!quoted && /[$`\\]/.test(body))) return null;
+  const close = /^\s*\)/.exec(cmd.slice(end));
+  return close ? { body, end: end + close[0].length - 1 } : null;
+}
+
 /**
  * Shell-ish lexer (the same rules as approve-guard.mjs): words (quotes and backslashes resolved, nothing expanded)
- * grouped into simple commands split on ; & | ( ) newlines and redirections. Throws on an unterminated quote.
- * @returns {string[][]}
+ * grouped into simple commands split on ; & | ( ) newlines and redirections. A heredoc's body is not lexed as
+ * commands: it is returned in `bodies`, for the caller to read as a quoted script. Throws on an unterminated quote.
+ * @returns {{ segments: string[][], bodies: string[] }}
  */
 function lex(cmd) {
   const segments = [[]];
+  const bodies = [];
+  const pending = [];
   let word = null;
   const endWord = () => {
     if (word !== null) segments.at(-1).push(word);
@@ -88,17 +132,42 @@ function lex(cmd) {
       let j = i + 1;
       let s = "";
       for (; j < cmd.length && cmd[j] !== '"'; j += 1) {
+        const lit = cmd[j] === "$" ? literalSubstitution(cmd, j) : null;
+        if (lit) {
+          s += lit.body;
+          j = lit.end;
+          continue;
+        }
         if (cmd[j] === "\\" && '"\\$`'.includes(cmd[j + 1] ?? "")) j += 1;
         s += cmd[j];
       }
       if (j >= cmd.length) throw new Error('unterminated "');
       word = (word ?? "") + s;
       i = j;
+    } else if (c === "$" && literalSubstitution(cmd, i)) {
+      const lit = literalSubstitution(cmd, i);
+      word = (word ?? "") + lit.body;
+      i = lit.end;
     } else if (c === "\\") {
       if (cmd[i + 1] !== "\n") word = (word ?? "") + (cmd[i + 1] ?? "");
       i += 1;
+    } else if (c === "\n" && pending.length > 0) {
+      // The heredocs opened on this line: their bodies follow it, each up to its delimiter line.
+      endSegment();
+      let end = i;
+      for (const h of pending.splice(0)) {
+        const r = readHeredoc(cmd, end + 1, h.delim, h.stripTabs);
+        bodies.push(r.body);
+        end = r.end;
+      }
+      i = end;
     } else if (";&|()\n\r".includes(c)) {
       endSegment();
+    } else if (c === "<" && cmd[i - 1] !== "<" && cmd[i + 1] === "<" && cmd[i + 2] !== "<" && HEREDOC_RE.test(cmd.slice(i))) {
+      const m = HEREDOC_RE.exec(cmd.slice(i));
+      endWord();
+      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-" });
+      i += m[0].length - 1;
     } else if ("<>".includes(c) || /\s/.test(c)) {
       endWord();
     } else {
@@ -106,7 +175,18 @@ function lex(cmd) {
     }
   }
   endSegment();
-  return segments.filter((s) => s.length > 0);
+  return { segments: segments.filter((s) => s.length > 0), bodies };
+}
+
+/** `cmd` without its literal `$(cat <<'D' … D)` substitutions, for the raw-text checks: their text is only data. */
+function withoutLiteralSubstitutions(cmd) {
+  let out = "";
+  for (let i = 0; i < cmd.length; i += 1) {
+    const lit = cmd[i] === "$" ? literalSubstitution(cmd, i) : null;
+    if (lit) i = lit.end;
+    else out += cmd[i];
+  }
+  return out;
 }
 
 const ASSIGN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
@@ -140,34 +220,34 @@ function resolveSegments(segments) {
 const isNestedScript = (w) => /[\s;&|()<>]/.test(w);
 
 /**
- * Walks every simple command of `cmd`, recursing into every quoted script. `visit(words)` is called per simple
- * command; `onOpaque(text)` for a part that cannot be read (unterminated quote, nesting too deep), which the caller
- * fails closed on when the text names what it looks for.
+ * Walks every simple command of `cmd`, recursing into every quoted script and every heredoc body (either may be run:
+ * `bash -c "…"`, `bash <<EOF`, `cat <<EOF | sh`). `visit(words)` is called per simple command; `onOpaque(text)` for a
+ * part that cannot be read (unterminated quote, nesting too deep), which the caller fails closed on when the text
+ * names what it looks for.
  */
 function walk(cmd, depth, visit, onOpaque) {
-  let segments;
+  let lexed;
   try {
-    segments = lex(cmd);
+    lexed = lex(cmd);
   } catch {
     onOpaque(cmd);
     return;
   }
-  for (const words of resolveSegments(segments)) {
+  const nested = (text) => (depth >= MAX_DEPTH ? onOpaque(text) : walk(text, depth + 1, visit, onOpaque));
+  for (const words of resolveSegments(lexed.segments)) {
     visit(words);
-    for (const w of words) {
-      if (!isNestedScript(w)) continue;
-      if (depth >= MAX_DEPTH) onOpaque(w);
-      else walk(w, depth + 1, visit, onOpaque);
-    }
+    for (const w of words) if (isNestedScript(w)) nested(w);
   }
+  for (const body of lexed.bodies) nested(body);
 }
 
 /**
  * Every run of `start.mjs` in a Bash command: the script as the command itself, or as an argument of node, including
  * runs behind env, chains, subshells or `bash -c`. `standalone` is true only for the plain
  * `node scripts/lanes/start.mjs <N ...>` (with its `issues`) or `node scripts/lanes/start.mjs --auto [--go]` (with its
- * `auto` form) with nothing around it. Merely naming the file (cat, git diff) is not a run.
- * @returns {({ issues: number[] | undefined, standalone: boolean } | { auto: "dry" | "go", standalone: true })[]}
+ * `auto` form) with nothing around it. Merely naming the file (cat, git diff) is not a run. A part that cannot be
+ * read and names start.mjs counts as a run with `unparsed: true`.
+ * @returns {({ issues: number[] | undefined, standalone: boolean, unparsed?: true } | { auto: "dry" | "go", standalone: true })[]}
  */
 export function findStartInvocations(command) {
   const cmd = String(command ?? "");
@@ -187,7 +267,7 @@ export function findStartInvocations(command) {
       });
     },
     (text) => {
-      if (/start\.mjs/i.test(text)) out.push({ issues: undefined, standalone: false });
+      if (/start\.mjs/i.test(text)) out.push({ issues: undefined, standalone: false, unparsed: true });
     },
   );
   // No raw-text fallback: `node $(echo …start.mjs)` and backticks leave `$` or a backtick in the script word, which
@@ -202,8 +282,14 @@ export function findStartInvocations(command) {
 
 /** True when a Bash command runs `claude --bg` (or `--background`) directly, behind any wrapper, or cannot be read. */
 export function findBgLaunches(command) {
+  return scanBgLaunches(command).found;
+}
+
+/** findBgLaunches, and whether only a part that cannot be read (and names --bg) made it true. */
+function scanBgLaunches(command) {
   const cmd = String(command ?? "");
   let found = false;
+  let opaque = false;
   walk(
     cmd,
     0,
@@ -216,13 +302,15 @@ export function findBgLaunches(command) {
       if (cmdWord !== undefined && UNRESOLVED_RE.test(cmdWord) && words.some((w) => BG_FLAG_RE.test(w) || (w.startsWith("-") && UNRESOLVED_RE.test(w)))) found = true;
     },
     (text) => {
-      if (/--(bg|background)/.test(text)) found = true;
+      if (/--(bg|background)/.test(text)) opaque = true;
     },
   );
   // `$(which claude) --bg`: the lexer splits the substitution off, so claude and its flag land in different simple
-  // commands. Only a `$(` that names claude, with a --bg word in the same call, fails closed; an unrelated "$VAR" does not.
-  if (!found && /\$\([^)]*claude/i.test(cmd) && /(^|[\s'"])--(bg|background)([=\s'"]|$)/.test(cmd)) found = true;
-  return found;
+  // commands. Only a `$(` that names claude, with a --bg word in the same call, fails closed; an unrelated "$VAR" does
+  // not, nor does a literal `$(cat <<'EOF' … EOF)` message that merely names both.
+  const raw = withoutLiteralSubstitutions(cmd);
+  if (!found && /\$\([^)]*claude/i.test(raw) && /(^|[\s'"])--(bg|background)([=\s'"]|$)/.test(raw)) found = true;
+  return { found: found || opaque, unparsed: !found && opaque };
 }
 
 /** A grant names either issues or one auto form, never both. */
@@ -249,9 +337,11 @@ const sameIssues = (a, b) => a.length === b.length && [...a].sort((x, y) => x - 
 export function decidePreToolUse(input, grant, now = Date.now()) {
   if (input?.tool_name !== "Bash") return null;
   const command = input.tool_input?.command;
-  if (findBgLaunches(command)) return { decision: "deny", reason: BG_DENY_REASON };
+  const bg = scanBgLaunches(command);
+  if (bg.found) return { decision: "deny", reason: bg.unparsed ? PARSE_DENY_REASON : BG_DENY_REASON };
   const found = findStartInvocations(command);
   if (found.length === 0) return null;
+  if (found.every((f) => f.unparsed)) return { decision: "deny", reason: PARSE_DENY_REASON };
   const deny = { decision: "deny", reason: DENY_REASON };
   const sessionId = input.session_id;
   if (found.length !== 1 || !found[0].standalone) return deny;
