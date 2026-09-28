@@ -127,6 +127,26 @@ test("lane.md step 2 runs blockers.mjs and stops on any non-zero exit", () => {
   assert.doesNotMatch(step2, /gh issue view <N> --json state/);
 });
 
+// #45: when reviewers.mjs names governing ADRs, the lane hands their paths on and the advisor checks the diff against them
+test("lane.md step 6 hands the architecture-advisor the governing ADRs' paths when reviewers.mjs prints ADRs:", () => {
+  const step6 = readFileSync(".claude/commands/lane.md", "utf8").replace(/\r\n/g, "\n").match(/^6\. [\s\S]*?(?=^7\. )/m)[0].replace(/\s+/g, " ");
+  assert.match(step6, /When `reviewers\.mjs` also prints `ADRs: NNNN, \.\.\.`/);
+  assert.match(step6, /give the architecture-advisor each one's path \(`docs\/adr\/NNNN-\*\.md`\)/);
+});
+
+test("architecture-advisor.md reads the given ADRs and fails the verdict when the diff contradicts an accepted ADR's Decision", () => {
+  const text = readFileSync(".claude/agents/architecture-advisor.md", "utf8").replace(/\s+/g, " ");
+  assert.match(text, /If you were given ADR paths \(`docs\/adr\/NNNN-\*\.md`\)[^.]*\. Read each one's Decision in full/);
+  assert.match(text, /`verdict` must be `"failure"` if [^.]*, or if the diff contradicts the Decision of an accepted ADR you were given/);
+});
+
+// edge: a lane could edit the ADR file in its own PR to make the diff look compliant; the advisor must read
+// the Decision from the default branch, not the PR's copy, or that dodge would go uncaught
+test("architecture-advisor.md reads each given ADR's Decision from the default branch, not the PR's own copy", () => {
+  const text = readFileSync(".claude/agents/architecture-advisor.md", "utf8").replace(/\s+/g, " ");
+  assert.match(text, /on the default branch \(`git show origin\/main:<path>`\), since the PR's copy may differ/);
+});
+
 // I5: the reviewer agents /lane spawns must ship in the repo, fresh-eyes and on sonnet
 const AGENTS = ["test-hunter", "security-reviewer", "ui-reviewer", "architecture-advisor"];
 
