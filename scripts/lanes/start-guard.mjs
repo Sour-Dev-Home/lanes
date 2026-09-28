@@ -16,6 +16,8 @@
 //     names no lane script, and arithmetic `$((…))` are not read as commands (#89, #102). A redirection target is no
 //     word of its command, though a substitution in it is still read (#191); a backtick substitution is read wherever
 //     it stands (#197); and the command find -exec or xargs runs is read, with what they hand it unresolved (#113).
+//     A quoted heredoc body is not read at all in a call that only writes text or sends it with gh issue|pr
+//     comment|create|edit and runs no substitution (#240); text piped into a shell has its backticks read live (#246).
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -168,13 +170,16 @@ const arithmeticScript = (expr) => expr.replace(/\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$
  * expression (its word reads as `0`), as is an unquoted backtick substitution's command (#197). A body is `literal`
  * when the shell expands nothing in it. A redirection target (and a fd number right before its operator, as in
  * `2>file`) is no word of its command: it is returned in `targets`, for the caller to scan for a substitution (#191).
- * A here-string (`<<<`) stays a word. Throws on an unterminated quote or backtick.
- * @returns {{ segments: string[][], writes: (boolean | "dup")[], stdin: (string | undefined)[], targets: string[], bodies: { text: string, literal: boolean, start?: number, end?: number }[] }}
+ * A here-string (`<<<`) stays a word. `pipes[k]` is true when segment k's output is piped (`|` or `|&`, not `||`) into
+ * the next, and a heredoc body is `toShell` when a shell reads it: its own command, or one down its pipeline (#246).
+ * Throws on an unterminated quote or backtick.
+ * @returns {{ segments: string[][], writes: (boolean | "dup")[], stdin: (string | undefined)[], pipes: boolean[], targets: string[], bodies: { text: string, literal: boolean, toShell?: boolean, start?: number, end?: number }[] }}
  */
 function lex(cmd) {
   const segments = [[]];
   // Per segment: true when it holds an output redirection (`>`), so writes to a file; "dup" once it duplicates an fd.
   const writes = [false];
+  const pipes = [false];
   // Per segment: the target of its input redirection (`<`), which node reads as its script when no argument is one.
   const stdin = [undefined];
   const targets = [];
@@ -197,6 +202,7 @@ function lex(cmd) {
     if (segments.at(-1).length > 0) {
       segments.push([]);
       writes.push(false);
+      pipes.push(false);
       stdin.push(undefined);
     }
   };
@@ -272,7 +278,7 @@ function lex(cmd) {
       let end = i;
       for (const h of pending.splice(0)) {
         const r = readHeredoc(cmd, end + 1, h.delim, h.stripTabs);
-        bodies.push({ text: r.body, literal: h.quoted || !/[$`\\]/.test(r.body), toShell: h.toShell, start: end + 1, end: r.end });
+        bodies.push({ text: r.body, literal: h.quoted || !/[$`\\]/.test(r.body), toShell: h.toShell, seg: h.seg, start: end + 1, end: r.end });
         end = r.end;
       }
       i = end;
@@ -291,13 +297,14 @@ function lex(cmd) {
       target = op === "<" || op === "<>" ? "stdin" : "other";
       i += op.length - 1;
     } else if (";&|()\n\r".includes(c)) {
+      if (c === "|" && cmd[i - 1] !== "|" && cmd[i + 1] !== "|" && segments.at(-1).length > 0) pipes[pipes.length - 1] = true;
       endSegment();
     } else if (c === "<" && cmd[i - 1] !== "<" && cmd[i + 1] === "<" && cmd[i + 2] !== "<" && HEREDOC_RE.test(cmd.slice(i))) {
       const m = HEREDOC_RE.exec(cmd.slice(i));
       endWord();
       // `toShell`: a shell reads the body as its script (`bash <<'EOF'`), so even a quoted body's backticks run.
       const program = segments.at(-1).find((w) => !ASSIGN_RE.test(w));
-      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-", quoted: m[4] === undefined, toShell: program !== undefined && SHELL_RE.test(basename(program)) });
+      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-", quoted: m[4] === undefined, toShell: program !== undefined && SHELL_RE.test(basename(program)), seg: segments.length - 1 });
       i += m[0].length - 1;
     } else if (c === "<" || /\s/.test(c)) {
       // A `<<` that HEREDOC_RE does not read ends the word, as before.
@@ -307,9 +314,24 @@ function lex(cmd) {
     }
   }
   endSegment();
+  // A pipeline can go on after the heredoc's body (`cat <<'EOF' |` then the body, then `sh`), so this waits for the end.
+  for (const b of bodies) if (b.seg !== undefined && feedsShell(segments, pipes, b.seg)) b.toShell = true;
   // Only the last segment can be empty, so `writes` stays aligned with the segments kept.
   const kept = segments.filter((s) => s.length > 0);
-  return { segments: kept, writes: writes.slice(0, kept.length), stdin: stdin.slice(0, kept.length), targets, bodies };
+  return { segments: kept, writes: writes.slice(0, kept.length), stdin: stdin.slice(0, kept.length), pipes: pipes.slice(0, kept.length), targets, bodies };
+}
+
+/**
+ * True when segment k's output is piped into a shell further down its pipeline (#246): a shell named anywhere in a
+ * piped-to command (`| sh`, `| env bash -s`, `| xargs sh -c`), or eval, source or `.` as its command word.
+ */
+function feedsShell(segments, pipes, k) {
+  for (let j = k + 1; j < segments.length && pipes[j - 1]; j += 1) {
+    const words = segments[j];
+    const program = words.find((w) => !ASSIGN_RE.test(w));
+    if (words.some((w) => SHELL_RE.test(basename(w))) || program === "eval" || program === "source" || program === ".") return true;
+  }
+  return false;
 }
 
 /** `cmd` without its literal `$(cat <<'D' … D)` substitutions, for the raw-text checks: their text is only data. */
@@ -384,6 +406,30 @@ const PLACE_COMMANDS = new Set(["cd", "mkdir"]);
 const isDataOnly = ({ segments, writes }) =>
   segments.every((words, k) => PLACE_COMMANDS.has(words[0]) || (WRITE_COMMANDS.has(words[0]) && writes[k] === true));
 
+// gh commands that send text to GitHub and print only a URL (#240): never a browser, editor or --dry-run, which runs
+// a program or prints the body back. A bundle of short flags (`-we`) counts if it holds -w or -e.
+const GH_SEND = new Set(["issue comment", "issue create", "issue edit", "pr comment", "pr create", "pr edit"]);
+const GH_RUNS_RE = /^(?:--(?:web|editor|dry-run)(?:=|$)|-[A-Za-z]*[we])/;
+/** True for plain `gh issue|pr comment|create|edit`, alone or behind `MSYS_NO_PATHCONV=1` (Git Bash, the lane skill). */
+const sendsText = (words) => {
+  const w = words[0] === "MSYS_NO_PATHCONV=1" ? words.slice(1) : words;
+  return w[0] === "gh" && GH_SEND.has(`${w[1]} ${w[2]}`) && !w.some((x) => GH_RUNS_RE.test(x));
+};
+
+// A live substitution left in a word or target: a backtick (in double quotes, or lexed as QUOTED_TICKs) or `$(`.
+const SUBSTITUTION_RE = /[`]|\$\(/;
+
+/**
+ * True when nothing in a whole lexed Bash call can run a literal heredoc body (#240): every simple command writes text
+ * (isDataOnly's cat, echo, printf, cd, mkdir) or sends it (sendsText), so a body written to a file for
+ * `gh issue comment --body-file` is only text, and no substitution runs, not even one that only prints (a
+ * `--body "`bash c.md`"` would run the file just written). Unlike isDataOnly, gh's own words are still read as before.
+ */
+const isTextOnly = ({ segments, writes, targets, bodies }) =>
+  segments.every((words, k) => PLACE_COMMANDS.has(words[0]) || (WRITE_COMMANDS.has(words[0]) && writes[k] === true) || sendsText(words)) &&
+  bodies.every((b) => b.seg !== undefined && b.literal) &&
+  ![...segments.flat(), ...targets].some((w) => SUBSTITUTION_RE.test(w));
+
 const EVAL_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-pe"]);
 const EVAL_PROGRAM_RE = /^(node|nodejs|bun)(\.exe)?$/i;
 
@@ -417,7 +463,9 @@ function evalScripts(words) {
  * part that cannot be read (unterminated quote, nesting too deep), which the caller fails closed on when the text
  * names what it looks for; `onEval(text)` for a `node -e` script, which is JavaScript, not shell (#89). A whole call
  * that only prints or writes text (isDataOnly) has only what the shell expands in it walked: a word with a `$` or
- * backtick, a heredoc that is not literal, an arithmetic expression.
+ * backtick, a heredoc that is not literal, an arithmetic expression. A call that only writes or sends text (isTextOnly)
+ * skips its literal heredoc bodies (#240). A simple command piped into a shell has its words, and its arguments joined
+ * as one line, walked with their backticks live (#246).
  */
 function walk(cmd, depth, visit, onOpaque, onEval) {
   let lexed;
@@ -429,23 +477,27 @@ function walk(cmd, depth, visit, onOpaque, onEval) {
   }
   const nested = (text) => (depth >= MAX_DEPTH ? onOpaque(text) : walk(text, depth + 1, visit, onOpaque, onEval));
   const dataOnly = depth === 0 && isDataOnly(lexed);
-  const scan = (words, stdin) => {
+  const textOnly = depth === 0 && isTextOnly(lexed);
+  const scan = (words, stdin, piped = false) => {
     if (!dataOnly) visit(words, stdin);
     const scripts = dataOnly ? new Map() : evalScripts(words);
     words.forEach((w, i) => {
       if (scripts.has(i)) onEval(scripts.get(i));
-      else if (isNestedScript(w) && !(dataOnly && !UNRESOLVED_RE.test(w))) nested(runsAsShell(words, i) ? unliteralLive(w) : unliteral(w));
+      else if (isNestedScript(w) && !(dataOnly && !UNRESOLVED_RE.test(w))) nested(piped || runsAsShell(words, i) ? unliteralLive(w) : unliteral(w));
     });
+    // What a command piped into a shell prints may be its arguments (echo, printf): read them as one live script (#246).
+    if (piped && words.length > 1) nested(unliteralLive(words.slice(1).join(" ")));
   };
   for (const [k, words] of resolveSegments(lexed.segments).entries()) {
-    scan(words, lexed.stdin[k]);
+    scan(words, lexed.stdin[k], feedsShell(lexed.segments, lexed.pipes, k));
     // The command find -exec or xargs runs is a simple command of its own (#113).
     if (!dataOnly) for (const sub of runnerCommands(words)) scan(sub);
   }
   // A redirection target is no word, but a substitution in it still runs (#191).
   for (const t of lexed.targets) if (isNestedScript(t) && !(dataOnly && !UNRESOLVED_RE.test(t))) nested(unliteral(t));
-  // A quoted heredoc's backticks are literal text, as in a single-quoted word.
-  for (const body of lexed.bodies) if (!(dataOnly && body.literal)) nested(body.literal && !body.toShell ? body.text.replaceAll("`", QUOTED_TICK) : body.text);
+  // A quoted heredoc's backticks are literal text, as in a single-quoted word. A literal body in a call that only writes
+  // or sends text is never run, so it is not read at all (#240): prose in it may not even parse as shell.
+  for (const body of lexed.bodies) if (!(textOnly && body.literal)) nested(body.literal && !body.toShell ? body.text.replaceAll("`", QUOTED_TICK) : body.text);
 }
 
 // What find hands its -exec command for `{}`, and the arguments xargs appends from its input: known only at run time,

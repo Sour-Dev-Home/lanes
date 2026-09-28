@@ -1131,3 +1131,160 @@ test("#113 edge (test-hunter): a $(...) redirection target naming queue.mjs or c
   assert.deepEqual(decide("printf x > $(node scripts/lanes/queue.mjs 12)"), { decision: "deny", reason: QUEUE_DENY_REASON });
   assert.deepEqual(decide('printf x > "$(claude --bg -p hi)"'), { decision: "deny", reason: BG_DENY_REASON });
 });
+
+// --- #240: text-only mentions of queue.mjs (#240), backticks piped into a shell (#246), bare backticks (#247) -------
+
+// A comment body as a lane writes it: prose with an apostrophe (an unterminated quote read as shell), markdown
+// backticks and the command itself, none of it run.
+const PROSE = "The queue script (queue.mjs) isn't run here: the owner runs `node scripts/lanes/queue.mjs` in their own terminal.";
+const deny = (reason) => ({ decision: "deny", reason });
+
+test("#240 criterion 1: a heredoc body that mentions queue.mjs, written for gh to send, gets no decision", () => {
+  for (const cmd of [
+    `cat <<'EOF' > .lanes/comment.md\n${PROSE}\nEOF\ngh issue comment 97 --body-file .lanes/comment.md`,
+    `mkdir -p .lanes && cat > .lanes/pr.md <<'EOF'\n${PROSE}\nEOF\nMSYS_NO_PATHCONV=1 gh pr create --title "Queue CLI" --body-file .lanes/pr.md`,
+    `gh issue comment 97 --body-file - <<'EOF'\n${PROSE}\nEOF`,
+    `cat > .lanes/body.md <<"EOF"\n${PROSE}\nEOF\ngh pr edit 12 --body-file .lanes/body.md && gh issue create --title x --label lane-filed --body-file .lanes/body.md`,
+    "git commit -F - <<'EOF'\nDocument queue.mjs in USING.md\nEOF",
+  ]) {
+    assert.equal(findQueueInvocations(cmd), false, cmd);
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+test("#240 criterion 2: queue.mjs runs, plain, ./-relative, inside bash -c or sh -c, or in a pipeline, are still denied", () => {
+  for (const cmd of [
+    "node scripts/lanes/queue.mjs",
+    "node ./scripts/lanes/queue.mjs",
+    "bash -c 'node scripts/lanes/queue.mjs'",
+    'bash -c "node ./scripts/lanes/queue.mjs"',
+    "sh -c 'node scripts/lanes/queue.mjs'",
+    'sh -c "node ./scripts/lanes/queue.mjs 12"',
+    "echo 12 | node scripts/lanes/queue.mjs",
+    "node ./scripts/lanes/queue.mjs | tee .lanes/queue.log",
+    "git fetch origin | bash -c 'node scripts/lanes/queue.mjs'",
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(QUEUE_DENY_REASON), cmd);
+  }
+});
+
+test("#240 criterion 3: a grep for queue.mjs, and a gh comment whose --body mentions it, get no decision", () => {
+  for (const cmd of ["grep -n queue.mjs docs/USING.md", 'gh issue comment 97 --body "the owner runs queue.mjs in their terminal"', 'gh issue comment 97 --body "see queue.mjs: it polls the ready issues"']) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
+test("#246 criterion 1: a quoted heredoc piped into sh runs its backticks", () => {
+  assert.deepEqual(decide("cat <<'EOF' | sh\necho `node scripts/lanes/start.mjs 12`\nEOF"), deny(DENY_REASON));
+  assert.deepEqual(decide("cat <<'EOF' | sh\necho `node scripts/lanes/queue.mjs`\nEOF"), deny(QUEUE_DENY_REASON));
+});
+
+test("#246 criterion 2: a single-quoted echo piped into bash runs its backticks", () => {
+  assert.deepEqual(decide("echo 'echo `node scripts/lanes/start.mjs 12`' | bash"), deny(DENY_REASON));
+});
+
+test("#246 criterion 3: a commit message naming start.mjs in backticks still gets no decision", () => {
+  for (const cmd of ["git commit -F - <<'EOF'\nFix `start.mjs` parsing\n\nThe guard read `start.mjs` in a message.\nEOF", "git commit -m 'Fix `start.mjs` parsing'"]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+    assert.equal(decide(cmd), null, cmd);
+  }
+});
+
+test("#247 criterion 1: a bare double-quoted backtick substitution of a lane script is denied with its reason", () => {
+  assert.deepEqual(decide('echo "`scripts/lanes/queue.mjs`"'), deny(QUEUE_DENY_REASON));
+  assert.deepEqual(decide('echo "`scripts/lanes/start.mjs`"'), deny(DENY_REASON));
+});
+
+test("#247 criterion 2: a bare backtick substitution as a redirection target, unquoted or double-quoted, is denied", () => {
+  assert.deepEqual(decide("echo x > `scripts/lanes/queue.mjs`"), deny(QUEUE_DENY_REASON));
+  assert.deepEqual(decide('echo x > "`scripts/lanes/queue.mjs`"'), deny(QUEUE_DENY_REASON));
+  assert.deepEqual(decide("echo x > `scripts/lanes/start.mjs`"), deny(DENY_REASON));
+  assert.deepEqual(decide('echo x > "`scripts/lanes/start.mjs`"'), deny(DENY_REASON));
+});
+
+test("#247 criterion 3: a backtick substitution with a node prefix or an argument is still denied as a word and as a target", () => {
+  for (const [cmd, reason] of [
+    ["echo `node scripts/lanes/queue.mjs`", QUEUE_DENY_REASON],
+    ['echo "`node scripts/lanes/queue.mjs`"', QUEUE_DENY_REASON],
+    ["echo `scripts/lanes/queue.mjs 12`", QUEUE_DENY_REASON],
+    ["echo x > `node scripts/lanes/queue.mjs`", QUEUE_DENY_REASON],
+    ['echo x > "`scripts/lanes/queue.mjs 12`"', QUEUE_DENY_REASON],
+    ["echo `node scripts/lanes/start.mjs 12`", DENY_REASON],
+    ["echo `scripts/lanes/start.mjs 12`", DENY_REASON],
+    ["echo x > `node scripts/lanes/start.mjs 12`", DENY_REASON],
+    ['echo x > "`scripts/lanes/start.mjs 12`"', DENY_REASON],
+  ]) {
+    assert.deepEqual(decide(cmd), deny(reason), cmd);
+  }
+});
+
+test("#240 edge: a written body some other command in the call could run is still read", () => {
+  for (const [cmd, reason] of [
+    [`cat > .lanes/c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 --body-file .lanes/c.md && bash .lanes/c.md`, QUEUE_DENY_REASON],
+    [`cat > .lanes/c.md <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF\ngh issue comment 1 --body-file .lanes/c.md; sh .lanes/c.md`, DENY_REASON],
+    // gh commands that open a browser or an editor, echo the body (--dry-run), or are not issue/pr comment, create or edit.
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh pr create --dry-run --body-file c.md`, QUEUE_DENY_REASON],
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue create --web --body-file c.md`, QUEUE_DENY_REASON],
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 -e`, QUEUE_DENY_REASON],
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 --editor`, QUEUE_DENY_REASON],
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh api repos/o/r/issues -F body=@c.md`, QUEUE_DENY_REASON],
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue view 1`, QUEUE_DENY_REASON],
+    // An assignment other than MSYS_NO_PATHCONV, or gh reached by a path, is not the plain gh.
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\nGH_EDITOR=sh gh issue comment 1 --body-file c.md`, QUEUE_DENY_REASON],
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\n./gh issue comment 1 --body-file c.md`, QUEUE_DENY_REASON],
+    // A function named gh is defined in the same call.
+    [`gh() { bash; }\ngh issue comment 1 --body-file - <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF`, QUEUE_DENY_REASON],
+    // A substitution elsewhere in the call runs the written file.
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 --body "\`bash c.md\`"`, QUEUE_DENY_REASON],
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 --title x --body \`sh c.md\``, QUEUE_DENY_REASON],
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF\ngh issue comment 1 --body "$(bash c.md)"`, DENY_REASON],
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ncat > d.md <<EOF\n\`bash c.md\`\nEOF\ngh issue comment 1 --body-file d.md`, QUEUE_DENY_REASON],
+    [`cat > c.md <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\ngh issue comment 1 --body-file c.md > "\`bash c.md\`"`, QUEUE_DENY_REASON],
+    // The same route with only cat and echo (denied before #240 too, as a program named at run time).
+    [`cat > c.sh <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF\necho "\`bash c.sh\`" > out.txt`, QUEUE_DENY_REASON],
+    // gh's output piped into a shell.
+    [`gh issue comment 1 --body-file - <<'EOF' | sh\necho \`node scripts/lanes/start.mjs 12\`\nEOF`, DENY_REASON],
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(reason), cmd);
+  }
+});
+
+test("#240 edge: an empty heredoc, CRLF line ends and an unquoted body with nothing to expand, sent by gh, get no decision", () => {
+  for (const cmd of [
+    "cat > .lanes/c.md <<'EOF'\nEOF\ngh issue comment 1 --body-file .lanes/c.md",
+    "cat > .lanes/c.md <<'EOF'\r\nit's queue.mjs\r\nEOF\r\ngh issue comment 1 --body-file .lanes/c.md\r\n",
+    "cat > .lanes/c.md <<EOF\nit's queue.mjs, run by the owner\nEOF\ngh issue comment 1 --body-file .lanes/c.md",
+  ]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, JSON.stringify(cmd));
+  }
+});
+
+test("#240 edge: an unquoted body sent by gh still runs its substitutions", () => {
+  assert.deepEqual(decidePreToolUse(bash("cat > c.md <<EOF\n$(node scripts/lanes/queue.mjs)\nEOF\ngh issue comment 1 --body-file c.md"), null, NOW), deny(QUEUE_DENY_REASON));
+  assert.deepEqual(decidePreToolUse(bash("gh issue comment 1 --body-file - <<EOF\n`node scripts/lanes/start.mjs 12`\nEOF"), null, NOW), deny(DENY_REASON));
+});
+
+test("#246 edge: a pipe into a shell anywhere down the pipeline, or behind a wrapper, runs the backticks", () => {
+  for (const [cmd, reason] of [
+    ["cat <<'EOF' | tee .lanes/x.log | bash\necho `node scripts/lanes/start.mjs 12`\nEOF", DENY_REASON],
+    ["cat <<'EOF' |& sh\necho `node scripts/lanes/queue.mjs`\nEOF", QUEUE_DENY_REASON],
+    ["cat <<'EOF' | env bash -s\necho `node scripts/lanes/queue.mjs`\nEOF", QUEUE_DENY_REASON],
+    ["printf '%s\\n' 'echo `node scripts/lanes/queue.mjs`' | sh", QUEUE_DENY_REASON],
+    ["echo 'echo `scripts/lanes/start.mjs`' | bash", DENY_REASON],
+    ["echo '`scripts/lanes/queue.mjs`' | sh", QUEUE_DENY_REASON],
+    ["echo 'x' 'node scripts/lanes/queue.mjs' | sh", QUEUE_DENY_REASON],
+  ]) {
+    assert.deepEqual(decide(cmd), deny(reason), cmd);
+  }
+});
+
+test("#246 edge: backticks in text piped into no shell, or after || (no pipe), stay text", () => {
+  for (const cmd of [
+    "echo 'Fix `start.mjs` parsing' | grep start",
+    "cat <<'EOF' | wc -l\nFix `start.mjs` parsing\nEOF",
+    "git commit -F - <<'EOF' || bash scripts/lanes/cleanup.sh\nFix `start.mjs` parsing\nEOF",
+    "cat <<'EOF'\nFix `start.mjs` parsing\nEOF",
+  ]) {
+    assert.equal(decide(cmd), null, cmd);
+  }
+});
