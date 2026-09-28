@@ -835,3 +835,171 @@ test("the CLI answers deny, never crashes, when it cannot evaluate a PreToolUse 
   assert.equal(ok.status, 0);
   assert.equal(ok.stdout, "");
 });
+
+// --- #142: escaped and quoted brace characters, nested braces (#167) ----------------------------------------------
+
+test("a backslash-escaped close brace inside a brace alternative does not end the group (#142 reproduction)", () => {
+  denied("node scripts/lanes/{post-review.mjs,a\\}b} owner --pr 16");
+});
+
+test("escaped or quoted brace characters parse as bash parses them (#142)", () => {
+  // An escaped `{`, `}` or `,` neither opens, ends nor splits the group; the other alternative still expands.
+  denied("node scripts/lanes/{post-review.mjs,a\\{b} owner --pr 16");
+  denied("node scripts/lanes/{x\\},post-review.mjs} owner --pr 16");
+  denied("node scripts/lanes/{a\\,b,post-review.mjs} owner --pr 16");
+  denied('node scripts/lanes/{post-review.mjs,"a}b"} owner --pr 16');
+  denied("node scripts/lanes/{post-review.mjs,'a,}'} owner --pr 16");
+  // An escaped comma leaves one alternative, and an escaped open brace opens nothing: the brace is literal text
+  // with the backslash dropped, so the word is {post-review.mjs,x}, not post-review.mjs.
+  allowed("node scripts/lanes/{post-review.mjs\\,x} owner --pr 16");
+  allowed("node scripts/lanes/{post-review.mjs','x} owner --pr 16");
+  allowed("node scripts/lanes/\\{post-review.mjs,x} owner --pr 16");
+  allowed("node scripts/lanes/{post-review.mjs,x\\} owner --pr 16");
+});
+
+test("a nested brace before a slash-carrying alternative that spells the owner script path is an owner command (#167)", () => {
+  denied("node {{a,b},scripts/lanes/post-review.mjs} owner --pr 16");
+  denied("node scripts/{{a,b},lanes/post-review.mjs} owner --pr 16");
+  denied("node {x,{a,scripts/lanes/post-review.mjs}} owner --pr 16");
+  // The same shapes naming another script are ordinary arguments.
+  allowed("node scripts/{{a,b},lanes/gate.mjs} 16");
+  allowed("node {{a,b},scripts/lanes/gate.mjs} 16");
+});
+
+test("edge: brace words that expand to very many alternatives fail closed in the script position (#142)", () => {
+  denied(`node ${"{a,b}".repeat(14)}x owner --pr 16`);
+  // A long integer sequence is no match for the name, however long.
+  allowed("node scripts/lanes/post-review.mj{1..99999999} owner --pr 16");
+});
+
+// --- #193: a quoted heredoc written to a file that a later command runs ----------------------------------------------
+
+test("a quoted heredoc written by tee or cat to a file a later command runs is denied (#193, fixed by #140's review)", () => {
+  denied("tee script.sh <<'EOF'\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF\nbash script.sh");
+  denied("cat > script.sh <<'EOF'\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF\nbash script.sh");
+  // The non-heredoc form was never an exception: echo's argument text is scanned whatever reads it.
+  denied('echo "node scripts/lanes/post-review.mjs owner --pr 16" > script.sh; bash script.sh');
+});
+
+test("post-review.mjs itself refuses the owner post a written script would make, without a fresh grant (#193, #81)", async () => {
+  const { main } = await import("./post-review.mjs");
+  withDir((dir) => {
+    const calls = [];
+    const run = (...args) => {
+      calls.push(args);
+      throw new Error("gh must not be called without a grant");
+    };
+    assert.throws(() => main(["owner", "success", "x", "--pr", "16"], { run, log: () => {}, warn: () => {}, grantDir: dir, now: NOW }), /no fresh \/approve 16 grant/);
+    assert.deepEqual(calls, []);
+  });
+});
+
+// --- #119: powershell, pwsh, cmd and fish run a string as a command too --------------------------------------------
+
+const encoded = (text) => Buffer.from(text, "utf16le").toString("base64");
+
+test("the owner command run by powershell, pwsh, cmd or fish is denied (#119)", () => {
+  for (const cmd of [
+    'powershell.exe -Command "node scripts/lanes/post-review.mjs owner --pr 16"',
+    "powershell -NoProfile node scripts/lanes/post-review.mjs owner --pr 16",
+    "pwsh -c 'node scripts/lanes/post-review.mjs owner --pr 16'",
+    "pwsh.exe -NoLogo -Command node scripts/lanes/post-review.mjs owner --pr 16",
+    'cmd.exe /c "node scripts/lanes/post-review.mjs owner --pr 16"',
+    "cmd //c node scripts/lanes/post-review.mjs owner --pr 16",
+    "fish -c 'node scripts/lanes/post-review.mjs owner --pr 16'",
+    "fish --command='node scripts/lanes/post-review.mjs owner --pr 16'",
+  ]) denied(cmd);
+});
+
+test("a spliced or substituted script or reviewer word run by powershell, pwsh, cmd or fish is denied (#119)", () => {
+  for (const cmd of [
+    // powershell / pwsh: variables, concatenation, the backtick escape, an encoded command
+    "powershell.exe -Command '$s=\"post-re\"+\"view.mjs\"; node scripts/lanes/$s owner --pr 16'",
+    "pwsh -c 'node scripts/lanes/post-re`view.mjs owner --pr 16'",
+    "pwsh -c 'node scripts/lanes/post-review.mjs (\"ow\"+\"ner\") --pr 16'",
+    `powershell -EncodedCommand ${encoded("node scripts/lanes/post-review.mjs owner --pr 16")}`,
+    `pwsh -e ${encoded("node scripts/lanes/post-review.mjs owner --pr 16")}`,
+    // cmd: %VAR% and delayed !VAR! expansion, the ^ escape
+    'cmd.exe /c "set S=scripts/lanes/post-review.mjs&& node %S% owner --pr 16"',
+    'cmd /v:on /c "node scripts/lanes/post-review.mjs !R! --pr 16"',
+    "cmd //c node scripts/lanes/post-rev^iew.mjs owner --pr 16",
+    "cmd.exe /c node scripts/lanes/post-review.mjs %R% --pr 16",
+    // fish: command substitution with ( ), variables
+    "fish -c 'node scripts/lanes/post-(echo review).mjs owner --pr 16'",
+    "fish -c 'node scripts/lanes/post-review.mjs (echo owner) --pr 16'",
+    "fish -c 'set s post-review.mjs; node scripts/lanes/$s owner --pr 16'",
+  ]) denied(cmd);
+});
+
+test("ordinary powershell, pwsh, cmd and fish commands get no decision (#119)", () => {
+  for (const cmd of [
+    "pwsh -c Get-ChildItem",
+    "powershell -NoProfile -Command Get-Date",
+    "cmd //c dir",
+    "cmd.exe /c echo hello",
+    "fish -c 'ls -la'",
+    `powershell -EncodedCommand ${encoded("Get-Date")}`,
+  ]) allowed(cmd);
+});
+
+// --- owner session, 2026-09-28: a regex literal in quoted interpreter code is no shell glob ------------------------
+
+test("a regex literal inside quoted node -e code is not a post-review run, while a real glob still counts", () => {
+  allowed('node -e "s.match(/a\\n([^\\n]*)/)"');
+  allowed("node -e '/([^x]*)/.test(s)'");
+  allowed("node -e \"console.log('post-*.mjs'.length)\"");
+  denied("node scripts/lanes/post-rev*.mjs owner --pr 16");
+  denied("bash -c 'node scripts/lanes/post-rev*.mjs owner --pr 16'");
+});
+
+// --- #219: backticks and $ made literal by quoting ------------------------------------------------------------------
+
+test("#219 goal: echo '`x` foo' is allowed (single-quoted: bash runs nothing)", () => allowed("echo '`x` foo'"));
+test('#219 goal: echo "\\`x\\` foo" is allowed (escaped: bash runs nothing)', () => allowed('echo "\\`x\\` foo"'));
+test('#219 goal: gh issue comment 1 --body "\\`a.mjs\\` is fine" is allowed', () => allowed('gh issue comment 1 --body "\\`a.mjs\\` is fine"'));
+test('#219 goal: gh issue comment 1 --body "see \\`a.mjs\\` here" is allowed', () => allowed('gh issue comment 1 --body "see \\`a.mjs\\` here"'));
+test("#219 goal: grep -n '` x' file.mjs is allowed", () => allowed("grep -n '` x' file.mjs"));
+
+test("a quoted $ or backtick still counts where the command runs its arguments as shell text (#219)", () => {
+  denied("bash -c '`echo node` scripts/lanes/post-review.mjs owner --pr 1'");
+  denied("bash -c 'node scripts/lanes/post-review.mjs `echo owner` --pr 1'");
+  denied("sh -c 'node $S owner --pr 1'");
+  denied("eval 'node scripts/lanes/post-$X.mjs owner --pr 1'");
+  denied('eval "node scripts/lanes/post-review.mjs owner --pr 1"');
+  denied("sudo bash -c 'node $S owner --pr 1'");
+  denied("xargs sh -c 'node $S owner --pr 1'");
+  denied("echo 'node $S owner --pr 1' | bash");
+  denied("echo 'node $S owner --pr 1' > s.sh; bash s.sh");
+  denied("A='node $S owner --pr 1'; eval \"$A\"");
+  denied('echo "$(node scripts/lanes/post-review.mjs owner --pr 1)"');
+  denied('echo "`node scripts/lanes/post-review.mjs owner --pr 1`"');
+});
+
+test("edge: quoting found while implementing #142/#219 reads as bash reads it", () => {
+  // A "${NAME}" reference inside double quotes still resolves, braces and all.
+  denied('S=scripts/lanes/post-review.mjs; node "${S}" owner --pr 16');
+  denied('S=post-review; node "scripts/lanes/${S}.mjs" owner --pr 16');
+  // An empty alternative still expands: post-review.mjs{,} is post-review.mjs twice.
+  denied("node scripts/lanes/post-review.mjs{,} owner --pr 16");
+  // A character sequence across Z..a holds `[` and a backtick; they are plain text, not a glob or a substitution.
+  denied("node scripts/lanes/post-revie{Z..w}.mjs owner --pr 16");
+  // A single-quoted $ or glob in node's script position is a literal file name bash never expands.
+  allowed("node '$S' owner --pr 16");
+  allowed("node 'scripts/lanes/post-rev*.mjs' owner --pr 16");
+  // What echo prints into a shell is read afresh: the quoted reviewer word comes alive there.
+  denied("echo node scripts/lanes/post-review.mjs '$R' --pr 16 | bash");
+  // Wrappers that hand their arguments to a shell as text.
+  for (const w of ["watch", "ssh localhost", "su -c", "sudo -s", "sudo -i", "flock /tmp/l -c", "script -q -c"]) denied(`${w} 'node $S owner --pr 16'`);
+  allowed("sudo -u node node scripts/lanes/gate.mjs '$x y'");
+  // A -EncodedCommand value that is no base64 is read as it stands.
+  allowed("pwsh -EncodedCommand not_base64");
+  denied("pwsh -ec 'node $S owner --pr 16'");
+});
+
+test("edge: literal backticks and $ in data arguments are allowed; live ones in double quotes are still scanned (#219)", () => {
+  allowed("git commit -m 'fix `x` in $HOME handling'");
+  allowed("gh pr comment 1 --body '`$x` is `y`'");
+  allowed("echo \\`x\\` foo");
+  allowed("printf '%s\\n' '`a` $b'");
+  denied('echo "`node scripts/lanes/post-review.mjs owner --pr 1` x"');
+});

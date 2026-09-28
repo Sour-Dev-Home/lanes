@@ -112,6 +112,15 @@ function literalSubstitution(cmd, i) {
   return close ? { body, end: end + close[0].length - 1 } : null;
 }
 
+// A `$`, backtick, brace, comma or glob character that quoting or a backslash made literal (#142, #219) stays in its
+// word as a private-use stand-in, so the brace, glob and substitution checks read it as bash does: plain text. `unmark`
+// puts the real characters back wherever the word is handed on as shell text to run (bash -c '…', eval, a pipe into
+// a shell), where bash reads them afresh.
+const LITERAL = { $: "", "`": "", "{": "", "}": "", ",": "", "*": "", "?": "", "[": "" };
+const ORIGINAL = Object.fromEntries(Object.entries(LITERAL).map(([c, m]) => [m, c]));
+const mark = (s) => s.replace(/[$`{},*?[]/g, (c) => LITERAL[c]);
+const unmark = (s) => s.replace(/[-]/g, (m) => ORIGINAL[m]);
+
 /**
  * Shell-ish lexer: words (quotes and backslashes resolved, nothing expanded) grouped into simple commands split on
  * ; & | ( ) newlines and redirections. A redirection's target (and a bare fd number right before it, as in `2>file`)
@@ -120,7 +129,8 @@ function literalSubstitution(cmd, i) {
  * herestring (`bash <<< "…"`) is a script. A heredoc's body is not lexed as commands on the outer line (#100): it goes
  * to its segment's `heredocs`, and a literal `$(cat <<'EOF' … EOF)` reads as its body, with that word's index in the
  * segment's `literal`. A segment whose output a `|` or `|&` feeds into the next one has `pipedOut` set
- * (`(echo …) | sh` marks the echo). Throws on an unterminated quote.
+ * (`(echo …) | sh` marks the echo). A quoted or escaped `$`, backtick, brace, comma or glob character is marked
+ * literal (see LITERAL). Throws on an unterminated quote.
  * @returns {(string[] & { pipedOut?: true, redirects?: { text: string, herestring: boolean, toFile: boolean }[], heredocs?: { body: string, quoted: boolean }[], literal?: Set<number> })[]}
  */
 function lex(cmd) {
@@ -161,7 +171,7 @@ function lex(cmd) {
     if (c === "'") {
       const end = cmd.indexOf("'", i + 1);
       if (end === -1) throw new Error("unterminated '");
-      word = (word ?? "") + cmd.slice(i + 1, end);
+      word = (word ?? "") + mark(cmd.slice(i + 1, end));
       i = end;
     } else if (c === '"') {
       let j = i + 1;
@@ -169,24 +179,33 @@ function lex(cmd) {
       for (; j < cmd.length && cmd[j] !== '"'; j += 1) {
         const lit = cmd[j] === "$" ? literalSubstitution(cmd, j) : null;
         if (lit) {
-          s += lit.body;
+          s += mark(lit.body);
           wordLiteral = true;
           j = lit.end;
           continue;
         }
-        if (cmd[j] === "\\" && '"\\$`'.includes(cmd[j + 1] ?? "")) j += 1;
-        s += cmd[j];
+        // Inside double quotes only `$` (with a `${…}` reference's braces) and a backtick stay live, and only when no
+        // backslash escapes them.
+        const ref = cmd[j] === "$" && cmd[j + 1] === "{" ? cmd.indexOf("}", j) : -1;
+        if (ref !== -1 && !cmd.slice(j, ref).includes('"')) {
+          s += cmd.slice(j, ref + 1);
+          j = ref;
+          continue;
+        }
+        const escaped = cmd[j] === "\\" && '"\\$`'.includes(cmd[j + 1] ?? "");
+        if (escaped) j += 1;
+        s += escaped || !"$`".includes(cmd[j]) ? mark(cmd[j]) : cmd[j];
       }
       if (j >= cmd.length) throw new Error('unterminated "');
       word = (word ?? "") + s;
       i = j;
     } else if (c === "$" && literalSubstitution(cmd, i)) {
       const lit = literalSubstitution(cmd, i);
-      word = (word ?? "") + lit.body;
+      word = (word ?? "") + mark(lit.body);
       wordLiteral = true;
       i = lit.end;
     } else if (c === "\\") {
-      if (cmd[i + 1] !== "\n") word = (word ?? "") + (cmd[i + 1] ?? "");
+      if (cmd[i + 1] !== "\n") word = (word ?? "") + mark(cmd[i + 1] ?? "");
       i += 1;
     } else if (c === "\n" && pending.length > 0) {
       // The heredocs opened on this line: their bodies follow it, each up to its delimiter line.
@@ -280,6 +299,27 @@ const RUNS_VIA_RUN_RE = /^(bun|deno)(\.exe)?$/i;
 // Commands that run their arguments as shell text: eval and source always, a shell after a -c flag.
 const EVAL_RE = /^(eval|source|\.)$/;
 const SHELL_RE = /^(sh|bash|zsh|dash|ksh|ash|busybox)(\.exe)?$/i;
+// Shells with another syntax (#119): every argument after one may be its command text (powershell.exe runs its
+// arguments as a command by default, cmd takes /c or /k anywhere, and `-c`/`-Command` have prefixes and `=` forms), so
+// all of them count as run. Their own splicing (`$x`, `%X%`, `!X!`, `(…)`, `+`, the `^` and backtick escapes) cannot be
+// resolved here, so text of theirs holding any of it fails closed.
+const FOREIGN_SHELL_RE = /^(powershell|pwsh|cmd|fish)(\.exe)?$/i;
+const FOREIGN_SPLICE_RE = /[$`%!^()[\]{}+@*?]/;
+// powershell's -EncodedCommand (and its -e, -ec and prefix forms) takes base64 UTF-16LE: read it decoded.
+const isEncodedFlag = (w) => /^[-/]e[a-z]*$/i.test(w) && (w.slice(1).toLowerCase() === "ec" || "encodedcommand".startsWith(w.slice(1).toLowerCase()));
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/** A word a foreign shell runs, as text: an -EncodedCommand value decoded, any other word with its real characters. */
+function foreignText(plain, i, shellName) {
+  const text = unmark(plain[i]);
+  if (/^(powershell|pwsh)/i.test(shellName) && isEncodedFlag(plain[i - 1] ?? "") && BASE64_RE.test(text)) {
+    return Buffer.from(text, "base64").toString("utf16le");
+  }
+  return text;
+}
+// Commands that hand their arguments to a shell as text without a -c flag of bash's (#219): watch, ssh, su -c,
+// script -c, flock -c, parallel, tmux, screen. Every argument after one counts as run.
+const SHELL_TEXT_COMMANDS = new Set(["watch", "ssh", "su", "runuser", "script", "flock", "parallel", "tmux", "screen"]);
 // Commands that only print, list or search their arguments: a "node" among them is never run. Every other command
 // word may be a wrapper (env, sudo, time, xargs, …), so a "node" behind it counts.
 const NON_RUNNING_COMMANDS = new Set(["echo", "printf", "grep", "egrep", "fgrep", "rg", "ls", "which", "where", "whereis", "type", "cat", "head", "tail", "wc", "file", "stat", "man"]);
@@ -402,11 +442,49 @@ function topLevelCommas(s) {
   return parts;
 }
 
+// Stands for the numbers an integer sequence {1..9} expands to, which no name needs spelled out.
+const DIGITS = "";
+// How many words a brace expansion may produce before the guard stops expanding and fails closed.
+const MAX_EXPANSIONS = 1024;
+
 /**
- * A regex source matching everything a glob and brace pattern can expand to, as bash reads it: a list `{a,b}` or a
- * sequence `{a..c}`/`{1..3}` expands, any other brace is literal text. An unclosed `{` is literal to bash too (#123),
- * but it is read as optional, so a word such as post-review{.mjs that names the script once the stray brace is dropped
- * still fails closed.
+ * The words bash's brace expansion makes of `s`, as bash reads it (#142, #167): the leftmost list `{a,b}` or sequence
+ * `{a..c}`/`{1..3}` expands, each result is expanded again from that brace on, and any other brace is literal text.
+ * A marked (quoted or escaped) brace or comma is plain text, so it neither opens, closes nor splits a group. Null when
+ * the expansion would make more than MAX_EXPANSIONS words.
+ */
+function braceExpand(s) {
+  const out = [];
+  const walk = (str, from) => {
+    if (out.length > MAX_EXPANSIONS) return;
+    for (let i = str.indexOf("{", from); i !== -1; i = str.indexOf("{", i + 1)) {
+      const end = closingBrace(str, i);
+      if (end === -1) continue;
+      const inner = str.slice(i + 1, end);
+      const parts = topLevelCommas(inner);
+      let alts = null;
+      let seq;
+      if (parts.length > 1) alts = parts;
+      else if (INT_SEQ_RE.test(inner)) alts = [DIGITS];
+      else if ((seq = CHAR_SEQ_RE.exec(inner))) {
+        const [lo, hi] = [seq[1].charCodeAt(0), seq[2].charCodeAt(0)].sort((a, b) => a - b);
+        alts = [];
+        for (let code = lo; code <= hi; code += 1) alts.push(mark(String.fromCharCode(code)));
+      }
+      if (alts === null) continue;
+      for (const alt of alts) walk(str.slice(0, i) + alt + str.slice(end + 1), i);
+      return;
+    }
+    out.push(str);
+  };
+  walk(s, 0);
+  return out.length > MAX_EXPANSIONS ? null : out;
+}
+
+/**
+ * A regex source matching everything a glob pattern (with no brace left to expand) can match, as bash reads it. A
+ * closed brace is literal text. An unclosed `{` is literal to bash too (#123), but it is read as optional, so a word
+ * such as post-review{.mjs that names the script once the stray brace is dropped still fails closed.
  */
 function patternRe(s) {
   let re = "";
@@ -414,6 +492,7 @@ function patternRe(s) {
     const c = s[i];
     if (c === "*") re += ".*";
     else if (c === "?") re += ".";
+    else if (c === DIGITS) re += "-?[0-9]+";
     else if (c === "[") {
       const end = s.indexOf("]", i + 2);
       if (end === -1) re += "\\[";
@@ -421,39 +500,24 @@ function patternRe(s) {
         re += ".";
         i = end;
       }
-    } else if (c === "{") {
-      const end = closingBrace(s, i);
-      if (end === -1) {
-        re += "\\{?";
-        continue;
-      }
-      const inner = s.slice(i + 1, end);
-      const parts = topLevelCommas(inner);
-      let seq;
-      if (parts.length > 1) re += `(?:${parts.map(patternRe).join("|")})`;
-      else if (INT_SEQ_RE.test(inner)) re += "-?[0-9]+";
-      else if ((seq = CHAR_SEQ_RE.exec(inner))) {
-        const [lo, hi] = [seq[1].charCodeAt(0), seq[2].charCodeAt(0)].sort((a, b) => a - b);
-        let chars = "";
-        for (let code = lo; code <= hi; code += 1) chars += String.fromCharCode(code);
-        re += `[${escapeRe(chars)}]`;
-      } else re += `\\{${patternRe(inner)}\\}`;
-      i = end;
-    } else re += escapeRe(c);
+    } else if (c === "{" && closingBrace(s, i) === -1) re += "\\{?";
+    else re += escapeRe(ORIGINAL[c] ?? c);
   }
   return re;
 }
 
 /**
- * Whether a word bash would glob- or brace-expand could expand to post-review.mjs: its last path component, as a
- * pattern, matches the name. A brace holding a `/` counts as a match.
+ * Whether a word bash would glob- or brace-expand could expand to post-review.mjs: the last path component of one of
+ * its brace expansions, as a pattern, matches the name. A word with too many expansions to check counts as a match.
  */
 function mayExpandToPostReview(w) {
   if (!GLOB_RE.test(w)) return false;
-  if (/\{[^}]*\/[^}]*\}/.test(w)) return true;
-  const re = patternRe(w.slice(w.lastIndexOf("/") + 1));
-  const pattern = new RegExp(`^${re}$`, "i");
-  return pattern.test("post-review.mjs") || pattern.test("post-review");
+  const words = braceExpand(w);
+  if (words === null) return true;
+  return words.some((x) => {
+    const pattern = new RegExp(`^${patternRe(x.slice(x.lastIndexOf("/") + 1))}$`, "i");
+    return pattern.test("post-review.mjs") || pattern.test("post-review");
+  });
 }
 
 /** Text with every quote and backslash dropped, so a name split by quoting (pos"t-review) reads whole. */
@@ -464,11 +528,14 @@ const commandName = (plain) => plain[0]?.split(/[\\/]/).at(-1);
 
 /**
  * A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own. One that still holds
- * `$` or a glob may splice a name inside it, so it is scanned too. True when `w` was such a script.
+ * `$` or a glob may splice a name inside it, so it is scanned too. `shell` is true when the word is run as shell text
+ * (so its quoted `$`, backticks and globs come alive again); otherwise only its live ones count (#219), and a quoted
+ * `$`, backtick or regex in, say, `echo '`x` foo'` or node -e code is no script. True when `w` was such a script.
  */
-function scanNested(w, depth, out) {
-  if (!/[\s;&|()<>]/.test(w) || !/post-review|[$`*?[{]/i.test(unquoted(w))) return false;
-  scanScript(w, depth, out);
+function scanNested(w, depth, out, shell) {
+  const text = unmark(w);
+  if (!/[\s;&|()<>]/.test(text) || !(/post-review/i.test(unquoted(text)) || /[$`*?[{]/.test(shell ? unquoted(text) : w))) return false;
+  scanScript(text, depth, out);
   return true;
 }
 
@@ -519,7 +586,9 @@ function scan(cmd, depth, out) {
     const programArgs = PROGRAM_RE.test(name ?? "") && !feedsRunner(k);
     // A heredoc body is a script unless a data command reads it. awk and sed are no data commands here: they can run
     // their input (system($0), sed's e). A body written to a file (tee, `>`) that a later command in this one may run
-    // is scanned too (#140 security review), and an unquoted body still runs its `$(…)` and backticks.
+    // is scanned too (#140 security review), and an unquoted body still runs its `$(…)` and backticks. That is what
+    // closes #193 (`tee s.sh <<'EOF' … EOF` then `bash s.sh`); the non-heredoc form (`echo "…" > s.sh; bash s.sh`) was
+    // never an exception, since an argument naming post-review is scanned whatever command it goes to.
     const writesFile = name === "tee" || (segments[k].redirects ?? []).some((r) => r.toFile);
     const laterRuns = () => plains.some((p, m) => m > k && p.length > 0 && !DATA_COMMANDS.has(commandName(p)));
     // Inside a process substitution (`bash <(cat <<'EOF' … EOF)`), the output goes to the command around it: a script.
@@ -536,18 +605,28 @@ function scan(cmd, depth, out) {
     // Words that eval, source or a shell's -c runs as shell text: one still holding `$` or a backtick could be any
     // command at all (`eval $A$B` with both ambiguous), so it fails closed like node's script.
     let evalFrom = Infinity;
+    // The first word a powershell, pwsh, cmd or fish runs, and that shell's name (#119).
+    let foreignFrom = Infinity;
+    let foreignName;
     plain.forEach((p, at) => {
       if ((at > 0 && !runsArgs) || at >= evalFrom) return;
       const name = p.split(/[\\/]/).at(-1);
-      if (EVAL_RE.test(name)) evalFrom = at + 1;
-      else if (SHELL_RE.test(name)) {
+      if (EVAL_RE.test(name) || SHELL_TEXT_COMMANDS.has(name)) evalFrom = at + 1;
+      else if (name === "sudo" && plain.some((w, j) => j > at && /^(-[A-Za-z]*[si][A-Za-z]*|--shell|--login)$/.test(w))) evalFrom = at + 1;
+      else if (FOREIGN_SHELL_RE.test(name)) {
+        evalFrom = at + 1;
+        foreignFrom = at + 1;
+        foreignName = name;
+      } else if (SHELL_RE.test(name)) {
         const c = plain.findIndex((w, j) => j > at && /^-[A-Za-z]*c[A-Za-z]*$/.test(w));
         if (c !== -1) evalFrom = c + 1;
       }
     });
+    // Every argument is shell text when the output feeds a shell, or goes to a file a later command may run (#219).
+    const argsRun = feedsRunner(k) || (writesFile && laterRuns());
     // An assigned value may be run later by eval or sh -c "$CMD", and an ambiguous one is never substituted: scan
     // every value that looks like a script as a command of its own.
-    for (const j of assigned[k]) scanNested(ASSIGN_RE.exec(segments[k][j])[2], depth, out);
+    for (const j of assigned[k]) scanNested(ASSIGN_RE.exec(segments[k][j])[2], depth, out, true);
     // A redirection target is no argument, but a herestring is a script and a quoted `$(…)` or backtick in any other
     // target runs. A plain file target ("$TMP/out file.txt") is neither.
     for (const { text, herestring } of segments[k].redirects ?? []) {
@@ -558,15 +637,22 @@ function scan(cmd, depth, out) {
       } catch {
         words = [text];
       }
-      for (const w of words) scanNested(w, depth, out);
+      for (const w of words) scanNested(w, depth, out, herestring);
     }
-    plain.forEach((w, i) => {
+    plain.forEach((raw, i) => {
+      // A word run as shell text reads with its quoted characters alive again.
+      const shell = i >= evalFrom || argsRun;
+      const w = shell ? unmark(raw) : raw;
+      const foreign = i >= foreignFrom ? foreignText(plain, i, foreignName) : null;
       if (i > 0 && ((readsData && literalAt[k].has(i)) || (programArgs && !/post-review/i.test(unquoted(w))))) {
         // Data for a command that does not run it: a commit message, a PR body, an awk program.
-      } else if (scanNested(w, depth, out)) {
+      } else if (foreign !== null && (FOREIGN_SPLICE_RE.test(foreign) || scanNested(foreign, depth, out, true))) {
+        // Text another shell runs: splicing of its own fails closed, and plain text is scanned as a command.
+        if (FOREIGN_SPLICE_RE.test(foreign)) out.push({ pr: undefined, standalone: false });
+      } else if (scanNested(raw, depth, out, shell)) {
         // Scanned as a command of its own.
       } else if (POST_REVIEW_RE.test(w)) {
-        const { reviewer, pr } = readPostReviewArgs(plain.slice(i + 1));
+        const { reviewer, pr } = readPostReviewArgs(plain.slice(i + 1).map((x) => (shell ? unmark(x) : x)));
         // Fail closed: a reviewer word that could expand to anything counts as the owner.
         if (reviewer === "owner" || (reviewer !== undefined && /[$`*?[{]/.test(reviewer))) out.push({ pr, standalone: false });
       } else if ((UNRESOLVED_RE.test(w) || mayExpandToPostReview(w)) && (i === 0 || nodeRange.has(i) || (i >= evalFrom && UNRESOLVED_RE.test(w)))) {
