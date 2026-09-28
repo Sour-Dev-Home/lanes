@@ -4,11 +4,12 @@
 //     a prompt that is exactly `/approve <N>` writes a grant { sessionId, pr: N, at } to .lanes/approve/<session>.json;
 //     any other prompt in that session deletes it.
 //   PreToolUse (Bash): node scripts/lanes/approve-guard.mjs pre-tool-use
-//     `post-review.mjs owner` is allowed (no prompt) once, only as the plain command, only with a grant from this
-//     session under 15 minutes old for the same --pr. Every other owner command is denied; anything else gets no
+//     `post-review.mjs owner` is allowed (no prompt) only as the plain command, only with a grant from this
+//     session under 15 minutes old for the same --pr. The allow keeps the grant: post-review.mjs checks it again
+//     and consumes it after the status is posted, so every route to review/owner needs a fresh /approve (#81). Every other owner command is denied; anything else gets no
 //     decision. A PreToolUse `allow` cannot skip an `ask` rule (observed on 2.1.283), so there is no `ask` rule for
 //     the owner command any more: this hook's deny is the barrier, and it holds in every permission mode.
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -447,15 +448,29 @@ export function findOwnerInvocations(command) {
   return out;
 }
 
-function validGrant(grant) {
+/** The directory the UserPromptSubmit hook writes grants to: .lanes/approve/ in the checkout holding this script. */
+export function grantDir() {
+  return fileURLToPath(new URL("../../.lanes/approve/", import.meta.url));
+}
+
+/** A grant file's shape: { sessionId: string, pr: positive integer, at: a parseable date }. */
+export function validGrant(grant) {
   return grant !== null && typeof grant === "object" && typeof grant.sessionId === "string" && Number.isSafeInteger(grant.pr) && grant.pr > 0 && typeof grant.at === "string" && !Number.isNaN(Date.parse(grant.at));
+}
+
+/** A valid grant for exactly `pr`, written no more than GRANT_TTL_MS ago (and not in the future). */
+export function isFreshGrant(grant, pr, now = Date.now()) {
+  if (!validGrant(grant) || grant.pr !== pr) return false;
+  const age = now - Date.parse(grant.at);
+  return age >= 0 && age < GRANT_TTL_MS;
 }
 
 /**
  * PreToolUse: null (no decision) unless the command runs `post-review.mjs owner`; then allow only with this session's
  * fresh grant for the same --pr, and deny everything else.
  * @param grant the session's grant file as parsed, null when there is none, or { unreadable: true }
- * @returns {null | { decision: "allow", reason: string, consumeGrant: true } | { decision: "deny", reason: string }}
+ * The allow leaves the grant in place: post-review.mjs checks it again and consumes it once the status is posted (#81).
+ * @returns {null | { decision: "allow" | "deny", reason: string }}
  */
 export function decidePreToolUse(input, grant, now = Date.now()) {
   if (input?.tool_name !== "Bash") return null;
@@ -466,12 +481,12 @@ export function decidePreToolUse(input, grant, now = Date.now()) {
   if (found.length !== 1 || !found[0].standalone) return deny;
   if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId) || !validGrant(grant)) return deny;
   if (grant.sessionId !== sessionId || String(grant.pr) !== found[0].pr) return deny;
-  const age = now - Date.parse(grant.at);
-  if (age < 0 || age >= GRANT_TTL_MS) return deny;
-  return { decision: "allow", reason: `owner approval from /approve ${grant.pr} in this session`, consumeGrant: true };
+  if (!isFreshGrant(grant, grant.pr, now)) return deny;
+  return { decision: "allow", reason: `owner approval from /approve ${grant.pr} in this session` };
 }
 
-function readGrant(file) {
+/** One grant file, parsed: null when it does not exist, { unreadable: true } when it cannot be read or parsed. */
+export function readGrant(file) {
   let text;
   try {
     text = readFileSync(file, "utf8");
@@ -483,6 +498,25 @@ function readGrant(file) {
   } catch {
     return { unreadable: true };
   }
+}
+
+/**
+ * The path of a grant file in `dir` holding a fresh grant for `pr` (from any session), or null. A missing directory, an
+ * unreadable file or a file that is not *.json counts as no grant.
+ */
+export function findFreshGrant(dir, pr, now = Date.now()) {
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  for (const name of names.sort()) {
+    if (!name.endsWith(".json")) continue;
+    const file = join(dir, name);
+    if (isFreshGrant(readGrant(file), pr, now)) return file;
+  }
+  return null;
 }
 
 const preToolUseOutput = (decision, reason) => JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: decision, permissionDecisionReason: reason } });
@@ -511,7 +545,7 @@ export function runHook(event, raw, { dir, now = Date.now() }) {
       const file = typeof sessionId === "string" && SESSION_RE.test(sessionId) ? join(dir, `${sessionId}.json`) : null;
       const d = decidePreToolUse(input, file ? readGrant(file) : null, now);
       if (d === null) return "";
-      if (d.decision === "allow") rmSync(file); // single use; if it cannot be removed, the catch below denies
+      // An allow keeps the grant: post-review.mjs consumes it only after the review/owner status is posted (#81).
       return preToolUseOutput(d.decision, d.reason);
     } catch {
       return preToolUseOutput("deny", DENY_REASON);
@@ -524,8 +558,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // A hook that crashes is a non-blocking error and the tool call proceeds, so every failure here must answer deny.
   let out;
   try {
-    const dir = fileURLToPath(new URL("../../.lanes/approve/", import.meta.url));
-    out = runHook(process.argv[2], readFileSync(0, "utf8"), { dir });
+    out = runHook(process.argv[2], readFileSync(0, "utf8"), { dir: grantDir() });
   } catch {
     out = process.argv[2] === "user-prompt-submit" ? "" : preToolUseOutput("deny", DENY_REASON);
   }

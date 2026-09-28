@@ -4,11 +4,13 @@
 //   node scripts/lanes/post-review.mjs --file .lanes/verdicts/test-hunter.json [--pr N]
 // Free text only for the owner's approval and for a reviewer the tier does not need:
 //   node scripts/lanes/post-review.mjs owner success "approved by owner" --pr N
-//     (the approve guard allows this only from /approve <N>)
+//     (the approve guard allows this only from /approve <N>, and this script itself refuses it without a fresh,
+//     unused /approve <N> grant, which it consumes once the status is posted)
 //   node scripts/lanes/post-review.mjs ui-reviewer skipped "no visible change"
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { findFreshGrant, grantDir } from "./approve-guard.mjs";
 import { parseIssueForm, parsePrBody, REVIEWERS, reviewContext } from "./lib.mjs";
 
 const RESULTS = ["pass", "fail", "not-applicable"];
@@ -171,9 +173,22 @@ export function checkSha(sha, headRefOid) {
  * Runs the CLI. `run` stands in for `gh` in tests. With `--file` the verdict comment is posted before the status: the
  * status event re-runs lanes/gate, which must find the comment then (#42). A failed comment throws before any status.
  */
-export function main(argv = process.argv.slice(2), { run = gh, log = console.log, warn = console.warn } = {}) {
+/**
+ * #81: the owner's approval needs an unused, unexpired `/approve N` grant for exactly that PR, however the command was
+ * built. Returns the grant file to consume once the status is posted; throws when there is none.
+ */
+export function requireOwnerGrant(prArg, dir, now) {
+  if (prArg === undefined || !/^[1-9][0-9]{0,8}$/.test(prArg)) throw new Error("the owner's approval needs --pr N (the PR the /approve grant names)");
+  const file = findFreshGrant(dir, Number(prArg), now);
+  if (file === null) throw new Error(`no fresh /approve ${prArg} grant: run /approve ${prArg} in the owner's session`);
+  return file;
+}
+
+export function main(argv = process.argv.slice(2), { run = gh, log = console.log, warn = console.warn, grantDir: dir = grantDir(), now = Date.now() } = {}) {
   const parsed = parseArgs(argv);
+  const grantFile = !parsed.file && parsed.positional[0] === "owner" ? requireOwnerGrant(parsed.pr, dir, now) : null;
   const pr = JSON.parse(run(["pr", "view", ...(parsed.pr ? [parsed.pr] : []), "--json", "number,headRefOid,body"]));
+  if (grantFile && String(pr.number) !== parsed.pr) throw new Error(`refusing: gh resolved --pr ${parsed.pr} to #${pr.number}`);
   const staleSha = checkSha(parsed.sha, pr.headRefOid);
   if (staleSha) throw new Error(staleSha);
   const repo = run(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim();
@@ -195,6 +210,8 @@ export function main(argv = process.argv.slice(2), { run = gh, log = console.log
   }
   if (comment) run(["pr", "comment", String(pr.number), "--body", comment]);
   run(["api", `repos/${repo}/statuses/${pr.headRefOid}`, "-f", `state=${status.state}`, "-f", `context=${status.context}`, "-f", `description=${status.description}`]);
+  // Consumed only after the post succeeds: a failed post throws above and keeps the grant for a retry.
+  if (grantFile) rmSync(grantFile, { force: true });
   log(`${status.context}=${status.state} on #${pr.number} at ${pr.headRefOid.slice(0, 7)}`);
 }
 

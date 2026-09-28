@@ -1,7 +1,7 @@
 // scripts/lanes/post-review.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildStatus, buildVerdictComment, checkSha, main, metricsWarning, parseArgs, validateVerdict } from "./post-review.mjs";
@@ -308,12 +308,108 @@ test("without --file, only the status is posted, exactly as before", () => {
   ]);
 });
 
-test("without --file, the owner's approval posts only the status", () => {
+// #81: the owner's approval needs an unused, unexpired /approve grant for that PR, and consumes it.
+const NOW = Date.parse("2026-09-28T12:00:00Z");
+const GRANT_TTL = 15 * 60 * 1000;
+const grantFor = (pr, ageMs = 60_000, sessionId = "s1") => ({ sessionId, pr, at: new Date(NOW - ageMs).toISOString() });
+function grantDirWith(files = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "post-review-grants-"));
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), typeof content === "string" ? content : JSON.stringify(content));
+  return dir;
+}
+const approval = (...extra) => ["owner", "success", "approved", "--pr", "12", ...extra];
+const NO_GRANT = /(^|Error: )no fresh \/approve 12 grant: run \/approve 12 in the owner's session$/;
+
+test("without --file, the owner's approval with a fresh grant posts only the status and consumes the grant", () => {
   const gh = fakeGh();
-  const approval = ["owner", "success", "approved", "--sha", HEAD];
-  main(approval, { run: gh.run, ...quiet });
+  const dir = grantDirWith({ "s1.json": grantFor(12) });
+  main(approval("--sha", HEAD), { run: gh.run, ...quiet, grantDir: dir, now: NOW });
   assert.deepEqual(gh.writes.map((w) => w.kind), ["status"]);
   assert.ok(gh.writes[0].args.includes("context=review/owner"));
+  assert.equal(existsSync(join(dir, "s1.json")), false);
+});
+
+test("the owner's approval is refused with no grant, another PR's, an expired or a malformed one", () => {
+  const cases = {
+    "no grant": {},
+    "another PR's grant": { "s1.json": grantFor(13) },
+    "an expired grant": { "s1.json": grantFor(12, GRANT_TTL) },
+    "a malformed grant": { "s1.json": "{not json" },
+    "a grant with a string pr": { "s1.json": { ...grantFor(12), pr: "12" } },
+  };
+  for (const [name, files] of Object.entries(cases)) {
+    const gh = fakeGh();
+    const dir = grantDirWith(files);
+    assert.throws(() => main(approval(), { run: gh.run, ...quiet, grantDir: dir, now: NOW }), (e) => NO_GRANT.test(e.message), name);
+    assert.deepEqual(gh.writes, [], name);
+    for (const file of Object.keys(files)) assert.equal(existsSync(join(dir, file)), true, `${name}: left in place`);
+  }
+});
+
+test("a failed owner status post keeps the grant", () => {
+  const gh = fakeGh({ failOn: "status" });
+  const dir = grantDirWith({ "s1.json": grantFor(12) });
+  assert.throws(() => main(approval(), { run: gh.run, ...quiet, grantDir: dir, now: NOW }), /status failed/);
+  assert.equal(existsSync(join(dir, "s1.json")), true);
+});
+
+test("a second owner approval after a successful one is refused: the grant was consumed", () => {
+  const gh = fakeGh();
+  const dir = grantDirWith({ "s1.json": grantFor(12) });
+  main(approval(), { run: gh.run, ...quiet, grantDir: dir, now: NOW });
+  assert.throws(() => main(approval(), { run: gh.run, ...quiet, grantDir: dir, now: NOW + 1000 }), NO_GRANT);
+  assert.equal(gh.writes.length, 1);
+});
+
+test("a stale --sha on the owner's approval is refused before the grant is consumed", () => {
+  const gh = fakeGh();
+  const dir = grantDirWith({ "s1.json": grantFor(12) });
+  assert.throws(() => main(approval("--sha", "b".repeat(40)), { run: gh.run, ...quiet, grantDir: dir, now: NOW }), /does not match/);
+  assert.deepEqual(gh.writes, []);
+  assert.equal(existsSync(join(dir, "s1.json")), true);
+});
+
+test("edge: the owner's approval without --pr is refused, since a grant names one PR", () => {
+  const gh = fakeGh();
+  const dir = grantDirWith({ "s1.json": grantFor(12) });
+  assert.throws(() => main(["owner", "success", "approved"], { run: gh.run, ...quiet, grantDir: dir, now: NOW }), /--pr N/);
+  assert.deepEqual(gh.writes, []);
+  assert.equal(existsSync(join(dir, "s1.json")), true);
+});
+
+test("edge: a --pr that is not a plain positive integer is refused for the owner", () => {
+  for (const pr of ["012", "12abc", "0", "-1", "#12", "1e2"]) {
+    const gh = fakeGh();
+    const dir = grantDirWith({ "s1.json": grantFor(12) });
+    assert.throws(() => main(["owner", "success", "approved", "--pr", pr], { run: gh.run, ...quiet, grantDir: dir, now: NOW }), /--pr N/, pr);
+    assert.deepEqual(gh.writes, [], pr);
+  }
+});
+
+test("edge: a grant from the future is refused", () => {
+  const gh = fakeGh();
+  const dir = grantDirWith({ "s1.json": grantFor(12, -60_000) });
+  assert.throws(() => main(approval(), { run: gh.run, ...quiet, grantDir: dir, now: NOW }), NO_GRANT);
+});
+
+test("edge: with a stale and a fresh grant for the PR, only the fresh one is consumed", () => {
+  const gh = fakeGh();
+  const dir = grantDirWith({ "a.json": grantFor(12, GRANT_TTL + 1, "a"), "b.json": grantFor(12, 1000, "b") });
+  main(approval(), { run: gh.run, ...quiet, grantDir: dir, now: NOW });
+  assert.equal(existsSync(join(dir, "a.json")), true);
+  assert.equal(existsSync(join(dir, "b.json")), false);
+});
+
+test("edge: a grant directory that does not exist counts as no grant", () => {
+  const gh = fakeGh();
+  assert.throws(() => main(approval(), { run: gh.run, ...quiet, grantDir: join(grantDirWith(), "missing"), now: NOW }), NO_GRANT);
+  assert.deepEqual(gh.writes, []);
+});
+
+test("edge: a non-owner skipped post needs no grant", () => {
+  const gh = fakeGh();
+  main(["ui-reviewer", "skipped", "no visible change"], { run: gh.run, ...quiet, grantDir: grantDirWith(), now: NOW });
+  assert.equal(gh.writes.length, 1);
 });
 
 test("edge: a failed status after a posted comment still throws, leaving the comment for a re-run", () => {
