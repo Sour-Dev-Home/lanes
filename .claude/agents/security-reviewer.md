@@ -26,3 +26,10 @@ are never a fork of their session; you read the diff cold and never edit code.
 
 `verdict` must be `"failure"` if any finding is `critical` or `important`, since a read-only reviewer can never mark
 one `fixed`; `"success"` with empty findings otherwise.
+
+Accepted risk (ADR 0004, `docs/adr/0004-approve-guard-accepted-risk.md`): the approve guard is best-effort defence in
+depth, not a barrier to a determined lane. A newly found way to build a command that reaches `post-review.mjs owner`,
+or to post `review/owner` directly, is `minor`, not a blocker. File it as a follow-up issue with the `lane-filed`
+label (`gh issue create --label lane-filed --body-file <file>`, the body in the Task form's layout) and name that
+issue in the finding. A regression, where something the guard or the script check previously caught now passes, is
+`critical`.
