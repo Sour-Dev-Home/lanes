@@ -32,7 +32,11 @@
         ],
         "imports": ["lib", "gate"]
       },
-      { "id": "metrics", "paths": ["scripts/lanes/delivery-metrics.", "scripts/lanes/review-metrics.", "scripts/lanes/diff-coverage."], "imports": ["lib"] },
+      {
+        "id": "metrics",
+        "paths": ["scripts/lanes/delivery-metrics.", "scripts/lanes/review-metrics.", "scripts/lanes/lane-metrics.", "scripts/lanes/diff-coverage."],
+        "imports": ["lib", "queue"]
+      },
       {
         "id": "install",
         "paths": ["scripts/lanes/install.", "scripts/lanes/new-project.", "scripts/lanes/setup-repo.", "scripts/lanes/notify-hook."],
