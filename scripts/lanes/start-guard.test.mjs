@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, runHook } from "./start-guard.mjs";
+import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, UNRESOLVED_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, runHook } from "./start-guard.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const START = "node scripts/lanes/start.mjs 12 14";
@@ -573,7 +573,7 @@ const QUEUE_RUNS = [
   '"C:/Program Files/nodejs/node.exe" scripts/lanes/queue.mjs 12',
   "node --no-warnings scripts/lanes/queue.mjs 12",
   "node ./scripts/lanes/queue.mjs 12",
-  "node /c/Users/me/repo/scripts/lanes/queue.mjs 12",
+  "node /opt/repo/scripts/lanes/queue.mjs 12",
   "node C:/repo/scripts/lanes/queue.mjs 12",
   '"C:\\repo\\scripts\\lanes\\queue.mjs" 12',
   "node scripts\\lanes\\queue.mjs 12",
@@ -625,12 +625,21 @@ test("#95 criterion 3: commands that only mention queue.mjs, or run its tests, a
     'gh pr create --title "start-guard denies queue.mjs" --body "only the owner runs queue.mjs"',
     "gh pr create --title x --body-file .lanes/pr-body.md",
     "wc -l scripts/lanes/queue.mjs",
+    "cat < scripts/lanes/queue.mjs",
   ];
   for (const c of mentions) {
     assert.equal(findQueueInvocations(c), false, c);
     assert.equal(decidePreToolUse(bash(c), null, NOW), null, c);
     assert.equal(decidePreToolUse(bash(c), AUTO_GO_GRANT(), NOW), null, c);
   }
+});
+
+test("#95 extra: node with queue.mjs redirected onto its stdin is a run too, not just an argument form", () => {
+  // Not among the QUEUE_RUNS forms above: no explicit node argument names the file, but `node < queue.mjs` still
+  // executes it as node's stdin script, unlike `cat < queue.mjs` (a mention, asserted above) which only reads it.
+  assert.equal(findQueueInvocations("node < scripts/lanes/queue.mjs"), true);
+  assert.deepEqual(decidePreToolUse(bash("node < scripts/lanes/queue.mjs"), null, NOW), { decision: "deny", reason: QUEUE_DENY_REASON });
+  assert.deepEqual(decidePreToolUse(bash("node < scripts/lanes/queue.mjs"), AUTO_GO_GRANT(), NOW), { decision: "deny", reason: QUEUE_DENY_REASON });
 });
 
 test("#95 criterion 4: with a /start --auto --go grant written by the hook, queue.mjs is denied and the grant is kept", () => {
@@ -659,10 +668,25 @@ test("#95 edge: a quoted script that cannot be read and names queue.mjs is denie
   }
 });
 
-test("#95 edge: an unresolved command or script word in a call that names queue.mjs is denied as a queue run", () => {
-  for (const c of ["node $(echo scripts/lanes/queue.mjs) 12", "node `echo scripts/lanes/queue.mjs` 12", "$NODE scripts/lanes/queue.mjs 12", "node $SCRIPT # queue.mjs"]) {
+test("#95 edge: an unresolved command or script word in a simple command that names queue.mjs is denied as a queue run", () => {
+  for (const c of ["node `echo scripts/lanes/queue.mjs` 12", "$NODE scripts/lanes/queue.mjs 12", "node $SCRIPT # queue.mjs"]) {
     assert.deepEqual(decidePreToolUse(bash(c), grant(), NOW), { decision: "deny", reason: QUEUE_DENY_REASON }, c);
   }
+});
+
+test("#95 edge: a program named only at run time is denied with a reason naming the owner's terminal, even when the text never says queue.mjs", () => {
+  // Found by the security review: an encoded path decoded into a variable never puts queue.mjs in the command text.
+  assert.match(UNRESOLVED_DENY_REASON, /owner's own terminal/);
+  for (const c of ["X=$(echo c2NyaXB0cy9sYW5lcy9xdWV1ZS5tanM= | base64 -d); node $X 12", "node $(echo scripts/lanes/queue.mjs) 12", "node $SCRIPT 12", "$RUN 12"]) {
+    for (const g of [null, grant(), AUTO_GO_GRANT()]) assert.deepEqual(decidePreToolUse(bash(c), g, NOW), { decision: "deny", reason: UNRESOLVED_DENY_REASON }, c);
+  }
+});
+
+test("#95 edge: a queue.mjs mention elsewhere does not relabel an unrelated unresolved run as a queue run", () => {
+  // Found by the test-hunter: the queue reason is scoped to the simple command, not the whole call's text.
+  const c = 'git commit -m "note about queue.mjs" && node $X';
+  assert.equal(findQueueInvocations(c), false);
+  assert.deepEqual(decidePreToolUse(bash(c), null, NOW), { decision: "deny", reason: UNRESOLVED_DENY_REASON });
 });
 
 test("#95 edge: files that merely look like queue.mjs, empty input and non-Bash tools are not queue runs", () => {
