@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   cleanableCount, cleanupMerged, findOrphans, formatStep, parseWorktrees, pidRunning, planCleanup, removeEmptyDir, render, runCleanup,
-  saveSessionLog, sessionEnded, sessionsFrom,
+  saveSessionLog, sessionEnded, sessionsFrom, waitForStop,
 } from "./cleanup.mjs";
 
 const ROOT = "C:/repo";
@@ -986,4 +986,141 @@ test("edge: removeEmptyDir never deletes a file that appears after it counted no
   const body = src.slice(src.indexOf("export function removeEmptyDir"), src.indexOf("export const LOG_LINES"));
   assert.doesNotMatch(body, /rmSync\(/);
   assert.match(body, /rmdirSync\(dir\)/);
+});
+
+// #179: a failed step says why, and `claude rm` right after `claude stop` waits for the session to finish exiting.
+const stopRmPlan = () => [{ branch: "issue-7-x", issue: 7, steps: [{ cmd: "claude", args: ["stop", "s7"] }, { cmd: "claude", args: ["rm", "s7"] }] }];
+const failure = (stderr, extra = {}) => Object.assign(new Error("Command failed: claude rm s7"), { stderr, ...extra });
+const agentsJson = (status) => JSON.stringify(status === undefined ? [] : [{ kind: "background", id: "s7", cwd: "C:\\repo", status }]);
+const AGENTS = "claude agents --json";
+
+test("a failed step's line carries the command's stderr, not only Command failed", () => {
+  const run = () => { throw failure("Error: session s7 is still exiting\n"); };
+  const [r] = runCleanup(stopRmPlan(), { run, stillThere: () => true });
+  assert.equal(r.status, "failed");
+  assert.equal(r.error, "Error: session s7 is still exiting");
+  assert.match(render([r]), /^failed issue-7-x at claude stop s7: Error: session s7 is still exiting$/);
+});
+
+test("edge: the failure text is one line of at most 200 characters, from stderr, else stdout, else the message", () => {
+  const first = (err) => runCleanup(stopRmPlan(), { run: () => { throw err; }, stillThere: () => true })[0].error;
+  const long = first(failure(`${"x".repeat(300)}\nmore`));
+  assert.equal(long.length, 200);
+  assert.ok(long.endsWith("…"));
+  assert.equal(first(failure("   \n\nsecond line\nthird")), "second line");
+  assert.equal(first(failure("", { stdout: "Error: from stdout\n" })), "Error: from stdout");
+  assert.equal(first(failure("  ", { stdout: "" })), "Command failed: claude rm s7");
+  assert.equal(first(new Error("spawn claude ENOENT")), "spawn claude ENOENT");
+});
+
+test("claude rm right after claude stop waits for the session to stop, then removes it", () => {
+  const log = [];
+  const run = (cmd, args) => { log.push(`${cmd} ${args.join(" ")}`); };
+  const waitStopped = (id) => (log.push(`wait ${id}`), true);
+  const [r] = runCleanup(stopRmPlan(), { run, stillThere: () => true, waitStopped, sleep: (ms) => log.push(`sleep ${ms}`) });
+  assert.deepEqual(log, ["claude stop s7", "wait s7", "claude rm s7"]);
+  assert.equal(r.status, "removed");
+});
+
+test("edge: no wait when claude stop failed, and none before a claude rm with no stop ahead of it", () => {
+  const waited = [];
+  const waitStopped = (id) => (waited.push(id), true);
+  const stopFails = (cmd, args) => { if (args[0] === "stop") throw failure("nope"); };
+  runCleanup(stopRmPlan(), { run: stopFails, stillThere: () => true, waitStopped });
+  const rmOnly = [{ branch: "issue-7-x", issue: 7, steps: [{ cmd: "claude", args: ["rm", "s7"] }] }];
+  runCleanup(rmOnly, { run: () => {}, stillThere: () => true, waitStopped });
+  assert.deepEqual(waited, []);
+});
+
+test("claude rm is retried once after 2 seconds when it fails, and the lane is removed when the retry works", () => {
+  const log = [];
+  let rmTries = 0;
+  const run = (cmd, args) => {
+    log.push(`${cmd} ${args.join(" ")}`);
+    if (args[0] === "rm" && ++rmTries === 1) throw failure("Error: session is still exiting");
+  };
+  const [r] = runCleanup(stopRmPlan(), { run, stillThere: () => true, sleep: (ms) => log.push(`sleep ${ms}`) });
+  assert.deepEqual(log, ["claude stop s7", "claude rm s7", "sleep 2000", "claude rm s7"]);
+  assert.equal(r.status, "removed");
+  assert.deepEqual(r.ran, ["claude stop s7", "claude rm s7"]);
+});
+
+test("claude rm gives up after the one retry and shows the stderr of the retry", () => {
+  const log = [];
+  let rmTries = 0;
+  const run = (cmd, args) => {
+    log.push(`${cmd} ${args.join(" ")}`);
+    if (args[0] === "rm") throw failure(`Error: attempt ${++rmTries} failed`);
+  };
+  const [r] = runCleanup(stopRmPlan(), { run, stillThere: () => true, sleep: (ms) => log.push(`sleep ${ms}`) });
+  assert.deepEqual(log, ["claude stop s7", "claude rm s7", "sleep 2000", "claude rm s7"]);
+  assert.equal(r.status, "failed");
+  assert.equal(r.failedStep, "claude rm s7");
+  assert.equal(r.error, "Error: attempt 2 failed");
+});
+
+test("edge: only claude rm is retried, and not at all without a sleep dep", () => {
+  const calls = [];
+  const gitFails = (cmd) => { calls.push(cmd); if (cmd === "git") throw failure("fatal: locked"); };
+  const plan = [{ branch: "b", issue: 7, steps: [{ cmd: "git", args: ["branch", "-D", "b"] }] }];
+  runCleanup(plan, { run: gitFails, stillThere: () => true, sleep: () => {} });
+  assert.deepEqual(calls, ["git"]);
+  const rmCalls = [];
+  const rmFails = (cmd, args) => { rmCalls.push(args[0]); if (args[0] === "rm") throw failure("x"); };
+  runCleanup(stopRmPlan(), { run: rmFails, stillThere: () => true });
+  assert.deepEqual(rmCalls, ["stop", "rm"]);
+});
+
+test("waitForStop checks the agents list every second and stops once the session is not busy or running", () => {
+  const seen = ["busy", "running", "idle"];
+  const log = [];
+  const run = (cmd, args) => { log.push(`${cmd} ${args.join(" ")}`); return agentsJson(seen.shift()); };
+  assert.equal(waitForStop("s7", { run, sleep: (ms) => log.push(`sleep ${ms}`) }), true);
+  assert.deepEqual(log, [AGENTS, "sleep 1000", AGENTS, "sleep 1000", AGENTS]);
+});
+
+test("waitForStop returns true once the session is gone from the list", () => {
+  const seen = ["busy", undefined];
+  const run = () => agentsJson(seen.shift());
+  assert.equal(waitForStop("s7", { run, sleep: () => {} }), true);
+});
+
+test("waitForStop gives up after 10 seconds of a still-busy session", () => {
+  let checks = 0;
+  const sleeps = [];
+  const run = () => (checks++, agentsJson("busy"));
+  assert.equal(waitForStop("s7", { run, sleep: (ms) => sleeps.push(ms) }), false);
+  assert.equal(sleeps.length, 10);
+  assert.ok(sleeps.every((ms) => ms === 1000));
+  assert.equal(checks, 11);
+});
+
+test("edge: waitForStop stops waiting when the agents list fails or is unparseable, and ignores a lingering working state", () => {
+  const noSleep = () => assert.fail("must not sleep");
+  const broken = () => { throw failure("no daemon"); };
+  assert.equal(waitForStop("s7", { run: broken, sleep: noSleep }), false);
+  assert.equal(waitForStop("s7", { run: () => "not json", sleep: noSleep }), false);
+  assert.equal(waitForStop("s7", { run: () => JSON.stringify({ not: "a list" }), sleep: noSleep }), false);
+  const stopped = () => JSON.stringify([{ id: "s7", status: "idle", state: "working" }, { id: "other", status: "busy" }]);
+  assert.equal(waitForStop("s7", { run: stopped, sleep: noSleep }), true);
+});
+
+test("cleanupMerged waits for the stop and retries rm through its default deps", () => {
+  const log = [];
+  let rmTries = 0;
+  const inputs = { worktrees: [], sessions: [session("s7", "issue-7-x", { status: "idle", state: "working", pid: 1, alive: true })], prs: [merged("issue-7-x")] };
+  const deps = {
+    load: () => inputs,
+    run: (cmd, args) => {
+      const line = `${cmd} ${args.join(" ")}`;
+      log.push(line);
+      if (line === AGENTS) return agentsJson("idle");
+      if (line === "claude rm s7" && ++rmTries === 1) throw failure("Error: still exiting");
+    },
+    stillThere: () => true,
+    sleep: (ms) => log.push(`sleep ${ms}`),
+  };
+  const lines = cleanupMerged({ deps });
+  assert.match(lines[0], /^removed /);
+  assert.deepEqual(log.filter((l) => /stop|agents|rm|sleep/.test(l)), ["claude stop s7", AGENTS, "claude rm s7", "sleep 2000", "claude rm s7"]);
 });
