@@ -518,6 +518,14 @@ test("an unclosed brace in a command word is literal, not a post-review run (#12
   denied("node scripts/lanes/p{ost-{review,x}.mjs owner --pr 16");
 });
 
+// test-hunter (this round): neither #123's criteria nor the round above named a word with more than one stray
+// unclosed `{` before the name, or a trailing stray `{` left over after an already-closed list expands in the same
+// word; both still spell post-review.mjs once every unclosed brace is dropped, so both still fail closed.
+test("edge: more than one stray unclosed brace in a word still fails closed when the name survives (#123)", () => {
+  denied("node scripts/lanes/{{post-review.mjs owner --pr 16");
+  denied("node scripts/lanes/{gate,post-review}.mjs{ owner --pr 16");
+});
+
 // test-hunter (this round): a bracket expression whose first character is a literal `]` (bash reads `]` right after
 // `[` as a set member, not a close) and a brace holding a `/` that spans into the directory part of the path, both
 // uncommon enough that neither #70's criteria nor the round above named them.
