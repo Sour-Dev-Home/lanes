@@ -400,11 +400,11 @@ const NEEDS_NOTHING = /^nothing\.?$/i;
  * comments (`parseVerdictComment`) whose author already passed `authorCanWrite`, oldest first; only those bound to
  * `headSha` count, and the newest per reviewer is its verdict for this head.
  */
-function fullTierBlocker({ pr, required, verdicts, headSha, reusedSha }) {
+function fullTierBlocker({ pr, required, verdicts, headSha, reuse }) {
   if (pr.contractChange === "breaking") return "breaking contract change";
   const head = typeof headSha === "string" ? headSha.toLowerCase() : null;
-  // #25: a reused test-hunter status brings along the test-hunter's verdict comment for the same commit, and only that.
-  const bound = (v) => (head !== null && v.sha === head) || (reusedSha !== null && v.reviewer === REUSABLE_REVIEWER && v.sha === reusedSha);
+  // #25, #154: a reused status brings along its own reviewer's verdict comment for the same commit, and only that.
+  const bound = (v) => (head !== null && v.sha === head) || (reuse.has(v.reviewer) && v.sha === reuse.get(v.reviewer).sha);
   const forHead = (Array.isArray(verdicts) ? verdicts : []).filter((v) => v?.verdict && bound(v));
   for (const v of forHead) {
     const findings = Array.isArray(v.verdict.findings) ? v.verdict.findings : [];
@@ -427,17 +427,94 @@ function tierOf(issueLabels) {
   return tiers.length === 1 ? tiers[0] : null;
 }
 
-/** The only reviewer whose status may be reused from an earlier commit (#25). */
-export const REUSABLE_REVIEWER = "test-hunter";
+/**
+ * The reviewers whose status may be reused from an earlier commit (#25, #154). Never the ui-reviewer (it judges what
+ * the page looks like, which a merge from main can change without touching the PR's own diff) and never review/owner.
+ */
+export const REUSABLE_REVIEWERS = Object.freeze(["test-hunter", "security-reviewer", "architecture-advisor"]);
 
 /**
- * Whether the gate should look for a test-hunter success on an earlier commit (#25): only when the tier requires the
- * test-hunter and the head has no trusted review/test-hunter status. Any status on the head, a failure included, wins.
+ * The required reviewers the gate should look for a success on an earlier commit for (#25, #154): each reusable
+ * reviewer the tier and diff require that has no trusted status on the head. Any status on the head, a failure
+ * included, wins.
  */
-export function testHunterReusable({ issueLabels, files, statuses, config, adrs = [] }) {
+export function reusableReviewers({ issueLabels, files, statuses, config, adrs = [] }) {
   const tier = tierOf(issueLabels);
-  if (tier === null || !requiredReviewers(tier, classifyFiles(files, config, adrs)).includes(REUSABLE_REVIEWER)) return false;
-  return !latestByContext(trustedStatuses(statuses)).has(reviewContext(REUSABLE_REVIEWER));
+  if (tier === null) return [];
+  const latest = latestByContext(trustedStatuses(statuses));
+  return requiredReviewers(tier, classifyFiles(files, config, adrs)).filter((r) => REUSABLE_REVIEWERS.includes(r) && !latest.has(reviewContext(r)));
+}
+
+/** Whether the gate should look for a test-hunter success on an earlier commit (#25). */
+export const testHunterReusable = (inputs) => reusableReviewers(inputs).includes("test-hunter");
+
+// What each reusable reviewer checks against besides the diff (#154): a file listed here, or under a listed directory
+// (trailing `/`), changing since the review means the review no longer stands.
+const REVIEW_INPUTS = {
+  "test-hunter": ["vendor/agent-skills/references/definition-of-done.md", "vendor/agent-skills/references/testing-patterns.md"],
+  "security-reviewer": ["vendor/agent-skills/references/security-checklist.md", "vendor/owasp-cheatsheets/"],
+  "architecture-advisor": [],
+};
+const ADR_FILE = /^docs\/adr\/(?:(\d{4})-)?[^/]*\.md$/;
+
+/**
+ * #154: the first of `changedFiles` (the files changed between the reviewed commit and the head, both names of a
+ * rename) that invalidates a reused `reviewer` review, or null when none does. That is the reviewer's brief
+ * (`.claude/agents/<reviewer>.md`), its checklists, and for the architecture-advisor any ADR (`docs/adr/NNNN-*.md`,
+ * whatever its status now) whose Governs covers one of `prFiles`. Fails closed: a reviewer that is not reusable,
+ * a changed list that is not an array of strings, or an ADR file with no NNNN number all block reuse.
+ */
+export function reuseBlockedBy(reviewer, changedFiles, prFiles, adrs = []) {
+  if (!REUSABLE_REVIEWERS.includes(reviewer)) return `${reviewer} is never reused`;
+  if (!Array.isArray(changedFiles) || !changedFiles.every((f) => typeof f === "string")) return "changed files unreadable";
+  const inputs = [`.claude/agents/${reviewer}.md`, ...REVIEW_INPUTS[reviewer]];
+  const norm = (f) => posix.normalize(f.replace(/\\/g, "/"));
+  const pr = (Array.isArray(prFiles) ? prFiles : []).filter((f) => typeof f === "string").map(norm);
+  const governing = new Set(
+    (Array.isArray(adrs) ? adrs : [])
+      .filter((a) => a && !a.error && Array.isArray(a.governs) && pr.some((f) => a.governs.some((g) => (g.endsWith("/") ? f.startsWith(g) : f === g))))
+      .map((a) => a.number),
+  );
+  for (const file of changedFiles) {
+    const f = norm(file);
+    if (inputs.some((p) => (p.endsWith("/") ? f.startsWith(p) : f === p))) return file;
+    if (reviewer !== "architecture-advisor") continue;
+    const adr = ADR_FILE.exec(f);
+    if (adr && (adr[1] === undefined || governing.has(Number(adr[1])))) return file;
+  }
+  return null;
+}
+
+/**
+ * The `reused` entries `gateDecision` trusts, as a Map from reviewer to `{ sha, status }`. `reused` is one
+ * `{ sha, status }` or a list of them. Defence in depth: each must be a trusted success of a reusable reviewer on a real
+ * commit SHA, for a reviewer with no trusted status on the head (`latest`); a reviewer named twice is dropped entirely.
+ */
+function acceptReused(reused, latest) {
+  const out = new Map();
+  const twice = new Set();
+  for (const r of Array.isArray(reused) ? reused : reused ? [reused] : []) {
+    const name = String(r?.status?.context ?? "").slice("review/".length);
+    const ok =
+      REUSABLE_REVIEWERS.includes(name) &&
+      r.status.context === reviewContext(name) &&
+      !latest.has(r.status.context) &&
+      COMMIT_SHA_RE.test(r.sha ?? "") &&
+      r.status.state === "success" &&
+      trustedStatuses([r.status]).length === 1;
+    if (!ok) continue;
+    if (out.has(name)) twice.add(name);
+    out.set(name, { sha: r.sha.toLowerCase(), status: r.status });
+  }
+  for (const name of twice) out.delete(name);
+  return out;
+}
+
+/** `, reused <reviewer>[+<reviewer>...] from <sha7>` per reviewed commit, in the order first reused. */
+function reuseNote(reuse) {
+  const bySha = new Map();
+  for (const [name, { sha }] of reuse) bySha.set(sha, [...(bySha.get(sha) ?? []), name]);
+  return [...bySha].map(([sha, names]) => `, reused ${names.join("+")} from ${sha.slice(0, 7)}`).join("");
 }
 
 const NO_BLOCKERS = Object.freeze({ ok: true, open: [], unreadable: [] });
@@ -460,9 +537,10 @@ function blockerStatus(blockers, closes) {
 
 /**
  * What `lanes/gate` should say for a PR head. Pure: every input is passed in. `blockers` (#36) is the linked issue's
- * `blockerReport` (from blockers.mjs); omitted, the issue has none. `reused` (#25) is `{ sha, status }`: a
- * trusted review/test-hunter success from an earlier commit of the PR whose own diff matches the head's. It counts only
- * when the head has no trusted test-hunter status of its own, and brings along the test-hunter verdict for that `sha`.
+ * `blockerReport` (from blockers.mjs); omitted, the issue has none. `reused` (#25, #154) is one `{ sha, status }` or a
+ * list: each a trusted review/<reviewer> success, for a reviewer in `REUSABLE_REVIEWERS`, from an earlier commit of
+ * the PR whose own diff matches the head's. Each counts only when the head has no trusted status of its own for that
+ * reviewer, and brings along that reviewer's verdict for its `sha`.
  */
 export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], reused = null, blockers = NO_BLOCKERS }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
@@ -497,14 +575,9 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
   const blocked = blockerStatus(blockers, pr.closes);
   if (blocked) return blocked;
   const latest = latestByContext(trustedStatuses(statuses));
-  const hunter = reviewContext(REUSABLE_REVIEWER);
-  // Defence in depth: the reused status must itself be a trusted test-hunter success on a real commit SHA.
-  const reuse =
-    !latest.has(hunter) && COMMIT_SHA_RE.test(reused?.sha ?? "") && reused.status?.context === hunter && reused.status.state === "success" && trustedStatuses([reused.status]).length === 1
-      ? { sha: reused.sha.toLowerCase(), status: reused.status }
-      : null;
-  if (reuse) latest.set(hunter, reuse.status);
-  const note = reuse ? `, test-hunter reused from ${reuse.sha.slice(0, 7)}` : "";
+  const reuse = acceptReused(reused, latest);
+  for (const [name, r] of reuse) latest.set(reviewContext(name), r.status);
+  const note = reuseNote(reuse);
   const required = requiredReviewers(tier, cls);
   for (const name of required) {
     const s = latest.get(reviewContext(name));
@@ -523,7 +596,7 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
   if (cls.owner) return waitOwner("owner-only path");
   if (!NEEDS_NOTHING.test(pr.sections["needs the owner"] ?? "")) return waitOwner("needs the owner");
   let blocker = null;
-  if (tier === "full") blocker = fullTierBlocker({ pr, required, verdicts, headSha, reusedSha: reuse?.sha ?? null });
+  if (tier === "full") blocker = fullTierBlocker({ pr, required, verdicts, headSha, reuse });
   else if (tier === "quick" && cls.contract) blocker = "contract change";
   if (blocker) return waitOwner(blocker);
   return { state: "success", description: `unattended-eligible (tier:${tier}), reviews in${note}`, stage: "ready" };

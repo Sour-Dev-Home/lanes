@@ -12,9 +12,9 @@ import {
   loadConfig,
   parsePrBody,
   parseVerdictComment,
-  REUSABLE_REVIEWER,
+  reusableReviewers,
+  reuseBlockedBy,
   reviewContext,
-  testHunterReusable,
   trustedStatuses,
 } from "./lib.mjs";
 import { parseBlockedBy, readBlockerReport } from "./blockers.mjs";
@@ -68,37 +68,67 @@ const REUSE_WALK = 20;
 // A branch name safe to put before `...` in a compare URL: no `..` and nothing outside a plain ref's characters.
 const BASE_REF = /^(?!.*\.\.)[A-Za-z0-9_./-]+$/;
 
+// The compare API lists at most this many files; a list that long may be cut short, so it fails closed.
+const COMPARE_FILES_CAP = 300;
+
 /**
- * A trusted review/test-hunter success to reuse on PR `number`'s head (#25), as `{ sha, status }`, or null. Walks the
- * PR's newest `REUSE_WALK` commits from newest to oldest to the most recent one with a trusted review/test-hunter
- * status, and reuses it only if it is a success and that commit's own diff (three-dot compare against the base branch,
- * so merged-in main changes drop out) has the head's `diffFingerprint`. Fails closed: any API error, an empty diff,
- * or a commit list that does not end at the head means no reuse.
+ * The trusted review successes to reuse on PR `number`'s head (#25, #154), as a list of `{ sha, status }`, one at most
+ * per name in `reviewers`. For each reviewer, walks the PR's newest `REUSE_WALK` commits from newest to oldest to the
+ * most recent one with a trusted review/<reviewer> status, and reuses it only if it is a success, that commit's own diff
+ * (three-dot compare against the base branch, so merged-in main changes drop out) has the head's `diffFingerprint`,
+ * and nothing changed between it and the head that the reviewer checks against (`reuseBlockedBy`, given the PR's
+ * `files` and the gate's `adrs`). Fails closed per reviewer: any API error, an empty diff, or a changed-file list that
+ * may be cut short means no reuse for it; a commit list that does not end at the head means no reuse at all.
  */
-export function reusableTestHunter(api, repo, number, pr) {
+export function reusableReviews(api, repo, number, pr, reviewers, { files = [], adrs = [] } = {}) {
   const head = pr?.head?.sha;
   const base = pr?.base?.ref;
-  if (!SHA.test(head ?? "") || !BASE_REF.test(base ?? "")) return null;
-  const ownDiff = (sha) => {
+  if (!SHA.test(head ?? "") || !BASE_REF.test(base ?? "") || !Array.isArray(reviewers) || reviewers.length === 0) return [];
+  // Each lookup at most once per gate run, whichever reviewers share a commit.
+  const once = (fn) => {
+    const seen = new Map();
+    return (sha) => {
+      if (!seen.has(sha)) seen.set(sha, fn(sha));
+      return seen.get(sha);
+    };
+  };
+  const ownDiff = once((sha) => {
     const diff = api([`repos/${repo}/compare/${base}...${sha}`, "-H", "Accept: application/vnd.github.diff"]);
     if (typeof diff !== "string" || diff === "") throw new Error(`no diff for ${sha}`);
     return diffFingerprint(diff);
-  };
+  });
+  const changedSince = once((sha) => {
+    const [count, ...names] = api([`repos/${repo}/compare/${sha}...${head}`, "--jq", "(.files | length), (.files[] | .filename, (.previous_filename // empty))"])
+      .split("\n")
+      .filter(Boolean);
+    if (!/^\d+$/.test(count ?? "") || Number(count) >= COMPARE_FILES_CAP) throw new Error(`cannot list the files changed since ${sha}`);
+    return names;
+  });
+  const statusesAt = once((sha) => latestByContext(trustedStatuses(statusesOf(api, repo, sha))));
+  let walk;
   try {
     const shas = api([`repos/${repo}/pulls/${number}/commits`, "--paginate", "--jq", ".[].sha"]).split("\n").filter(Boolean);
     // A push landed between reading the PR and its commits: decide on the next event instead.
-    if (shas.at(-1) !== head) return null;
-    for (const sha of shas.slice(-REUSE_WALK).reverse()) {
-      if (sha === head || !SHA.test(sha)) continue;
-      const status = latestByContext(trustedStatuses(statusesOf(api, repo, sha))).get(reviewContext(REUSABLE_REVIEWER));
-      if (!status) continue;
-      if (status.state !== "success") return null;
-      return ownDiff(sha) === ownDiff(head) ? { sha, status } : null;
-    }
+    if (shas.at(-1) !== head) return [];
+    walk = shas.slice(-REUSE_WALK).reverse().filter((sha) => sha !== head && SHA.test(sha));
   } catch {
-    return null;
+    return [];
   }
-  return null;
+  const out = [];
+  for (const reviewer of reviewers) {
+    const context = reviewContext(reviewer);
+    try {
+      const sha = walk.find((s) => statusesAt(s).has(context));
+      if (sha === undefined) continue;
+      const status = statusesAt(sha).get(context);
+      if (status.state !== "success" || ownDiff(sha) !== ownDiff(head)) continue;
+      if (reuseBlockedBy(reviewer, changedSince(sha), files, adrs) !== null) continue;
+      out.push({ sha, status });
+    } catch {
+      continue;
+    }
+  }
+  return out;
 }
 
 /**
@@ -139,7 +169,8 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     }
   }
   const statuses = statusesOf(api, repo, pr.head.sha);
-  const reused = testHunterReusable({ issueLabels, files, statuses, config, adrs }) ? reusableTestHunter(api, repo, number, pr) : null;
+  const candidates = reusableReviewers({ issueLabels, files, statuses, config, adrs });
+  const reused = candidates.length > 0 ? reusableReviews(api, repo, number, pr, candidates, { files, adrs }) : [];
   const decision = gateDecision({
     prBody: pr.body,
     issueLabels,
