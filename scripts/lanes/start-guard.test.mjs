@@ -1260,6 +1260,22 @@ test("#240 edge (security review): a `<<` inside a # comment opens no heredoc to
   }
 });
 
+test("#240 edge (security review, round 2): a `<<` inside an expansion, arithmetic or a group opens no heredoc to bash, so the lines after it are read", () => {
+  for (const [cmd, reason] of [
+    ["gh issue comment 1 -b x ${x#<<'EOF'}\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    ["gh issue comment 1 -b x $[1<<'EOF']\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    ["((gh issue comment 1<<'EOF'))\nnode scripts/lanes/start.mjs 12\nEOF", DENY_REASON],
+    ["gh issue comment 1 -b {x,<<'EOF'}\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    ["gh issue comment 1 -b x \\<<'EOF'\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    // The same shapes with cd or echo, which main's data-only rule let through.
+    ["cd ${x#<<'EOF'}\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    ["((cd<<'EOF'))\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    ["echo ${x#<<'EOF'} > f\nnode scripts/lanes/start.mjs 12\nEOF", DENY_REASON],
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(reason), cmd);
+  }
+});
+
 test("#240 edge: a # inside a quoted word or a heredoc body is no comment and keeps the body skipped", () => {
   for (const cmd of [
     `cat > .lanes/c.md <<'EOF'\n# Heading for #240\n${PROSE}\nEOF\ngh issue comment 240 --body-file .lanes/c.md`,

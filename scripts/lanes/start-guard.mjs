@@ -180,7 +180,9 @@ function lex(cmd) {
   // Per segment: true when it holds an output redirection (`>`), so writes to a file; "dup" once it duplicates an fd.
   const writes = [false];
   const pipes = [false];
-  let comment = false;
+  // Set by any unquoted character that starts shell syntax this lexer does not model (a comment, an expansion,
+  // arithmetic, a group, an escape), where its reading of `<<` may differ from bash's (#240 security review).
+  let unsure = false;
   // Per segment: the target of its input redirection (`<`), which node reads as its script when no argument is one.
   const stdin = [undefined];
   const targets = [];
@@ -271,6 +273,7 @@ function lex(cmd) {
       word = (word ?? "") + QUOTED_TICK + inner.replace(/[\s;&|()<>]/g, "_") + QUOTED_TICK;
       i = j;
     } else if (c === "\\") {
+      unsure = true;
       if (cmd[i + 1] !== "\n") word = (word ?? "") + literal(cmd[i + 1] ?? "");
       i += 1;
     } else if (c === "\n" && pending.length > 0) {
@@ -299,6 +302,7 @@ function lex(cmd) {
       i += op.length - 1;
     } else if (";&|()\n\r".includes(c)) {
       if (c === "|" && cmd[i - 1] !== "|" && cmd[i + 1] !== "|" && segments.at(-1).length > 0) pipes[pipes.length - 1] = true;
+      if (c === "(" || c === ")") unsure = true;
       endSegment();
     } else if (c === "<" && cmd[i - 1] !== "<" && cmd[i + 1] === "<" && cmd[i + 2] !== "<" && HEREDOC_RE.test(cmd.slice(i))) {
       const m = HEREDOC_RE.exec(cmd.slice(i));
@@ -311,9 +315,10 @@ function lex(cmd) {
       // A `<<` that HEREDOC_RE does not read ends the word, as before.
       endWord();
     } else {
-      // bash reads a `#` at the start of an unquoted word as a comment to the end of the line; this lexer does not, so a
-      // `# <<'EOF'` would open a heredoc here that bash never opens (#240 security review). Flagged for isTextOnly.
-      if (c === "#" && word === null) comment = true;
+      // bash reads a `#` at the start of an unquoted word as a comment, and `$`, `{`, `[` start expansions and
+      // arithmetic (`${x#<<'EOF'}`, `$[1<<2]`); this lexer reads neither, so a `<<` in them would open a heredoc here
+      // that bash never opens (#240 security review). Flagged for isTextOnly.
+      if ((c === "#" && word === null) || "${}[]".includes(c)) unsure = true;
       word = (word ?? "") + c;
     }
   }
@@ -322,7 +327,7 @@ function lex(cmd) {
   for (const b of bodies) if (b.seg !== undefined && feedsShell(segments, pipes, b.seg)) b.toShell = true;
   // Only the last segment can be empty, so `writes` stays aligned with the segments kept.
   const kept = segments.filter((s) => s.length > 0);
-  return { segments: kept, writes: writes.slice(0, kept.length), stdin: stdin.slice(0, kept.length), pipes: pipes.slice(0, kept.length), targets, bodies, comment };
+  return { segments: kept, writes: writes.slice(0, kept.length), stdin: stdin.slice(0, kept.length), pipes: pipes.slice(0, kept.length), targets, bodies, unsure };
 }
 
 /**
@@ -427,11 +432,12 @@ const SUBSTITUTION_RE = /[`]|\$\(/;
  * True when nothing in a whole lexed Bash call can run a literal heredoc body (#240): every simple command writes text
  * (isDataOnly's cat, echo, printf, cd, mkdir) or sends it (sendsText), so a body written to a file for
  * `gh issue comment --body-file` is only text, and no substitution runs, not even one that only prints (a
- * `--body "`bash c.md`"` would run the file just written), and no `#` comment, where a `<<` the lexer reads as a
- * heredoc is only comment text to bash. Unlike isDataOnly, gh's own words are still read as before.
+ * `--body "`bash c.md`"` would run the file just written), and nothing unquoted the lexer does not model (`unsure`:
+ * a `#` comment, `$`, `{}`, `[]`, `()`, a backslash), where a `<<` it reads as a heredoc may be no heredoc to bash, so
+ * the lines of its "body" run. Unlike isDataOnly, gh's own words are still read as before.
  */
-const isTextOnly = ({ segments, writes, targets, bodies, comment }) =>
-  !comment &&
+const isTextOnly = ({ segments, writes, targets, bodies, unsure }) =>
+  !unsure &&
   segments.every((words, k) => PLACE_COMMANDS.has(words[0]) || (WRITE_COMMANDS.has(words[0]) && writes[k] === true) || sendsText(words)) &&
   bodies.every((b) => b.seg !== undefined && b.literal) &&
   ![...segments.flat(), ...targets].some((w) => SUBSTITUTION_RE.test(w));
