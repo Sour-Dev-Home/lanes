@@ -8,7 +8,7 @@ import { authorCanWrite, parseIssueForm, parseSections, parseValidation, Validat
 
 const MAX_VALIDATE_LINE = 500;
 
-export const MARKER ="<!-- lanes:issue-contract -->";
+export const MARKER = "<!-- lanes:issue-contract -->";
 
 /**
  * @param {string} body the issue body
