@@ -1,7 +1,7 @@
 // scripts/lanes/start.test.mjs
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { START_DEFAULTS, inFlightIssues, launchArgs, main as runStart, parseSessionId, planStart, startConfig } from "./start.mjs";
@@ -1459,6 +1459,43 @@ test("#118 edge: a grant that cannot be removed does not downgrade a worse exit 
     assert.equal(code, 2, lines.join("\n"));
     assert.equal(lines.at(-1), "the /start grant could not be removed: EPERM: operation not permitted");
     assert.deepEqual(g.launches, []);
+  } finally {
+    g.done();
+  }
+});
+
+test("#118 edge (#217): an overlapping run on the same grant is refused, because the first run claims it up front", () => {
+  const g = granted(numbered([1]));
+  let inner;
+  const config = g.deps.config;
+  g.deps.config = () => {
+    // A second start.mjs 1 arriving while the first is mid-run.
+    inner = runStart(["1"], { ...g.deps, config });
+    return config();
+  };
+  try {
+    const outer = runStart(["1"], g.deps);
+    assert.equal(outer.code, 0, outer.lines.join("\n"));
+    assert.deepEqual(inner, { code: 2, lines: ["nothing launched: no /start grant in this session"] });
+    assert.equal(g.launches.length, 1, "only one run launched");
+    assert.deepEqual(readdirSync(g.dir), [], "no grant or claimed copy is left behind");
+  } finally {
+    g.done();
+  }
+});
+
+test("#118 edge: a grant that stops matching between the check and the claim is refused and put back", () => {
+  const g = granted(numbered([1], NOW - GRANT_TTL_MS + 1));
+  let calls = 0;
+  g.deps.now = () => (calls++ === 0 ? NOW : NOW + 1);
+  try {
+    const before = readFileSync(g.file, "utf8");
+    const { code, lines } = runStart(["1"], g.deps);
+    assert.equal(code, 2);
+    assert.deepEqual(lines, ["nothing launched: the /start grant is older than 15 minutes"]);
+    assert.deepEqual(g.launches, []);
+    assert.deepEqual(readdirSync(g.dir), [`${OWNER}.json`]);
+    assert.equal(readFileSync(g.file, "utf8"), before);
   } finally {
     g.done();
   }

@@ -630,7 +630,7 @@ export function runHook(event, raw, { dir, now = Date.now() }) {
     try {
       const input = JSON.parse(raw);
       const file = grantPath(dir, input?.session_id);
-      const d =decidePreToolUse(input, file ? readGrant(file) : null, now);
+      const d = decidePreToolUse(input, file ? readGrant(file) : null, now);
       if (d === null) return "";
       // An allow leaves the grant: start.mjs checks it again and deletes it after its launches (ADR 0007).
       return preToolUseOutput(d.decision, d.reason);

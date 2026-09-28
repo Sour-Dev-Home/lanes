@@ -7,7 +7,8 @@
 // only --go launches it. Exit 0: printed (and, with --go, every pick launched). 1: a launch failed. 2: as above.
 // The cap and the soft paths come from the `start` block of lanes.config.json.
 import { execFileSync, spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main as checkBlockers } from "./blockers.mjs";
@@ -335,6 +336,23 @@ export function main(argv, deps = { gh, claude, root: repoRoot, config: readConf
   const run = auto ? { auto: go ? "go" : "dry" } : { issues: [...new Set(args.map(Number))] };
   const refused = grantRefusal(file ? readGrant(file) : null, sessionId, run, deps.now());
   if (refused) return { code: 2, lines: [`nothing launched: ${refused}`] };
+  // Claimed by an atomic rename before anything runs, so of two overlapping runs only one gets it (#217). The claimed
+  // copy is checked again in case the owner typed a new /start between the check above and the rename.
+  const claimed = `${file}.claimed-${randomUUID()}`;
+  try {
+    renameSync(file, claimed);
+  } catch (err) {
+    return { code: 2, lines: [`nothing launched: ${err.code === "ENOENT" ? "the /start grant was already used by another run" : `the /start grant could not be claimed: ${reason(err)}`}`] };
+  }
+  const changed = grantRefusal(readGrant(claimed), sessionId, run, deps.now());
+  if (changed) {
+    try {
+      if (!existsSync(file)) renameSync(claimed, file);
+    } catch {
+      // The grant stays claimed and unused; the owner types /start again.
+    }
+    return { code: 2, lines: [`nothing launched: ${changed}`] };
+  }
 
   let result;
   let notRemoved = null;
@@ -343,7 +361,7 @@ export function main(argv, deps = { gh, claude, root: repoRoot, config: readConf
   } finally {
     // Single use, even when the run stopped early: a second run needs the owner's /start again.
     try {
-      (deps.removeGrant ?? rmSync)(file);
+      (deps.removeGrant ?? rmSync)(claimed);
     } catch (err) {
       notRemoved = reason(err);
     }
