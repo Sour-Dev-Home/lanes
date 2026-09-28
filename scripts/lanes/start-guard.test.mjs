@@ -1292,6 +1292,12 @@ test("#246 edge (test-hunter): text piped into eval, source or . has its backtic
   }
 });
 
+test("#246 edge (test-hunter): a heredoc in a later segment feeding a shell is read live; one whose pipe is earlier is not", () => {
+  const body = "echo `node scripts/lanes/start.mjs 12`";
+  assert.deepEqual(decide(`echo hi; cat <<'EOF' | sh\n${body}\nEOF`), deny(DENY_REASON));
+  assert.equal(decide(`cat a | sh; cat <<'EOF'\n${body}\nEOF`), null);
+});
+
 test("#240 edge (test-hunter): a $( substitution in a gh word keeps a literal heredoc body read", () => {
   assert.notEqual(decide("gh issue comment 1 --body \"$(bash c.md)\" <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF"), null);
 });
