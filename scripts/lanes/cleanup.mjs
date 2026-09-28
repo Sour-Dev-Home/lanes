@@ -170,6 +170,8 @@ export const cleanableCount = (plan) => plan.filter((e) => e.steps).length;
 // `claude rm` refuses while another session's entry claims the same worktree; the claimant id is plain, never a flag.
 const CLAIMED = /Another running background session \(([A-Za-z0-9][A-Za-z0-9_-]*)\) claims this worktree/;
 const isRm = (step) => step.cmd === "claude" && step.args[0] === "rm";
+const isStop = (step) => step.cmd === "claude" && step.args[0] === "stop";
+const RM_RETRY_MS = 2000;
 const isSessionStep = (step) => step.cmd === "claude" && (step.args[0] === "rm" || step.args[0] === "stop");
 
 // Runs each lane's steps in order; a failed step skips that lane's later steps, and other lanes continue.
@@ -178,7 +180,9 @@ const isSessionStep = (step) => step.cmd === "claude" && (step.args[0] === "rm" 
 // removed and the refused `claude rm` retried once, and a running one is reported, never stopped.
 // `saveLog(id, issue)`, when given, saves a session's log before it is first stopped or removed and returns the file;
 // a throw is reported in the result and the session is still removed. `removeDir(path)` runs an orphan's `rmdir`.
-export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, removeDir, dryRun = false }) {
+// `waitStopped(id)`, when given, runs after each successful `claude stop`, so the `claude rm` that follows finds the
+// session gone; `sleep(ms)`, when given, lets a failed `claude rm` be retried once after RM_RETRY_MS (#179).
+export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, removeDir, waitStopped, sleep, dryRun = false }) {
   return plan.map((entry) => {
     const base = { branch: entry.branch, issue: entry.issue, pr: entry.pr, closed: entry.closed, orphan: entry.orphan, files: entry.files };
     if (entry.skip) return { ...base, status: "skipped", skip: entry.skip };
@@ -209,6 +213,17 @@ export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, remov
         exec(step);
       } catch (err) {
         const claimant = isRm(step) && sessionEnded ? CLAIMED.exec(errorOutput(err))?.[1] : undefined;
+        if (!claimant && isRm(step) && sleep) {
+          // The session may still be exiting; one more try shortly after usually finds it gone.
+          sleep(RM_RETRY_MS);
+          try {
+            exec(step);
+          } catch (retryErr) {
+            return fail(step, errorText(retryErr, step));
+          }
+          ran.push(formatStep(step));
+          continue;
+        }
         if (!claimant) return fail(step, errorText(err, step));
         if (!sessionEnded(claimant)) return fail(step, `${errorText(err, step)} (session ${claimant} is still running; it was not stopped)`);
         const clear = { cmd: "claude", args: ["rm", claimant] };
@@ -226,6 +241,13 @@ export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, remov
         }
       }
       ran.push(formatStep(step));
+      if (isStop(step) && waitStopped) {
+        try {
+          waitStopped(step.args[1]);
+        } catch {
+          // A wait that breaks must not fail a stop that worked; the `claude rm` retry covers a session still exiting.
+        }
+      }
     }
     return { ...base, status: "removed", ran };
   });
@@ -236,8 +258,16 @@ const errorOutput = (err) => `${err.stderr ?? ""}\n${err.stdout ?? ""}\n${err.me
 // Windows refuses to delete a worktree while any process has a file in it open.
 const OPEN_FILES_HINT = "(a process still has files open in the worktree; close it and re-run)";
 
+const MAX_ERROR_CHARS = 200;
+// Other control characters (an ANSI escape, a backspace) are dropped: the line is echoed to the owner's terminal.
+const firstLine = (text) =>
+  String(text ?? "").split(/\r\n|\r|\n/).map((l) => l.replace(/[\x00-\x1f\x7f]/g, "").trim()).find(Boolean);
+
+// The command's own words on why it failed: its stderr, else its stdout (some claude commands print errors there),
+// else the error's message; one line of at most MAX_ERROR_CHARS characters.
 function errorText(err, step) {
-  const line = (String(err.stderr ?? "").trim() || err.message).split(/\r?\n/)[0];
+  const said = firstLine(err.stderr) ?? firstLine(err.stdout) ?? firstLine(err.message) ?? "command failed";
+  const line = said.length > MAX_ERROR_CHARS ? `${said.slice(0, MAX_ERROR_CHARS - 1)}…` : said;
   const removing = step.args[0] === "worktree" && step.args[1] === "remove";
   return removing && /Permission denied/i.test(line) ? `${line} ${OPEN_FILES_HINT}` : line;
 }
@@ -441,6 +471,36 @@ export function sessionEnded(id, { sessions = [], run, isRunning = pidRunning })
   }
 }
 
+export const STOP_CHECKS = 10;
+export const STOP_CHECK_MS = 1000;
+
+// A blocking pause; the whole script is synchronous.
+const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * After `claude stop <id>`, waits until `claude agents --json` no longer lists session `id` as busy or running,
+ * checking every STOP_CHECK_MS for at most STOP_CHECKS seconds. Only `status` counts: `state` can keep saying
+ * "working" after a session stopped (#83). Returns whether it stopped; a list that cannot be read ends the wait at
+ * once with false, and the caller's `claude rm` retry covers the rest.
+ * @param {string} id
+ * @param {{ run: Function, sleep: (ms: number) => void }} deps
+ */
+export function waitForStop(id, { run, sleep }) {
+  for (let check = 0; ; check++) {
+    let agents;
+    try {
+      agents = JSON.parse(String(run("claude", ["agents", "--json"])));
+    } catch {
+      return false;
+    }
+    if (!Array.isArray(agents)) return false;
+    const status = agents.find((a) => a?.id === id)?.status;
+    if (status !== "busy" && status !== "running") return true;
+    if (check >= STOP_CHECKS) return false;
+    sleep(STOP_CHECK_MS);
+  }
+}
+
 const branchExists = (branch) => {
   try {
     sh("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
@@ -455,23 +515,26 @@ const DEFAULT_DEPS = {
   run: (cmd, args) => sh(cmd, args),
   stillThere: (onlyIf) => (onlyIf.path ? existsSync(onlyIf.path) : branchExists(onlyIf.branch)),
   removeDir: removeEmptyDir,
+  sleep: sleepMs,
 };
 
 /**
  * Removes every done lane and empty orphan folder (or, with `dryRun`, only plans it) and returns render's lines, one
  * per entry or `["no lanes to clean up"]`; a failed step's line starts with `failed `. Throws when the inputs cannot
  * be read. `deps` holds fakes in tests: `load()` returns planCleanup's inputs, and `run`, `stillThere`,
- * `sessionEnded`, `saveLog` and `removeDir` are runCleanup's (`sessionEnded` defaults to the exported one over the
- * loaded sessions and `run`; `saveLog` to saveSessionLog under the loaded `root`, and to none when inputs have no root).
- * @param {{ dryRun?: boolean, deps?: { load?: Function, run?: Function, stillThere?: Function, sessionEnded?: Function, saveLog?: Function, removeDir?: Function } }} [options]
+ * `sessionEnded`, `saveLog`, `removeDir`, `waitStopped` and `sleep` are runCleanup's (`sessionEnded` defaults to the
+ * exported one over the loaded sessions and `run`; `saveLog` to saveSessionLog under the loaded `root`, and to none when
+ * inputs have no root; `waitStopped` to waitForStop over `run` and `sleep`; `sleep` to a blocking pause).
+ * @param {{ dryRun?: boolean, deps?: { load?: Function, run?: Function, stillThere?: Function, sessionEnded?: Function, saveLog?: Function, removeDir?: Function, waitStopped?: Function, sleep?: Function } }} [options]
  * @returns {string[]}
  */
 export function cleanupMerged({ dryRun = false, deps = {} } = {}) {
-  const { load, run, stillThere, sessionEnded: ended, saveLog, removeDir } = { ...DEFAULT_DEPS, ...deps };
+  const { load, run, stillThere, sessionEnded: ended, saveLog, removeDir, waitStopped: waited, sleep } = { ...DEFAULT_DEPS, ...deps };
   const inputs = load();
   const isEnded = ended ?? ((id) => sessionEnded(id, { sessions: inputs.sessions, run }));
   const save = saveLog ?? (inputs.root ? (id, issue) => saveSessionLog(id, issue, { run, root: inputs.root }) : undefined);
-  return render(runCleanup(planCleanup(inputs), { dryRun, run, stillThere, sessionEnded: isEnded, saveLog: save, removeDir })).split("\n");
+  const waitStopped = waited ?? ((id) => waitForStop(id, { run, sleep }));
+  return render(runCleanup(planCleanup(inputs), { dryRun, run, stillThere, sessionEnded: isEnded, saveLog: save, removeDir, waitStopped, sleep })).split("\n");
 }
 
 function main(argv = process.argv.slice(2)) {
