@@ -185,6 +185,11 @@ test("criterion 4 (#160): the ADR 0004 and ADR 0007 accepted-risk paragraphs are
   for (const [adr, para] of Object.entries(ACCEPTED_RISK)) assert.ok(b.includes(flat(para)), `the ${adr} accepted-risk paragraph changed or is missing`);
 });
 
+// install.mjs copies the brief into other projects without vendor/owasp-cheatsheets/, so the brief must not dead-end there.
+test("edge: the brief says what to do when INDEX.md is not in the repository", () => {
+  assert.match(brief(), /If `INDEX\.md` is not in this repository, say so in your summary and carry on from the checklist alone/);
+});
+
 test("edge: flat collapses newlines and indentation so re-wrapped prose still matches", () => {
   assert.equal(flat("  a\n  b\r\n\tc  "), "a b c");
   assert.equal(flat(""), "");
