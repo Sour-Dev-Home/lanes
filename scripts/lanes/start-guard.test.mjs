@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, UNRESOLVED_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, runHook } from "./start-guard.mjs";
+import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, UNRESOLVED_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, grantPath, grantRefusal, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, readGrant, runHook } from "./start-guard.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const START = "node scripts/lanes/start.mjs 12 14";
@@ -155,8 +155,8 @@ test("claude without --bg, or --bg without claude, is not a background launch", 
 
 // --- PreToolUse (criteria 1-3) ------------------------------------------------------------------------------------
 
-test("criterion 1: /start in this session allows the plain start command once, for the same issues", () => {
-  assert.deepEqual(decidePreToolUse(bash(START), grant(), NOW), { decision: "allow", reason: "owner launch from /start 12 14 in this session", consumeGrant: true });
+test("criterion 1: /start in this session allows the plain start command, for the same issues", () => {
+  assert.deepEqual(decidePreToolUse(bash(START), grant(), NOW), { decision: "allow", reason: "owner launch from /start 12 14 in this session" });
 });
 
 test("criterion 1: a lane (no grant) is denied start.mjs", () => {
@@ -240,8 +240,8 @@ test("#76: the plain auto commands are detected as standalone with their form", 
 });
 
 test("#76 criterion 2: each auto form is allowed with a fresh grant for that exact form", () => {
-  assert.deepEqual(decidePreToolUse(bash(AUTO), autoGrant("dry"), NOW), { decision: "allow", reason: "owner run of /start --auto in this session", consumeGrant: true });
-  assert.deepEqual(decidePreToolUse(bash(GO), autoGrant("go"), NOW), { decision: "allow", reason: "owner run of /start --auto --go in this session", consumeGrant: true });
+  assert.deepEqual(decidePreToolUse(bash(AUTO), autoGrant("dry"), NOW), { decision: "allow", reason: "owner run of /start --auto in this session" });
+  assert.deepEqual(decidePreToolUse(bash(GO), autoGrant("go"), NOW), { decision: "allow", reason: "owner run of /start --auto --go in this session" });
 });
 
 test("#76 criterion 2: a dry-run grant never allows --go, and no grant crosses forms", () => {
@@ -295,18 +295,21 @@ test("#76 edge: a grant holding both issues and an auto form, or an unknown form
   for (const auto of ["GO", "", "go ", null, 1, true]) assert.deepEqual(decidePreToolUse(bash(GO), autoGrant(auto), NOW), deny, JSON.stringify(auto));
 });
 
-test("#76 criterion 3: /start --auto --go then the go command is allowed once by the hook; a dry-run grant refuses --go", () => {
+// #118: the hook no longer deletes the grant; start.mjs deletes it after its launches (simulated here with rmSync).
+test("#76 criterion 3: /start --auto --go then the go command is allowed by the hook until start.mjs spends the grant; a dry-run grant refuses --go", () => {
   const dir = tmp();
   try {
     runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start --auto --go" }), { dir, now: NOW });
     assert.equal(JSON.parse(readFileSync(join(dir, "s1.json"), "utf8")).auto, "go");
     assert.deepEqual(out(runHook("pre-tool-use", JSON.stringify(bash(GO)), { dir, now: NOW + 1000 })), { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "owner run of /start --auto --go in this session" });
-    assert.ok(!existsSync(join(dir, "s1.json")));
+    assert.ok(existsSync(join(dir, "s1.json")), "#118: the hook leaves the grant for start.mjs");
+    rmSync(join(dir, "s1.json")); // what start.mjs does after its launches
     assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(GO)), { dir, now: NOW + 2000 })).permissionDecision, "deny");
 
     runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start --auto" }), { dir, now: NOW });
     assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(GO)), { dir, now: NOW + 1000 })).permissionDecision, "deny");
     assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(AUTO)), { dir, now: NOW + 1000 })).permissionDecision, "allow");
+    rmSync(join(dir, "s1.json"));
     assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(AUTO)), { dir, now: NOW + 2000 })).permissionDecision, "deny");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -350,13 +353,15 @@ test("#76 criterion 4: start.md and USING.md no longer say the guard denies --au
 
 // --- the hook end to end (criterion 3:allowed /start run, denied lane, denied claude --bg, expired grant) ---------
 
-test("criterion 3: /start then start.mjs is allowed once, and the grant is consumed", () => {
+test("criterion 3: /start then start.mjs is allowed, the hook leaves the grant (#118), and once start.mjs spends it the next run is denied", () => {
   const dir = tmp();
   try {
     runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start 12 14" }), { dir, now: NOW });
     assert.ok(existsSync(join(dir, "s1.json")));
+    const before = readFileSync(join(dir, "s1.json"), "utf8");
     assert.deepEqual(out(runHook("pre-tool-use", JSON.stringify(bash(START)), { dir, now: NOW + 1000 })), { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "owner launch from /start 12 14 in this session" });
-    assert.ok(!existsSync(join(dir, "s1.json")));
+    assert.equal(readFileSync(join(dir, "s1.json"), "utf8"), before, "#118: the hook neither deletes nor rewrites the grant");
+    rmSync(join(dir, "s1.json")); // what start.mjs does after its launches
     assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(START)), { dir, now: NOW + 2000 })).permissionDecision, "deny");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -883,4 +888,80 @@ test("#89 edge: node -e that is not the command word, or has a $ escaped in its 
   }
   // An unescaped one in double quotes is still expanded by the shell before node runs.
   assert.deepEqual(decidePreToolUse(bash(`node -e "console.log('$HOME')"`), null, NOW), { decision: "deny", reason: UNRESOLVED_DENY_REASON });
+});
+
+// --- #195: lanes are named lane-<N>; the guard's decisions do not change --------------------------------------------
+
+test("#195: a direct claude --bg with --name is still denied, with or without a grant", () => {
+  const deny = { decision: "deny", reason: BG_DENY_REASON };
+  for (const cmd of [`claude --bg --name lane-12 "/lane 12"`, `claude --name lane-12 --bg "/lane 12"`, `claude --bg -n lane-12 --model sonnet "/lane 12"`, `claude --bg --name=lane-12 "/lane 12"`]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny, cmd);
+    assert.deepEqual(decidePreToolUse(bash(cmd), grant(), NOW), deny, cmd);
+  }
+});
+
+test("#195: the plain start command is still allowed with its grant", () => {
+  assert.equal(decidePreToolUse(bash(START), grant(), NOW).decision, "allow");
+  assert.equal(decidePreToolUse(bash(GO), autoGrant("go"), NOW).decision, "allow");
+});
+
+// --- #118: grantRefusal, shared with start.mjs, and the hook leaving the grant in place ------------------------------
+
+test("#118: grantRefusal is null exactly when the hook allows, over every grant shape", () => {
+  const grants = [null, { unreadable: true }, grant(), grant({ issues: [12] }), grant({ sessionId: "s2" }), grant({ at: new Date(NOW - GRANT_TTL_MS).toISOString() }), grant({ at: new Date(NOW + 1).toISOString() }), autoGrant("dry"), autoGrant("go"), autoGrant("go", { issues: [12] })];
+  const runs = [[START, { issues: [12, 14] }], [AUTO, { auto: "dry" }], [GO, { auto: "go" }]];
+  for (const g of grants) {
+    for (const [cmd, run] of runs) {
+      const allowed = decidePreToolUse(bash(cmd), g, NOW).decision === "allow";
+      assert.equal(grantRefusal(g, "s1", run, NOW) === null, allowed, `${JSON.stringify(g)} ${cmd}`);
+    }
+  }
+});
+
+test("#118: grantRefusal names each reason in plain words", () => {
+  const cases = [
+    [null, "s1", { issues: [12, 14] }, /^no \/start grant in this session$/],
+    [grant(), undefined, { issues: [12, 14] }, /^no session id/],
+    [grant(), "a/b", { issues: [12, 14] }, /^no session id/],
+    [{ unreadable: true }, "s1", { issues: [12, 14] }, /unreadable or malformed/],
+    [grant({ sessionId: "s2" }), "s1", { issues: [12, 14] }, /another session/],
+    [grant(), "s1", { issues: [12] }, /other issue numbers \(12 14\)/],
+    [autoGrant("dry"), "s1", { auto: "go" }, /--auto grant never allows --go/],
+    [autoGrant("go"), "s1", { auto: "dry" }, /--auto --go, not a dry run/],
+    [grant(), "s1", { auto: "dry" }, /issue numbers, not --auto/],
+    [autoGrant("dry"), "s1", { issues: [12] }, /for --auto, not issue numbers/],
+    [autoGrant("go"), "s1", { issues: [12] }, /for --auto --go, not issue numbers/],
+    [grant({ at: new Date(NOW - GRANT_TTL_MS).toISOString() }), "s1", { issues: [12, 14] }, /older than 15 minutes/],
+    [grant({ at: new Date(NOW + 1).toISOString() }), "s1", { issues: [12, 14] }, /dated in the future/],
+  ];
+  for (const [g, session, run, pattern] of cases) assert.match(grantRefusal(g, session, run, NOW), pattern, JSON.stringify([g, session, run]));
+  assert.equal(grantRefusal(grant(), "s1", { issues: [14, 12] }, NOW), null, "order does not matter");
+});
+
+test("#118 edge: grantPath refuses a session id unsafe as a file name, and readGrant tells missing from unreadable", () => {
+  assert.equal(grantPath("/d", "s1"), join("/d", "s1.json"));
+  for (const id of [undefined, "", "../x", "a b", "x".repeat(129)]) assert.equal(grantPath("/d", id), null, String(id));
+  const dir = tmp();
+  try {
+    assert.equal(readGrant(join(dir, "none.json")), null);
+    writeFileSync(join(dir, "bad.json"), "{");
+    assert.deepEqual(readGrant(join(dir, "bad.json")), { unreadable: true });
+    assert.deepEqual(readGrant(dir), { unreadable: true }, "a directory is unreadable, not missing");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#118: an allowed pre-tool-use leaves every grant form in place", () => {
+  for (const [prompt, cmd] of [["/start 12 14", START], ["/start --auto", AUTO], ["/start --auto --go", GO]]) {
+    const dir = tmp();
+    try {
+      runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt }), { dir, now: NOW });
+      assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(cmd)), { dir, now: NOW + 1000 })).permissionDecision, "allow");
+      assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(cmd)), { dir, now: NOW + 2000 })).permissionDecision, "allow", "still there for start.mjs");
+      assert.ok(existsSync(join(dir, "s1.json")), prompt);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });

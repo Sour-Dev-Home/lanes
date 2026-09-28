@@ -5,9 +5,10 @@
 //     .lanes/start/<session>.json, and one that is exactly `/start --auto` or `/start --auto --go` writes
 //     { sessionId, auto: "dry" | "go", at } (#76); any other prompt in that session deletes it.
 //   PreToolUse (Bash): node scripts/lanes/start-guard.mjs pre-tool-use
-//     `start.mjs` is allowed once, only as the plain `node scripts/lanes/start.mjs <N ...>` or
+//     `start.mjs` is allowed only as the plain `node scripts/lanes/start.mjs <N ...>` or
 //     `node scripts/lanes/start.mjs --auto [--go]`, only with a grant from this session under 15 minutes old for the
-//     same issue numbers or the same auto form (a dry-run grant never allows --go). Every other start.mjs run is denied. A direct
+//     same issue numbers or the same auto form (a dry-run grant never allows --go). The hook leaves the grant in place:
+//     start.mjs checks it again and deletes it after its launches (ADR 0007). Every other start.mjs run is denied. A direct
 //     `claude --bg` is always denied: start.mjs launches lanes itself (execFileSync, not a Bash tool call), so no
 //     session ever needs it. A `queue.mjs` run is always denied too, grant or not: the owner runs it in their own
 //     terminal (#95, ADR 0005). Anything else gets no decision. A deny holds in every permission mode.
@@ -531,10 +532,38 @@ function validGrant(grant) {
 const sameIssues = (a, b) => a.length === b.length && [...a].sort((x, y) => x - y).every((n, i) => n === [...b].sort((x, y) => x - y)[i]);
 
 /**
- * PreToolUse: null (no decision) unless the command runs `claude --bg` or `start.mjs`. `claude --bg` is always denied;
- * start.mjs is allowed only with this session's fresh grant for the same issues or the same auto form, and denied otherwise.
+ * Why `grant` does not allow the start.mjs run `run` in session `sessionId` at `now`, or null when it does: the grant
+ * must be this session's, name the same issue numbers or the same auto form, and be under GRANT_TTL_MS old. Shared by
+ * the PreToolUse hook and start.mjs (ADR 0007), so both read a grant the same way.
  * @param grant the session's grant file as parsed, null when there is none, or { unreadable: true }
- * @returns {null | { decision: "allow", reason: string, consumeGrant: true } | { decision: "deny", reason: string }}
+ * @param {{ issues: number[] } | { auto: "dry" | "go" }} run
+ * @returns {string | null}
+ */
+export function grantRefusal(grant, sessionId, run, now) {
+  if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId)) return "no session id, so no /start grant can be checked";
+  if (grant === null || grant === undefined) return "no /start grant in this session";
+  if (!validGrant(grant)) return "the /start grant is unreadable or malformed";
+  if (grant.sessionId !== sessionId) return "the /start grant belongs to another session";
+  if (run.auto !== undefined) {
+    if (grant.auto === undefined) return "the /start grant is for issue numbers, not --auto";
+    if (grant.auto !== run.auto) return run.auto === "go" ? "a /start --auto grant never allows --go" : "the /start grant is for --auto --go, not a dry run";
+  } else if (grant.auto !== undefined) {
+    return `the /start grant is for ${AUTO_FORMS[grant.auto]}, not issue numbers`;
+  } else if (!sameIssues(grant.issues, run.issues)) {
+    return `the /start grant is for other issue numbers (${grant.issues.join(" ")})`;
+  }
+  const age = now - Date.parse(grant.at);
+  if (age < 0) return "the /start grant is dated in the future";
+  if (age >= GRANT_TTL_MS) return "the /start grant is older than 15 minutes";
+  return null;
+}
+
+/**
+ * PreToolUse: null (no decision) unless the command runs `claude --bg` or `start.mjs`. `claude --bg` is always denied;
+ * start.mjs is allowed only with this session's fresh grant for the same issues or the same auto form, and denied
+ * otherwise. An allow leaves the grant in place: start.mjs checks it again and deletes it after its launches (ADR 0007).
+ * @param grant the session's grant file as parsed, null when there is none, or { unreadable: true }
+ * @returns {null | { decision: "allow" | "deny", reason: string }}
  */
 export function decidePreToolUse(input, grant, now = Date.now()) {
   if (input?.tool_name !== "Bash") return null;
@@ -551,20 +580,20 @@ export function decidePreToolUse(input, grant, now = Date.now()) {
   if (found.length === 0) return null;
   if (found.every((f) => f.unparsed)) return { decision: "deny", reason: PARSE_DENY_REASON };
   const deny = { decision: "deny", reason: DENY_REASON };
-  const sessionId = input.session_id;
   if (found.length !== 1 || !found[0].standalone) return deny;
-  if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId) || !validGrant(grant)) return deny;
-  if (grant.sessionId !== sessionId) return deny;
   const run = found[0];
-  const matches = run.auto !== undefined ? grant.auto === run.auto : grant.auto === undefined && sameIssues(grant.issues, run.issues);
-  if (!matches) return deny;
-  const age = now - Date.parse(grant.at);
-  if (age < 0 || age >= GRANT_TTL_MS) return deny;
-  if (run.auto !== undefined) return { decision: "allow", reason: `owner run of /start ${AUTO_FORMS[run.auto]} in this session`, consumeGrant: true };
-  return { decision: "allow", reason: `owner launch from /start ${grant.issues.join(" ")} in this session`, consumeGrant: true };
+  if (grantRefusal(grant, input.session_id, run, now) !== null) return deny;
+  if (run.auto !== undefined) return { decision: "allow", reason: `owner run of /start ${AUTO_FORMS[run.auto]} in this session` };
+  return { decision: "allow", reason: `owner launch from /start ${grant.issues.join(" ")} in this session` };
 }
 
-function readGrant(file) {
+/** The grant file of session `sessionId` in `dir`, or null for a session id unsafe as a file name. */
+export function grantPath(dir, sessionId) {
+  return typeof sessionId === "string" && SESSION_RE.test(sessionId) ? join(dir, `${sessionId}.json`) : null;
+}
+
+/** The grant file at `file`, parsed: null when there is none, { unreadable: true } when it cannot be read or parsed. */
+export function readGrant(file) {
   let text;
   try {
     text = readFileSync(file, "utf8");
@@ -600,11 +629,10 @@ export function runHook(event, raw, { dir, now = Date.now() }) {
   if (event === "pre-tool-use") {
     try {
       const input = JSON.parse(raw);
-      const sessionId = input?.session_id;
-      const file = typeof sessionId === "string" && SESSION_RE.test(sessionId) ? join(dir, `${sessionId}.json`) : null;
-      const d = decidePreToolUse(input, file ? readGrant(file) : null, now);
+      const file = grantPath(dir, input?.session_id);
+      const d =decidePreToolUse(input, file ? readGrant(file) : null, now);
       if (d === null) return "";
-      if (d.decision === "allow") rmSync(file); // single use; if it cannot be removed, the catch below denies
+      // An allow leaves the grant: start.mjs checks it again and deletes it after its launches (ADR 0007).
       return preToolUseOutput(d.decision, d.reason);
     } catch {
       return preToolUseOutput("deny", DENY_REASON);

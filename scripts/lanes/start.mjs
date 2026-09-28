@@ -7,13 +7,14 @@
 // only --go launches it. Exit 0: printed (and, with --go, every pick launched). 1: a launch failed. 2: as above.
 // The cap and the soft paths come from the `start` block of lanes.config.json.
 import { execFileSync, spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main as checkBlockers } from "./blockers.mjs";
 import { cleanupMerged } from "./cleanup.mjs";
 import { TIERS, parseIssueForm } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
+import { grantPath, grantRefusal, readGrant } from "./start-guard.mjs";
 import { issuePaths, pathsOverlap } from "./status.mjs";
 
 export const START_DEFAULTS = Object.freeze({
@@ -72,14 +73,16 @@ function startModels(models) {
 }
 
 /**
- * The claude arguments for one lane: `--model <name>` before `/lane <n>` when start.models has a model for the
- * issue's tier, and none otherwise. No permission-mode flag: a lane runs under the owner's normal settings.
+ * The claude arguments for one lane: `--name lane-<n>`, so `claude agents` shows which issue a session works, then
+ * `--model <name>` before `/lane <n>` when start.models has a model for the issue's tier, and none otherwise. No
+ * permission-mode flag: a lane runs under the owner's normal settings.
  * @param {number} n
  * @param {{ tier?: string, models?: { skip?: string, quick?: string, full?: string } }} [options] tier without `tier:`
  */
 export function launchArgs(n, { tier, models = {} } = {}) {
   const model = TIERS.includes(tier) && Object.hasOwn(models, tier) ? models[tier] : undefined;
-  return model ? ["--bg", "--model", model, `/lane ${n}`] : ["--bg", `/lane ${n}`];
+  const named = ["--bg", "--name", `lane-${n}`];
+  return model ? [...named, "--model", model, `/lane ${n}`] : [...named, `/lane ${n}`];
 }
 
 // The tier of an issue from its label names (`tier:quick` → `quick`), or undefined.
@@ -123,6 +126,8 @@ function refusal(issue) {
   if (issue.error) return issue.error;
   if (issue.state !== "OPEN") return "not open";
   if (!issue.labels.includes("ready")) return "lacks ready";
+  // A lane found nothing to build and handed it to the owner (#136); it waits for them to close or rewrite it.
+  if (issue.labels.includes("needs-owner")) return "needs-owner";
   if (issue.labels.filter((l) => l.startsWith("tier:")).length !== 1) return "no single tier:* label";
   if (issue.blockers?.code !== 0) return String(issue.blockers?.message ?? "cannot check blockers").replace(/^#\d+: /, "");
   return null;
@@ -307,19 +312,48 @@ function autoStart(go, deps, { maxLanes, softPaths, models }) {
 }
 
 /**
- * Removes merged lanes, then reads the issues, plans and launches. `deps` holds fakes in tests: `gh(args)` and
- * `claude(args, { cwd })` return stdout, `root()` the main repository root, `config()` the parsed lanes.config.json
- * (undefined when there is none), `cleanup({ dryRun })` cleanupMerged's lines, `spawn(cmd, args, options)` a
- * child_process.spawn child, and `reaperLog(root, n)` lane n's reaper log opened for appending, as `{ fd, close }`.
- * Returns the exit code and the lines to print, cleanup's first.
+ * Checks this session's /start grant, removes merged lanes, then reads the issues, plans and launches, and deletes
+ * the grant. `deps` holds fakes in tests: `gh(args)` and `claude(args, { cwd })` return stdout, `root()` the main
+ * repository root, `config()` the parsed lanes.config.json (undefined when there is none), `cleanup({ dryRun })`
+ * cleanupMerged's lines, `spawn(cmd, args, options)` a child_process.spawn child, `reaperLog(root, n)` lane n's reaper
+ * log opened for appending, as `{ fd, close }`, `session()` this session's id, `grantDir()` the directory of grant
+ * files, `now()` the time in ms, and optionally `removeGrant(file)`. Returns the exit code and the lines to print,
+ * cleanup's first.
  */
-export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig, cleanup: cleanupMerged, spawn, reaperLog }) {
+export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig, cleanup: cleanupMerged, spawn, reaperLog, session, grantDir, now: Date.now }) {
   const args = argv.map((a) => String(a).replace(/^#/, ""));
   const auto = args[0] === "--auto";
   if (auto ? args.length > 2 || (args.length === 2 && args[1] !== "--go") : !args.length || args.some((a) => !/^[1-9]\d*$/.test(a))) {
     return { code: 2, lines: [USAGE] };
   }
+  const go = args[1] === "--go";
 
+  // ADR 0007: whatever reached this script, it launches nothing without the owner's fresh /start for these arguments.
+  const sessionId = deps.session();
+  const file = grantPath(deps.grantDir(), sessionId);
+  // A repeated number launches once, so it is compared once.
+  const run = auto ? { auto: go ? "go" : "dry" } : { issues: [...new Set(args.map(Number))] };
+  const refused = grantRefusal(file ? readGrant(file) : null, sessionId, run, deps.now());
+  if (refused) return { code: 2, lines: [`nothing launched: ${refused}`] };
+
+  let result;
+  let notRemoved = null;
+  try {
+    result = startRun(auto, go, args, deps);
+  } finally {
+    // Single use, even when the run stopped early: a second run needs the owner's /start again.
+    try {
+      (deps.removeGrant ?? rmSync)(file);
+    } catch (err) {
+      notRemoved = reason(err);
+    }
+  }
+  if (notRemoved === null) return result;
+  return { code: Math.max(result.code, 1), lines: [...result.lines, `the /start grant could not be removed: ${notRemoved}`] };
+}
+
+// The run once the grant is accepted: config, cleanup, then the plan and its launches.
+function startRun(auto, go, args, deps) {
   let config;
   try {
     const raw = deps.config();
@@ -331,7 +365,6 @@ export function main(argv, deps = { gh, claude, root: repoRoot, config: readConf
   } catch (err) {
     return { code: 2, lines: [`cannot read lanes.config.json, nothing launched: ${reason(err)}`] };
   }
-  const go = args[1] === "--go";
   // Merged lanes go first, so their sessions no longer count as in flight; only --auto without --go is a dry run.
   const cleaned = cleanupLines(deps, auto && !go);
   const { code, lines } = auto ? autoStart(go, deps, config) : startIssues(args, deps, config);
@@ -400,6 +433,10 @@ function startIssues(args, deps, config) {
   return { code: refused.length || launched.failed ? 1 : 0, lines: numbers.flatMap((n) => lines.get(n)) };
 }
 
+// The grant the start guard's UserPromptSubmit hook writes: `.lanes/start/<session>.json` beside these scripts, the
+// same directory the hook resolves from its own file.
+const session = () => process.env.CLAUDE_CODE_SESSION_ID;
+const grantDir = () => fileURLToPath(new URL("../../.lanes/start/", import.meta.url));
 const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const claude = (args, { cwd }) => execFileSync("claude", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 // The main checkout, even when run from a worktree: the parent of the shared .git directory.
