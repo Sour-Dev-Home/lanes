@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { START_DEFAULTS, inFlightIssues, launchArgs, main, parseSessionId, planStart, startConfig } from "./start.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
@@ -236,9 +237,22 @@ test("parseSessionId returns null when no id is printed", () => {
 const form = ({ scope = "In: `a.mjs`.", blockedBy = "none", contract = "none" } = {}) =>
   ["### Goal", "g", "### Acceptance criteria", "- [ ] a", "### Interface contract", contract, "### Scope", scope, "### Blocked by", blockedBy, "### Tier", "quick"].join("\n\n");
 
-function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config, cleanup = () => [] } = {}) {
+function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config, cleanup = () => [], spawnChild } = {}) {
   const launches = [];
   const calls = [];
+  // Every reaper spawn and log open/close, in order; spawnChild(cmd, args, options) overrides the fake child.
+  const reapers = [];
+  const logs = [];
+  const spawn = (cmd, args, options) => {
+    const child = spawnChild ? spawnChild(cmd, args, options) : { pid: 4242, on() {}, unref() { this.unrefed = true; } };
+    reapers.push({ cmd, args, options, child });
+    return child;
+  };
+  const reaperLog = (root, n) => {
+    const log = { root, n, fd: 100 + n, closed: false };
+    logs.push(log);
+    return { fd: log.fd, close: () => (log.closed = true) };
+  };
   const view = (n) => {
     const i = issues[n];
     return { number: n, state: i.state ?? "OPEN", labels: (i.labels ?? ["ready", "tier:quick"]).map((name) => ({ name })), body: i.body ?? form() };
@@ -269,8 +283,125 @@ function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut
     calls.push(`cleanup ${JSON.stringify(options)}`);
     return cleanup(options);
   };
-  return { deps: { gh, claude, root: () => "/repo", config: () => config, cleanup: cleanupFake }, launches, calls };
+  return { deps: { gh, claude, root: () => "/repo", config: () => config, cleanup: cleanupFake, spawn, reaperLog }, launches, calls, reapers, logs };
 }
+
+// #164: one detached reaper per launched lane (ADR 0010).
+const reapScript = join("/repo", "scripts", "lanes", "reap.mjs");
+
+// #164 criterion 1: after a launch with a session id, reap.mjs is spawned detached, logging to its own log, and unref'd.
+test("main spawns one detached, unref'd reaper per launched lane, logging to the reaper's log", () => {
+  const { deps, reapers, logs } = fakes({ issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } } });
+  const { code, lines } = main(["1", "2"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#2 → id2"]);
+  assert.deepEqual(
+    reapers.map((r) => [r.cmd, r.args]),
+    [
+      [process.execPath, [reapScript, "--issue", "1", "--session", "id1"]],
+      [process.execPath, [reapScript, "--issue", "2", "--session", "id2"]],
+    ],
+  );
+  for (const [i, r] of reapers.entries()) {
+    assert.equal(r.options.detached, true);
+    assert.equal(r.options.cwd, "/repo");
+    assert.deepEqual(r.options.stdio, ["ignore", logs[i].fd, logs[i].fd]);
+    assert.equal(r.child.unrefed, true);
+  }
+  assert.deepEqual(logs.map((l) => [l.root, l.n, l.closed]), [["/repo", 1, true], ["/repo", 2, true]]);
+});
+
+// #164 criterion 1 and 4: a launch with no session id (or a failed launch) spawns no reaper.
+test("main spawns no reaper for a launch that printed no session id or failed", () => {
+  const { deps, reapers, logs } = fakes({ issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) }, 3: { body: form({ scope: "In: `c.mjs`." }) } }, launchOut: { 1: "something went wrong" }, launchFail: [2] });
+  const { code } = main(["1", "2", "3"], deps);
+  assert.equal(code, 1);
+  assert.deepEqual(reapers.map((r) => r.args[2]), ["3"]);
+  assert.equal(logs.length, 1);
+});
+
+// Extra, not from criteria or a listed edge case: a failed launch interleaved between two successful ones must not
+// shift which issue or session id a reaper is attributed to (unlike the run above, where every failure comes first).
+test("edge: a failed launch between two successes does not misattribute either reaper's issue or session id", () => {
+  const { deps, reapers, logs } = fakes({
+    issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) }, 3: { body: form({ scope: "In: `c.mjs`." }) } },
+    launchFail: [2],
+  });
+  const { code, lines } = main(["1", "2", "3"], deps);
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ["#1 → id1", "#2: launch failed: claude: spawn failed, not retried", "#3 → id3"]);
+  assert.deepEqual(
+    reapers.map((r) => r.args.slice(1)),
+    [
+      ["--issue", "1", "--session", "id1"],
+      ["--issue", "3", "--session", "id3"],
+    ],
+  );
+  assert.deepEqual(logs.map((l) => l.n), [1, 3]);
+});
+
+// #164 criterion 3 and 4: the --auto dry run spawns nothing; --auto --go spawns one per launch.
+test("--auto (dry run) spawns no reaper, and --auto --go spawns one per launched lane", () => {
+  const dry = fakes({ issues: autoIssues(), sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-6-y" }] });
+  main(["--auto"], dry.deps);
+  assert.equal(dry.reapers.length, 0);
+  assert.equal(dry.logs.length, 0);
+  const go = fakes({ issues: autoIssues(), sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-6-y" }] });
+  const { code } = main(["--auto", "--go"], go.deps);
+  assert.equal(code, 0);
+  assert.deepEqual(go.reapers.map((r) => r.args.slice(1)), [["--issue", "1", "--session", "id1"], ["--issue", "2", "--session", "id2"]]);
+});
+
+// #164 criterion 2 and 4: a spawn that throws is reported and does not fail the launch.
+test("a reaper spawn that throws prints #N: reaper not started and keeps the launch", () => {
+  const { deps, logs } = fakes({ issues: { 1: {} }, spawnChild: () => { throw new Error("spawn EACCES"); } });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#1: reaper not started: spawn EACCES"]);
+  assert.equal(logs[0].closed, true);
+});
+
+test("edge: a spawn that returns no pid (its error comes later) is reported, and the later error is swallowed", () => {
+  const handlers = {};
+  const { deps } = fakes({ issues: { 1: {} }, spawnChild: () => ({ pid: undefined, on(event, fn) { handlers[event] = fn; }, unref() {} }) });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#1: reaper not started: no process started"]);
+  assert.equal(typeof handlers.error, "function");
+  assert.doesNotThrow(() => handlers.error(new Error("spawn ENOENT")));
+});
+
+test("edge: a reaper log that cannot be opened is reported, spawns nothing, and keeps the launch", () => {
+  const { deps, reapers } = fakes({ issues: { 1: {} } });
+  deps.reaperLog = () => { throw new Error("EACCES: permission denied, open '.lanes/reap/1.log'"); };
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#1: reaper not started: EACCES: permission denied, open '.lanes/reap/1.log'"]);
+  assert.equal(reapers.length, 0);
+});
+
+test("edge: a spawn error on one lane does not stop the next lane's reaper", () => {
+  let first = true;
+  const { deps, reapers } = fakes({
+    issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } },
+    spawnChild: () => {
+      if (first) {
+        first = false;
+        throw new Error("spawn EAGAIN");
+      }
+      return { pid: 7, on() {}, unref() {} };
+    },
+  });
+  const { code, lines } = main(["1", "2"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#1: reaper not started: spawn EAGAIN", "#2 → id2"]);
+  assert.equal(reapers.length, 1);
+});
+
+test("edge: a multi-line spawn error is reported as its first line only", () => {
+  const { deps } = fakes({ issues: { 1: {} }, spawnChild: () => { throw new Error("spawn failed\nstack line"); } });
+  assert.deepEqual(main(["1"], deps).lines, ["#1 → id1", "#1: reaper not started: spawn failed"]);
+});
 
 test("main launches from the repository root and prints #N → id", () => {
   const { deps, launches } = fakes({ issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } } });
