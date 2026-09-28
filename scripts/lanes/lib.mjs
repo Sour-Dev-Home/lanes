@@ -264,7 +264,8 @@ function splitValidateLine(body) {
   const rest = head.slice(0, ot.index);
   for (const sep of rest.matchAll(VALIDATE_SEPARATOR)) {
     const end = sep.index + sep[0].length;
-    if (end < rest.length) return [rest.slice(0, sep.index), rest.slice(end), ot[1], ot[2], att[1]];
+    // the old `.` groups never matched a line terminator, so a multi-line command or regex stays malformed
+    if (end < rest.length && !/[\n\r\p{Zl}\p{Zp}]/u.test(rest.slice(0, sep.index) + rest.slice(end))) return [rest.slice(0, sep.index), rest.slice(end), ot[1], ot[2], att[1]];
   }
   return null;
 }

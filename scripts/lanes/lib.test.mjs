@@ -727,6 +727,11 @@ test("edge: parseValidation keeps a separator inside the regex and whitespace va
   assert.throws(() => parseValidation("validate: node —  >= 3 (attempts: 2)"), { name: "ValidationParseError" });
 });
 
+test("edge: parseValidation rejects a newline inside the command or the regex, as the old pattern did", () => {
+  assert.throws(() => parseValidation("validate: a — x\ny < 1 (attempts: 1)"), { name: "ValidationParseError" });
+  assert.throws(() => parseValidation("validate: a\nb — (x) < 1 (attempts: 1)"), { name: "ValidationParseError" });
+});
+
 test("edge: parseValidation throws a named error for malformed validate lines", () => {
   for (const bad of [
     "validate:",
