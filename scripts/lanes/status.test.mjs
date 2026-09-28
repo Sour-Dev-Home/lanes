@@ -648,6 +648,12 @@ test("edge: a needs-owner issue with an open PR or a busy session keeps showing 
   assert.deepEqual([running.waitingOnOwner, running.inFlight.map((i) => [i.number, i.stage])], [[], [[60, "running"]]]);
 });
 
+test("edge: a needs-owner issue whose session is waiting on a prompt shows as the waiting lane, not as already met", () => {
+  const sessions = laneSessions([waitingAgent("42c93c57", wt("issue-60-x"))], ROOT);
+  const s = summarize({ prs: [], issues: [needsOwner(60)], merged: [], sessions });
+  assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage]), [[60, "running"]]);
+});
+
 test("edge: several needs-owner issues are each listed once, in issue order", () => {
   const s = summarize({ prs: [], issues: [needsOwner(60), needsOwner(62)], merged: [], sessions: new Map() });
   assert.deepEqual(s.waitingOnOwner.map((i) => i.number), [60, 62]);
