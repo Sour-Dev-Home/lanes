@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkModules, importSpecifiers, listFiles, main, MAX_CYCLES, MAX_STEPS } from "./modules.mjs";
+import { checkModules, importSpecifiers, listFiles, main, MAX_CYCLES, MAX_STEPS, moduleOf } from "./modules.mjs";
 
 // Fixture sources are built with `q` so this file's own text never holds a literal `from "./..."` import it doesn't make.
 const q = (s) => JSON.stringify(s);
@@ -372,4 +372,28 @@ test("edge: main on the real map exits 1 and names a stray file that no module c
   const { code, message } = main(io);
   assert.equal(code, 1);
   assert.match(message, /^unmapped: scripts\/lanes\/stray\.mjs$/m);
+});
+
+test("moduleOf returns the id of the module whose path prefix matches, or null for no module", () => {
+  assert.equal(moduleOf("src/app/a.mjs", map), "app");
+  assert.equal(moduleOf("src/core/deep/c.mjs", map), "core");
+  assert.equal(moduleOf("README.md", map), null);
+});
+
+test("edge: moduleOf picks the longest matching prefix and matches nothing for an empty path", () => {
+  const nested = { entries: [{ id: "outer", paths: ["src/"], imports: [] }, { id: "inner", paths: ["src/core/"], imports: [] }] };
+  assert.equal(moduleOf("src/core/x.mjs", nested), "inner");
+  assert.equal(moduleOf("src/other.mjs", nested), "outer");
+  assert.equal(moduleOf("", nested), null);
+});
+
+test("edge: moduleOf refuses a malformed map with the reason, like checkModules", () => {
+  assert.throws(() => moduleOf("src/a.mjs", { entries: "no" }), /entries must be an array/);
+  assert.throws(() => moduleOf("src/a.mjs", null), /must be an object/);
+});
+
+test("edge: moduleOf gives the module lanes.config.json assigns to a real file", () => {
+  const config = JSON.parse(readFileSync("lanes.config.json", "utf8"));
+  assert.equal(moduleOf("scripts/lanes/modules.mjs", config.modules), "modules");
+  assert.equal(moduleOf("scripts/lanes/lessons.mjs", config.modules), "lessons");
 });

@@ -60,6 +60,7 @@ export const MANIFEST = [
   "scripts/lanes/review-metrics.mjs",
   "scripts/lanes/modules.mjs",
   "scripts/lanes/structure-report.mjs",
+  "scripts/lanes/lessons.mjs",
   "docs/USING.md",
 ];
 
