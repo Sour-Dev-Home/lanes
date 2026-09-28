@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { carry, evaluatePr, main } from "./gate.mjs";
+import { carry, evaluatePr, main, noteOwnerApproval } from "./gate.mjs";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -925,6 +925,22 @@ test("edge: owner success on a SHA with two open PRs comments on each", () => {
   main(statusEvent(OWNER, "success"), api);
   assert.deepEqual(comments.map((c) => c.path), [COMMENTS_5, "repos/o/r/issues/6/comments"]);
   assert.equal(posted.length, 2);
+});
+
+// Not required by the criteria or a listed edge: case, but noteOwnerApproval's own return-value contract ("Returns
+// whether it commented") and its zero-padded date formatting are otherwise only exercised indirectly through main().
+test("edge: noteOwnerApproval reports whether it commented, and zero-pads a single-digit month, day, hour and minute", () => {
+  const { api, comments } = commentingApi(statusRoutes());
+  const now = new Date("2026-01-05T03:04:00Z");
+  const first = noteOwnerApproval(api, "o/r", 5, SHA, now);
+  assert.equal(first, true);
+  assert.equal(
+    comments[0].body,
+    `Owner approval recorded for ${SHA.slice(0, 7)} at 2026-01-05 03:04 UTC. If you didn't approve this, dismiss the review/owner status and report it.\n\n${MARKER}`,
+  );
+  const second = noteOwnerApproval(api, "o/r", 5, SHA, now);
+  assert.equal(second, false, "a second call for the same PR and SHA must not comment again");
+  assert.equal(comments.length, 1);
 });
 
 test("edge: an unreadable comment list still re-evaluates the gate, then fails the run naming the PR", () => {
