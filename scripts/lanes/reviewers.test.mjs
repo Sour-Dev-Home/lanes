@@ -44,6 +44,27 @@ function inRepo(fn, committed = { "src/app.js": "x\n" }) {
     rmSync(root, { recursive: true, force: true });
   }
 }
+// A throwaway repo whose HEAD is origin/main: the lane has not committed yet.
+function atBase(fn) {
+  const root = mkdtempSync(join(tmpdir(), "lanes-reviewers-"));
+  const git = (...args) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd: root, env: GIT_ENV, encoding: "utf8" });
+  const write = (file, text = "x\n") => {
+    mkdirSync(dirname(join(root, file)), { recursive: true });
+    writeFileSync(join(root, file), text);
+  };
+  try {
+    git("init", "-q", "-b", "main");
+    write("lanes.config.json", JSON.stringify(CONFIG));
+    write(".gitignore", ".lanes/\n");
+    write("src/style.css", "a{}\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    git("update-ref", "refs/remotes/origin/main", "HEAD");
+    return fn({ root, git, write });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 const run = (root, tier = "quick") => spawnSync(process.execPath, [SCRIPT, tier], { cwd: root, encoding: "utf8" });
 const reviewers = (root, tier) => {
   const r = run(root, tier);
@@ -143,25 +164,51 @@ test("edge: non-ASCII and spaced paths are classified unquoted", () => {
 // AC1 (the bug in #17 itself): before the lane's first commit, HEAD equals origin/main, so the committed diff
 // is empty and only the uncommitted change may report a reviewer.
 test("edge: before the first commit, an uncommitted change alone is classified", () => {
-  const root = mkdtempSync(join(tmpdir(), "lanes-reviewers-"));
-  const git = (...args) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd: root, env: GIT_ENV, encoding: "utf8" });
-  const write = (file, text = "x\n") => {
-    mkdirSync(dirname(join(root, file)), { recursive: true });
-    writeFileSync(join(root, file), text);
-  };
-  try {
-    git("init", "-q", "-b", "main");
-    write("lanes.config.json", JSON.stringify(CONFIG));
-    write("src/style.css", "a{}\n");
-    git("add", "-A");
-    git("commit", "-q", "-m", "base");
-    git("update-ref", "refs/remotes/origin/main", "HEAD");
+  atBase(({ root, write, git }) => {
     write("auth/new.js");
     git("add", "auth/new.js");
     assert.deepEqual(reviewers(root), ["test-hunter", "security-reviewer"]);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+  });
+});
+
+// #124 AC1: nothing committed over origin/main and nothing uncommitted is a refusal, not a bare test-hunter.
+const refusesEmpty = (root, tier = "quick") => {
+  const r = run(root, tier);
+  assert.notEqual(r.status, 0);
+  assert.equal(r.stdout, "");
+  assert.match(r.stderr, /no diff to review/);
+  assert.match(r.stderr, /commit or make changes first/);
+};
+
+test("empty: HEAD at origin/main with a clean tree is refused", () => {
+  atBase(({ root }) => refusesEmpty(root));
+});
+
+test("edge: empty is refused for every tier", () => {
+  atBase(({ root }) => {
+    for (const tier of ["skip", "quick", "full"]) refusesEmpty(root, tier);
+  });
+});
+
+test("edge: only ignored untracked files is still empty", () => {
+  atBase(({ root, write }) => {
+    write(".lanes/verdicts/test-hunter.json", "{}\n");
+    refusesEmpty(root);
+  });
+});
+
+test("edge: commits that change no file are still empty", () => {
+  atBase(({ root, git }) => {
+    git("commit", "-q", "--allow-empty", "-m", "nothing");
+    refusesEmpty(root);
+  });
+});
+
+test("edge: a branch commit reverted by an uncommitted change is still a diff", () => {
+  inRepo(({ root, git }) => {
+    git("rm", "-q", "src/app.js");
+    assert.deepEqual(reviewers(root), ["test-hunter"]);
+  });
 });
 
 test("edge: an unknown tier is refused", () => {
