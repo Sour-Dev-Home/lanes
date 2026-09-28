@@ -187,6 +187,43 @@ test("the ADR 0004 rule is the same in both briefs", () => {
   assert.equal(acceptedRiskRule("security-reviewer"), acceptedRiskRule("test-hunter"));
 });
 
+// ADR 0007: the same rule for the start guard (start.mjs, queue.mjs, claude --bg)
+function startGuardRule(name) {
+  const text = readFileSync(`.claude/agents/${name}.md`, "utf8").replace(/\r\n/g, "\n");
+  const match = text.match(/^Accepted risk \(ADR 0007\b[^)]*\):[\s\S]*?(?=\n\n|(?![\s\S]))/m);
+  assert.ok(match, `${name}: no "Accepted risk (ADR 0007 ...):" paragraph`);
+  return match[0].replace(/\s+/g, " ");
+}
+
+for (const name of ["security-reviewer", "test-hunter"]) {
+  test(`${name} states ADR 0007's accepted-risk rule for the start guard: new bypasses minor with a lane-filed follow-up, regressions critical`, () => {
+    const rule = startGuardRule(name);
+    assert.match(rule, /docs\/adr\/0007-start-guard-accepted-risk\.md/);
+    assert.match(rule, /`start\.mjs`/);
+    assert.match(rule, /`queue\.mjs`/);
+    assert.match(rule, /`claude --bg`/);
+    const sentence = (a, b) => new RegExp(`${a}(?:[^.]|\\.\\S)*${b}`);
+    assert.match(rule, sentence("newly found way", "`start\\.mjs`(?:[^.]|\\.\\S)*`queue\\.mjs`(?:[^.]|\\.\\S)*`claude --bg`(?:[^.]|\\.\\S)*\\bis `minor`"));
+    assert.match(rule, sentence("follow-up issue", "`lane-filed`"));
+    assert.match(rule, sentence("regression", "\\bis `critical`"));
+    assert.match(rule, sentence("previously caught", "now passes"));
+  });
+}
+
+test("the ADR 0007 rule is the same in both briefs", () => {
+  assert.equal(startGuardRule("security-reviewer"), startGuardRule("test-hunter"));
+});
+
+test("the ADR 0007 paragraph sits right after ADR 0004's in both briefs", () => {
+  for (const name of ["security-reviewer", "test-hunter"]) {
+    const text = readFileSync(`.claude/agents/${name}.md`, "utf8").replace(/\r\n/g, "\n");
+    const first = text.indexOf("Accepted risk (ADR 0004");
+    const second = text.indexOf("Accepted risk (ADR 0007");
+    assert.ok(first >= 0 && second > first, `${name}: ADR 0007 paragraph must follow ADR 0004's`);
+    assert.match(text.slice(first, second), /^[^\n]+(?:\n[^\n]+)*\n\n$/, `${name}: one paragraph between them`);
+  }
+});
+
 test("the reviewer agents are installed into other repos", () => {
   const installText = readFileSync("scripts/lanes/install.mjs", "utf8");
   for (const name of AGENTS) assert.match(installText, new RegExp(`\\.claude/agents/${name}\\.md`), name);

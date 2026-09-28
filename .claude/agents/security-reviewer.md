@@ -33,3 +33,10 @@ or to post `review/owner` directly, is `minor`, not a blocker. File it as a foll
 label (`gh issue create --label lane-filed --body-file <file>`, the body in the Task form's layout) and name that
 issue in the finding. A regression, where something the guard or the script check previously caught now passes, is
 `critical`.
+
+Accepted risk (ADR 0007, `docs/adr/0007-start-guard-accepted-risk.md`): the start guard is best-effort defence in
+depth, not a barrier to a determined lane. A newly found way to build a command that reaches `start.mjs`, `queue.mjs`
+or `claude --bg` is `minor`, not a blocker. File it as a follow-up issue with the `lane-filed` label
+(`gh issue create --label lane-filed --body-file <file>`, the body in the Task form's layout) and name that issue in
+the finding. A regression, where something the guard or the script check previously caught now passes, is
+`critical`.
