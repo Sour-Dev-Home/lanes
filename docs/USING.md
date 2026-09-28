@@ -54,7 +54,7 @@
    `.claude/worktrees`. For each `issue-<N>-…` lane whose PR merged at exactly its local branch tip and whose worktree
    has no uncommitted or untracked changes, it runs `claude rm <id>` for its background session, `git worktree remove` and `git branch -D`,
    never with a force or discard flag; anything else is skipped with the reason, and a failed step stops only that
-   lane. `/health` runs it; `/status` prints `N merged lanes to clean up` when some are waiting. Every `/start`, with
+   lane. `/health` runs it; `/status` prints `N lanes or folders to clean up` when some are waiting. Every `/start`, with
    issue numbers or with `--auto`, runs the same cleanup first, so merged lanes no longer count as in flight;
    `--auto` without `--go` only prints what it would remove. Remote branches are left to GitHub's delete-on-merge, and
    closed-unmerged lanes are never touched.
