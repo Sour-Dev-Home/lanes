@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { gateDescriptions, issuePaths, laneBranches, laneSessions, loadLaneBranches, loadSessions, mergeQueueEntries, pathsOverlap, render, summarize } from "./status.mjs";
+import { cleanableCount, planCleanup } from "./cleanup.mjs";
+import { gateDescriptions, laneBranches, laneSessions, loadLaneBranches, loadSessions, mergeQueueEntries, render, summarize } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -278,55 +279,35 @@ test("render prints the five sections with counts, BLOCKED after READY TO START"
   assert.match(text, /READY TO START \(0\)\n\nBLOCKED \(1\)\n  #4 \[full\] One-command setup — blocked by #3\n\nMERGED, last 24h \(0\)/);
 });
 
-test("render prints one hint line when merged lanes wait for cleanup, and none otherwise", () => {
+test("render prints one hint line when lanes or folders wait for cleanup, and none otherwise", () => {
   const empty = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
-  assert.match(render({ ...empty, toCleanUp: 2 }, "24h"), /\n\n2 merged lanes to clean up: node scripts\/lanes\/cleanup\.mjs$/);
-  assert.match(render({ ...empty, toCleanUp: 1 }, "24h"), /\n\n1 merged lane to clean up: node scripts\/lanes\/cleanup\.mjs$/);
+  assert.match(render({ ...empty, toCleanUp: 2 }, "24h"), /\n\n2 lanes or folders to clean up: node scripts\/lanes\/cleanup\.mjs$/);
+  assert.match(render({ ...empty, toCleanUp: 1 }, "24h"), /\n\n1 lane or folder to clean up: node scripts\/lanes\/cleanup\.mjs$/);
   assert.doesNotMatch(render({ ...empty, toCleanUp: 0 }, "24h"), /clean up/);
   assert.doesNotMatch(render(empty, "24h"), /clean up/);
 });
 
-test("issuePaths reads backticked and bare paths from the contract and Scope's In: part, ignoring Out:", () => {
-  const paths = issuePaths({
-    contract: "none (additive `--json` fields on `ready` items), see docs/contract.md",
-    scope: "In: `scripts/lanes/status.mjs`, scripts/lanes/status.test.mjs.\nOut: the 3-lane cap, `lib.mjs`, `.claude/commands/*`.",
+test("the cleanup hint counts a merged lane, a closed-issue lane and an empty orphan folder without calling them all merged lanes", () => {
+  const empty = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
+  const HEAD = "a".repeat(40);
+  const wt = (branch) => ({ path: `C:/repo/.claude/worktrees/${branch}`, branch, head: HEAD, dirty: false, unpushed: 0 });
+  const plan = planCleanup({
+    worktrees: [{ path: "C:/repo", branch: "main", head: "f".repeat(40), dirty: false, main: true }, wt("issue-7-x"), wt("issue-8-y")],
+    prs: [{ number: 90, state: "MERGED", headRefName: "issue-7-x", headRefOid: HEAD }],
+    issues: [{ number: 8, state: "CLOSED" }],
+    orphans: [{ path: "C:/repo/.claude/worktrees/gone", files: 0 }],
   });
-  assert.deepEqual(paths, ["docs/contract.md", "scripts/lanes/status.mjs", "scripts/lanes/status.test.mjs"]);
-  assert.deepEqual(issuePaths({ contract: "none", scope: "tidy up the wording" }), []);
-  assert.deepEqual(issuePaths({ contract: "", scope: "In: `src/ui/` and ./README.md" }), ["src/ui/", "README.md"]);
-  // "Built-in:" and "Opt-out:" are not the In:/Out: labels.
-  assert.deepEqual(issuePaths({ scope: "Built-in: `x.mjs`. In: `a.mjs`, opt-out: `b.mjs`\nOut: `c.mjs`" }), ["a.mjs", "b.mjs"]);
-});
-
-test("issuePaths ignores paths in the parenthesised note after a `none` contract: they are only read", () => {
-  const reads = (scope) => issuePaths({ contract: "none (reads `contracts/adr-template.md` from #44)", scope });
-  assert.deepEqual(reads("In: `.claude/commands/adr.md`."), [".claude/commands/adr.md"]);
-  // #45 and #46 both only read the template, so they do not overlap.
-  assert.equal(pathsOverlap(reads("In: `scripts/lanes/reviewers.mjs`."), reads("In: `.claude/commands/plan-issues.md`.")), false);
-});
-
-test("a real contract path still overlaps another issue that edits it", () => {
-  const owner = issuePaths({ contract: "`contracts/adr-template.md`", scope: "In: `scripts/lanes/adr.mjs`." });
-  const reader = issuePaths({ contract: "none (reads `contracts/adr-template.md` from #44)", scope: "In: `contracts/adr-template.md`." });
-  assert.deepEqual(owner, ["contracts/adr-template.md", "scripts/lanes/adr.mjs"]);
-  assert.equal(pathsOverlap(owner, reader), true);
-  assert.equal(pathsOverlap(owner, issuePaths({ contract: "none (reads `contracts/adr-template.md`)", scope: "In: `b.mjs`." })), false);
-});
-
-test("edge: only a note right after `none` is dropped; other contract text, nested parentheses and case are handled", () => {
-  assert.deepEqual(issuePaths({ contract: "None (reads `a.md` (see #4) and `b.md`)", scope: "In: `c.mjs`." }), ["c.mjs"]);
-  assert.deepEqual(issuePaths({ contract: "`x.md` (reads `y.md`)", scope: "In: `c.mjs`." }), ["x.md", "y.md", "c.mjs"]);
-  assert.deepEqual(issuePaths({ contract: "none (reads `a.md`), writes `d.md`", scope: "" }), ["d.md"]);
-  assert.deepEqual(issuePaths({ contract: "nonetheless `e.md`", scope: "" }), ["e.md"]);
-  assert.deepEqual(issuePaths({ contract: "none (unclosed `f.md`", scope: "" }), ["f.md"]);
-});
-
-test("paths overlap when equal or when one is a directory containing the other", () => {
-  assert.equal(pathsOverlap(["a/b.mjs"], ["a/b.mjs"]), true);
-  assert.equal(pathsOverlap(["a/"], ["a/b/c.mjs"]), true);
-  assert.equal(pathsOverlap(["a/b/c.mjs"], ["a/"]), true);
-  assert.equal(pathsOverlap(["a/b.mjs"], ["a/c.mjs"]), false);
-  assert.equal(pathsOverlap(["ab/"], ["a/b.mjs", "abc/d.mjs"]), false);
+  const line = render({ ...empty, toCleanUp: cleanableCount(plan) }, "24h").split("\n\n").pop();
+  assert.equal(line, "3 lanes or folders to clean up: node scripts/lanes/cleanup.mjs");
+  assert.doesNotMatch(line, /merged/);
+  // each kind alone is one thing to clean up, not "1 merged lane"
+  for (const only of [
+    { worktrees: [wt("issue-7-x")], prs: [{ number: 90, state: "MERGED", headRefName: "issue-7-x", headRefOid: HEAD }] },
+    { worktrees: [wt("issue-8-y")], issues: [{ number: 8, state: "CLOSED" }] },
+    { orphans: [{ path: "C:/repo/.claude/worktrees/gone", files: 0 }] },
+  ]) {
+    assert.equal(render({ ...empty, toCleanUp: cleanableCount(planCleanup(only)) }, "24h").split("\n\n").pop(), "1 lane or folder to clean up: node scripts/lanes/cleanup.mjs");
+  }
 });
 
 const hints = (s) => s.ready.map((i) => [i.number, i.parallel, i.overlapsWith, i.note]);

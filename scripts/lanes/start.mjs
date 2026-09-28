@@ -14,7 +14,7 @@ import { main as checkBlockers } from "./blockers.mjs";
 import { cleanupMerged } from "./cleanup.mjs";
 import { TIERS, parseIssueForm } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
-import { issuePaths, pathsOverlap } from "./status.mjs";
+import { issuePaths, pathsOverlap } from "./paths.mjs";
 
 export const START_DEFAULTS = Object.freeze({
   maxLanes: 8,
