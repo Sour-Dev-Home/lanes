@@ -195,6 +195,22 @@ test("edge: flat collapses newlines and indentation so re-wrapped prose still ma
   assert.equal(flat(""), "");
 });
 
+// #160 renumbered the step list from six items to seven to fit the new INDEX.md step; a botched renumbering could
+// drop or duplicate a step without any criterion-specific test above noticing.
+test("edge: the brief's numbered step list stays sequential 1-7 with no gap or duplicate", () => {
+  const numbers = [...read(BRIEF).matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
+  assert.deepEqual(numbers, [1, 2, 3, 4, 5, 6, 7]);
+});
+
+// Steps 1, 4, 6 and 7 and the closing verdict rule were not meant to change in #160; only their numbers should move.
+test("edge: the brief's unrelated steps and closing verdict rule are untouched by the #160 rewrite", () => {
+  const b = brief();
+  assert.match(b, /Read the issue's Goal and Acceptance criteria/);
+  assert.match(b, /Focus on what actually changed: new input handling, new secrets or tokens/);
+  assert.match(b, /`criteria` may be left empty: you are not required to assess the issue's acceptance criteria one by one\./);
+  assert.match(b, /verdict` must be `"failure"` if any finding is `critical` or `important`/);
+});
+
 test("edge: blobTable skips malformed rows", () => {
   const t = blobTable(`| ${"b".repeat(40)} | A.md |\n| nothex | B.md |\n| ${"c".repeat(39)} | C.md |`);
   assert.deepEqual([...t.keys()], ["A.md"]);
