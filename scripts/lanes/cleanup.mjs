@@ -307,7 +307,7 @@ function hasStalePointer(dir) {
   const file = join(dir, ".git");
   try {
     if (!lstatSync(file).isFile()) return false;
-    const target = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(readFileSync(file, "utf8"))?.[1];
+    const target = /^gitdir:[ \t]*(.+?)[ \t]*$/.exec(readFileSync(file, "utf8").split(/\r?\n/, 1)[0])?.[1];
     return Boolean(target) && !existsSync(resolve(dir, target));
   } catch {
     return false;
@@ -351,7 +351,8 @@ export function findOrphans(root, tracked) {
 
 /**
  * Deletes `path` if it holds no files (empty folders inside go with it); throws otherwise. Folders are removed deepest
- * first with a plain rmdir, which refuses a non-empty one, so a file written after the count is never deleted.
+ * first with a plain rmdir, which refuses a non-empty one, so a file written after the count is never deleted. The one
+ * file unlinked outright is a stale `.git` pointer directly in `path` (see hasStalePointer), which is not counted.
  */
 export function removeEmptyDir(path) {
   const files = countFiles(path);

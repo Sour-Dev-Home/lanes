@@ -946,6 +946,29 @@ test("edge: a .git file that is not a gitdir pointer, an empty one, or a .git fo
   assert.throws(() => removeEmptyDir(join(base, "junk")), /has 1 file; left in place/);
 });
 
+test("edge: a gitdir line that is not the first line is not a pointer; CRLF and forward slashes still are", (t) => {
+  const root = tempRoot(t);
+  const base = join(root, ".claude", "worktrees");
+  const liveDir = join(root, "live-gitdir");
+  mkdirSync(liveDir);
+  const cases = { later: "notes\ngitdir: /nowhere\n", crlf: "gitdir: /nowhere/x\r\n", fwd: `gitdir: ${liveDir.replace(/\\/g, "/")}\n` };
+  for (const [name, text] of Object.entries(cases)) {
+    mkdirSync(join(base, name), { recursive: true });
+    writeFileSync(join(base, name, ".git"), text);
+  }
+  const counts = Object.fromEntries(findOrphans(root, [root]).map((o) => [o.path.replace(/\\/g, "/").split("/").pop(), o.files]));
+  assert.deepEqual(counts, { later: 1, crlf: 0, fwd: 1 });
+});
+
+test("edge: a stale .git pointer in a subfolder still counts as a file", (t) => {
+  const root = tempRoot(t);
+  const dir = join(root, ".claude", "worktrees", "issue-36-x");
+  mkdirSync(join(dir, "sub"), { recursive: true });
+  writeFileSync(join(dir, "sub", ".git"), `gitdir: ${join(root, "gone")}\n`);
+  assert.deepEqual(findOrphans(root, [root]).map((o) => o.files), [1]);
+  assert.throws(() => removeEmptyDir(dir), /has 1 file; left in place/);
+});
+
 test("edge: removeEmptyDir deletes a stale pointer folder with empty subfolders too", (t) => {
   const root = tempRoot(t);
   const dir = pointerDir(root, "issue-36-x", join(root, "gone"));
