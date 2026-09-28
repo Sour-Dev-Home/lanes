@@ -1,6 +1,7 @@
 // scripts/lanes/diff-coverage.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   MAX_ENTRIES, isCandidate, intersect, main, normalizeSf, parseArgs, parseDiff, parseLcov, report,
 } from "./diff-coverage.mjs";
@@ -221,4 +222,31 @@ test("main exits 2 with one line when the diff cannot be read, and on bad argume
   const args = main(["--wat"], io());
   assert.equal(args.code, 2);
   assert.match(args.message, /Unknown argument: --wat/);
+});
+
+// ---- criteria 4 to 6: the test-hunter brief and the module map ----
+
+const hunter = readFileSync(".claude/agents/test-hunter.md", "utf8");
+
+test("test-hunter.md runs diff-coverage first and asks for a test or an explanation per uncovered changed line", () => {
+  assert.ok(hunter.includes("node scripts/lanes/diff-coverage.mjs"));
+  assert.ok(hunter.indexOf("diff-coverage.mjs") < hunter.indexOf("Run the existing test suite narrowly"), "the coverage report comes before the narrow suite run");
+  assert.match(hunter, /test for each uncovered changed line[\s\S]{0,80}explain/);
+});
+
+test("test-hunter.md adds the mutation step for tier full only: at most 5 mutants, narrowest test, restore, surviving mutant a finding", () => {
+  const step = hunter.slice(hunter.indexOf("3c."), hunter.indexOf("4. Where you find"));
+  assert.match(step, /Tier full only/);
+  assert.match(step, /at\s+most 5 changed conditions or return values/);
+  assert.match(step, /narrowest test file/);
+  assert.match(step, /Restore the code/);
+  assert.match(step, /surviving mutant/);
+  assert.match(step, /finding/);
+  assert.match(step, /Tier quick skips this\s+step/);
+});
+
+test("lanes.config.json maps scripts/lanes/diff-coverage. into the metrics module", () => {
+  const config = JSON.parse(readFileSync("lanes.config.json", "utf8"));
+  const metrics = config.modules.entries.find((entry) => entry.id === "metrics");
+  assert.ok(metrics.paths.includes("scripts/lanes/diff-coverage."));
 });

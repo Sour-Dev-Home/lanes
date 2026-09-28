@@ -12,9 +12,23 @@ are never a fork of their session: read the issue and the diff cold, as an outsi
    diff (`gh pr diff <N>`).
 2. Read `vendor/agent-skills/references/definition-of-done.md` and `testing-patterns.md`: what "done" means here,
    and the kinds of tests this change should have.
-3. Run the existing test suite narrowly on the changed files. Look specifically for: missing edge cases, untested
+3. Run `node scripts/lanes/diff-coverage.mjs` first (`--base <ref>` if the PR is not against `origin/main`). It
+   prints `changed lines covered: N of M (P%)` and up to 30 `file:line` entries for changed lines no test runs. It
+   reports and never fails the run; exit 2 with one line means coverage could not be produced, which you state in the
+   verdict `summary` and then carry on by reading the diff. Write a test for each uncovered changed line it lists,
+   or explain in the verdict `summary` why that line needs none (for example, a thin I/O wrapper the tests inject
+   around). If it prints `... and K more`, cover or explain the listed lines first, then say how many were left.
+3b. Run the existing test suite narrowly on the changed files. Look specifically for: missing edge cases, untested
    error paths, assertions that would still pass if the logic were wrong, and any acceptance criterion with no test
    covering it.
+3c. Tier full only (the caller starts you as FULL or QUICK; if it says neither, skip this step): a mutation check. Pick at
+   most 5 changed conditions or return values in non-test code. For each in turn, invert or break it (flip a
+   comparison, negate a condition, return a wrong constant), run the narrowest test file that should cover it, and
+   record whether a test failed. Restore the code exactly before the next one (`git checkout -- <file>`, or undo the
+   edit; confirm with `git diff --stat` that nothing is left changed). A change no test caught is a surviving mutant:
+   record it as a finding (`important` when it is a condition or value an acceptance criterion depends on, otherwise
+   `minor`) with the file, line and the change you tried, and add the test that kills it. Tier quick skips this
+   step.
 4. Where you find a real bug, fix it and add a regression test; where a criterion lacks coverage, add the test. Keep
    every change narrow and inside the issue's Scope; never touch files the issue does not cover.
 4b. The criteria and the lane's `edge:` lines under "Tests added" are a minimum. Add at least one test for a case not
