@@ -9,7 +9,8 @@
 //     `node scripts/lanes/start.mjs --auto [--go]`, only with a grant from this session under 15 minutes old for the
 //     same issue numbers or the same auto form (a dry-run grant never allows --go). Every other start.mjs run is denied. A direct
 //     `claude --bg` is always denied: start.mjs launches lanes itself (execFileSync, not a Bash tool call), so no
-//     session ever needs it. Anything else gets no decision. A deny holds in every permission mode.
+//     session ever needs it. A `queue.mjs` run is always denied too, grant or not: the owner runs it in their own
+//     terminal (#95, ADR 0005). Anything else gets no decision. A deny holds in every permission mode.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,9 @@ import { fileURLToPath } from "node:url";
 export const GRANT_TTL_MS = 15 * 60 * 1000;
 export const DENY_REASON = "lanes are launched only from /start <N> typed by the owner in this session";
 export const BG_DENY_REASON = "claude --bg is never run directly; the owner launches lanes with /start <N>";
+export const QUEUE_DENY_REASON = "queue.mjs runs only in the owner's own terminal, never from a Claude session, lane or schedule (ADR 0005)";
+export const UNRESOLVED_DENY_REASON =
+  "this command runs a program named only at run time ($VAR, $(…) or a backtick), which could be start.mjs or queue.mjs: queue.mjs runs only in the owner's own terminal, and lanes are launched only from /start <N> typed by the owner";
 export const PARSE_DENY_REASON =
   "this command could not be parsed (an unterminated quote or nesting too deep) and it names start.mjs or --bg, so start-guard denies it; rewrite it, for example a commit message with git commit -F <file>";
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -27,6 +31,7 @@ const AUTO_PROMPT_RE = /^\/start\s+--auto(\s+--go)?$/;
 const AUTO_PLAIN_RE = /^node scripts\/lanes\/start\.mjs --auto( --go)?$/;
 const AUTO_FORMS = { dry: "--auto", go: "--auto --go" };
 const START_WORD_RE = /start\.mjs$/i;
+const QUEUE_WORD_RE = /queue\.mjs$/i;
 const NODE_RE =/^(node|nodejs|bun|deno)(\.exe)?$/i;
 const CLAUDE_RE = /^claude(-code)?(\.exe|\.cmd|\.ps1)?$/i;
 const BG_FLAG_RE = /^--(bg|background)(=.*)?$/;
@@ -242,6 +247,31 @@ function walk(cmd, depth, visit, onOpaque) {
 }
 
 /**
+ * The indexes of the words node/bun/deno at `nodeAt` could run as its script: every word up to the first resolved one
+ * that must be the script. A flag's value may be the next word (`-r dotenv/config $X`, #95 security review), so a word
+ * right after a flag without `=` is skipped as possibly its value, as is bun/deno's `run`.
+ */
+function scriptCandidates(plain, nodeAt) {
+  const at = new Set();
+  if (nodeAt === -1) return at;
+  let afterFlag = false;
+  for (let i = nodeAt + 1; i < plain.length; i += 1) {
+    const w = plain[i];
+    if (w.startsWith("-")) {
+      afterFlag = !w.includes("=");
+      continue;
+    }
+    at.add(i);
+    if (UNRESOLVED_RE.test(w) || afterFlag || w === "run") {
+      afterFlag = false;
+      continue;
+    }
+    break;
+  }
+  return at;
+}
+
+/**
  * Every run of `start.mjs` in a Bash command: the script as the command itself, or as an argument of node, including
  * runs behind env, chains, subshells or `bash -c`. `standalone` is true only for the plain
  * `node scripts/lanes/start.mjs <N ...>` (with its `issues`) or `node scripts/lanes/start.mjs --auto [--go]` (with its
@@ -258,12 +288,12 @@ export function findStartInvocations(command) {
     (words) => {
       const plain = words.filter((w) => !ASSIGN_RE.test(w));
       const nodeAt = plain.findIndex((p) => NODE_RE.test(basename(p)));
-      const scriptAt = nodeAt === -1 ? -1 : plain.findIndex((p, i) => i > nodeAt && !p.startsWith("-"));
+      const scripts = scriptCandidates(plain, nodeAt);
       plain.forEach((w, i) => {
         // Unquoted `scripts\lanes\start.mjs` loses its backslashes in the lexer, as in bash: match the word's end.
         if (START_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i))) out.push({ issues: undefined, standalone: false });
-        // The command word, or the script node runs, that still holds `$` or a backtick could expand to start.mjs.
-        else if (UNRESOLVED_RE.test(w) && (i === 0 || i === scriptAt)) out.push({ issues: undefined, standalone: false });
+        // The command word, or a word node could run as its script, that still holds `$` or a backtick could expand to start.mjs.
+        else if (UNRESOLVED_RE.test(w) && (i === 0 || scripts.has(i))) out.push({ issues: undefined, standalone: false });
       });
     },
     (text) => {
@@ -278,6 +308,46 @@ export function findStartInvocations(command) {
   const a = AUTO_PLAIN_RE.exec(cmd.trim());
   if (out.length === 1 && a) out[0] = { auto: a[1] ? "go" : "dry", standalone: true };
   return out;
+}
+
+/**
+ * True when a Bash command runs `queue.mjs` (#95, ADR 0005): the script as the command itself, or as an argument of
+ * node, bun or deno, behind any wrapper, chain, `bash -c` or heredoc. A part that cannot be read and names queue.mjs, or
+ * a command or script word that stays unresolved (`$X`, a backtick) in a simple command that names queue.mjs, also
+ * counts: either could be a run. Merely naming the file (cat, git diff, `node --test …queue.test.mjs`) is not a run.
+ */
+export function findQueueInvocations(command) {
+  return scanQueueInvocations(command).found;
+}
+
+/**
+ * findQueueInvocations, and `unresolved`: a command or script word elsewhere that stays unresolved, which could be
+ * queue.mjs (or start.mjs) once expanded, as in `X=$(… | base64 -d); node $X` (#95 security review).
+ */
+function scanQueueInvocations(command) {
+  let found = false;
+  let unresolved = false;
+  walk(
+    String(command ?? ""),
+    0,
+    (words) => {
+      const plain = words.filter((w) => !ASSIGN_RE.test(w));
+      const nodeAt = plain.findIndex((p) => NODE_RE.test(basename(p)));
+      const scripts = scriptCandidates(plain, nodeAt);
+      const names = plain.some((w) => /queue\.mjs/i.test(w));
+      plain.forEach((w, i) => {
+        if (QUEUE_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i))) found = true;
+        else if (UNRESOLVED_RE.test(w) && (i === 0 || scripts.has(i))) {
+          if (names) found = true;
+          else unresolved = true;
+        }
+      });
+    },
+    (text) => {
+      if (/queue\.mjs/i.test(text)) found = true;
+    },
+  );
+  return { found, unresolved };
 }
 
 /** True when a Bash command runs `claude --bg` (or `--background`) directly, behind any wrapper, or cannot be read. */
@@ -339,6 +409,12 @@ export function decidePreToolUse(input, grant, now = Date.now()) {
   const command = input.tool_input?.command;
   const bg = scanBgLaunches(command);
   if (bg.found) return { decision: "deny", reason: bg.unparsed ? PARSE_DENY_REASON : BG_DENY_REASON };
+  // Before any grant is read: no /start grant, of any form, reaches queue.mjs.
+  const queue = scanQueueInvocations(command);
+  if (queue.found) return { decision: "deny", reason: QUEUE_DENY_REASON };
+  // A program named only at run time could be either script (findStartInvocations denies the same words); a command
+  // that names start.mjs keeps the start reason. Only the reason differs: both deny.
+  if (queue.unresolved && !/start\.mjs/i.test(withoutLiteralSubstitutions(String(command ?? "")))) return { decision: "deny", reason: UNRESOLVED_DENY_REASON };
   const found = findStartInvocations(command);
   if (found.length === 0) return null;
   if (found.every((f) => f.unparsed)) return { decision: "deny", reason: PARSE_DENY_REASON };
