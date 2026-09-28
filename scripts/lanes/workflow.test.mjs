@@ -140,6 +140,13 @@ test("architecture-advisor.md reads the given ADRs and fails the verdict when th
   assert.match(text, /`verdict` must be `"failure"` if [^.]*, or if the diff contradicts the Decision of an accepted ADR you were given/);
 });
 
+// edge: a lane could edit the ADR file in its own PR to make the diff look compliant; the advisor must read
+// the Decision from the default branch, not the PR's copy, or that dodge would go uncaught
+test("architecture-advisor.md reads each given ADR's Decision from the default branch, not the PR's own copy", () => {
+  const text = readFileSync(".claude/agents/architecture-advisor.md", "utf8").replace(/\s+/g, " ");
+  assert.match(text, /on the default branch \(`git show origin\/main:<path>`\), since the PR's copy may differ/);
+});
+
 // I5: the reviewer agents /lane spawns must ship in the repo, fresh-eyes and on sonnet
 const AGENTS = ["test-hunter", "security-reviewer", "ui-reviewer", "architecture-advisor"];
 
