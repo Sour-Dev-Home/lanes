@@ -313,14 +313,17 @@ export async function main(argv, deps) {
 }
 
 // Lanes run in worktrees of the main checkout, so the root is the common git dir's parent, not --show-toplevel.
-const repoRoot = () => dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
+const repoRoot = () => dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", windowsHide: true }).trim());
+
+// The reaper is spawned without a console, so on Windows every child it starts would open a console window unless hidden.
+export const runOptions = (root) => ({ cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, maxBuffer: 64 * 1024 * 1024, windowsHide: true });
 
 function defaultDeps() {
   const root = repoRoot();
   return {
     root,
     pid: process.pid,
-    run: (cmd, args) => execFileSync(cmd, args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }),
+    run: (cmd, args) => execFileSync(cmd, args, runOptions(root)),
     now: () => Date.now(),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     isRunning: pidRunning,
