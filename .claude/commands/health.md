@@ -1,6 +1,10 @@
 ---
 description: Weekly health check (stale work, red main, flaky checks, stuck chains)
 ---
+First bring the lanes scripts up to date: if `git branch --show-current` prints `main` and `git status --porcelain`
+prints nothing, run `git pull --ff-only`. Otherwise print one line, `lanes scripts may be stale: this checkout is not a
+clean main`, and carry on. If the pull fails, report its error in one line and carry on.
+
 Report, in at most 15 lines:
 1. `node scripts/lanes/status.mjs --since 168h`.
 2. Ready issues older than 7 days and open PRs older than 3 days (`gh issue list` / `gh pr list` with `--json createdAt`).

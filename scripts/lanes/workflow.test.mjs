@@ -488,3 +488,45 @@ test("adr.md's issue-or-PR-number mode still files its own issue and PR and link
   assert.doesNotMatch(ideaMode, /link it from #\$ARGUMENTS/);
   assert.match(ideaMode, /without filing an issue or opening a PR yourself/);
 });
+
+// #115: /health, /status and /start run the lanes scripts from an up-to-date main, so a stale checkout never reports
+// or acts with old code. Each file's pull step comes before its first lanes script run.
+const commandText = (name) => readFileSync(`.claude/commands/${name}.md`, "utf8").replace(/\s+/g, " ");
+
+for (const name of ["health", "status", "start"]) {
+  test(`${name}.md pulls main with --ff-only, only on a clean main, before running any lanes script`, () => {
+    const md = commandText(name);
+    const pull = md.indexOf("git pull --ff-only");
+    assert.ok(pull >= 0, "no git pull --ff-only step");
+    assert.ok(pull < md.indexOf("node scripts/lanes/"), "the pull must come before the first lanes script run");
+    assert.match(md, /`git branch --show-current` prints `main` and `git status --porcelain` prints nothing/);
+  });
+
+  test(`${name}.md reports a failed fast-forward and carries on instead of stopping`, () => {
+    assert.match(commandText(name), /If the pull fails, report its error in one line and carry on/);
+  });
+
+  test(`${name}.md prints one stale-scripts line and carries on when not on a clean main`, () => {
+    assert.match(
+      commandText(name),
+      /Otherwise print one line, `lanes scripts may be stale: this checkout is not a clean main`, and carry on/,
+    );
+  });
+}
+
+// Edge: a lane or a schedule must stop before touching git, so start.md's refusal stays ahead of its pull step.
+test("start.md still refuses a lane or a schedule before its pull step", () => {
+  const md = commandText("start");
+  assert.ok(md.indexOf("stop now") < md.indexOf("git pull --ff-only"));
+});
+
+// Edge (beyond the criteria): start-guard.mjs allows start.mjs only as a standalone plain command (#51). If a model
+// chained the new pull step onto the start.mjs run (`git pull --ff-only && node scripts/lanes/start.mjs ...`), the
+// guard would deny the whole compound command and /start would stop working. start.md must say to run the git
+// commands on their own instead.
+test("start.md tells the model to run its pull step on its own, never chained to the guarded start.mjs run", () => {
+  assert.match(
+    commandText("start"),
+    /Run each of these git commands on its own, never chained to the `start\.mjs` run below/,
+  );
+});
