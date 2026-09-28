@@ -490,6 +490,17 @@ test("edge: a malformed or unusual brace in the script word fails closed or read
   }
 });
 
+// test-hunter (this round): a bracket expression whose first character is a literal `]` (bash reads `]` right after
+// `[` as a set member, not a close) and a brace holding a `/` that spans into the directory part of the path, both
+// uncommon enough that neither #70's criteria nor the round above named them.
+test("edge: a bracket expression starting with a literal ']', and a brace holding a '/', are still owner commands (#70)", () => {
+  // `[]i]` is the set {']', 'i'}: post-rev[]i]ew.mjs matches post-review.mjs with 'i' in that slot.
+  denied("node scripts/lanes/post-rev[]i]ew.mjs owner --pr 16");
+  // The brace spans a '/', so one branch names a whole path ending in post-review.mjs; the last path segment alone
+  // (naive slicing on the final '/') would misread this, so the guard must catch it via the embedded '/' instead.
+  denied("node scripts/{lanes/post-review.mjs,x} owner --pr 16");
+});
+
 // Found by the test-hunter (this round): NODE_RE only matched node/nodejs, so `bun`/`deno` running post-review.mjs
 // owner got no decision at all (a full bypass), and bun/deno's own `run` subcommand needed skipping to still find
 // the real script and reviewer behind it, mirroring start-guard.mjs's existing bun/deno coverage.
