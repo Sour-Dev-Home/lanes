@@ -56,12 +56,39 @@ export function loadAdrs(dir = "docs/adr") {
     .map((n) => parseAdr(readFileSync(join(dir, n), "utf8")));
 }
 
+const normPath = (f) => posix.normalize(String(f).replace(/\\/g, "/"));
+// #241: the ADRs themselves and the module map (the `modules` key of lanes.config.json) are architecture changes.
+const isArchitectureFile = (f) => f.startsWith("docs/adr/") || f === "lanes.config.json";
+
+/**
+ * The repo-relative paths a task issue's Interface contract names (#241): backticked or bare tokens with a `/` or a
+ * file extension, a trailing `/` marking a directory. A contract that starts with `none` names none; an absolute or
+ * `..` path is dropped, since no diff path can match it.
+ */
+export function interfacePaths(text) {
+  const s = String(text ?? "").trim();
+  if (/^none\b/i.test(s)) return [];
+  const out = new Set();
+  for (const token of s.match(/[\w./\\-]+/g) ?? []) {
+    const t = token.replace(/\.+$/, "");
+    if (!t.includes("/") && !t.includes("\\") && !/\.[A-Za-z][\w-]+$/.test(t)) continue;
+    if (/^([/\\]|[A-Za-z]:)/.test(t)) continue;
+    const p = normPath(t) + (/[/\\]$/.test(t) ? "/" : "");
+    if (p === "./" || p === "." || p.startsWith("../") || p === "..") continue;
+    out.add(p.replace(/\/\/$/, "/"));
+  }
+  return [...out];
+}
+
 /**
  * Which kinds of files a diff touches. Pass both the new and the old name of a renamed file. `adr` lists the accepted
- * ADRs (from `adrs`, default none) that govern any changed file.
+ * ADRs (from `adrs`, default none) that govern any changed file. `architecture` (#241) is a change to an ADR, to
+ * lanes.config.json, or to a path the issue's `interfaceContract` text names.
  */
-export function classifyFiles(files, config, adrs = []) {
+export function classifyFiles(files, config, adrs = [], interfaceContract = "") {
   const { paths } = config;
+  const named = interfacePaths(interfaceContract);
+  const inContract = (f) => named.some((p) => (p.endsWith("/") ? f.startsWith(p) : f === p));
   return {
     skipOnly: files.length > 0 && files.every((f) => matchesAny(paths.skip, f) && !matchesAny(paths.sensitive, f)),
     contract: files.some((f) => matchesAny(paths.contract, f)),
@@ -69,22 +96,26 @@ export function classifyFiles(files, config, adrs = []) {
     ui: files.some((f) => matchesAny(paths.ui, f)),
     owner: files.some((f) => matchesAny(paths.owner, f)),
     adr: [...new Set(files.flatMap((f) => adrGoverns(adrs, f)))].sort((a, b) => a - b),
+    architecture: files.map(normPath).some((f) => isArchitectureFile(f) || inContract(f)),
   };
 }
 
-/** The fresh-eyes reviewers a PR must pass, from its issue's tier and its diff. */
+/**
+ * The fresh-eyes reviewers a PR must pass, from its issue's tier and its diff. The architecture-advisor runs for a
+ * contract or architecture change (#241), not for every diff an accepted ADR governs.
+ */
 export function requiredReviewers(tier, cls) {
   if (tier === "skip") return [];
   const out = ["test-hunter"];
   if (cls.ui) out.push("ui-reviewer");
   if (cls.sensitive) out.push("security-reviewer");
-  if (cls.contract || cls.adr?.length > 0) out.push("architecture-advisor");
+  if (cls.contract || cls.architecture) out.push("architecture-advisor");
   return out;
 }
 
 /** What `reviewers.mjs` prints: a skip warning if due, the reviewers (or `none`), then `ADRs: NNNN, ...` if any govern. */
-export function reviewersReport(tier, files, config, adrs = []) {
-  const cls = classifyFiles(files, config, adrs);
+export function reviewersReport(tier, files, config, adrs = [], interfaceContract = "") {
+  const cls = classifyFiles(files, config, adrs, interfaceContract);
   const lines = [];
   if (tier === "skip" && !cls.skipOnly) lines.push("NOT SKIP: the diff changes files outside the skip paths; use quick or full");
   const list = requiredReviewers(tier, cls);
@@ -438,11 +469,11 @@ export const REUSABLE_REVIEWERS = Object.freeze(["test-hunter", "security-review
  * reviewer the tier and diff require that has no trusted status on the head. Any status on the head, a failure
  * included, wins.
  */
-export function reusableReviewers({ issueLabels, files, statuses, config, adrs = [] }) {
+export function reusableReviewers({ issueLabels, files, statuses, config, adrs = [], interfaceContract = "" }) {
   const tier = tierOf(issueLabels);
   if (tier === null) return [];
   const latest = latestByContext(trustedStatuses(statuses));
-  return requiredReviewers(tier, classifyFiles(files, config, adrs)).filter((r) => REUSABLE_REVIEWERS.includes(r) && !latest.has(reviewContext(r)));
+  return requiredReviewers(tier, classifyFiles(files, config, adrs, interfaceContract)).filter((r) => REUSABLE_REVIEWERS.includes(r) && !latest.has(reviewContext(r)));
 }
 
 /** Whether the gate should look for a test-hunter success on an earlier commit (#25). */
@@ -540,9 +571,10 @@ function blockerStatus(blockers, closes) {
  * `blockerReport` (from blockers.mjs); omitted, the issue has none. `reused` (#25, #154) is one `{ sha, status }` or a
  * list: each a trusted review/<reviewer> success, for a reviewer in `REUSABLE_REVIEWERS`, from an earlier commit of
  * the PR whose own diff matches the head's. Each counts only when the head has no trusted status of its own for that
- * reviewer, and brings along that reviewer's verdict for its `sha`.
+ * reviewer, and brings along that reviewer's verdict for its `sha`. `interfaceContract` (#241) is the issue's Interface
+ * contract text; a path it names that the diff changes requires the architecture-advisor.
  */
-export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], reused = null, blockers = NO_BLOCKERS }) {
+export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
@@ -566,7 +598,7 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
   if (pr.missing.length > 0) return fail(`PR template sections missing: ${pr.missing.join(", ")}`);
   if (pr.contractChange === null) return fail("'Contract changes' must start with none, additive or breaking");
   // #45: `adrs` come from the gate's own checkout of the default branch, never from the PR.
-  const cls = classifyFiles(files, config, adrs);
+  const cls = classifyFiles(files, config, adrs, interfaceContract);
   if (tier === "skip" && !cls.skipOnly) return fail("tier:skip but the diff changes files outside the skip paths");
   if (pr.contractChange === "none" && cls.contract) return fail("contract files changed but 'Contract changes' says none");
   if (pr.contractChange === "breaking" && !labels.includes("contract:breaking")) {

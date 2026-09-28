@@ -284,9 +284,18 @@ const adrMd = (n, governs) =>
   `# ${String(n).padStart(4, "0")}: ADR ${n}\n\nStatus: accepted\n\n## Context\n\nx\n\n## Decision\n\nx\n\n## Decisions for the owner\n\nnothing\n\n## Consequences\n\nx\n\n## Governs\n\n- ${governs}\n`;
 const WAIT_ADVISOR = "waiting for review/architecture-advisor";
 
-test("evaluatePr and carry require the architecture-advisor for a file an accepted ADR governs", () => {
+// #241: a file an accepted ADR governs no longer requires the advisor on its own; a change under docs/adr/ does.
+test("evaluatePr and carry need no architecture-advisor for a file an accepted ADR only governs", () => {
   const adrs = [parseAdr(adrMd(3, "src/"))];
-  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  assert.equal(evaluatePr(api, "o/r", 5, config, adrs).state, "success");
+});
+
+test("evaluatePr and carry require the architecture-advisor for an ADR change", () => {
+  const adrs = [parseAdr(adrMd(3, "src/"))];
+  const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+  routes["repos/o/r/pulls/5/files"] = "docs/adr/0003-src.md\nsrc/a.ts\n";
+  const { api, posted } = fakeApi(routes);
   assert.equal(evaluatePr(api, "o/r", 5, config, adrs).description, WAIT_ADVISOR);
   assert.ok(posted[0].fields.includes("state=pending"));
   const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, "b".repeat(40), config, adrs);
@@ -315,18 +324,18 @@ function inCheckout(adrFiles, fn) {
 }
 const descriptionOf = (post) => post.fields.find((f) => f.startsWith("description=")).slice("description=".length);
 
-test("main loads the default branch's ADRs: a governed file waits for the architecture-advisor", () => {
+test("main loads the default branch's ADRs: a governed file alone no longer waits for the architecture-advisor", () => {
   const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
   inCheckout({ "0003-src.md": adrMd(3, "src/") }, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
-  assert.equal(descriptionOf(posted[0]), WAIT_ADVISOR);
+  assert.equal(descriptionOf(posted[0]), "unattended-eligible (tier:full), reviews in");
 });
 
-test("main ignores an ADR the PR itself adds: it is not on the default branch yet", () => {
+test("main requires the advisor for an ADR the PR itself adds, though it is not on the default branch yet", () => {
   const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
   routes["repos/o/r/pulls/5/files"] = "docs/adr/0003-src.md\nsrc/a.ts\n";
   const { api, posted } = fakeApi(routes);
   inCheckout({}, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
-  assert.equal(descriptionOf(posted[0]), "unattended-eligible (tier:full), reviews in");
+  assert.equal(descriptionOf(posted[0]), WAIT_ADVISOR);
 });
 
 // #25: reuse a test-hunter success from an earlier commit when the PR's own diff is unchanged
@@ -464,6 +473,8 @@ function threeRoutes(reusedNames, over = {}) {
     ...over,
   });
   routes[statusesRoute(SHA)] = at(SHA, onHead);
+  // #241: srcAdrs governing src/a.ts no longer requires the advisor; the PR's own ADR change does.
+  routes["repos/o/r/pulls/5/files"] = "src/a.ts\ndocs/adr/0005-new.md\n";
   return routes;
 }
 const decide = (routes) => evaluatePr(fakeApi(routes).api, "o/r", 5, secArch, srcAdrs);

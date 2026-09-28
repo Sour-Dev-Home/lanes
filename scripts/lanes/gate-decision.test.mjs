@@ -360,7 +360,8 @@ test("real config: a skip PR adding docs/adr/0003-x.md waits, never fails", () =
 });
 
 test("real config: one owner-only file among tooling files makes the whole PR wait", () => {
-  waits(onReal("full", ["scripts/lanes/status.mjs", "docs/USING.md", "lanes.config.json"], ["test-hunter", "security-reviewer"]), "owner-only path");
+  // #241: lanes.config.json (the module map) also needs the architecture-advisor.
+  waits(onReal("full", ["scripts/lanes/status.mjs", "docs/USING.md", "lanes.config.json"], ["test-hunter", "security-reviewer", "architecture-advisor"]), "owner-only path");
 });
 
 test("real config: a sensitive full PR whose security verdict has an unfixed important finding waits", () => {
@@ -371,7 +372,7 @@ test("real config: a sensitive full PR whose security verdict has an unfixed imp
 
 test("real config: review/owner success still passes anything, owner-only included", () => {
   const withOwner = (reviewers) => ({ statuses: [...reviewers.map((n) => st(`review/${n}`)), st("review/owner")], verdicts: [] });
-  assert.deepEqual(onReal("full", ["scripts/lanes/gate.mjs", "lanes.config.json"], [], withOwner(["test-hunter", "security-reviewer"])), { state: "success", description: "approved by owner", stage: "ready" });
+  assert.deepEqual(onReal("full", ["scripts/lanes/gate.mjs", "lanes.config.json"], [], withOwner(["test-hunter", "security-reviewer", "architecture-advisor"])), { state: "success", description: "approved by owner", stage: "ready" });
   assert.equal(onReal("skip", ["docs/adr/0003-x.md"], [], withOwner([])).state, "success");
 });
 
@@ -411,15 +412,40 @@ const adrText = (n, status, governs) =>
 const adrOf = (n, governs, status = "accepted") => parseAdr(adrText(n, status, governs));
 const ADRS = [adrOf(3, ["src/"])];
 
-test("a governed file makes the gate wait for the architecture-advisor, then pass once it is in", () => {
-  assert.deepEqual(full({ adrs: ADRS, files: ["src/a.ts"] }), { state: "pending", description: "waiting for review/architecture-advisor", stage: "review" });
-  assert.deepEqual(full({ adrs: ADRS, files: ["src/a.ts"], ...clean(["test-hunter", "architecture-advisor"]) }), READY("full"));
-  assert.equal(run({ adrs: ADRS, files: ["src/a.ts"], statuses: [st("review/test-hunter")] }).description, "waiting for review/architecture-advisor");
+// #241: governing a changed file no longer requires the advisor; changing an ADR, the module map or an Interface
+// contract path does.
+test("a governed file alone no longer makes the gate wait for the architecture-advisor", () => {
+  assert.deepEqual(full({ adrs: ADRS, files: ["src/a.ts"] }), READY("full"));
+  assert.deepEqual(run({ adrs: ADRS, files: ["src/a.ts"], statuses: [st("review/test-hunter")] }), READY("quick"));
 });
 
-test("full: a governed diff also needs the architecture-advisor's verdict for the head", () => {
+test("an Interface contract path in the diff makes the gate wait for the architecture-advisor, then pass once it is in", () => {
+  const over = { adrs: ADRS, files: ["src/a.ts"], interfaceContract: "`src/a.ts` exports `f`" };
+  assert.deepEqual(full(over), { state: "pending", description: "waiting for review/architecture-advisor", stage: "review" });
+  assert.deepEqual(full({ ...over, ...clean(["test-hunter", "architecture-advisor"]) }), READY("full"));
+  assert.equal(run({ ...over, statuses: [st("review/test-hunter")] }).description, "waiting for review/architecture-advisor");
+  assert.deepEqual(full({ ...over, interfaceContract: "none" }), READY("full"));
+});
+
+test("full: an architecture change also needs the architecture-advisor's verdict for the head", () => {
   const statuses = [st("review/test-hunter"), st("review/architecture-advisor")];
-  waits(full({ adrs: ADRS, files: ["src/a.ts"], statuses, verdicts: [verdict("test-hunter")] }), "no verdict for head from architecture-advisor");
+  const over = { files: ["src/a.ts"], interfaceContract: "`src/a.ts`" };
+  waits(full({ ...over, statuses, verdicts: [verdict("test-hunter")] }), "no verdict for head from architecture-advisor");
+});
+
+test("an architecture change that is not a contract file leaves the contract checks alone", () => {
+  // 'Contract changes: none' and the quick-tier contract blocker key off paths.contract only.
+  const over = { files: ["src/a.ts", "docs/adr/0003-new.md"], prBody: body("none"), ...clean(["test-hunter", "architecture-advisor"]) };
+  assert.deepEqual(run(over), READY("quick"));
+  assert.deepEqual(run({ ...over, interfaceContract: "`src/a.ts`" }), READY("quick"));
+  assert.equal(run({ ...over, files: ["contracts/x.ts"] }).description, "contract files changed but 'Contract changes' says none");
+  waits(run({ ...over, files: ["contracts/x.ts"], prBody: body("additive") }), "contract change");
+});
+
+test("edge: reusableReviewers sees the Interface contract the gate sees", () => {
+  const inputs = { issueLabels: ["tier:full", "ready"], files: ["src/a.ts"], statuses: [], config };
+  assert.deepEqual(reusableReviewers(inputs), ["test-hunter"]);
+  assert.deepEqual(reusableReviewers({ ...inputs, interfaceContract: "`src/a.ts`" }), ["test-hunter", "architecture-advisor"]);
 });
 
 test("a diff touching only ungoverned files is unchanged", () => {
@@ -430,10 +456,11 @@ test("a superseded ADR is ignored", () => {
   assert.deepEqual(full({ adrs: [adrOf(3, ["src/"], "superseded by 0004")], files: ["src/a.ts"] }), READY("full"));
 });
 
-test("a PR adding an ADR that governs its own files does not require the advisor (not on the default branch yet)", () => {
-  // The gate's adrs come from the default branch; the PR's new docs/adr file is only in its file list.
+test("a PR adding an ADR requires the advisor, though the ADR is not on the default branch yet", () => {
+  // The gate's adrs come from the default branch; #241 keys off the PR's docs/adr file in its file list instead.
   const files = ["docs/adr/0003-new.md", "src/a.ts"];
-  assert.deepEqual(full({ adrs: [], files }), READY("full"));
+  assert.equal(full({ adrs: [], files }).description, "waiting for review/architecture-advisor");
+  assert.deepEqual(full({ adrs: [], files, ...clean(["test-hunter", "architecture-advisor"]) }), READY("full"));
 });
 
 test("tier skip on a governed file is unchanged: no reviewers", () => {

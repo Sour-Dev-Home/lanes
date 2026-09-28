@@ -188,7 +188,7 @@ test("the real config: tooling scripts and non-lane commands are sensitive but n
 });
 
 test("docs and tests only are skipOnly", () => {
-  assert.deepEqual(classifyFiles(["docs/a.md", "src/x.test.ts"], config), { skipOnly: true, contract: false, sensitive: false, ui: false, owner: false, adr: [] });
+  assert.deepEqual(classifyFiles(["docs/a.md", "src/x.test.ts"], config), { skipOnly: true, contract: false, sensitive: false, ui: false, owner: false, adr: [], architecture: false });
 });
 
 test("a sensitive markdown file is not skipOnly", () => {
@@ -202,7 +202,7 @@ test("no files is not skipOnly", () => {
 
 test("code plus docs is not skipOnly; contract and ui are detected", () => {
   const cls = classifyFiles(["docs/a.md", "contracts/snapshot.ts", "frontend/src/App.tsx"], config);
-  assert.deepEqual(cls, { skipOnly: false, contract: true, sensitive: false, ui: true, owner: false, adr: [] });
+  assert.deepEqual(cls, { skipOnly: false, contract: true, sensitive: false, ui: true, owner: false, adr: [], architecture: false });
 });
 
 test("required reviewers by tier and class", () => {
@@ -420,18 +420,102 @@ test("edge: two changed files governed by the same ADR report it once", () => {
   assert.deepEqual(classifyFiles(["src/a.ts", "src/b.ts"], config, [governing(3, "- src/")]).adr, [3]);
 });
 
-test("requiredReviewers adds the architecture-advisor for a governed diff at quick and full, never skip", () => {
-  const none = { skipOnly: false, contract: false, sensitive: false, ui: false, owner: false, adr: [] };
+// #241: the advisor runs for contract, module-map and ADR changes, no longer for every diff an ADR governs.
+test("requiredReviewers adds no architecture-advisor for a diff that only touches governed files", () => {
+  const none = { skipOnly: false, contract: false, sensitive: false, ui: false, owner: false, adr: [], architecture: false };
   const governed = { ...none, adr: [3] };
-  assert.deepEqual(requiredReviewers("quick", governed), ["test-hunter", "architecture-advisor"]);
-  assert.deepEqual(requiredReviewers("full", governed), ["test-hunter", "architecture-advisor"]);
-  assert.deepEqual(requiredReviewers("skip", governed), []);
+  assert.deepEqual(requiredReviewers("quick", governed), ["test-hunter"]);
+  assert.deepEqual(requiredReviewers("full", governed), ["test-hunter"]);
   assert.deepEqual(requiredReviewers("full", none), ["test-hunter"]);
 });
 
-test("edge: contract and ADR together add the architecture-advisor once", () => {
-  const cls = { skipOnly: false, contract: true, sensitive: false, ui: false, owner: false, adr: [3] };
+test("requiredReviewers adds the architecture-advisor for an architecture change at quick and full, never skip", () => {
+  const arch = { skipOnly: false, contract: false, sensitive: false, ui: false, owner: false, adr: [], architecture: true };
+  assert.deepEqual(requiredReviewers("quick", arch), ["test-hunter", "architecture-advisor"]);
+  assert.deepEqual(requiredReviewers("full", arch), ["test-hunter", "architecture-advisor"]);
+  assert.deepEqual(requiredReviewers("skip", arch), []);
+  assert.deepEqual(requiredReviewers("skip", { ...arch, architecture: false, contract: true }), []);
+});
+
+test("edge: contract and architecture together add the architecture-advisor once", () => {
+  const cls = { skipOnly: false, contract: true, sensitive: false, ui: false, owner: false, adr: [3], architecture: true };
   assert.deepEqual(requiredReviewers("full", cls), ["test-hunter", "architecture-advisor"]);
+});
+
+const advisorFor = (files, interfaceContract = "", adrs = [governing(10, "- scripts/lanes/reap.mjs")]) =>
+  requiredReviewers("full", classifyFiles(files, config, adrs, interfaceContract)).includes("architecture-advisor");
+
+test("a governed-file-only diff (scripts/lanes/reap.mjs) needs no advisor, but still reports its ADR", () => {
+  assert.equal(advisorFor(["scripts/lanes/reap.mjs"]), false);
+  assert.deepEqual(classifyFiles(["scripts/lanes/reap.mjs"], config, [governing(10, "- scripts/lanes/reap.mjs")]).adr, [10]);
+});
+
+test("an ADR, lanes.config.json, a contract file or an Interface contract path each need the advisor", () => {
+  assert.equal(advisorFor(["docs/adr/0010-lane-reaper.md"]), true);
+  assert.equal(advisorFor(["lanes.config.json"]), true);
+  assert.equal(advisorFor(["contracts/x.schema.json"]), true);
+  assert.equal(advisorFor(["scripts/lanes/reap.mjs"], "`scripts/lanes/reap.mjs` exports `reap(opts)`"), true);
+});
+
+test("classifyFiles reports architecture for docs/adr/, lanes.config.json and named Interface contract paths only", () => {
+  assert.equal(classifyFiles(["docs/adr/README.md"], config).architecture, true);
+  assert.equal(classifyFiles(["lanes.config.json"], config).architecture, true);
+  assert.equal(classifyFiles(["src/a.ts"], config, [], "`src/a.ts` returns `{ x }`").architecture, true);
+  assert.equal(classifyFiles(["src/a.ts"], config).architecture, false);
+  assert.equal(classifyFiles(["contracts/x.schema.json"], config).architecture, false);
+});
+
+test("edge: an Interface contract of none, empty or missing names no path", () => {
+  for (const text of ["none", "None", "none: this changes `src/a.ts` internals only", "", undefined, null]) {
+    assert.equal(classifyFiles(["src/a.ts"], config, [], text).architecture, false, String(text));
+  }
+});
+
+test("edge: an Interface contract path the diff does not change needs no advisor", () => {
+  assert.equal(advisorFor(["src/b.ts"], "`src/a.ts` exports `f`"), false);
+  // A path must match whole: a longer name that merely starts with it is another file.
+  assert.equal(advisorFor(["src/a.tsx"], "`src/a.ts` exports `f`"), false);
+});
+
+test("edge: an Interface contract directory (trailing /) covers the files under it", () => {
+  assert.equal(advisorFor(["src/api/users.ts"], "Every handler in `src/api/` returns `Result`"), true);
+  assert.equal(advisorFor(["src/apiv2/users.ts"], "Every handler in `src/api/` returns `Result`"), false);
+});
+
+test("edge: bare, unbackticked paths with trailing punctuation still count", () => {
+  assert.equal(advisorFor(["scripts/lanes/lib.mjs"], "The shape of scripts/lanes/lib.mjs, and nothing else."), true);
+  assert.equal(advisorFor(["lanes.config.json"], "Adds a key to lanes.config.json."), true);
+});
+
+test("edge: prose that only looks path-like (e.g., i.e., versions) names no path", () => {
+  const text = "Returns a list, e.g. the ids; i.e. unchanged since v1.0 and 2.5 as before.";
+  assert.equal(advisorFor(["e.g", "i.e", "v1.0", "2.5"], text), false);
+});
+
+test("edge: Interface contract and diff paths are compared normalized (backslashes, ./)", () => {
+  assert.equal(advisorFor(["src\\a.ts"], "`./src/a.ts` exports `f`"), true);
+  assert.equal(advisorFor(["docs\\adr\\0010-lane-reaper.md"]), true);
+  assert.equal(advisorFor(["./lanes.config.json"]), true);
+});
+
+test("edge: an absolute or parent-relative Interface contract path matches nothing", () => {
+  assert.equal(advisorFor(["etc/x.conf"], "`/etc/x.conf` holds the key"), false);
+  assert.equal(advisorFor(["src/a.ts"], "`../src/a.ts` exports `f`"), false);
+});
+
+test("edge: a file renamed out of an Interface contract path still counts (old name passed too)", () => {
+  assert.equal(advisorFor(["src/a.ts", "src/b.ts"], "`src/a.ts` exports `f`"), true);
+});
+
+test("edge: the tier skip still needs no reviewer, whatever the diff touches", () => {
+  const cls = classifyFiles(["docs/adr/0010-lane-reaper.md", "lanes.config.json", "contracts/x.schema.json"], config, [], "`contracts/x.schema.json`");
+  assert.deepEqual(requiredReviewers("skip", cls), []);
+});
+
+test("reviewersReport and requiredReviewers agree, and the report takes the Interface contract too", () => {
+  const adrs = [governing(10, "- scripts/lanes/reap.mjs")];
+  assert.equal(reviewersReport("full", ["scripts/lanes/reap.mjs"], config, adrs), "test-hunter\nsecurity-reviewer\nADRs: 0010");
+  assert.equal(reviewersReport("full", ["scripts/lanes/reap.mjs"], config, adrs, "`scripts/lanes/reap.mjs`"), "test-hunter\nsecurity-reviewer\narchitecture-advisor\nADRs: 0010");
 });
 
 test("edge: a class without an adr key (older callers) adds no advisor", () => {
@@ -476,7 +560,8 @@ test("loadAdrs defaults to this repo's docs/adr", () => {
 
 test("reviewersReport lists the reviewers, then the governing ADRs zero-padded", () => {
   const adrs = [governing(3, "- src/a.ts"), governing(7, "- src/a.ts")];
-  assert.equal(reviewersReport("full", ["src/a.ts"], config, adrs), "test-hunter\narchitecture-advisor\nADRs: 0003, 0007");
+  assert.equal(reviewersReport("full", ["src/a.ts"], config, adrs), "test-hunter\nADRs: 0003, 0007");
+  assert.equal(reviewersReport("full", ["src/a.ts", "docs/adr/0003-a.md"], config, adrs), "test-hunter\narchitecture-advisor\nADRs: 0003, 0007");
 });
 
 test("reviewersReport prints no ADR line when none govern the diff", () => {
