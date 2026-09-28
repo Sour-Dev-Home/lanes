@@ -15,6 +15,8 @@ import { fileURLToPath } from "node:url";
 
 export const GRANT_TTL_MS = 15 * 60 * 1000;
 export const DENY_REASON = "owner approval only from /approve <N> in this session";
+// A command that names post-review but cannot be parsed (an unterminated quote) fails closed with this reason (#100).
+export const UNPARSED_REASON = `the command could not be parsed and names post-review.mjs: ${DENY_REASON}`;
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const APPROVE_RE = /^\/approve ([1-9][0-9]{0,8})$/;
 const POST_REVIEW_RE = /post-review(\.mjs)?$/i;
@@ -68,21 +70,70 @@ function skipRedirectTarget(cmd, i) {
   return j;
 }
 
+// `<<D`, `<<-D`, `<<'D'`, `<<"D"` or `<<\D`; a quoted delimiter makes the body literal. `<<<` is a here-string, not this.
+const HEREDOC_RE = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([^\s;&|()<>'"`$]+))/;
+// `$(cat <<D` and the end of its line: the start of a substitution whose output is only a heredoc's body.
+const CAT_HEREDOC_RE = /^\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z0-9_.-]+))[ \t]*\r?\n/;
+// Text in an unquoted heredoc body that runs a command while bash expands it.
+const RUNS_ON_EXPANSION_RE = /\$\(|`/;
+
+/**
+ * The body of a heredoc starting at `from`: every line up to the one that is exactly `delim` (after leading tabs,
+ * for `<<-`). `end` is the index of the newline ending the delimiter line; an unterminated body runs to the end, as in
+ * bash, with `terminated` false. (The same reader as start-guard.mjs, #86.)
+ */
+function readHeredoc(cmd, from, delim, stripTabs) {
+  const lines = [];
+  for (let pos = from; pos < cmd.length; ) {
+    const nl = cmd.indexOf("\n", pos);
+    const lineEnd = nl === -1 ? cmd.length : nl;
+    let line = cmd.slice(pos, lineEnd).replace(/\r$/, "");
+    if (stripTabs) line = line.replace(/^\t+/, "");
+    if (line === delim) return { body: lines.join("\n"), end: lineEnd, terminated: true };
+    lines.push(line);
+    pos = lineEnd + 1;
+  }
+  return { body: lines.join("\n"), end: cmd.length, terminated: false };
+}
+
+/**
+ * `$(cat <<'D' … D)` at `i`, as in `git commit -m "$(cat <<'EOF' … EOF)"`: its output is the body, known text, so it
+ * reads as that text, as if single-quoted. Null for any other substitution, or an unquoted delimiter whose body runs
+ * a `$(…)` or backtick while it expands. `end` is the index of the closing `)`.
+ */
+function literalSubstitution(cmd, i) {
+  const m = CAT_HEREDOC_RE.exec(cmd.slice(i));
+  if (!m) return null;
+  const quoted = m[4] === undefined;
+  const { body, end, terminated } = readHeredoc(cmd, i + m[0].length, m[2] ?? m[3] ?? m[4], m[1] === "-");
+  if (!terminated || (!quoted && RUNS_ON_EXPANSION_RE.test(body))) return null;
+  const close = /^\s*\)/.exec(cmd.slice(end));
+  return close ? { body, end: end + close[0].length - 1 } : null;
+}
+
 /**
  * Shell-ish lexer: words (quotes and backslashes resolved, nothing expanded) grouped into simple commands split on
  * ; & | ( ) newlines and redirections. A redirection's target (and a bare fd number right before it, as in `2>file`)
  * is never a word: bash does not pass it to the program, so it must not shift argument positions such as the
  * reviewer word. Its raw text goes to the segment's `redirects` instead, since a `$(…)` in it still runs and a
- * herestring (`bash <<< "…"`) is a script. A segment whose output a `|` or `|&` feeds into the next one has
- * `pipedOut` set (`(echo …) | sh` marks the echo). Throws on an unterminated quote.
- * @returns {(string[] & { pipedOut?: true, redirects?: { text: string, herestring: boolean }[] })[]}
+ * herestring (`bash <<< "…"`) is a script. A heredoc's body is not lexed as commands on the outer line (#100): it goes
+ * to its segment's `heredocs`, and a literal `$(cat <<'EOF' … EOF)` reads as its body, with that word's index in the
+ * segment's `literal`. A segment whose output a `|` or `|&` feeds into the next one has `pipedOut` set
+ * (`(echo …) | sh` marks the echo). Throws on an unterminated quote.
+ * @returns {(string[] & { pipedOut?: true, redirects?: { text: string, herestring: boolean }[], heredocs?: { body: string, quoted: boolean }[], literal?: Set<number> })[]}
  */
 function lex(cmd) {
   const segments = [[]];
+  const pending = [];
   let word = null;
+  let wordLiteral = false;
   const endWord = () => {
-    if (word !== null) segments.at(-1).push(word);
+    if (word !== null) {
+      if (wordLiteral) (segments.at(-1).literal ??= new Set()).add(segments.at(-1).length);
+      segments.at(-1).push(word);
+    }
     word = null;
+    wordLiteral = false;
   };
   const endSegment = () => {
     endWord();
@@ -105,15 +156,37 @@ function lex(cmd) {
       let j = i + 1;
       let s = "";
       for (; j < cmd.length && cmd[j] !== '"'; j += 1) {
+        const lit = cmd[j] === "$" ? literalSubstitution(cmd, j) : null;
+        if (lit) {
+          s += lit.body;
+          wordLiteral = true;
+          j = lit.end;
+          continue;
+        }
         if (cmd[j] === "\\" && '"\\$`'.includes(cmd[j + 1] ?? "")) j += 1;
         s += cmd[j];
       }
       if (j >= cmd.length) throw new Error('unterminated "');
       word = (word ?? "") + s;
       i = j;
+    } else if (c === "$" && literalSubstitution(cmd, i)) {
+      const lit = literalSubstitution(cmd, i);
+      word = (word ?? "") + lit.body;
+      wordLiteral = true;
+      i = lit.end;
     } else if (c === "\\") {
       if (cmd[i + 1] !== "\n") word = (word ?? "") + (cmd[i + 1] ?? "");
       i += 1;
+    } else if (c === "\n" && pending.length > 0) {
+      // The heredocs opened on this line: their bodies follow it, each up to its delimiter line.
+      endSegment();
+      let end = i;
+      for (const h of pending.splice(0)) {
+        const r = readHeredoc(cmd, end + 1, h.delim, h.stripTabs);
+        (h.segment.heredocs ??= []).push({ body: r.body, quoted: h.quoted });
+        end = r.end;
+      }
+      i = end;
     } else if (c === "|" && cmd[i + 1] === "|") {
       endSegment();
       i += 1;
@@ -126,6 +199,12 @@ function lex(cmd) {
       // A bare fd number immediately before `<`/`>` (as in `2>file`) is part of the operator, not a word.
       if (word !== null && /^[0-9]+$/.test(word)) word = null;
       else endWord();
+      const doc = c === "<" && cmd[i + 1] === "<" && cmd[i + 2] !== "<" ? HEREDOC_RE.exec(cmd.slice(i)) : null;
+      if (doc) {
+        pending.push({ segment: segments.at(-1), delim: doc[2] ?? doc[3] ?? doc[4], stripTabs: doc[1] === "-", quoted: doc[4] === undefined });
+        i += doc[0].length - 1;
+        continue;
+      }
       let j = i + 1;
       if (cmd[j] === c || cmd[j] === "&") j += 1; // >>, <<, >&, <&
       const herestring = c === "<" && cmd[j] === "<";
@@ -140,7 +219,7 @@ function lex(cmd) {
     }
   }
   endSegment();
-  return segments.filter((s) => s.length > 0 || s.redirects);
+  return segments.filter((s) => s.length > 0 || s.redirects || s.heredocs);
 }
 
 /** The reviewer and --pr of one post-review invocation, from the words after the script path. */
@@ -181,6 +260,12 @@ const SHELL_RE = /^(sh|bash|zsh|dash|ksh|ash|busybox)(\.exe)?$/i;
 // Commands that only print, list or search their arguments: a "node" among them is never run. Every other command
 // word may be a wrapper (env, sudo, time, xargs, …), so a "node" behind it counts.
 const NON_RUNNING_COMMANDS = new Set(["echo", "printf", "grep", "egrep", "fgrep", "rg", "ls", "which", "where", "whereis", "type", "cat", "head", "tail", "wc", "file", "stat", "man"]);
+// Text tools whose quoted argument is a program in their own language, not shell (#148): its `$` and backticks mean
+// nothing to bash, so it is scanned only when it names post-review (awk's system() can still run it).
+const PROGRAM_RE = /^(awk|gawk|mawk|nawk|sed|gsed|jq)(\.exe)?$/i;
+// Commands that read a heredoc or a literal `$(cat <<'EOF' … EOF)` as data (a file, a commit message, a PR body),
+// never as a script (#100).
+const DATA_COMMANDS = new Set([...NON_RUNNING_COMMANDS, "git", "gh", "tee"]);
 // Node options known to take no value. Any other bare option (no `=value`) may take the next word as its value, so
 // that word and the one after it are both treated as the script: an option missing here only costs a false deny.
 const NODE_BOOLEAN_FLAGS = new Set([
@@ -212,17 +297,34 @@ function nodeScriptEnd(plain, nodeAt) {
   return plain.length - 1;
 }
 
+// Builtins whose `NAME=value` arguments are assignments too.
+const ASSIGNING_BUILTINS = new Set(["export", "declare", "local", "readonly", "typeset"]);
+
 /**
- * `NAME=value` words anywhere in the command's segments. The lexer cannot tell a sequence from exclusive branches
+ * The indexes of a simple command's assignment words: the `NAME=value` words before its command word, and those after
+ * export, declare, local, readonly or typeset. Any other `NAME=value` word is an argument (`echo "n=$n"`, #152).
+ */
+function assignmentIndexes(words) {
+  const at = new Set();
+  let i = 0;
+  for (; i < words.length && ASSIGN_RE.test(words[i]); i += 1) at.add(i);
+  if (ASSIGNING_BUILTINS.has(words[i])) {
+    for (let j = i + 1; j < words.length; j += 1) if (ASSIGN_RE.test(words[j])) at.add(j);
+  }
+  return at;
+}
+
+/**
+ * The assignment words of the command's segments. The lexer cannot tell a sequence from exclusive branches
  * (`true && R=own || R=xyz`, if/else, case), so a name given two different values is left out: its references stay
  * unresolved and fail closed.
  */
-function collectAssignments(segments) {
+function collectAssignments(segments, assigned) {
   const assignments = {};
   const ambiguous = new Set();
-  for (const words of segments) {
-    for (const w of words) {
-      const m = ASSIGN_RE.exec(w);
+  for (const [k, words] of segments.entries()) {
+    for (const j of assigned[k]) {
+      const m = ASSIGN_RE.exec(words[j]);
       if (!m) continue;
       if (Object.prototype.hasOwnProperty.call(assignments, m[1]) && assignments[m[1]] !== m[2]) ambiguous.add(m[1]);
       assignments[m[1]] = m[2];
@@ -343,9 +445,14 @@ const commandName = (plain) => plain[0]?.split(/[\\/]/).at(-1);
  */
 function scanNested(w, depth, out) {
   if (!/[\s;&|()<>]/.test(w) || !/post-review|[$`*?[{]/i.test(unquoted(w))) return false;
-  if (depth >= MAX_DEPTH) out.push({ pr: undefined, standalone: false });
-  else scan(w, depth + 1, out);
+  scanScript(w, depth, out);
   return true;
+}
+
+/** Text that may be run as a script (a heredoc fed to a shell): scan it as a command of its own. */
+function scanScript(text, depth, out) {
+  if (depth >= MAX_DEPTH) out.push({ pr: undefined, standalone: false });
+  else scan(text, depth + 1, out);
 }
 
 function scan(cmd, depth, out) {
@@ -354,23 +461,42 @@ function scan(cmd, depth, out) {
     segments = lex(cmd);
   } catch {
     // An unterminated quote: bash will not run it, but fail closed on the name with any quoting removed.
-    if (/post-review/i.test(unquoted(cmd))) out.push({ pr: undefined, standalone: false });
+    if (/post-review/i.test(unquoted(cmd))) out.push({ pr: undefined, standalone: false, unparsed: true });
     return;
   }
   // `S=scripts/lanes/post-review.mjs; node $S owner … --pr N` must be caught too: resolve same-command
   // `NAME=value` assignments into later `$NAME`/`${NAME}` references before looking for the script and its args.
-  const assignments = collectAssignments(segments);
-  // The command word and the script node runs (also behind env, time or sudo), counted without `NAME=value` words.
-  const plains = segments.map((rawWords) => resolveVars(rawWords, assignments).filter((w) => !ASSIGN_RE.test(w)));
+  const assigned = segments.map(assignmentIndexes);
+  const assignments = collectAssignments(segments, assigned);
+  // The command word and the script node runs (also behind env, time or sudo), counted without assignment words;
+  // `literalAt` holds the indexes (in `plains`) of words read from a literal `$(cat <<'EOF' … EOF)`.
+  const plains = [];
+  const literalAt = [];
+  segments.forEach((raw, k) => {
+    const kept = raw.map((_, j) => j).filter((j) => !assigned[k].has(j));
+    plains.push(resolveVars(kept.map((j) => raw[j]), assignments));
+    literalAt.push(new Set(kept.flatMap((j, i) => (raw.literal?.has(j) ? [i] : []))));
+  });
+  // Whether segment k's output flows down a pipe into anything that may run it: `echo node … | bash` runs what echo
+  // prints, `grep node … | wc -l` does not.
+  const feedsRunner = (k) => {
+    for (let m = k; segments[m]?.pipedOut; m += 1) if (!NON_RUNNING_COMMANDS.has(commandName(plains[m + 1] ?? []))) return true;
+    return false;
+  };
   plains.forEach((plain, k) => {
+    const name = commandName(plain);
     // Node's options and the script: any of them that still holds `$` or a backtick could load or be post-review.mjs.
     // Every word that looks like node counts, since an earlier one may only be an argument (`sudo -u node node …`).
     const nodeRange = new Set();
-    // A command that only prints or searches its arguments runs none of them, unless its output flows down a pipe
-    // into anything else: `echo node … | bash` runs what echo prints, `grep node … | wc -l` does not.
-    let runsArgs = !NON_RUNNING_COMMANDS.has(commandName(plain));
-    for (let m = k; !runsArgs && segments[m]?.pipedOut; m += 1) {
-      runsArgs = !NON_RUNNING_COMMANDS.has(commandName(plains[m + 1] ?? []));
+    // A command that only prints or searches its arguments runs none of them, unless its output feeds a runner.
+    const runsArgs = !NON_RUNNING_COMMANDS.has(name) || feedsRunner(k);
+    // Heredocs and literal `$(cat <<'EOF' … EOF)` words given to a command that reads them as data are not scripts.
+    const readsData = (DATA_COMMANDS.has(name) || PROGRAM_RE.test(name ?? "")) && !feedsRunner(k);
+    // An awk, sed or jq program is scanned only when it names post-review (#148).
+    const programArgs = PROGRAM_RE.test(name ?? "") && !feedsRunner(k);
+    // A heredoc body is a script unless a data command reads it; an unquoted one still runs its `$(…)` and backticks.
+    for (const { body, quoted } of segments[k].heredocs ?? []) {
+      if (!readsData || (!quoted && RUNS_ON_EXPANSION_RE.test(body))) scanScript(body, depth, out);
     }
     plain.forEach((p, at) => {
       if ((at > 0 && !runsArgs) || !NODE_RE.test(p.split(/[\\/]/).at(-1))) return;
@@ -392,10 +518,7 @@ function scan(cmd, depth, out) {
     });
     // An assigned value may be run later by eval or sh -c "$CMD", and an ambiguous one is never substituted: scan
     // every value that looks like a script as a command of its own.
-    for (const w of segments[k]) {
-      const m = ASSIGN_RE.exec(w);
-      if (m) scanNested(m[2], depth, out);
-    }
+    for (const j of assigned[k]) scanNested(ASSIGN_RE.exec(segments[k][j])[2], depth, out);
     // A redirection target is no argument, but a herestring is a script and a quoted `$(…)` or backtick in any other
     // target runs. A plain file target ("$TMP/out file.txt") is neither.
     for (const { text, herestring } of segments[k].redirects ?? []) {
@@ -409,7 +532,9 @@ function scan(cmd, depth, out) {
       for (const w of words) scanNested(w, depth, out);
     }
     plain.forEach((w, i) => {
-      if (scanNested(w, depth, out)) {
+      if (i > 0 && ((readsData && literalAt[k].has(i)) || (programArgs && !/post-review/i.test(unquoted(w))))) {
+        // Data for a command that does not run it: a commit message, a PR body, an awk program.
+      } else if (scanNested(w, depth, out)) {
         // Scanned as a command of its own.
       } else if (POST_REVIEW_RE.test(w)) {
         const { reviewer, pr } = readPostReviewArgs(plain.slice(i + 1));
@@ -427,7 +552,8 @@ function scan(cmd, depth, out) {
 /**
  * Every `post-review.mjs owner` invocation in a Bash command, including ones behind env, chains, subshells or
  * `bash -c`. `standalone` is true only for the plain `node scripts/lanes/post-review.mjs owner …` with nothing around it.
- * @returns {{ pr: string | undefined, standalone: boolean }[]}
+ * `unparsed` is set on an entry for a part that could not be parsed and names post-review.
+ * @returns {{ pr: string | undefined, standalone: boolean, unparsed?: true }[]}
  */
 export function findOwnerInvocations(command) {
   const cmd = String(command ?? "");
@@ -435,9 +561,8 @@ export function findOwnerInvocations(command) {
   // lexed words can tell.
   const out = [];
   scan(cmd, 0, out);
-  // Deeper indirection (a variable built from another, `$(…)`, backticks) cannot be resolved statically: with an
-  // `owner` word and a substitution anywhere, fail closed and count it as an owner command.
-  if (out.length === 0 && /[$`]/.test(cmd) && /(^|[\s`(])owner($|[\s`)])/.test(unquoted(cmd))) out.push({ pr: undefined, standalone: false });
+  // No fallback for an `owner` word next to a `$` anywhere (#140): it denied everyday commands such as
+  // `echo "owner $X"`, and post-review.mjs itself refuses the owner's approval without a fresh grant (#81, ADR 0004).
   // Leading/trailing whitespace (a trailing newline the model appends to a Bash command is common) must not turn the
   // plain command into a "wrapped" one: trim before checking the exact prefix and for embedded shell metacharacters.
   const trimmedCmd = cmd.trim();
@@ -476,6 +601,7 @@ export function decidePreToolUse(input, grant, now = Date.now()) {
   if (input?.tool_name !== "Bash") return null;
   const found = findOwnerInvocations(input.tool_input?.command);
   if (found.length === 0) return null;
+  if (found.some((f) => f.unparsed)) return { decision: "deny", reason: UNPARSED_REASON };
   const deny = { decision: "deny", reason: DENY_REASON };
   const sessionId = input.session_id;
   if (found.length !== 1 || !found[0].standalone) return deny;

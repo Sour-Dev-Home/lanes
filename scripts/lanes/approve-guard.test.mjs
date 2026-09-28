@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, readGrant, runHook, validGrant } from "./approve-guard.mjs";
+import { DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, readGrant, runHook, validGrant } from "./approve-guard.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const SHA = "a".repeat(40);
@@ -667,6 +667,120 @@ test("edge: process substitution and an unrecognized valued node flag do not hid
     assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
     assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
   }
+});
+
+// --- #140: false positives on harmless commands --------------------------------------------------------------------
+
+const allowed = (cmd) => {
+  assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+  assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+};
+
+test("an owner word next to a $ is no longer an owner command on its own (#140)", () => {
+  allowed('echo "owner $X"');
+  allowed("cat > .lanes/verdicts/test-hunter.json <<'EOF'\n{ \"summary\": \"the owner pays $0 for `npm test`\" }\nEOF");
+  allowed("gh pr create --title x --body-file - <<'EOF'\n## Needs the owner\n\nnothing; the gate costs $0\nEOF");
+});
+
+test("a disguised owner command the hook no longer catches is refused by post-review.mjs without a grant (#140, #81)", async () => {
+  // Before #140 the `owner` word plus a `$` failed closed; now only the script's own grant check (#81) stops it.
+  const cmd = "python3 -c \"import subprocess,sys; subprocess.run(['node','scripts/lanes/post-review.mjs']+sys.argv[1:])\" owner success x --pr $PR";
+  assert.deepEqual(findOwnerInvocations(cmd), []);
+  // What that command ends up running: post-review.mjs owner, with no /approve grant anywhere.
+  const { main } = await import("./post-review.mjs");
+  withDir((dir) => {
+    const calls = [];
+    const run = (...args) => {
+      calls.push(args);
+      throw new Error("gh must not be called without a grant");
+    };
+    assert.throws(() => main(["owner", "success", "x", "--pr", "16"], { run, log: () => {}, warn: () => {}, grantDir: dir, now: NOW }), /no fresh \/approve 16 grant/);
+    assert.deepEqual(calls, []);
+  });
+});
+
+test("a NAME=value argument after the command word is an argument, not an assignment (#152)", () => {
+  allowed('echo "n=$n i=$i"');
+  allowed('printf "%s\\n" "a=$A b=$B"');
+  // Leading NAME=value words are still assignments.
+  denied("S=scripts/lanes/post-review.mjs; node $S owner --pr 1");
+  denied('A="node scripts/lanes/post-review.mjs owner --pr 1"; eval "$A"');
+  // An argument really run as a script is still scanned and fails closed.
+  denied('bash -c "x=$y; node \\$x owner --pr 1"');
+  denied('eval "x=$y; node \\$x owner --pr 1"');
+});
+
+test("an awk program holding backticks and $ is allowed (#148)", () => {
+  const cmd = "awk '/^```markdown$/{f=1;next} f&&/^```$/{exit} f' in.md > out.md";
+  allowed(cmd);
+  withDir((dir) => assert.equal(runHook("pre-tool-use", JSON.stringify(bash(cmd)), { dir, now: NOW }), ""));
+});
+
+test("a heredoc that only feeds data gives no decision; one that runs post-review.mjs owner is denied (#100)", () => {
+  allowed("git commit -m \"$(cat <<'EOF'\nfix: post-review.mjs owner check reads $PR; `x`\n\nCo-Authored-By: a <b@c>\nEOF\n)\"");
+  denied("bash <<'EOF'\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF");
+  denied("cat <<'EOF' | sh\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF");
+});
+
+test("a command that cannot be parsed is denied with a reason that says so (#100)", () => {
+  const d = decidePreToolUse(bash(`node scripts/lanes/post-review.mjs owner "oops --pr 16`), grant(), NOW);
+  assert.equal(d.decision, "deny");
+  assert.match(d.reason, /could not be parsed/);
+});
+
+test("edge: heredocs a data command reads stay data, and every heredoc that can run post-review.mjs owner is denied (#100)", () => {
+  allowed("gh pr comment 16 --body-file - <<'EOF'\nrun node scripts/lanes/post-review.mjs owner --pr 16 after /approve 16\nEOF");
+  allowed("cat <<'EOF'\nEOF");
+  allowed("cat <<-EOF\n\tnode $S owner\n\tEOF");
+  allowed("git commit -F - <<EOF\nfix $X handling\nEOF");
+  allowed("cat <<'EOF\nnot a delimiter");
+  // An unquoted body still runs its $(…) and backticks, even when a data command reads it.
+  denied("cat <<EOF\n$(node scripts/lanes/post-review.mjs owner --pr 16)\nEOF");
+  denied("cat <<EOF > out.txt\n`node scripts/lanes/post-review.mjs owner --pr 16`\nEOF");
+  // A shell reading the body, unterminated, tab-stripped, behind a second heredoc on the same line, or piped on.
+  denied("bash <<EOF\nnode scripts/lanes/post-review.mjs owner --pr 16");
+  denied("sh <<-EOF\n\tnode scripts/lanes/post-review.mjs owner --pr 16\n\tEOF");
+  denied("cat <<A; bash <<B\nx\nA\nnode scripts/lanes/post-review.mjs owner --pr 16\nB");
+  denied("gh pr view 16 <<'EOF' | bash\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF");
+  denied("bash <<'EOF'\nS=scripts/lanes/post-review.mjs; node $S owner --pr 16\nEOF");
+  denied("node <<'EOF'\nrequire('child_process').execSync('node scripts/lanes/post-review.mjs owner --pr 16')\nEOF");
+  // A literal $(cat <<'EOF' … EOF) is data for git, a script for a shell or anything piped into one.
+  denied("bash -c \"$(cat <<'EOF'\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF\n)\"");
+  denied("git log -1 --format=\"$(cat <<'EOF'\nnode scripts/lanes/post-review.mjs owner --pr 16\nEOF\n)\" | sh");
+  // The commands after a heredoc's body are still read as commands.
+  denied("cat <<'EOF'\nhello\nEOF\nnode scripts/lanes/post-review.mjs owner --pr 16");
+});
+
+test("edge: assignment words are only the leading ones and export's; the rest are arguments (#152)", () => {
+  allowed('git commit -m "a=$A; b=$B"');
+  allowed("make X=$Y all");
+  // export, local, declare and readonly still assign.
+  denied("export S=scripts/lanes/post-review.mjs; node $S owner --pr 16");
+  denied("local S=scripts/lanes/post-review.mjs; node $S owner --pr 16");
+  denied("declare -x S=scripts/lanes/post-review.mjs; node $S owner --pr 16");
+  // env's NAME=value is no shell assignment, so $S stays unresolved in node's script position: still denied.
+  denied("env S=scripts/lanes/post-review.mjs node $S owner --pr 16");
+  // A NAME=value argument that is a script of its own, or holds a substitution, is still scanned.
+  denied('env FOO="x; node $S owner" true');
+  denied("echo x=$(node scripts/lanes/post-review.mjs owner --pr 16)");
+});
+
+test("edge: an awk, sed or jq program is scanned only when it names post-review, or when its output is run (#148)", () => {
+  allowed("sed -n '/^```$/,/^$/p; s/`x`/$y/' in.md");
+  allowed("jq -r '.[] | \"\\(.a) $\\(.b) `c`\"' in.json");
+  allowed("awk '{ print $1; x = `y` }' in.txt | head -5");
+  denied("awk 'BEGIN { system(\"node scripts/lanes/post-review.mjs owner --pr 16\") }'");
+  denied("awk 'BEGIN { print \"x; node $S owner\" }' | sh");
+});
+
+test("edge: only a part that names post-review and cannot be parsed gets the parse reason (#100)", () => {
+  allowed('echo "oops');
+  const nested = decidePreToolUse(bash(`bash -c 'node scripts/lanes/post-review.mjs owner "x --pr 16'`), grant(), NOW);
+  assert.deepEqual(nested, { decision: "deny", reason: UNPARSED_REASON });
+  assert.match(UNPARSED_REASON, /could not be parsed/);
+  assert.ok(UNPARSED_REASON.endsWith(DENY_REASON));
+  // A parseable owner command keeps the ordinary reason.
+  assert.deepEqual(decidePreToolUse(bash(OWNER), null, NOW), { decision: "deny", reason: DENY_REASON });
 });
 
 test("the CLI answers deny, never crashes, when it cannot evaluate a PreToolUse call", () => {
