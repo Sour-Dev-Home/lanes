@@ -7,10 +7,10 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GATE_CONTEXT, parseIssueForm, parseVerdictComment } from "./lib.mjs";
-import { gateDescriptions, mergeQueueEntries, prStage } from "./status.mjs";
+import { STATUS_QUERY, gateDescriptions, mergeQueueEntries, prStage } from "./status.mjs";
 
 const ISSUE_LIMIT = 1000;
-const PR_LIMIT = 100; // also the GraphQL page size of SNAPSHOT_QUERY
+const PR_LIMIT = 100; // also the GraphQL page size of STATUS_QUERY
 const TITLE_MAX = 200;
 // Only comments by people with write access count: a verdict comment from anyone else is not a review.
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -165,12 +165,6 @@ export function writeSnapshot(snapshot, file) {
 
 const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 }));
 
-// Same query as status.mjs: the merge queue and each open PR's gate description in one call.
-const SNAPSHOT_QUERY =
-  "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ " +
-  "mergeQueue { entries(first:100){ nodes { state position pullRequest { number } } } } " +
-  `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description } } } } } } } } }`;
-
 function main(argv = process.argv.slice(2)) {
   const out = parseOutArg(argv);
   const from = parseFromArg(argv);
@@ -180,7 +174,7 @@ function main(argv = process.argv.slice(2)) {
     else console.log(JSON.stringify(snapshot, null, 2));
     return;
   }
-  const reply = gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${SNAPSHOT_QUERY}`]);
+  const reply = gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${STATUS_QUERY}`]);
   const issues = gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,title,labels,body"]);
   // A blocker missing from a truncated list would read as closed, so refuse rather than publish a wrong "ready".
   if (issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);

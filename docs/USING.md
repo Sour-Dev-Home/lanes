@@ -212,3 +212,12 @@ An existing repository: `node scripts/lanes/install.mjs <target>` (it also copie
 `vendor/agent-skills/`, which `lane.md` names directly), edit the target's `lanes.config.json`, add `setup` and
 `preflight` npm scripts and a `verify` workflow for the project's own tests (with the push-to-main trigger above), push
 to `main`, then (owner) set the `PII_PATTERNS` secret and run `node scripts/lanes/setup-repo.mjs <owner/repo>`.
+
+### The dashboard workflow and private repositories
+
+A GitHub Pages site is public even when its repository is private, and the dashboard publishes the PR and issue
+snapshot to one (ADR 0012). So `install.mjs` copies the dashboard workflow as `.github/workflows/dashboard.yml.disabled`,
+which GitHub ignores, unless the target repository is public. It asks `gh` whether the repository is public; when that
+is unknown it treats the repository as private. To turn the dashboard on, either run
+`node scripts/lanes/install.mjs <target> --public` (`--private` forces the disabled copy), or rename the file to
+`dashboard.yml` yourself. Do that only when you accept that the snapshot's contents are readable by anyone.

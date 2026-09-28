@@ -310,7 +310,7 @@ const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", std
 // `gh pr --json` has no merge queue field and drops status descriptions, so one GraphQL call fetches both.
 // `mergeQueue` without `branch` is the default branch's queue; null when it has none. `pullRequests` matches the
 // `gh pr list` limit below. `{owner}` and `{repo}` are filled in by gh.
-const STATUS_QUERY =
+export const STATUS_QUERY =
   "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ " +
   "mergeQueue { entries(first:100){ nodes { state position pullRequest { number } } } } " +
   `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description } } } } } } } } }`;

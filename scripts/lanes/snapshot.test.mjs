@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { buildSnapshot, parseFromArg, parseInput, parseOutArg, verdictCriteria, writeSnapshot } from "./snapshot.mjs";
 import { buildVerdictComment } from "./post-review.mjs";
+import { STATUS_QUERY } from "./status.mjs";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98";
@@ -297,4 +298,12 @@ test("edge: a PR whose gate passed with auto-merge off is ready, with no blocker
 test("edge: a criterion result outside pass/fail/not-applicable never reaches the criteria", () => {
   const v = { sha: SHA, reviewer: "r", verdict: { criteria: [{ index: 1, result: "<script>" }, { index: 2, result: "pass" }] } };
   assert.deepEqual(verdictCriteria([v], SHA), [{ index: 2, result: "pass" }]);
+});
+
+test("snapshot.mjs uses status.mjs's GraphQL query rather than its own copy", () => {
+  const source = readFileSync(new URL("./snapshot.mjs", import.meta.url), "utf8");
+  assert.equal(typeof STATUS_QUERY, "string");
+  assert.match(source, /import \{[^}]*\bSTATUS_QUERY\b[^}]*\} from "\.\/status\.mjs"/);
+  assert.match(source, /`query=\$\{STATUS_QUERY\}`/);
+  assert.doesNotMatch(source, /query\(\$owner/);
 });
