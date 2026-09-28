@@ -671,6 +671,15 @@ test("verify.yml's test job matrix covers ubuntu-latest on Node 22 and 24, and w
   assert.match(yml, /- run: npm test/);
 });
 
+// edge: the matrix must hold exactly the three named entries, not grow an unlisted fourth combination
+// (e.g. windows + node 24 as a required leg) that the acceptance criteria's substring checks would miss.
+test("verify.yml's matrix has exactly three entries, one informational, and only windows is informational", () => {
+  const yml = verifyYml();
+  assert.equal((yml.match(/^\s*- os: /gm) ?? []).length, 3);
+  assert.equal((yml.match(/informational: true/g) ?? []).length, 1);
+  assert.match(yml, /- os: windows-latest\n\s+node: 22\n\s+#[^\n]*\n\s+informational: true\n/);
+});
+
 // #232: a final job named verify needs the matrix and fails when any required entry fails
 test("verify.yml's final job is named verify, needs the test matrix, and fails the required check when it doesn't succeed", () => {
   const yml = verifyYml();
