@@ -522,6 +522,21 @@ test("edge: heredoc forms that still run start.mjs are start runs, never standal
   }
 });
 
+test("edge: bit-shift arithmetic (`$((1<<2))`) is not mistaken for a heredoc, and never hides a real start.mjs or claude --bg run on the next line", () => {
+  // Found by the test-hunter: `1<<2` inside `$((...))` matches the heredoc opener regex (delimiter "2"), so the
+  // lexer treats the rest of the line as a bogus heredoc body. On a single line that body is simply never closed
+  // (no trailing newline to read it), so nothing is lost. Across a newline the "body" swallows whatever follows -
+  // but that swallowed text is still walked as a nested script, so a real start.mjs/claude --bg run right after the
+  // arithmetic must still be caught, and a merely-arithmetic command must still get no decision.
+  for (const cmd of [`X=$((1<<2)); echo $X`, "X=$((1<<2))\necho done"]) {
+    assert.deepEqual(findStartInvocations(cmd), [], cmd);
+    assert.equal(findBgLaunches(cmd), false, cmd);
+    assert.equal(decidePreToolUse(bash(cmd), grant(), NOW), null, cmd);
+  }
+  assert.deepEqual(decidePreToolUse(bash("X=$((1<<2))\nnode scripts/lanes/start.mjs 12"), grant(), NOW), { decision: "deny", reason: DENY_REASON });
+  assert.deepEqual(decidePreToolUse(bash("X=$((1<<2))\nclaude --bg x"), grant(), NOW), { decision: "deny", reason: BG_DENY_REASON });
+});
+
 test("edge: the hook itself passes a heredoc commit and gives the could-not-parse reason end to end", () => {
   const dir = tmp();
   try {
