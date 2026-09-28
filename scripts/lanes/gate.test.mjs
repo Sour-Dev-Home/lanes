@@ -527,6 +527,17 @@ test("carry fails a queue entry whose PR has an open blocker", () => {
   assert.ok(posted[0].fields.includes("state=failure"));
 });
 
+// Not named in the issue's acceptance criteria or its listed edge cases: carry must fail closed the same way for an
+// unreadable blocker as it does for an open one, not just for evaluatePr's own PR-head decision.
+test("carry fails a queue entry whose PR has an unreadable blocker, not just an open one", () => {
+  const group = "b".repeat(40);
+  const { api, posted } = fakeApi(blockerRoutes("#3, #9", { 3: "closed" })); // no route for #9: the read throws
+  const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, group, config);
+  assert.deepEqual(d, { state: "failure", description: "cannot check blockers of #7: #9 unreadable" });
+  assert.equal(posted[0].sha, group);
+  assert.ok(posted[0].fields.includes("state=failure"));
+});
+
 test("edge: a blocker with an unexpected state counts as unreadable", () => {
   const { api } = fakeApi(blockerRoutes("#3", { 3: "weird" }));
   assert.equal(evaluatePr(api, "o/r", 5, config).description, "cannot check blockers of #7: #3 unreadable");
@@ -546,6 +557,41 @@ test("edge: a repeated blocker is read once", () => {
   const calls = [];
   evaluatePr((args) => (calls.push(args[0]), api(args)), "o/r", 5, config);
   assert.equal(calls.filter((c) => c === "repos/o/r/issues/3").length, 1);
+});
+
+// #36 security round 2: a stranger's issue must not make the gate read its blockers (one API call each, on every
+// pull_request_target run), and no issue may list more blockers than the cap.
+const blockerReads = (calls) => calls.filter((c) => /^repos\/o\/r\/issues\/(?!7$)\d+$/.test(c));
+const many = (n) => Array.from({ length: n }, (_, i) => `#${100 + i}`).join(", ");
+
+test("edge: blockers are not read for an untrusted linked issue", () => {
+  const untrusted = [
+    { ...blockedIssue(many(50)), user: { login: "stranger" } }, // no write access: the permission lookup throws
+    { ...blockedIssue(many(50)), labels: [{ name: "tier:skip" }] }, // not ready
+    { ...blockedIssue(many(50)), state: "closed" },
+    { ...blockedIssue(many(50)), pull_request: { url: "x" } },
+  ];
+  for (const issue of untrusted) {
+    const { api } = fakeApi({ ...writeAccessRoutes("leo"), "repos/o/r/issues/7": issue });
+    const calls = [];
+    const d = evaluatePr((args) => (calls.push(args[0]), api(args)), "o/r", 5, config);
+    assert.equal(d.state, "failure", JSON.stringify(issue.labels));
+    assert.deepEqual(blockerReads(calls), [], JSON.stringify(issue.labels));
+  }
+});
+
+test("edge: more blockers than the cap fail closed without reading any", () => {
+  const { api } = fakeApi({ ...writeAccessRoutes("leo"), "repos/o/r/issues/7": blockedIssue(many(21)) });
+  const calls = [];
+  const d = evaluatePr((args) => (calls.push(args[0]), api(args)), "o/r", 5, config);
+  assert.deepEqual(d, { state: "failure", description: "cannot check blockers of #7: more than 20 blockers", stage: "blocked" });
+  assert.deepEqual(blockerReads(calls), []);
+});
+
+test("edge: exactly the cap of blockers is read", () => {
+  const states = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [100 + i, "closed"]));
+  const { api } = fakeApi(blockerRoutes(many(20), states));
+  assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
 });
 
 // #36: closing an issue re-evaluates the open PRs whose linked issue lists it in "Blocked by", and only those.

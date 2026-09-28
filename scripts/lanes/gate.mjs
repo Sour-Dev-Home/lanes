@@ -129,7 +129,11 @@ export function decideForPr(api, repo, number, config, adrs = []) {
       // E2: the issues API also returns pull requests; only a `pull_request` key set means it is actually a PR.
       issueIsPr = issue.pull_request !== undefined && issue.pull_request !== null;
       issueAuthorCanWrite = authorCanWrite(api, repo, issue.user?.login);
-      blockers = readBlockers(api, repo, issue.body);
+      // Only a trusted task issue's blockers are read: each costs an API call, and a stranger's PR runs this gate.
+      // An untrusted issue fails in gateDecision before the blocker check, so the fail-closed default never shows.
+      if (issueAuthorCanWrite === true && !issueIsPr && issueState === "open" && issueLabels.includes("ready")) {
+        blockers = readBlockers(api, repo, issue.body);
+      }
     } catch {
       issueLabels = []; // unknown issue: the decision then fails on the missing tier label
     }
@@ -155,11 +159,16 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   return { pr, decision };
 }
 
+// Bounds the API calls one gate run spends on blockers; a longer list fails closed.
+const MAX_BLOCKERS = 20;
+
 /**
- * #36: `blockerReport` for a task issue's body through blockers.mjs's shared reader, one API call per blocker. The
- * issues API also answers for a PR, so a PR used as a blocker counts by its own state.
+ * #36: `blockerReport` for a task issue's body through blockers.mjs's shared reader, one API call per blocker (at most
+ * `MAX_BLOCKERS`). The issues API also answers for a PR, so a PR used as a blocker counts by its own state.
  */
 export function readBlockers(api, repo, issueBody) {
+  const { blockedBy } = parseBlockedBy(issueBody);
+  if (blockedBy && blockedBy.length > MAX_BLOCKERS) return { ok: false, open: [], unreadable: [], error: `more than ${MAX_BLOCKERS} blockers` };
   return readBlockerReport(issueBody, (b) => JSON.parse(api([`repos/${repo}/issues/${b}`])).state);
 }
 
