@@ -35,7 +35,8 @@ test("edge: MANIFEST lists no OWASP sheet that is not vendored", () => {
 test("edge: install copies the OWASP sheets byte for byte", () => {
   const target = mkdtempSync(path.join(tmpdir(), "lanes-owasp-"));
   install(".", target);
-  for (const f of ["INDEX.md", "sheets/Input_Validation_Cheat_Sheet.md"])
+  const all = [...["LICENSE", "VENDORED.md", "INDEX.md"], ...readdirSync("vendor/owasp-cheatsheets/sheets").map((s) => `sheets/${s}`)];
+  for (const f of all)
     assert.deepEqual(readFileSync(path.join(target, "vendor/owasp-cheatsheets", f)), readFileSync(path.join("vendor/owasp-cheatsheets", f)));
 });
 
