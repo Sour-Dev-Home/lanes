@@ -456,3 +456,14 @@ test("start.md still refuses a lane or a schedule before its pull step", () => {
   const md = commandText("start");
   assert.ok(md.indexOf("stop now") < md.indexOf("git pull --ff-only"));
 });
+
+// Edge (beyond the criteria): start-guard.mjs allows start.mjs only as a standalone plain command (#51). If a model
+// chained the new pull step onto the start.mjs run (`git pull --ff-only && node scripts/lanes/start.mjs ...`), the
+// guard would deny the whole compound command and /start would stop working. start.md must say to run the git
+// commands on their own instead.
+test("start.md tells the model to run its pull step on its own, never chained to the guarded start.mjs run", () => {
+  assert.match(
+    commandText("start"),
+    /Run each of these git commands on its own, never chained to the `start\.mjs` run below/,
+  );
+});
