@@ -341,3 +341,10 @@ test("edge: a stale --sha posts nothing, with or without --file", () => {
   assert.throws(() => main(["ui-reviewer", "skipped", "x", "--sha", stale], { run: gh.run, ...quiet }), /does not match/);
   assert.deepEqual(gh.writes, []);
 });
+
+test("edge: a --file path that does not exist posts neither comment nor status", () => {
+  const gh = fakeGh();
+  const missing = join(mkdtempSync(join(tmpdir(), "post-review-")), "does-not-exist.json");
+  assert.throws(() => main(["--file", missing], { run: gh.run, ...quiet }), /ENOENT/);
+  assert.deepEqual(gh.writes, []);
+});
