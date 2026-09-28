@@ -1249,6 +1249,27 @@ test("#240 edge: a written body some other command in the call could run is stil
   }
 });
 
+test("#240 edge (security review): a `<<` inside a # comment opens no heredoc to bash, so the lines after it are read", () => {
+  for (const [cmd, reason] of [
+    ["gh issue comment 1 -b x # <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    ["gh issue comment 1 -b x #<<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF", DENY_REASON],
+    ["cat > f.md # <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    ["mkdir -p x; # <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(reason), cmd);
+  }
+});
+
+test("#240 edge: a # inside a quoted word or a heredoc body is no comment and keeps the body skipped", () => {
+  for (const cmd of [
+    `cat > .lanes/c.md <<'EOF'\n# Heading for #240\n${PROSE}\nEOF\ngh issue comment 240 --body-file .lanes/c.md`,
+    `gh issue create --title "Fix it (#240)" --label lane-filed --body-file - <<'EOF'\n${PROSE}\nEOF`,
+    `gh issue comment 1 -b x#y --body-file - <<'EOF'\n${PROSE}\nEOF`,
+  ]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
 test("#240 edge: an empty heredoc, CRLF line ends and an unquoted body with nothing to expand, sent by gh, get no decision", () => {
   for (const cmd of [
     "cat > .lanes/c.md <<'EOF'\nEOF\ngh issue comment 1 --body-file .lanes/c.md",
@@ -1287,4 +1308,15 @@ test("#246 edge: backticks in text piped into no shell, or after || (no pipe), s
   ]) {
     assert.equal(decide(cmd), null, cmd);
   }
+});
+
+test("#246 edge (test-hunter): text piped into eval, source or . has its backticks read live", () => {
+  for (const sink of ["eval", "source /dev/stdin", ". /dev/stdin"]) {
+    assert.deepEqual(decide(`echo 'echo \`node scripts/lanes/start.mjs 12\`' | ${sink}`), deny(DENY_REASON), sink);
+    assert.deepEqual(decide(`echo 'echo \`node scripts/lanes/queue.mjs\`' | ${sink}`), deny(QUEUE_DENY_REASON), sink);
+  }
+});
+
+test("#240 edge (test-hunter): a $( substitution in a gh word keeps a literal heredoc body read", () => {
+  assert.notEqual(decide("gh issue comment 1 --body \"$(bash c.md)\" <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF"), null);
 });

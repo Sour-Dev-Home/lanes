@@ -180,6 +180,7 @@ function lex(cmd) {
   // Per segment: true when it holds an output redirection (`>`), so writes to a file; "dup" once it duplicates an fd.
   const writes = [false];
   const pipes = [false];
+  let comment = false;
   // Per segment: the target of its input redirection (`<`), which node reads as its script when no argument is one.
   const stdin = [undefined];
   const targets = [];
@@ -310,6 +311,9 @@ function lex(cmd) {
       // A `<<` that HEREDOC_RE does not read ends the word, as before.
       endWord();
     } else {
+      // bash reads a `#` at the start of an unquoted word as a comment to the end of the line; this lexer does not, so a
+      // `# <<'EOF'` would open a heredoc here that bash never opens (#240 security review). Flagged for isTextOnly.
+      if (c === "#" && word === null) comment = true;
       word = (word ?? "") + c;
     }
   }
@@ -318,7 +322,7 @@ function lex(cmd) {
   for (const b of bodies) if (b.seg !== undefined && feedsShell(segments, pipes, b.seg)) b.toShell = true;
   // Only the last segment can be empty, so `writes` stays aligned with the segments kept.
   const kept = segments.filter((s) => s.length > 0);
-  return { segments: kept, writes: writes.slice(0, kept.length), stdin: stdin.slice(0, kept.length), pipes: pipes.slice(0, kept.length), targets, bodies };
+  return { segments: kept, writes: writes.slice(0, kept.length), stdin: stdin.slice(0, kept.length), pipes: pipes.slice(0, kept.length), targets, bodies, comment };
 }
 
 /**
@@ -423,9 +427,11 @@ const SUBSTITUTION_RE = /[`]|\$\(/;
  * True when nothing in a whole lexed Bash call can run a literal heredoc body (#240): every simple command writes text
  * (isDataOnly's cat, echo, printf, cd, mkdir) or sends it (sendsText), so a body written to a file for
  * `gh issue comment --body-file` is only text, and no substitution runs, not even one that only prints (a
- * `--body "`bash c.md`"` would run the file just written). Unlike isDataOnly, gh's own words are still read as before.
+ * `--body "`bash c.md`"` would run the file just written), and no `#` comment, where a `<<` the lexer reads as a
+ * heredoc is only comment text to bash. Unlike isDataOnly, gh's own words are still read as before.
  */
-const isTextOnly = ({ segments, writes, targets, bodies }) =>
+const isTextOnly = ({ segments, writes, targets, bodies, comment }) =>
+  !comment &&
   segments.every((words, k) => PLACE_COMMANDS.has(words[0]) || (WRITE_COMMANDS.has(words[0]) && writes[k] === true) || sendsText(words)) &&
   bodies.every((b) => b.seg !== undefined && b.literal) &&
   ![...segments.flat(), ...targets].some((w) => SUBSTITUTION_RE.test(w));
