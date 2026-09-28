@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, readGrant, runHook, validGrant } from "./approve-guard.mjs";
+import { AUTOMATED_INPUT_PREFIXES, DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, readGrant, runHook, validGrant } from "./approve-guard.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const SHA = "a".repeat(40);
@@ -1036,4 +1036,66 @@ test("cmd's real Windows path separators and /k form still deny the owner comman
 });
 test("fish's backslash-escaped parens are literal text, not command substitution, unrelated commands get no decision (#142 review, round 2)", () => {
   allowed("fish -c 'echo \\(literal parens\\)'");
+});
+
+// --- automated inputs keep the grant (#262) -----------------------------------------------------------------------
+
+const WRAPPERS = ["<task-notification>", "Another Claude session sent a message:", "<cross-session-message", "[Cross-session idle notice]"];
+
+test("#262 criterion 1: a prompt that starts with an automated-input wrapper leaves the grant alone", () => {
+  for (const w of WRAPPERS) {
+    for (const p of [w, `${w}\nreviewer done`, `  \n\t${w} from="peer">hi</cross-session-message>`]) {
+      assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: p }, NOW), { action: "none" }, JSON.stringify(p));
+    }
+  }
+});
+
+test("#262 criterion 2: a wrapped /approve N never grants", () => {
+  for (const w of WRAPPERS) {
+    for (const p of [`${w}\n/approve 5`, `${w} /approve 5`, `${w}\n/approve 5\n`]) {
+      assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: p }, NOW), { action: "none" }, JSON.stringify(p));
+    }
+  }
+});
+
+test("#262 criterion 3: every other prompt behaves as before, including one that mentions a wrapper later", () => {
+  assert.equal(onUserPromptSubmit({ session_id: "s1", prompt: " /approve 5 " }, NOW).action, "grant");
+  for (const w of WRAPPERS) {
+    for (const p of [`look at this ${w} /approve 5`, `/approve 5 ${w}`, `x${w}`]) {
+      assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: p }, NOW), { action: "clear", sessionId: "s1" }, JSON.stringify(p));
+    }
+  }
+});
+
+test("#262 criterion 4: a grant that survives a notification still expires after its TTL, and a used-up grant is not revived", () => withDir((dir) => {
+  const file = join(dir, "s1.json");
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/approve 16" }), { dir, now: NOW });
+  const written = readFileSync(file, "utf8");
+  for (const w of WRAPPERS) runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: `${w}\nreviewer finished` }), { dir, now: NOW + 1000 });
+  assert.equal(readFileSync(file, "utf8"), written);
+  assert.equal(decision(runHook("pre-tool-use", JSON.stringify(bash(OWNER)), { dir, now: NOW + 2000 })), "allow");
+  assert.equal(decision(runHook("pre-tool-use", JSON.stringify(bash(OWNER)), { dir, now: NOW + GRANT_TTL_MS })), "deny");
+  // post-review consumes the grant; a later notification carrying /approve does not bring it back.
+  rmSync(file);
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: `${WRAPPERS[0]}\n/approve 16` }), { dir, now: NOW + 3000 });
+  assert.equal(existsSync(file), false);
+  assert.equal(decision(runHook("pre-tool-use", JSON.stringify(bash(OWNER)), { dir, now: NOW + 4000 })), "deny");
+}));
+
+test("#262 criterion 5: the wrapper list is one exported, frozen constant", () => {
+  assert.deepEqual([...AUTOMATED_INPUT_PREFIXES], WRAPPERS);
+  assert.equal(Object.isFrozen(AUTOMATED_INPUT_PREFIXES), true);
+  for (const w of WRAPPERS) assert.equal(isAutomatedInput(`\n ${w}`), true);
+});
+
+test("#262 edge: a wrapper in another case, a non-string prompt or an empty prompt is not an automated input", () => {
+  assert.equal(isAutomatedInput("<TASK-NOTIFICATION>"), false);
+  assert.equal(isAutomatedInput("another claude session sent a message:"), false);
+  for (const p of [undefined, null, 5, {}, "", "   "]) assert.equal(isAutomatedInput(p), false, JSON.stringify(p));
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: "<TASK-NOTIFICATION>\n/approve 5" }, NOW), { action: "clear", sessionId: "s1" });
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1" }, NOW), { action: "clear", sessionId: "s1" });
+});
+
+test("#262 edge: a wrapped prompt with an unsafe session id still does nothing", () => {
+  assert.deepEqual(onUserPromptSubmit({ session_id: "../x", prompt: `${WRAPPERS[0]}\n/approve 5` }, NOW), { action: "none" });
 });

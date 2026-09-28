@@ -3,7 +3,8 @@
 //   UserPromptSubmit: node scripts/lanes/start-guard.mjs user-prompt-submit
 //     a prompt that is exactly `/start <N> [<N> ...]` writes a grant { sessionId, issues, at } to
 //     .lanes/start/<session>.json, and one that is exactly `/start --auto` or `/start --auto --go` writes
-//     { sessionId, auto: "dry" | "go", at } (#76); any other prompt in that session deletes it.
+//     { sessionId, auto: "dry" | "go", at } (#76); any other prompt in that session deletes it, except an automated input
+//     (approve-guard's AUTOMATED_INPUT_PREFIXES), which neither creates nor deletes one (#262).
 //   PreToolUse (Bash): node scripts/lanes/start-guard.mjs pre-tool-use
 //     `start.mjs` is allowed only as the plain `node scripts/lanes/start.mjs <N ...>` or
 //     `node scripts/lanes/start.mjs --auto [--go]`, only with a grant from this session under 15 minutes old for the
@@ -20,6 +21,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isAutomatedInput } from "./approve-guard.mjs";
 
 export const GRANT_TTL_MS = 15 * 60 * 1000;
 export const DENY_REASON = "lanes are launched only from /start <N> typed by the owner in this session";
@@ -61,11 +63,14 @@ export function parseAutoPrompt(prompt) {
 
 /**
  * UserPromptSubmit: grant for `/start <N ...>` or `/start --auto [--go]`, clear for any other prompt, nothing for a
- * session id unsafe as a file name.
+ * session id unsafe as a file name or for an automated input (a subagent report, task notification or peer message,
+ * #262). Keeping the grant across an automated input is safe: such a prompt never creates one, whatever its body says,
+ * and the grant still lapses after GRANT_TTL_MS and is spent by start.mjs's one run.
  */
 export function onUserPromptSubmit(input, now = Date.now()) {
   const sessionId = input?.session_id;
   if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId)) return { action: "none" };
+  if (isAutomatedInput(input.prompt)) return { action: "none" };
   const at = new Date(now).toISOString();
   const auto = parseAutoPrompt(input.prompt);
   if (auto !== null) return { action: "grant", sessionId, grant: { sessionId, auto, at } };

@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, UNRESOLVED_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, grantPath, grantRefusal, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, readGrant, runHook } from "./start-guard.mjs";
+import { AUTOMATED_INPUT_PREFIXES } from "./approve-guard.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const START = "node scripts/lanes/start.mjs 12 14";
@@ -1300,4 +1301,70 @@ test("#246 edge (test-hunter): a heredoc in a later segment feeding a shell is r
 
 test("#240 edge (test-hunter): a $( substitution in a gh word keeps a literal heredoc body read", () => {
   assert.notEqual(decide("gh issue comment 1 --body \"$(bash c.md)\" <<'EOF'\nnode scripts/lanes/queue.mjs\nEOF"), null);
+});
+
+// --- automated inputs keep the grant (#262) -----------------------------------------------------------------------
+
+const WRAPPERS = ["<task-notification>", "Another Claude session sent a message:", "<cross-session-message", "[Cross-session idle notice]"];
+
+test("#262 criterion 1: a prompt that starts with an automated-input wrapper leaves the grant alone", () => {
+  for (const w of WRAPPERS) {
+    for (const p of [w, `${w}\nreviewer done`, `  \n\t${w} from="peer">hi</cross-session-message>`]) {
+      assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: p }, NOW), { action: "none" }, JSON.stringify(p));
+    }
+  }
+});
+
+test("#262 criterion 2: a wrapped /start 5 or /start --auto --go never grants", () => {
+  for (const w of WRAPPERS) {
+    for (const cmd of ["/start 5", "/start --auto --go", "/start --auto"]) {
+      for (const p of [`${w}\n${cmd}`, `${w} ${cmd}`, `${w}\n${cmd}\n`]) {
+        assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: p }, NOW), { action: "none" }, JSON.stringify(p));
+      }
+    }
+  }
+});
+
+test("#262 criterion 3: every other prompt behaves as before, including one that mentions a wrapper later", () => {
+  assert.equal(onUserPromptSubmit({ session_id: "s1", prompt: " /start 5 " }, NOW).action, "grant");
+  assert.equal(onUserPromptSubmit({ session_id: "s1", prompt: "/start --auto --go" }, NOW).action, "grant");
+  for (const w of WRAPPERS) {
+    for (const p of [`look at this ${w} /start 5`, `/start 5 ${w}`, `x${w}`]) {
+      assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: p }, NOW), { action: "clear", sessionId: "s1" }, JSON.stringify(p));
+    }
+  }
+});
+
+test("#262 criterion 4: a grant that survives a notification still expires after its TTL, and a spent grant is not revived", () => {
+  const dir = tmp();
+  try {
+    const file = join(dir, "s1.json");
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/start 12 14" }), { dir, now: NOW });
+    const written = readFileSync(file, "utf8");
+    for (const w of WRAPPERS) runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: `${w}\nreviewer finished` }), { dir, now: NOW + 1000 });
+    assert.equal(readFileSync(file, "utf8"), written);
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(START)), { dir, now: NOW + 2000 })).permissionDecision, "allow");
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(START)), { dir, now: NOW + GRANT_TTL_MS })).permissionDecision, "deny");
+    assert.match(grantRefusal(readGrant(file), "s1", { issues: [12, 14] }, NOW + GRANT_TTL_MS), /older than 15 minutes/);
+    // start.mjs deletes the grant after its launches; a later notification carrying /start does not bring it back.
+    rmSync(file);
+    runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: `${WRAPPERS[0]}\n/start 12 14` }), { dir, now: NOW + 3000 });
+    assert.equal(existsSync(file), false);
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(bash(START)), { dir, now: NOW + 4000 })).permissionDecision, "deny");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#262 criterion 5: start-guard uses approve-guard's one wrapper list", () => {
+  assert.deepEqual([...AUTOMATED_INPUT_PREFIXES], WRAPPERS);
+  const src = readFileSync(new URL("./start-guard.mjs", import.meta.url), "utf8");
+  assert.match(src, /import \{[^}]*\bisAutomatedInput\b[^}]*\} from "\.\/approve-guard\.mjs"/);
+  assert.doesNotMatch(src, /Another Claude session sent a message:/, "the list is not copied into start-guard");
+});
+
+test("#262 edge: a wrapper in another case, a missing prompt, or an unsafe session id is handled as before", () => {
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: "<TASK-NOTIFICATION>\n/start 5" }, NOW), { action: "clear", sessionId: "s1" });
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1" }, NOW), { action: "clear", sessionId: "s1" });
+  assert.deepEqual(onUserPromptSubmit({ session_id: "../x", prompt: `${WRAPPERS[0]}\n/start 5` }, NOW), { action: "none" });
 });
