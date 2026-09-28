@@ -8,7 +8,7 @@
 //     unused /approve <N> grant, which it consumes once the status is posted)
 //   node scripts/lanes/post-review.mjs ui-reviewer skipped "no visible change"
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { linkSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findFreshGrant, grantDir, isFreshGrant, readGrant } from "./approve-guard.mjs";
@@ -218,9 +218,13 @@ export function claimGrant(file, prArg) {
 
 /** Puts a claimed grant back for a retry, unless a newer grant has been written in its place meanwhile. */
 function restoreGrant(marker) {
-  const file = marker.slice(0, -CLAIMED_SUFFIX.length);
-  if (existsSync(file)) rmSync(marker, { force: true });
-  else renameSync(marker, file);
+  // A hard link fails when the name is taken, so a newer grant is never overwritten (no check-then-rename window).
+  try {
+    linkSync(marker, marker.slice(0, -CLAIMED_SUFFIX.length));
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+  }
+  rmSync(marker, { force: true });
 }
 
 /**

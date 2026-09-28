@@ -6,7 +6,7 @@
 //   PreToolUse (Bash): node scripts/lanes/approve-guard.mjs pre-tool-use
 //     `post-review.mjs owner` is allowed (no prompt) only as the plain command, only with a grant from this
 //     session under 15 minutes old for the same --pr. The allow keeps the grant: post-review.mjs checks it again
-//     and consumes it after the status is posted, so every route to review/owner needs a fresh /approve (#81). Every other owner command is denied; anything else gets no
+//     claims it (renames it to <grant>.json.claimed) before any gh call and deletes that after the status is posted, so every route to review/owner needs a fresh /approve (#81). Every other owner command is denied; anything else gets no
 //     decision. A PreToolUse `allow` cannot skip an `ask` rule (observed on 2.1.283), so there is no `ask` rule for
 //     the owner command any more: this hook's deny is the barrier, and it holds in every permission mode.
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -134,6 +134,8 @@ const unmark = (s) => s.replace(/[-]/g, (m) => ORIGINAL[m]);
  * @returns {(string[] & { pipedOut?: true, redirects?: { text: string, herestring: boolean, toFile: boolean }[], heredocs?: { body: string, quoted: boolean }[], literal?: Set<number> })[]}
  */
 function lex(cmd) {
+  // A raw stand-in character would read as a marked one: refuse to parse it, so a command naming post-review fails closed.
+  if (/[-]/.test(cmd)) throw new Error("private-use character");
   const segments = [[]];
   const pending = [];
   let word = null;
@@ -709,7 +711,7 @@ export function isFreshGrant(grant, pr, now = Date.now()) {
  * PreToolUse: null (no decision) unless the command runs `post-review.mjs owner`; then allow only with this session's
  * fresh grant for the same --pr, and deny everything else.
  * @param grant the session's grant file as parsed, null when there is none, or { unreadable: true }
- * The allow leaves the grant in place: post-review.mjs checks it again and consumes it once the status is posted (#81).
+ * The allow leaves the grant in place: post-review.mjs checks it again, claims it before any gh call (#180) and deletes it once the status is posted (#81).
  * @returns {null | { decision: "allow" | "deny", reason: string }}
  */
 export function decidePreToolUse(input, grant, now = Date.now()) {
@@ -786,7 +788,7 @@ export function runHook(event, raw, { dir, now = Date.now() }) {
       const file = typeof sessionId === "string" && SESSION_RE.test(sessionId) ? join(dir, `${sessionId}.json`) : null;
       const d = decidePreToolUse(input, file ? readGrant(file) : null, now);
       if (d === null) return "";
-      // An allow keeps the grant: post-review.mjs consumes it only after the review/owner status is posted (#81).
+      // An allow keeps the grant: post-review.mjs claims it when it runs (#180) and deletes it only after the review/owner status is posted (#81).
       return preToolUseOutput(d.decision, d.reason);
     } catch {
       return preToolUseOutput("deny", DENY_REASON);

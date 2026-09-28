@@ -993,6 +993,9 @@ test("edge: quoting found while implementing #142/#219 reads as bash reads it", 
   allowed("sudo -u node node scripts/lanes/gate.mjs '$x y'");
   // A -EncodedCommand value that is no base64 is read as it stands.
   allowed("pwsh -EncodedCommand not_base64");
+  // A raw private-use character (the guard's own stand-in for a quoted one) cannot be parsed: fail closed on the name.
+  assert.equal(decidePreToolUse(bash("node scripts/lanes/post-review.mjs owner --pr 16 X"), grant(), NOW).decision, "deny");
+  allowed("echo ");
   denied("pwsh -ec 'node $S owner --pr 16'");
 });
 
