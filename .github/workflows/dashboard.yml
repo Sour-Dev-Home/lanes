@@ -1,0 +1,95 @@
+name: dashboard
+# ADR 0012: publishes snapshot.json (and dashboard/, when present) to GitHub Pages as an Actions artifact. No branch
+# receives commits. GitHub Pages sites are public even for a private repository, so install.mjs leaves this workflow
+# disabled there (docs/USING.md).
+on:
+  # No pull_request and no pull_request_target: nothing here may run a PR's code or hold its secrets. Every trigger
+  # below runs on the default branch (status, issues and schedule only ever do), and the build job checks out the
+  # default branch's own copy of the scripts, never a PR's.
+  issues:
+    types: [opened, edited, closed, reopened, labeled, unlabeled]
+  status:
+  merge_group:
+  push:
+    # The default branch. Change it here if the repository's is not main.
+    branches: [main]
+  schedule:
+    # A scheduled run can start 10 to 20 minutes late; the page shows generatedAt for that reason.
+    - cron: "*/5 * * * *"
+permissions:
+  contents: read
+# Only the freshest snapshot matters.
+concurrency:
+  group: dashboard-publish
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # read-only: the snapshot is built from gh reads of issues, PRs, checks and statuses.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: read
+      checks: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Build the snapshot
+        run: |
+          mkdir _site
+          if [ -d dashboard ]; then cp -R dashboard/. _site/; fi
+          node scripts/lanes/snapshot.mjs --out _site/snapshot.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+      - name: Check snapshot.json for PII or hardcoded local paths
+        # The same checks as security.yml, on the one file that gets published. Patterns come from the PII_PATTERNS
+        # repository SECRET (one fixed string per line), never a variable. Only line numbers are printed, never text.
+        env:
+          PII_PATTERNS: ${{ secrets.PII_PATTERNS }}
+        run: |
+          set -e
+          # Fail closed: a missing snapshot or a grep that cannot run must never read as "no hits".
+          if [ ! -s _site/snapshot.json ]; then
+            echo "::error::_site/snapshot.json is missing or empty; not deploying."
+            exit 1
+          fi
+          PII=$(mktemp)
+          PATHS=$(mktemp)
+          OUT=$(mktemp)
+          printf '%s\n' "$PII_PATTERNS" | sed '/^[[:space:]]*$/d' > "$PII"
+          printf '%s\n' 'C:\Users' 'C:/Users' '/home/' '/Users/' 'C:\\Users' > "$PATHS"
+          if [ -z "$PII_PATTERNS" ]; then
+            echo "::warning::PII_PATTERNS secret is not available; only checking for local paths."
+          fi
+          # grep exits 1 for "no match" (fine) and 2 for an error (fatal under set -e).
+          scan() { grep -n -iF -f "$1" _site/snapshot.json || [ $? -eq 1 ]; }
+          scan "$PII" > "$OUT"
+          scan "$PATHS" >> "$OUT"
+          HITS=$(cut -d: -f1 "$OUT" | sort -un)
+          if [ -n "$HITS" ]; then
+            echo "$HITS" | sed 's/^/snapshot.json:/'
+            echo "::error::Possible PII or hardcoded-path leak in snapshot.json at the lines above; not deploying."
+            exit 1
+          fi
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    # The only job that may write Pages or mint an OIDC token.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

@@ -19,7 +19,7 @@
         "paths": [
           "scripts/lanes/gate.", "scripts/lanes/gate-decision.", "scripts/lanes/blockers.", "scripts/lanes/approve-guard.",
           "scripts/lanes/post-review.", "scripts/lanes/issue-contract.", "scripts/lanes/reviewers.", "scripts/lanes/contracts.",
-          "scripts/lanes/workflow.", "scripts/gate-workflow."
+          "scripts/lanes/workflow.", "scripts/gate-workflow.", "scripts/dashboard-workflow."
         ],
         "imports": ["lib", "preflight"]
       },
@@ -27,7 +27,8 @@
         "id": "queue",
         "paths": [
           "scripts/lanes/pick.", "scripts/lanes/status.", "scripts/lanes/paths.", "scripts/lanes/start.", "scripts/lanes/start-guard.",
-          "scripts/lanes/queue.", "scripts/lanes/cleanup.", "scripts/lanes/reap.", "scripts/lanes/lifecycle."
+          "scripts/lanes/queue.", "scripts/lanes/cleanup.", "scripts/lanes/reap.", "scripts/lanes/lifecycle.",
+          "scripts/lanes/snapshot."
         ],
         "imports": ["lib", "gate"]
       },
