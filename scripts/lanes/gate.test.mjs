@@ -594,6 +594,15 @@ test("edge: exactly the cap of blockers is read", () => {
   assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
 });
 
+// Not named in the issue's acceptance criteria or its listed edge cases: the cap counts distinct blockers, so a
+// list that names 20 issues twice each (40 raw mentions) must still be read, not rejected as "more than 20".
+test("edge: a blocker repeated past the cap in raw mentions still passes, since only distinct blockers count", () => {
+  const distinct = Array.from({ length: 20 }, (_, i) => `#${100 + i}`);
+  const states = Object.fromEntries(distinct.map((b) => [Number(b.slice(1)), "closed"]));
+  const { api } = fakeApi(blockerRoutes([...distinct, ...distinct].join(", "), states));
+  assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
+});
+
 // #36: closing an issue re-evaluates the open PRs whose linked issue lists it in "Blocked by", and only those.
 const OPEN_PRS = "repos/o/r/pulls?state=open&per_page=100";
 const prLine = (number, closes) => JSON.stringify({ number, body: `Closes #${closes}\n## What changed\nx` });
