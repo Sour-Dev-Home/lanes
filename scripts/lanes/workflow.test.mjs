@@ -275,6 +275,10 @@ test("edge: lane.md step 7 treats a wait that times out as unsettled, not as pas
   assert.match(laneStep(7), /exit 124[^.]*did not settle/i);
 });
 
+test("edge: lane.md step 7 re-lists runs once for a check that has no run yet, so a lane never hangs on a not-yet-started check", () => {
+  assert.match(laneStep(7), /list again once if a check `gh pr checks` shows has no run yet/);
+});
+
 test("lane.md loads PushNotification via ToolSearch and caps each notification at one short `lanes #N:` line", () => {
   const lane = laneText();
   assert.match(lane, /ToolSearch/);
