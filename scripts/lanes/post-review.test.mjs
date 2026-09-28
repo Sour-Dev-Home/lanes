@@ -1,8 +1,10 @@
 // scripts/lanes/post-review.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { buildStatus, buildVerdictComment, checkSha, metricsWarning, parseArgs, validateVerdict } from "./post-review.mjs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildStatus, buildVerdictComment, checkSha, main, metricsWarning, parseArgs, validateVerdict } from "./post-review.mjs";
 
 test("skipped is a success whose description starts with skipped", () => {
   assert.deepEqual(buildStatus("ui-reviewer", "skipped", "no visible change"), { context: "review/ui-reviewer", state: "success", description: "skipped: no visible change" });
@@ -255,4 +257,87 @@ test("edge: an unknown, missing or multi-line reviewer name still gives a one-li
 test("edge: metricsWarning never throws on null or undefined input, and still warns", () => {
   assert.match(metricsWarning(null), /^warning: .*metrics/);
   assert.match(metricsWarning(undefined), /^warning: .*metrics/);
+});
+
+// #42: with --file the verdict comment goes first, so the status event that re-runs lanes/gate always finds it.
+const HEAD = "a".repeat(40);
+const ISSUE_BODY = "### Goal\n\ng\n\n### Acceptance criteria\n\n- [ ] one\n- [ ] two\n\n### Interface contract\n\nnone\n\n### Scope\n\nIn: `a.mjs`.\n\n### Blocked by\n\nnone\n\n### Tier\n\nfull\n";
+
+/** A fake `gh`: answers the reads, records every write, and throws on the write named by `failOn`. */
+function fakeGh({ failOn = null, prBody = "Closes #7" } = {}) {
+  const writes = [];
+  const run = (args) => {
+    if (args[0] === "pr" && args[1] === "view") return JSON.stringify({ number: 12, headRefOid: HEAD, body: prBody });
+    if (args[0] === "repo" && args[1] === "view") return "o/r\n";
+    if (args[0] === "issue" && args[1] === "view") return JSON.stringify({ body: ISSUE_BODY });
+    const kind = args[0] === "pr" && args[1] === "comment" ? "comment" : args[0] === "api" ? "status" : args.join(" ");
+    if (kind === failOn) throw new Error(`gh ${kind} failed`);
+    writes.push({ kind, args });
+    return "";
+  };
+  return { run, writes };
+}
+
+const quiet = { log: () => {}, warn: () => {} };
+
+function verdictFile(v = verdict()) {
+  const file = join(mkdtempSync(join(tmpdir(), "post-review-")), "v.json");
+  writeFileSync(file, JSON.stringify(v));
+  return file;
+}
+
+test("with --file, the verdict comment is posted before the review status", () => {
+  const gh = fakeGh();
+  main(["--file", verdictFile()], { run: gh.run, ...quiet });
+  assert.deepEqual(gh.writes.map((w) => w.kind), ["comment", "status"]);
+  assert.ok(gh.writes[0].args.at(-1).startsWith(`<!-- lanes:verdict test-hunter ${HEAD} -->`));
+  assert.ok(gh.writes[1].args.includes("context=review/test-hunter"));
+});
+
+test("with --file, a failed comment posts no status and the command throws (a non-zero exit)", () => {
+  const gh = fakeGh({ failOn: "comment" });
+  assert.throws(() => main(["--file", verdictFile()], { run: gh.run, ...quiet }), /comment failed/);
+  assert.deepEqual(gh.writes, []);
+});
+
+test("without --file, only the status is posted, exactly as before", () => {
+  const gh = fakeGh();
+  main(["ui-reviewer", "skipped", "no visible change"], { run: gh.run, ...quiet });
+  assert.deepEqual(gh.writes, [
+    { kind: "status", args: ["api", `repos/o/r/statuses/${HEAD}`, "-f", "state=success", "-f", "context=review/ui-reviewer", "-f", "description=skipped: no visible change"] },
+  ]);
+});
+
+test("without --file, the owner's approval posts only the status", () => {
+  const gh = fakeGh();
+  const approval = ["owner", "success", "approved", "--sha", HEAD];
+  main(approval, { run: gh.run, ...quiet });
+  assert.deepEqual(gh.writes.map((w) => w.kind), ["status"]);
+  assert.ok(gh.writes[0].args.includes("context=review/owner"));
+});
+
+test("edge: a failed status after a posted comment still throws, leaving the comment for a re-run", () => {
+  const gh = fakeGh({ failOn: "status" });
+  assert.throws(() => main(["--file", verdictFile()], { run: gh.run, ...quiet }), /status failed/);
+  assert.deepEqual(gh.writes.map((w) => w.kind), ["comment"]);
+});
+
+test("edge: a refused verdict posts neither comment nor status", () => {
+  const gh = fakeGh();
+  assert.throws(() => main(["--file", verdictFile(verdict({ verdict: "maybe" }))], { run: gh.run, ...quiet }), /verdict refused/);
+  assert.deepEqual(gh.writes, []);
+});
+
+test("edge: a PR body without Closes posts neither comment nor status", () => {
+  const gh = fakeGh({ prBody: "no link" });
+  assert.throws(() => main(["--file", verdictFile()], { run: gh.run, ...quiet }), /Closes #N/);
+  assert.deepEqual(gh.writes, []);
+});
+
+test("edge: a stale --sha posts nothing, with or without --file", () => {
+  const gh = fakeGh();
+  const stale = "b".repeat(40);
+  assert.throws(() => main(["--file", verdictFile(), "--sha", stale], { run: gh.run, ...quiet }), /does not match/);
+  assert.throws(() => main(["ui-reviewer", "skipped", "x", "--sha", stale], { run: gh.run, ...quiet }), /does not match/);
+  assert.deepEqual(gh.writes, []);
 });
