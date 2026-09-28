@@ -635,6 +635,12 @@ test("a branch whose PR is open is not stopped, whether the PR closes the issue 
   }
 });
 
+test("edge: an issue with several leftover branches is taken when any one of them has an open PR, not only when all do", () => {
+  const p = pr(7, [gate("PENDING", "waiting for review/test-hunter")], { headRefName: "issue-10-new" });
+  const s = summarize({ prs: [p], issues: [issue(10)], merged: [], laneBranches: branches(10, "issue-10-old", "issue-10-new") });
+  assert.deepEqual([s.waitingOnOwner, s.inFlight.map((i) => i.number), s.ready], [[], [7], []]);
+});
+
 test("laneBranches maps pushed branches and local lane worktrees to their issue", () => {
   const remote = ["abc123\trefs/heads/issue-10-x", "def456\trefs/heads/main", "0a0a0a\trefs/heads/issue-5x-y", "1b1b1b\trefs/heads/issue-12"].join("\n");
   const worktrees = [
