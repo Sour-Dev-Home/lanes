@@ -12,7 +12,8 @@ const FAILED = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_RE
 
 // A PR that enters the merge queue loses its `autoMergeRequest`, so queue membership is checked first.
 // `gh pr list` leaves StatusContext descriptions out of `statusCheckRollup`, so the gate's comes from `gateDescription`.
-function prStage(pr, queuePosition, gateDescription) {
+// queue.mjs derives its owner waits from this too, so the queue and /status never disagree (#122).
+export function prStage(pr, queuePosition, gateDescription) {
   if (queuePosition !== undefined) return { stage: "queued", note: `in merge queue, position ${queuePosition}` };
   const rollup = pr.statusCheckRollup ?? [];
   const failing = rollup

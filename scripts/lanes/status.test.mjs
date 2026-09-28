@@ -729,3 +729,18 @@ test("edge: an open PR from another issue's branch does not hide this issue's st
   const s = summarize({ prs: [pr(7, [], { headRefName: "issue-11-y" })], issues: [issue(10)], merged: [], laneBranches: branches(10) });
   assert.deepEqual(s.waitingOnOwner.map((i) => i.number), [10]);
 });
+
+// #97 (from #122): prStage is exported, classifying each stage as summarize relies on.
+test("prStage is exported and classifies each stage", async () => {
+  const { prStage } = await import("./status.mjs");
+  assert.equal(typeof prStage, "function");
+  assert.deepEqual(prStage(pr(1, [gate("PENDING", "x")]), 3), { stage: "queued", note: "in merge queue, position 3" });
+  assert.deepEqual(prStage(pr(2, [{ name: "test", conclusion: "FAILURE" }])), { stage: "failing", note: "failing: test" });
+  assert.deepEqual(prStage(pr(3, [])), { stage: "starting", note: "no lanes/gate yet" });
+  assert.deepEqual(prStage(pr(4, [gate("SUCCESS", "ok")])), { stage: "ready", note: "auto-merge is off" });
+  assert.deepEqual(prStage(pr(5, [gate("FAILURE", "tier label missing")])), { stage: "contract", note: "tier label missing" });
+  const noDescription = [{ context: "lanes/gate", state: "PENDING" }];
+  assert.deepEqual(prStage(pr(6, noDescription), undefined, "waiting on owner: review/owner"), { stage: "owner", note: "waiting on owner: review/owner" });
+  assert.deepEqual(prStage(pr(7, [gate("PENDING", "waiting for review/test-hunter")])), { stage: "gate", note: "waiting for review/test-hunter" });
+  assert.deepEqual(prStage(pr(8, [gate("PENDING", "waiting on reviewers")])), { stage: "review", note: "waiting on reviewers" });
+});

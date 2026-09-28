@@ -28,6 +28,16 @@
    of you typing `/start <N ...>`, `/start --auto` or `/start --auto --go` in that session (a `/start --auto` never
    allows `--go`), and it denies a direct `claude --bg` in every session and permission mode. `start.mjs` checks the
    same grant itself and deletes it after its launches, so it runs once per `/start` however it was reached (ADR 0007).
+   **Or keep the queue running**: `node scripts/lanes/queue.mjs` in your own terminal (never from Claude: it exits 2
+   when `CLAUDECODE` is set, and the start guard denies it in every session). It takes no arguments. Every 3 minutes
+   it cleans up merged lanes, re-reads every open `ready` issue, the open PRs and the sessions, and launches what
+   `/start --auto --go` would, under the same `start.maxLanes`, `start.softPaths` and `start.models`; an issue made
+   `ready` mid-run joins on the next tick, and one skipped for an overlap or the cap is tried again. Each line is
+   time-stamped. A PR waiting on you (`/approve`, a failing check or review, a failing gate) is printed once each time
+   its state changes, and the queue keeps working the rest. A failed launch is printed and that issue is not tried
+   again until you restart the queue. A GitHub read that fails is retried next tick; three in a row exit 1. It exits
+   0 after three idle ticks in a row (nothing in flight, nothing to launch); Ctrl-C stops it at any time. Its lanes
+   get no reaper (ADR 0010), so run `cleanup.mjs` for lanes that merge after it exits.
 3. **Watch with `/status`**: WAITING ON YOU, IN FLIGHT (each PR's stage), READY TO START, MERGED.
    A `Notification` hook (`scripts/lanes/notify-hook.mjs`) pops a notification when a lane stops at a permission
    prompt or needs input (with the `claude attach <id>` to reach it), or finishes with its PR waiting on you or failing.

@@ -33,10 +33,10 @@ test("planTick returns { launch, waiting, idle, lines } from plain data", () => 
   assert.ok(Array.isArray(out.lines) && out.lines.every((l) => typeof l === "string"));
 });
 
-test("planTick does no I/O: the module imports nothing that reads or runs anything, and inputs stay untouched", async () => {
-  const { readFileSync } = await import("node:fs");
-  const src = readFileSync(new URL("./queue.mjs", import.meta.url), "utf8");
-  assert.doesNotMatch(src, /node:(child_process|fs|net|http|https)|process\.|fetch\(/);
+test("planTick does no I/O: its code reads or runs nothing, and inputs stay untouched", async () => {
+  // #97: the module now also holds the CLI, so only planTick's own code is checked (owner decision, 2026-09-28).
+  const src = planTick.toString();
+  assert.doesNotMatch(src,/node:(child_process|fs|net|http|https)|process\.|fetch\(/);
   const input = { issues: [issue(1, ["src/a.mjs"])], prs: [pr(10, 2, ["src/b.mjs"])], sessions: [session(3)], maxLanes: 3, softPaths: [] };
   const before = JSON.stringify(input);
   assert.deepEqual(planTick(input), planTick(input));
@@ -262,4 +262,317 @@ test("lines: one per launch, wait and skip, then a summary", () => {
     "PR #60: needs the owner: waiting on owner: review/owner",
     "1 in flight, 1 to launch, 1 waiting on the owner",
   ]);
+});
+
+// #97 (from #122): waiting comes from status.mjs's prStage, so the queue and /status agree on every lane PR.
+test("a PR status.mjs puts in the owner or failing stage is exactly one planTick lists in waiting", async () => {
+  const { prStage } = await import("./status.mjs");
+  const rollups = [
+    [gate("PENDING", "waiting on owner: review/owner")], // owner
+    [{ name: "test", conclusion: "FAILURE" }, gate("PENDING", "waiting on reviewers")], // failing
+    [{ context: "review/security-reviewer", state: "ERROR" }], // failing, no gate yet
+    [{ name: "test", conclusion: "TIMED_OUT" }], // failing
+    [gate("FAILURE", "tier label missing")], // contract: a failing gate, listed as before
+    [gate("PENDING", "waiting on reviewers")], // review
+    [gate("PENDING", "waiting for review/test-hunter")], // gate
+    [], // starting
+    [gate("SUCCESS", "all reviews passed")], // ready
+    [{ name: "test", conclusion: "SUCCESS" }, gate("PENDING", "waiting on reviewers")], // review
+  ];
+  const prs = rollups.map((rollup, i) => pr(100 + i, 10 + i, [`src/p${i}.mjs`], rollup));
+  prs.push({ ...pr(120, 30, ["src/q.mjs"], [{ context: "lanes/gate", state: "PENDING" }]), gateDescription: "waiting on owner: review/owner" });
+  const listed = new Set(tick({ prs }).waiting.map((w) => w.number));
+  const stages = new Map(prs.map((p) => [p.number, prStage(p, undefined, p.gateDescription).stage]));
+  for (const p of prs) {
+    const stage = stages.get(p.number);
+    if (stage === "owner" || stage === "failing") assert.ok(listed.has(p.number), `PR #${p.number} (${stage}) should wait`);
+    else if (stage !== "contract") assert.ok(!listed.has(p.number), `PR #${p.number} (${stage}) should not wait`);
+  }
+  assert.deepEqual([...stages.values()].filter((s) => s === "owner" || s === "failing").length, 5);
+  assert.deepEqual(
+    tick({ prs }).waiting.map((w) => w.number),
+    prs.filter((p) => ["owner", "failing", "contract"].includes(stages.get(p.number))).map((p) => p.number),
+  );
+});
+
+test("the queue keeps no private copy of the stage logic", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("./queue.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /function ownerWait|const FAILED\b/);
+  assert.match(src, /import \{[^}]*\bprStage\b[^}]*\} from "\.\/status\.mjs"/);
+});
+
+test("edge: a failing gate with no description still gives a reason", () => {
+  assert.deepEqual(tick({ prs: [pr(68, 6, ["src/x.mjs"], [gate("ERROR")])] }).waiting, [{ number: 68, reason: "lanes/gate failed" }]);
+});
+
+// --- The CLI (#97): main drives ticks through fake gh, claude, clock and sleep deps. ---
+
+const TICK_MS = 3 * 60 * 1000;
+const STAMP = /^\d\d:\d\d:\d\d /;
+
+// A fake GitHub and claude. `world.issues`, `world.prs` and `world.sessions` are read each tick; `onSleep(tickNo)`
+// changes them between ticks. A launch adds a background session in the issue's worktree.
+function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFails = () => false, ghFails = () => false } = {}) {
+  const out = [];
+  const calls = [];
+  const launched = [];
+  let clock = Date.UTC(2026, 8, 28, 9, 0, 0);
+  let ticks = 0;
+  const deps = {
+    env,
+    gh: (args) => {
+      calls.push(["gh", ...args]);
+      if (ghFails(ticks)) throw Object.assign(new Error("gh failed"), { stderr: "HTTP 502: Bad Gateway\nmore" });
+      if (args[0] === "issue") return JSON.stringify(world.issues);
+      if (args[0] === "pr") return JSON.stringify(world.prs);
+      if (args[0] === "api") return JSON.stringify({ data: { repository: { pullRequests: { nodes: [] } } } });
+      throw new Error(`unexpected gh ${args.join(" ")}`);
+    },
+    claude: (args, opts) => {
+      calls.push(["claude", ...args, opts?.cwd]);
+      if (args[0] === "agents") return JSON.stringify(world.sessions);
+      const n = Number(args.at(-1).match(/^\/lane (\d+)$/)[1]);
+      launched.push({ n, tick: ticks, args });
+      if (launchFails(n)) throw Object.assign(new Error("spawn failed"), { stderr: "claude: not logged in" });
+      world.sessions.push(session(n));
+      return `backgrounded · sess-${n}\n`;
+    },
+    root: () => "/repo",
+    config: () => ({ start: { maxLanes: 3 } }),
+    cleanup: () => {
+      calls.push(["cleanup"]);
+      return [];
+    },
+    now: () => clock,
+    sleep: async (ms) => {
+      assert.equal(ms, TICK_MS);
+      clock += ms;
+      ticks += 1;
+      if (ticks > maxTicks) throw new Error("the queue never stopped");
+      onSleep(ticks);
+    },
+    print: (line) => out.push(line),
+  };
+  return { deps, out, calls, launched, ticks: () => ticks };
+}
+
+test("CLI: any argument prints a usage line and exits 2 before reading anything", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const argv of [["1"], ["--help"], [""]]) {
+    const run = fakeRun({ issues: [], prs: [], sessions: [] });
+    assert.equal(await main(argv, run.deps), 2);
+    assert.equal(run.out.length, 1);
+    assert.match(run.out[0], /^usage: /);
+    assert.deepEqual(run.calls, []);
+  }
+});
+
+test("CLI: exits 2 with a one-line reason when CLAUDECODE is set", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] }, { env: { CLAUDECODE: "1" } });
+  assert.equal(await main([], run.deps), 2);
+  assert.equal(run.out.length, 1);
+  assert.match(run.out[0], /CLAUDECODE/);
+  assert.deepEqual(run.calls, []);
+});
+
+test("CLI: each tick cleans up first, then reads, launches with claude --bg /lane N and prints time-stamped lines", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  // #1's lane finishes (issue closed) after the first sleep.
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  const first = run.calls.findIndex((c) => c[0] === "cleanup");
+  const firstRead = run.calls.findIndex((c) => c[0] === "gh");
+  assert.ok(first >= 0 && first < firstRead, "cleanup runs before the reads");
+  assert.deepEqual(run.launched.map((l) => l.n), [1]);
+  const launch = run.calls.find((c) => c[0] === "claude" && c.includes("--bg"));
+  assert.deepEqual(launch.slice(1, 2), ["--bg"]);
+  assert.equal(launch.at(-2), "/lane 1");
+  assert.equal(launch.at(-1), "/repo", "launched from the repository root");
+  assert.ok(run.out.length > 0 && run.out.every((l) => STAMP.test(l)), run.out.join("\n"));
+  assert.ok(run.out.some((l) => / #1: launch$/.test(l)));
+  assert.ok(run.out.some((l) => / #1 → sess-1$/.test(l)));
+});
+
+test("CLI: exits 0 after three idle ticks in a row, no sooner", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] });
+  assert.equal(await main([], run.deps), 0);
+  assert.equal(run.ticks(), 2, "three ticks: two sleeps");
+  assert.equal(run.calls.filter((c) => c[0] === "cleanup").length, 3);
+  assert.match(run.out.at(-1), /idle/);
+});
+
+test("CLI: a busy tick resets the idle count", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [], prs: [], sessions: [] };
+  // Idle, idle, then a lane launches on tick 2, then idle again: 2 + 1 + 3 ticks, so 5 sleeps.
+  const run = fakeRun(world, {
+    onSleep: (t) => {
+      if (t === 2) world.issues = [issue(5, ["src/e.mjs"])];
+      if (t === 3) world.issues = [];
+    },
+  });
+  assert.equal(await main([], run.deps), 0);
+  assert.equal(run.ticks(), 5);
+});
+
+test("CLI: a failed launch is printed and that issue is not retried for the rest of the run", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/b.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { launchFails: (n) => n === 1, onSleep: (t) => t === 2 && (world.issues = world.issues.filter((i) => i.number !== 2)) });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [1, 2], "#1 is tried once only");
+  assert.ok(run.out.some((l) => / #1: launch failed: claude: not logged in, not retried$/.test(l)), run.out.join("\n"));
+});
+
+test("edge: a launch that prints no session id counts as failed and is not retried", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world);
+  run.deps.claude = (args) => {
+    if (args[0] === "agents") return JSON.stringify(world.sessions);
+    run.launched.push({ n: 1 });
+    return "something else\n";
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.equal(run.launched.length, 1);
+  assert.ok(run.out.some((l) => / #1: launch failed: no session id in output, not retried$/.test(l)));
+});
+
+test("CLI: prints each owner wait once per state change, not every tick", async () => {
+  const { main } = await import("./queue.mjs");
+  const waitingPr = (description) => pr(60, 6, ["src/x.mjs"], [gate("PENDING", description)]);
+  const world = { issues: [issue(6, ["src/x.mjs"], { labels: ["tier:quick"] })], prs: [waitingPr("waiting on owner: review/owner")], sessions: [] };
+  const run = fakeRun(world, {
+    onSleep: (t) => {
+      if (t === 3) world.prs = [waitingPr("waiting on reviewers")];
+      if (t === 4) world.prs = [waitingPr("waiting on owner: review/owner")];
+      if (t === 6) world.prs[0] = pr(60, 6, ["src/x.mjs"], [{ name: "test", conclusion: "FAILURE" }]);
+      if (t === 8) (world.prs = []), (world.issues = []);
+    },
+  });
+  assert.equal(await main([], run.deps), 0);
+  const waits = run.out.filter((l) => l.includes("PR #60: needs the owner")).map((l) => l.replace(STAMP, ""));
+  assert.deepEqual(waits, [
+    "PR #60: needs the owner: waiting on owner: review/owner",
+    "PR #60: needs the owner: waiting on owner: review/owner",
+    "PR #60: needs the owner: failing: test",
+  ]);
+});
+
+test("CLI: a GitHub read failure is printed and retried next tick", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { ghFails: (t) => t === 0 || t === 2, onSleep: (t) => t === 3 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => [l.n, l.tick]), [[1, 1]]);
+  const failures = run.out.filter((l) => /cannot read GitHub/.test(l));
+  assert.equal(failures.length, 2);
+  assert.match(failures[0], /HTTP 502: Bad Gateway, retrying next tick$/);
+  assert.ok(failures.every((l) => !l.includes("more")), "only the first line of the error");
+});
+
+test("CLI: three GitHub read failures in a row exit 1", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] }, { ghFails: () => true });
+  assert.equal(await main([], run.deps), 1);
+  assert.equal(run.ticks(), 2);
+  assert.match(run.out.at(-1), /three .*in a row/);
+});
+
+test("edge: failures that are not in a row do not add up to an exit", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  // Fails on ticks 0, 1, 3, 4: never three in a row. #1 launches on tick 2 and finishes after tick 5.
+  const run = fakeRun(world, { ghFails: (t) => [0, 1, 3, 4].includes(t), onSleep: (t) => t === 5 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [1]);
+});
+
+test("edge: a cleanup failure is printed and the tick goes on", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: () => (world.issues = []) });
+  run.deps.cleanup = () => {
+    throw new Error("git worktree list failed");
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [1]);
+  assert.ok(run.out.some((l) => /cleanup failed: git worktree list failed/.test(l)));
+});
+
+test("edge: a bad lanes.config.json exits 2 before any tick", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] });
+  run.deps.config = () => ({ start: { maxLanes: 0 } });
+  assert.equal(await main([], run.deps), 2);
+  assert.match(run.out[0], /maxLanes/);
+  assert.equal(run.calls.length, 0);
+});
+
+test("edge: the config's maxLanes caps the launches", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [1, 2, 3].map((n) => issue(n, [`src/${n}.mjs`])), prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 2 && (world.issues = []) });
+  run.deps.config = () => ({ start: { maxLanes: 2 } });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.filter((l) => l.tick === 0).length, 2);
+});
+
+test("CLI: conflicting issues launch one after the other, a newly ready issue joins, then three idle ticks end the run", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/a.mjs"]), issue(3, ["src/c.mjs"], { labels: ["tier:quick"] })], prs: [], sessions: [] };
+  const close = (n) => (world.issues = world.issues.filter((i) => i.number !== n));
+  const run = fakeRun(world, {
+    onSleep: (t) => {
+      if (t === 1) close(1); // #1's lane merged: #2 may start
+      if (t === 2) world.issues = world.issues.map((i) => (i.number === 3 ? issue(3, ["src/c.mjs"]) : i)); // #3 made ready
+      if (t === 4) (close(2), close(3));
+    },
+  });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => [l.n, l.tick]), [[1, 0], [2, 1], [3, 2]]);
+  // Ticks 0-3 busy, then three idle ticks (4, 5, 6): 6 sleeps.
+  assert.equal(run.ticks(), 6);
+  assert.ok(run.out.some((l) => /#2: skipped: overlaps #1 on src\/a\.mjs/.test(l)));
+});
+
+// Extra case (test-hunter, #97): `claude agents --json` printing something other than a list is not covered by any
+// numbered criterion or by the notes' "edge:" list, but readSnapshot has its own guard against it and that guard
+// had no test.
+test("edge: claude agents --json printing something other than a list is a read failure, retried next tick", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  let bad = true;
+  const run = fakeRun(world, {
+    onSleep: (t) => {
+      if (t === 1) bad = false;
+      if (t === 2) world.issues = [];
+    },
+  });
+  run.deps.claude = (args, opts) => {
+    run.calls.push(["claude", ...args, opts?.cwd]);
+    if (args[0] === "agents") return bad ? JSON.stringify({ not: "a list" }) : JSON.stringify(world.sessions);
+    const n = Number(args.at(-1).match(/^\/lane (\d+)$/)[1]);
+    run.launched.push({ n, tick: run.ticks() });
+    world.sessions.push(session(n));
+    return `backgrounded · sess-${n}\n`;
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.ok(run.out.some((l) => /cannot read GitHub or the sessions:.*printed no list.*retrying next tick/.test(l)), run.out.join("\n"));
+  assert.deepEqual(run.launched.map((l) => l.n), [1], "the issue launches once the sessions can be read again");
+});
+
+// Extra case: the same truncation guard queue.mjs copies from start.mjs (a possibly-truncated issue list would hide
+// a blocker and let a claim be lost) had no test in this file either.
+test("edge: 1000+ open issues is a read failure naming the count, retried next tick", async () => {
+  const { main } = await import("./queue.mjs");
+  const many = Array.from({ length: 1000 }, (_, i) => issue(i + 1, [`src/${i}.mjs`]));
+  const world = { issues: many, prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  assert.ok(run.out.some((l) => /1000\+ open issues: too many to plan from, retrying next tick/.test(l)), run.out.join("\n"));
 });
