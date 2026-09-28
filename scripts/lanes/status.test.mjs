@@ -19,7 +19,7 @@ test("stages come from lanes/gate and failing checks", () => {
     merged: [],
   });
   assert.deepEqual(s.waitingOnOwner.map((i) => i.number), [1]);
-  assert.deepEqual(s.inFlight.map((i) => [i.number, i.stage]), [[2, "review"], [3, "queued"], [4, "failing"], [5, "starting"]]);
+  assert.deepEqual(s.inFlight.map((i) => [i.number, i.stage]), [[2, "gate"], [3, "queued"], [4, "failing"], [5, "starting"]]);
   assert.match(s.inFlight.find((i) => i.number === 4).note, /verify/);
 });
 
@@ -63,7 +63,7 @@ test("a PR whose gate says waiting on owner is WAITING ON YOU even though the ro
   const reply = gateReply([gateNode(8, { context: { state: "PENDING", description: "waiting on owner (/approve)" } }), gateNode(9, { context: { state: "PENDING", description: "waiting for review/test-hunter" } })]);
   const s = summarize({ prs: [pr(8, [bareGate("PENDING")]), pr(9, [bareGate("PENDING")])], issues: [], merged: [], gateDescriptions: gateDescriptions(reply) });
   assert.deepEqual(s.waitingOnOwner, [{ number: 8, title: "pr 8", stage: "owner", note: "waiting on owner (/approve)" }]);
-  assert.deepEqual(s.inFlight, [{ number: 9, title: "pr 9", stage: "review", note: "waiting for review/test-hunter" }]);
+  assert.deepEqual(s.inFlight, [{ number: 9, title: "pr 9", stage: "gate", note: "waiting for review/test-hunter" }]);
 });
 
 test("gateDescriptions maps each PR to its head's lanes/gate description, skipping PRs with no gate status", () => {
@@ -115,9 +115,73 @@ test("mergeQueueEntries and gateDescriptions tolerate a missing or malformed Gra
   assert.deepEqual(gateDescriptions({}), new Map());
 });
 
-test("a PR whose body needs the owner is waiting on him even mid-review", () => {
-  const s = summarize({ prs: [pr(6, [gate("PENDING", "waiting for review/test-hunter")], { body: body("pick a name for the package") })], issues: [], merged: [] });
-  assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.note]), [[6, "needs: pick a name for the package"]]);
+const ownerApproved = (state = "SUCCESS") => ({ __typename: "StatusContext", context: "review/owner", state });
+const placement = (s, number) => (s.waitingOnOwner.some((i) => i.number === number) ? "owner" : s.inFlight.some((i) => i.number === number) ? "inFlight" : "absent");
+const itemOf = (s, number) => [...s.waitingOnOwner, ...s.inFlight].find((i) => i.number === number);
+
+test("a PR whose gate waits for a reviewer is IN FLIGHT as [gate], even when its body asks for /approve", () => {
+  const s = summarize({ prs: [pr(6, [gate("PENDING", "waiting for review/architecture-advisor")], { body: body("/approve once the reviewers are in") })], issues: [], merged: [] });
+  assert.equal(placement(s, 6), "inFlight");
+  assert.deepEqual(itemOf(s, 6), { number: 6, title: "pr 6", stage: "gate", note: "waiting for review/architecture-advisor" });
+  assert.match(render(s, "24h"), /IN FLIGHT \(1\)\n  #6 \[gate\] pr 6 — waiting for review\/architecture-advisor/);
+});
+
+test("a PR whose gate waits for a reviewer after the owner approved is IN FLIGHT as [gate]", () => {
+  const s = summarize({ prs: [pr(7, [gate("PENDING", "waiting for review/architecture-advisor"), ownerApproved()], { body: body("/approve") })], issues: [], merged: [] });
+  assert.equal(placement(s, 7), "inFlight");
+  assert.deepEqual(itemOf(s, 7), { number: 7, title: "pr 7", stage: "gate", note: "waiting for review/architecture-advisor" });
+});
+
+test("a PR with review/owner=success on its head is never WAITING ON YOU for /approve", () => {
+  const prs = [
+    pr(8, [gate("PENDING", "waiting on owner (/approve)"), ownerApproved()]),
+    pr(9, [gate("PENDING", "waiting for blocker #3 (open)"), ownerApproved()], { body: body("/approve after the rename") }),
+    pr(10, [ownerApproved()], { body: body("/approve") }),
+  ];
+  const s = summarize({ prs, issues: [], merged: [] });
+  assert.deepEqual(s.waitingOnOwner, []);
+  assert.deepEqual(s.inFlight.map((i) => i.number), [8, 9, 10]);
+});
+
+test("a PR that genuinely waits on /approve is still WAITING ON YOU", () => {
+  const prs = [
+    pr(11, [gate("PENDING", "waiting on owner (/approve) (tier:full)")]),
+    pr(12, [gate("PENDING", "waiting for blocker #3 (open)")], { body: body("pick a name for the package") }),
+  ];
+  const s = summarize({ prs, issues: [], merged: [] });
+  assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage, i.note]), [[11, "owner", "waiting on owner (/approve) (tier:full)"], [12, "review", "needs: pick a name for the package"]]);
+});
+
+test("status --json carries the gate stage and reason", () => {
+  const reply = gateReply([gateNode(13, { context: { state: "PENDING", description: "waiting for review/security-reviewer" } })]);
+  const s = summarize({ prs: [pr(13, [bareGate("PENDING")], { body: body("/approve") })], issues: [], merged: [], gateDescriptions: gateDescriptions(reply) });
+  const json = JSON.parse(JSON.stringify({ version: 0, ...s }));
+  assert.deepEqual(json.inFlight, [{ number: 13, title: "pr 13", stage: "gate", note: "waiting for review/security-reviewer" }]);
+  assert.deepEqual(json.waitingOnOwner, []);
+});
+
+test("edge: a review/owner status that is not success does not count as an approval", () => {
+  for (const state of ["PENDING", "EXPECTED"]) {
+    const s = summarize({ prs: [pr(14, [gate("PENDING", "waiting on owner (/approve)"), ownerApproved(state)])], issues: [], merged: [] });
+    assert.equal(placement(s, 14), "owner", state);
+  }
+});
+
+test("edge: an owner approval does not hide a lane stuck on a permission prompt", () => {
+  const sessions = new Map([[1, { id: "abc", state: "blocked", waiting: true }]]);
+  const s = summarize({ prs: [pr(15, [gate("PENDING", "waiting for review/test-hunter"), ownerApproved()], { closingIssuesReferences: [{ number: 1 }] })], issues: [], merged: [], sessions });
+  assert.equal(placement(s, 15), "owner");
+});
+
+test("edge: a description only near 'waiting for review/' (no name, other prefix) stays [review]", () => {
+  const prs = [pr(16, [gate("PENDING", "waiting for review/")]), pr(17, [gate("PENDING", "not waiting for review/test-hunter")])];
+  const s = summarize({ prs, issues: [], merged: [] });
+  assert.deepEqual(s.inFlight.map((i) => [i.number, i.stage]), [[16, "review"], [17, "review"]]);
+});
+
+test("edge: a failing gate that names a reviewer is still [contract], not [gate]", () => {
+  const s = summarize({ prs: [pr(18, [gate("FAILURE", "review/test-hunter is failure")])], issues: [], merged: [] });
+  assert.deepEqual(s.inFlight.map((i) => [i.number, i.stage]), [[18, "contract"]]);
 });
 
 const issueBody = (blockedBy = "none", scope = "s", contract = "none") =>
@@ -415,8 +479,8 @@ test("laneSessions keeps background sessions in this repo's issue-<N>- worktrees
 test("an IN FLIGHT PR whose issue has a session shows the id in its note", () => {
   const sessions = laneSessions([agent("42c93c57", wt("issue-10-x"))], ROOT);
   const s = summarize({ prs: [pr(7, [gate("PENDING", "waiting for review/test-hunter")], { closingIssuesReferences: [{ number: 10 }] })], issues: [issue(10)], merged: [], sessions });
-  assert.deepEqual(s.inFlight, [{ number: 7, title: "pr 7", stage: "review", note: "waiting for review/test-hunter — session 42c93c57", session: { id: "42c93c57", state: "working" } }]);
-  assert.match(render(s, "24h"), /#7 \[review\] pr 7 — waiting for review\/test-hunter — session 42c93c57/);
+  assert.deepEqual(s.inFlight, [{ number: 7, title: "pr 7", stage: "gate", note: "waiting for review/test-hunter — session 42c93c57", session: { id: "42c93c57", state: "working" } }]);
+  assert.match(render(s, "24h"), /#7 \[gate\] pr 7 — waiting for review\/test-hunter — session 42c93c57/);
 });
 
 test("a lane with a session and no PR is IN FLIGHT as running, not READY TO START", () => {
