@@ -610,3 +610,24 @@ test("cleanup.mjs's CLI calls cleanupMerged and keeps its output and exit code",
   assert.match(cli, /process\.exitCode = 1/);
   assert.doesNotMatch(cli, /planCleanup|runCleanup/);
 });
+
+// #134: a lane whose worktree folder is `issue-<N>` with no slug is still that issue's lane.
+test("sessionsFrom maps both issue-<N> and issue-<N>-<slug> folders to N, and never a look-alike number", () => {
+  const agents = ["issue-104", "issue-106/src", "issue-7-slug", "issue-5x", "issue-5x-slug", "issue-", "issue-9-", "issue-80"]
+    .map((dir, i) => ({ kind: "background", id: `s${i}`, cwd: `C:/repo/.claude/worktrees/${dir}` }));
+  assert.deepEqual(sessionsFrom(agents, ROOT).map((s) => s.issue), [104, 106, 7, null, null, null, 9, 80]);
+});
+
+test("a merged lane in a bare issue-<N> folder (branch issue-<N>-...) is removed: session, worktree, branch", () => {
+  const tree = { path: `${ROOT}/.claude/worktrees/issue-7`, branch: "issue-7-x", head: HEAD, dirty: false };
+  const sessions = sessionsFrom([{ kind: "background", id: "s7", cwd: "C:\\repo\\.claude\\worktrees\\issue-7", state: "idle" }], ROOT);
+  const [entry] = planCleanup({ worktrees: [main, tree], sessions, prs: [merged("issue-7-x")] });
+  assert.equal(entry.skip, undefined);
+  assert.deepEqual(cmds(entry), ["claude rm s7", `git worktree remove ${ROOT}/.claude/worktrees/issue-7`, "git branch -D issue-7-x"]);
+});
+
+test("edge: a merged lane's leftover session in a bare issue-<N> folder whose worktree is gone is still removed", () => {
+  const sessions = sessionsFrom([{ kind: "background", id: "s7", cwd: "C:/repo/.claude/worktrees/issue-7", state: "idle" }], ROOT);
+  const plan = planCleanup({ worktrees: [main], sessions, prs: [merged("issue-7-x")] });
+  assert.deepEqual(plan.map(cmds), [["claude rm s7"]]);
+});
