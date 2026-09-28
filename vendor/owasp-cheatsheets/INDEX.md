@@ -21,7 +21,7 @@ and `vendor/agent-skills/references/security-checklist.md` differ, the sheet win
 
 Scripts that import `node:child_process` (each call site runs `gh`, `git`, `claude` or a notifier):
 `scripts/preflight.mjs`, `scripts/lanes/blockers.mjs`, `scripts/lanes/cleanup.mjs`,
-`scripts/lanes/delivery-metrics.mjs`, `scripts/lanes/gate.mjs`, `scripts/lanes/issue-contract.mjs`,
+`scripts/lanes/delivery-metrics.mjs`, `scripts/lanes/diff-coverage.mjs`, `scripts/lanes/gate.mjs`, `scripts/lanes/issue-contract.mjs`,
 `scripts/lanes/new-project.mjs`, `scripts/lanes/notify-hook.mjs`, `scripts/lanes/post-review.mjs`,
 `scripts/lanes/queue.mjs`, `scripts/lanes/reap.mjs`, `scripts/lanes/reviewers.mjs`, `scripts/lanes/review-metrics.mjs`,
 `scripts/lanes/setup-repo.mjs`, `scripts/lanes/start.mjs`, `scripts/lanes/status.mjs`,
