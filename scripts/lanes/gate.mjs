@@ -324,7 +324,8 @@ export function main(env = process.env, api = ghApi) {
   try {
     return decide(env, api);
   } catch (e) {
-    // Only a failed GitHub call: other failures (a malformed input, a failed notice after the status was posted) keep their own outcome.
+    // Only a failed GitHub call: other failures (a malformed input) keep their own outcome. A failed notice call also lands here,
+    // which overwrites an already-posted status with error: the safe direction.
     if (e?.ghCall) postError(env, api, e);
     throw e;
   }
