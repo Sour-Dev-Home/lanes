@@ -76,6 +76,15 @@ export function onUserPromptSubmit(input, now = Date.now()) {
 // `<<D`, `<<-D`, `<<'D'`, `<<"D"` or `<<\D`; a quoted delimiter makes the body literal. `<<<` is a here-string, not this.
 const HEREDOC_RE = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([^\s;&|()<>'"`$]+))/;
 // `$(cat <<D` and the end of its line: the start of a substitution whose output is only a heredoc's body.
+/** The index of the backtick closing the one at `i` (a backslash escapes the next character), or -1. */
+function backtickEnd(cmd, i) {
+  for (let j = i + 1; j < cmd.length; j += 1) {
+    if (cmd[j] === "\\") j += 1;
+    else if (cmd[j] === "`") return j;
+  }
+  return -1;
+}
+
 // A redirection operator: `>`, `>>`, `>|`, `>&`, `<`, `<&`, `<>`, `&>` or `&>>` (#191).
 const REDIRECT_RE = /^(?:&>>?|>[>|&]?|<[&>]?)/;
 const CAT_HEREDOC_RE =/^\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z0-9_.-]+))[ \t]*\r?\n/;
@@ -215,6 +224,16 @@ function lex(cmd) {
           j = arith.end;
           continue;
         }
+        if (cmd[j] === "`") {
+          // A live backtick substitution runs even with no whitespace to make the word a nested script, as in
+          // "`scripts/lanes/queue.mjs`" (#113 test-hunter): its command is a body to walk; the word keeps its text.
+          const close = backtickEnd(cmd, j);
+          if (close === -1) throw new Error("unterminated `");
+          bodies.push({ text: cmd.slice(j + 1, close).replace(/\\([`$\\"])/g, "$1"), literal: false });
+          s += cmd.slice(j, close + 1);
+          j = close;
+          continue;
+        }
         if (cmd[j] === "\\" && '"\\$`'.includes(cmd[j + 1] ?? "")) {
           j += 1;
           s += literal(cmd[j]);
@@ -236,14 +255,13 @@ function lex(cmd) {
       i = arith.end;
     } else if (c === "`") {
       // A backtick substitution is one word, whitespace and all (#197). Its command runs, so it is returned as a body
-      // to walk; the word keeps the backticks (so it still reads as unresolved) but no shell syntax, so walk() does
-      // not read the same text again as a nested script.
-      let j = i + 1;
-      for (; j < cmd.length && cmd[j] !== "`"; j += 1) if (cmd[j] === "\\") j += 1;
-      if (j >= cmd.length) throw new Error("unterminated `");
+      // to walk; the word holds it between QUOTED_TICKs (so it still reads as unresolved) with no shell syntax, so
+      // walk() does not read the same text again as a nested script.
+      const j = backtickEnd(cmd, i);
+      if (j === -1) throw new Error("unterminated `");
       const inner = cmd.slice(i + 1, j).replace(/\\([`$\\])/g, "$1");
       bodies.push({ text: inner, literal: false });
-      word = (word ?? "") + "`" + inner.replace(/[\s;&|()<>]/g, "_") + "`";
+      word = (word ?? "") + QUOTED_TICK + inner.replace(/[\s;&|()<>]/g, "_") + QUOTED_TICK;
       i = j;
     } else if (c === "\\") {
       if (cmd[i + 1] !== "\n") word = (word ?? "") + literal(cmd[i + 1] ?? "");

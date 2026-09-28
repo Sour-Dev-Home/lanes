@@ -990,6 +990,18 @@ test("#113 criterion 2: xargs node, and xargs -I{} node {}, are denied", () => {
   }
 });
 
+test("extra (test-hunter): a queue.mjs run reached through find -exec or xargs is denied under every grant shape, like every other QUEUE_RUNS form", () => {
+  // Not covered by #95's own QUEUE_RUNS list (written before #113 added find/xargs indirection) nor by #113's own
+  // tests (which only check the default valid /start grant via the `decide` helper): a /start or /start --auto --go
+  // grant, or an unreadable one, must not open a path to queue.mjs through find -exec/xargs any more than the direct
+  // forms already covered above.
+  const grants = [null, grant(), grant({ issues: [12] }), AUTO_GO_GRANT(), { unreadable: true }];
+  for (const cmd of ["find scripts -name queue.mjs -exec node {} \\;", "echo scripts/lanes/queue.mjs | xargs node"]) {
+    assert.equal(findQueueInvocations(cmd), true, cmd);
+    for (const g of grants) assert.deepEqual(decidePreToolUse(bash(cmd), g, NOW), { decision: "deny", reason: QUEUE_DENY_REASON }, `${JSON.stringify(g)} ${cmd}`);
+  }
+});
+
 test("#113 criterion 3: find without -exec and xargs running something else stay allowed", () => {
   for (const cmd of ["find . -name queue.mjs", "find scripts -name start.mjs -print", "git ls-files | xargs grep queue", "xargs grep queue < files.txt", "find . -name '*.mjs' -exec grep -l queue {} \\;"]) {
     assert.equal(decide(cmd), null, cmd);
@@ -1083,6 +1095,14 @@ test("#113 edge: a literal backtick in a script a shell runs (-c, eval, a heredo
   }
   assert.deepEqual(decide("bash -c 'echo `node scripts/lanes/queue.mjs`'"), { decision: "deny", reason: QUEUE_DENY_REASON });
   assert.equal(decide("git commit -F - <<'EOF'\nFix `start.mjs` and `queue.mjs`\nEOF"), null);
+});
+
+test("#113 edge (test-hunter): a double-quoted backtick around a bare script path, with no node or argument, runs", () => {
+  for (const cmd of ['echo "`scripts/lanes/queue.mjs`"', 'echo x > "`scripts/lanes/queue.mjs`"', "echo `scripts/lanes/queue.mjs`"]) {
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: QUEUE_DENY_REASON }, cmd);
+  }
+  assert.deepEqual(decide('echo "`scripts/lanes/start.mjs`"'), { decision: "deny", reason: DENY_REASON });
+  assert.equal(decide('echo "`date`" > log.txt'), null);
 });
 
 test("#113 edge: an unterminated backtick that names a lane script fails closed", () => {
