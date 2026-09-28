@@ -176,7 +176,7 @@ test("edge: a malformed map is refused with the reason", () => {
 });
 
 test("edge: a path prefix outside the repo is refused", () => {
-  for (const p of ["/etc/", "../up/", "src/../../x/", "C:/Users/", "src\\core\\"]) {
+  for (const p of ["/etc/", "../up/", "src/../../x/", "D:/x/","src\\core\\"]) {
     const m = { entries: [{ id: "a", paths: [p], imports: [] }] };
     assert.throws(() => checkModules({ map: m, files: {} }), /must be repo-relative/, p);
   }
