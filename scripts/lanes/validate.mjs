@@ -27,7 +27,41 @@ const compare = {
 
 const readIssue = (n) => JSON.parse(execFileSync("gh", ["issue", "view", String(n), "--json", "body"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })).body;
 
-const run = (argv) => spawnSync(argv[0], argv.slice(1), { encoding: "utf8", shell: false, timeout: TIMEOUT_MS, maxBuffer: MAX_BUFFER });
+// Characters cmd.exe would interpret even inside double quotes (or that break the quoting); an argument with one is refused.
+const CMD_UNSAFE = /["%^&|<>!\r\n\0]/;
+
+/**
+ * On Windows, npm and npx are .cmd shims that Node refuses to spawn without a shell (ENOENT or EINVAL). Finds the
+ * command on PATH; a .cmd or .bat is run as `cmd.exe /d /s /c "<shim> "<arg>" ..."` with every argument quoted and
+ * any argument holding a cmd.exe metacharacter refused, so issue text is never interpreted by a shell. Anything else
+ * (an .exe, another platform, a command not found) is returned unchanged for spawn to run or report.
+ * @returns {{ file: string, args: string[], verbatim: boolean }}
+ */
+export function resolveCommand(argv, { platform = process.platform, env = process.env, exists = existsSync } = {}) {
+  const plain = { file: argv[0], args: argv.slice(1), verbatim: false };
+  if (platform !== "win32" || /[\\/]/.test(argv[0])) return plain;
+  // Only absolute PATH entries count: a relative one would resolve against the checkout and could pick a planted shim.
+  const dirs = (env.PATH ?? env.Path ?? "").split(";").filter((d) => /^([A-Za-z]:[\\/]|\\\\)/.test(d));
+  const exts = (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const full = `${dir.replace(/[\\/]+$/, "")}\\${argv[0]}${ext}`;
+      if (!exists(full)) continue;
+      if (!/\.(cmd|bat)$/i.test(full)) return plain;
+      const parts = [full, ...argv.slice(1)];
+      // A trailing backslash would escape the closing quote when the target parses its command line.
+      const bad = parts.find((p) => CMD_UNSAFE.test(p) || p.endsWith("\\"));
+      if (bad !== undefined) throw new Error(`unsafe character in a command argument for ${argv[0]}: ${JSON.stringify(bad)}`);
+      return { file: env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", `"${parts.map((p) => `"${p}"`).join(" ")}"`], verbatim: true };
+    }
+  }
+  return plain;
+}
+
+const run = (argv) => {
+  const { file, args, verbatim } = resolveCommand(argv);
+  return spawnSync(file, args, { encoding: "utf8", shell: false, windowsVerbatimArguments: verbatim, timeout: TIMEOUT_MS, maxBuffer: MAX_BUFFER });
+};
 
 function readLog(file) {
   if (!existsSync(file)) return [];
