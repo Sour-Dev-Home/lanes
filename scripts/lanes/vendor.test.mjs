@@ -57,10 +57,6 @@ test("criterion 1: every sheet and the licence match the blob ids recorded from 
 // unlisted sheet slipping through: the negative tests below run the same helper the real test above uses.
 const realEntries = () => [...sheetFiles().map((f) => ({ name: f, bytes: readFileSync(join(SHEETS, f)) })), { name: "LICENSE", bytes: readFileSync(join(DIR, "LICENSE")) }];
 
-test("criterion 1: the blob-id check passes for the real vendored files", () => {
-  assert.deepEqual(blobIdProblems(blobTable(vendored()), realEntries()), []);
-});
-
 test("criterion 1 (negative): a sheet copy with one added line fails the blob-id check, naming the file", () => {
   const dir = mkdtempSync(join(tmpdir(), "vendor-blob-"));
   try {
