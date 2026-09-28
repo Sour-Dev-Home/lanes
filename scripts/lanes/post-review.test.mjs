@@ -101,6 +101,14 @@ test("a description shows the count when only failing criteria were assessed", (
   assert.equal(r.status.description, "0/2 criteria pass, 1 fixed: 4 tests added, 1 bug fixed");
 });
 
+test("edge: one pass among not-applicable criteria still shows the count, and a null criterion is refused", () => {
+  const some = [{ index: 1, result: "pass", evidence: "ok" }, { index: 2, result: "not-applicable", evidence: "no UI" }];
+  assert.equal(validateVerdict(verdict({ criteria: some }), { criteriaCount: 2 }).status.description, "1/2 criteria pass, 1 fixed: 4 tests added, 1 bug fixed");
+  const bad = validateVerdict(verdict({ reviewer: "security-reviewer", criteria: [null] }), { criteriaCount: 2 });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.status, null);
+});
+
 // M1 + T7: strict argument parsing, so a malformed command line cannot reach the owner form without a prompt
 test("--file takes a value and then no positional arguments", () => {
   assert.deepEqual(parseArgs(["--file", "v.json"]), { file: "v.json", pr: undefined, sha: undefined, positional: [] });
