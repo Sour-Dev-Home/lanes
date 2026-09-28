@@ -6,8 +6,8 @@
 // Or: node scripts/lanes/start.mjs --auto [--go]. Picks from every ready issue with pickStartable and prints the plan;
 // only --go launches it. Exit 0: printed (and, with --go, every pick launched). 1: a launch failed. 2: as above.
 // The cap and the soft paths come from the `start` block of lanes.config.json.
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main as checkBlockers } from "./blockers.mjs";
@@ -201,8 +201,47 @@ function finishedIssues(deps, prs, sessions) {
   });
 }
 
-// Launches each issue from the repository root, one attempt each, on its tier's model (`tiers`: issue → tier).
-// Returns issue → line, and whether any failed.
+// Spawns lane n's reaper (ADR 0010): `node scripts/lanes/reap.mjs --issue n --session id` from the root, detached,
+// its output appended to `.lanes/reap/<n>.log`, and unref'd so it outlives this process. Returns null, or the line
+// saying why it did not start; it never throws, so a reaper failure never fails the launch.
+function startReaper(n, id, deps, root) {
+  let log;
+  try {
+    log = deps.reaperLog(root, n);
+    const child = deps.spawn(process.execPath, [join(root, "scripts", "lanes", "reap.mjs"), "--issue", String(n), "--session", id], {
+      cwd: root,
+      detached: true,
+      stdio: ["ignore", log.fd, log.fd],
+      windowsHide: true,
+    });
+    // A spawn that cannot start returns a child with no pid and emits `error` later; that error is reported here
+    // instead, and the listener keeps it from crashing start.mjs.
+    child.on("error", () => {});
+    if (child.pid === undefined) return `#${n}: reaper not started: no process started`;
+    child.unref();
+    return null;
+  } catch (err) {
+    return `#${n}: reaper not started: ${reason(err)}`;
+  } finally {
+    // The child holds its own copy of the log's descriptor.
+    try {
+      log?.close();
+    } catch {
+      // Nothing to do: the reaper already has the log or never started.
+    }
+  }
+}
+
+// `.lanes/reap/<n>.log` under root, created as needed and opened for appending, as { fd, close }.
+function reaperLog(root, n) {
+  const dir = join(root, ".lanes", "reap");
+  mkdirSync(dir, { recursive: true });
+  const fd = openSync(join(dir, `${n}.log`), "a");
+  return { fd, close: () => closeSync(fd) };
+}
+
+// Launches each issue from the repository root, one attempt each, on its tier's model (`tiers`: issue → tier), and
+// starts a reaper for each lane that returned a session id. Returns issue → lines, and whether any launch failed.
 function launchAll(numbers, deps, { tiers, models }) {
   const lines = new Map();
   let failed = false;
@@ -216,9 +255,11 @@ function launchAll(numbers, deps, { tiers, models }) {
     } catch (err) {
       why = reason(err);
     }
-    if (id) lines.set(n, `#${n} → ${id}`);
-    else {
-      lines.set(n, `#${n}: launch failed: ${why}, not retried`);
+    if (id) {
+      const reaperFailed = startReaper(n, id, deps, root);
+      lines.set(n, reaperFailed ? [`#${n} → ${id}`, reaperFailed] : [`#${n} → ${id}`]);
+    } else {
+      lines.set(n, [`#${n}: launch failed: ${why}, not retried`]);
       failed = true;
     }
   }
@@ -262,16 +303,17 @@ function autoStart(go, deps, { maxLanes, softPaths, models }) {
   }
   const tiers = new Map(candidates.map((i) => [i.number, tierOf(labelsOf(i))]));
   const { lines, failed } = launchAll(start, deps, { tiers, models });
-  return { code: failed ? 1 : 0, lines: [...start.map((n) => lines.get(n)), ...skipLines] };
+  return { code: failed ? 1 : 0, lines: [...start.flatMap((n) => lines.get(n)), ...skipLines] };
 }
 
 /**
  * Removes merged lanes, then reads the issues, plans and launches. `deps` holds fakes in tests: `gh(args)` and
  * `claude(args, { cwd })` return stdout, `root()` the main repository root, `config()` the parsed lanes.config.json
- * (undefined when there is none), `cleanup({ dryRun })` cleanupMerged's lines.
+ * (undefined when there is none), `cleanup({ dryRun })` cleanupMerged's lines, `spawn(cmd, args, options)` a
+ * child_process.spawn child, and `reaperLog(root, n)` lane n's reaper log opened for appending, as `{ fd, close }`.
  * Returns the exit code and the lines to print, cleanup's first.
  */
-export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig, cleanup: cleanupMerged }) {
+export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig, cleanup: cleanupMerged, spawn, reaperLog }) {
   const args = argv.map((a) => String(a).replace(/^#/, ""));
   const auto = args[0] === "--auto";
   if (auto ? args.length > 2 || (args.length === 2 && args[1] !== "--go") : !args.length || args.some((a) => !/^[1-9]\d*$/.test(a))) {
@@ -354,8 +396,8 @@ function startIssues(args, deps, config) {
   const { launch, refused } = planStart({ issues, inFlight, overlaps, running: (n) => runningOverlap.get(n) ?? null, maxLanes: config.maxLanes });
   const tiers = new Map(issues.filter((i) => i.labels).map((i) => [i.number, tierOf(i.labels)]));
   const launched = launchAll(launch, deps, { tiers, models: config.models });
-  const lines = new Map([...refused.map((r) => [r.number, `#${r.number}: refused: ${r.reason}`]), ...launched.lines]);
-  return { code: refused.length || launched.failed ? 1 : 0, lines: numbers.map((n) => lines.get(n)) };
+  const lines = new Map([...refused.map((r) => [r.number, [`#${r.number}: refused: ${r.reason}`]]), ...launched.lines]);
+  return { code: refused.length || launched.failed ? 1 : 0, lines: numbers.flatMap((n) => lines.get(n)) };
 }
 
 const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
