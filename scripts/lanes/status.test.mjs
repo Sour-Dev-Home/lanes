@@ -184,6 +184,12 @@ test("edge: a failing gate that names a reviewer is still [contract], not [gate]
   assert.deepEqual(s.inFlight.map((i) => [i.number, i.stage]), [[18, "contract"]]);
 });
 
+test("edge: an owner approval does not hide an unrelated 'needs the owner' note", () => {
+  const s = summarize({ prs: [pr(19, [gate("PENDING", "waiting for blocker #3 (open)"), ownerApproved()], { body: body("pick a name for the package") })], issues: [], merged: [] });
+  assert.equal(placement(s, 19), "owner");
+  assert.deepEqual(itemOf(s, 19), { number: 19, title: "pr 19", stage: "review", note: "needs: pick a name for the package" });
+});
+
 const issueBody = (blockedBy = "none", scope = "s", contract = "none") =>
   `### Goal\ng\n### Acceptance criteria\n- [ ] a\n### Interface contract\n${contract}\n### Scope\n${scope}\n### Blocked by\n${blockedBy}\n### Tier\nquick`;
 const issue = (number, blockedBy, { ready = true, tier = "quick", scope, contract } = {}) => ({

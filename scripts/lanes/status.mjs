@@ -186,12 +186,17 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
     const { stage, note } = prStage(pr, queuePosition.get(pr.number), gateDescriptions.get(pr.number));
     const needs = (parsePrBody(pr.body).sections["needs the owner"] ?? "").trim();
     const item = { number: pr.number, title: pr.title, stage, note };
-    // A prompt still needs the owner; an approval already given, or a gate waiting on a reviewer, does not.
+    // A prompt still needs the owner; a gate waiting on a reviewer does not, whatever the body asks for. An
+    // approval already given only clears a /approve ask (the gate's own "waiting on owner" stage, or a "needs the
+    // owner" note that asks for /approve) — an unrelated need (e.g. "pick a name for the package") still surfaces.
+    const asksForApprove = /\/approve\b/i.test(needs);
     if (session?.waiting) out.waitingOnOwner.push(withSession(item, session));
-    else if (stage === "gate" || ownerApproved(pr)) out.inFlight.push(withSession(item, session));
-    else if (stage === "owner") out.waitingOnOwner.push(withSession(item, session));
-    else if (needs && !/^nothing\b/i.test(needs)) out.waitingOnOwner.push(withSession({ ...item, note: `needs: ${needs.split("\n")[0]}` }, session));
-    else out.inFlight.push(withSession(item, session));
+    else if (stage === "gate") out.inFlight.push(withSession(item, session));
+    else if (stage === "owner") (ownerApproved(pr) ? out.inFlight : out.waitingOnOwner).push(withSession(item, session));
+    else if (needs && !/^nothing\b/i.test(needs)) {
+      if (ownerApproved(pr) && asksForApprove) out.inFlight.push(withSession(item, session));
+      else out.waitingOnOwner.push(withSession({ ...item, note: `needs: ${needs.split("\n")[0]}` }, session));
+    } else out.inFlight.push(withSession(item, session));
   }
   const formOf = new Map(issues.map((i) => [i.number, parseIssueForm(i.body ?? "").fields]));
   const blockedByOf = new Map([...formOf].map(([n, f]) => [n, f.blockedBy]));
