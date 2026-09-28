@@ -30,6 +30,8 @@ The list:
 
 - The gate and trust code, with their tests: `scripts/lanes/(gate|lib|approve-guard|post-review|issue-contract)(.test)?.mjs`,
   `scripts/lanes/gate-decision.test.mjs`, `scripts/lanes/workflow.test.mjs`.
+- `scripts/gate-workflow.test.mjs` (amendment, #207): it pins `lanes-gate.yml`'s permissions, `STATUS_STATE` env entry
+  and default-branch checkout, the same kind of security pin as `workflow.test.mjs`.
 - `scripts/lanes/(install|setup-repo|new-project)(.test)?.mjs`: they write settings and rulesets into other repos.
 - `.claude/settings.json`, `.github/`, `.githooks/`, `lanes.config.json`.
 - The lane and reviewer instructions: `.claude/agents/`, `.claude/commands/(lane|night|approve).md`.
