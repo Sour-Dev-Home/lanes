@@ -1368,3 +1368,295 @@ test("#262 edge: a wrapper in another case, a missing prompt, or an unsafe sessi
   assert.deepEqual(onUserPromptSubmit({ session_id: "s1" }, NOW), { action: "clear", sessionId: "s1" });
   assert.deepEqual(onUserPromptSubmit({ session_id: "../x", prompt: `${WRAPPERS[0]}\n/start 5` }, NOW), { action: "none" });
 });
+
+// --- #61: the PowerShell tool, quote-split names, and commands that launch nothing -------------------------------
+
+const ps = (command, over = {}) => bash(command, { tool_name: "PowerShell", ...over });
+const decideFor = (input, g = null) => decidePreToolUse(input, g, NOW);
+const BG = "--" + "bg";
+const encodedPs = (text) => Buffer.from(text, "utf16le").toString("base64");
+
+test("#61 criterion 1: both guards' PreToolUse hooks match the PowerShell tool as well as Bash", () => {
+  const s = JSON.parse(readFileSync(".claude/settings.json", "utf8"));
+  const commands = (tool) => s.hooks.PreToolUse.filter((h) => new RegExp(`^(?:${h.matcher})$`).test(tool)).flatMap((h) => h.hooks.map((x) => x.command));
+  for (const tool of ["Bash", "PowerShell"]) {
+    assert.ok(commands(tool).some((c) => /scripts\/lanes\/start-guard\.mjs" pre-tool-use$/.test(c)), `start-guard for ${tool}`);
+    assert.ok(commands(tool).some((c) => /scripts\/lanes\/approve-guard\.mjs" pre-tool-use$/.test(c)), `approve-guard for ${tool}`);
+  }
+});
+
+test("#61 criterion 2: through PowerShell, the plain start.mjs run follows the same grant rules as through Bash", () => {
+  assert.equal(decideFor(ps(START), grant()).decision, "allow");
+  assert.equal(decideFor(ps(`${START}\r\n`), grant()).decision, "allow");
+  assert.equal(decideFor(ps("node scripts/lanes/start.mjs --auto"), autoGrant("dry")).decision, "allow");
+  assert.equal(decideFor(ps("node scripts/lanes/start.mjs --auto --go"), autoGrant("go")).decision, "allow");
+  for (const [g, why] of [
+    [null, "no grant"],
+    [grant({ issues: [12] }), "other issues"],
+    [grant({ sessionId: "s2" }), "another session"],
+    [grant({ at: new Date(NOW - GRANT_TTL_MS).toISOString() }), "stale"],
+    [autoGrant("dry"), "an auto grant"],
+  ]) {
+    assert.deepEqual(decideFor(ps(START), g), { decision: "deny", reason: DENY_REASON }, why);
+  }
+  assert.equal(decideFor(ps("node scripts/lanes/start.mjs --auto --go"), autoGrant("dry")).decision, "deny");
+});
+
+test("#61 criterion 2: start.mjs wrapped, spliced or run by PowerShell's own launchers is denied even with a grant", () => {
+  for (const c of [
+    "& node scripts/lanes/start.mjs 12 14",
+    "node scripts/lanes/start.mjs 12 14; Get-Date",
+    "node scripts/lanes/start.mjs 12 14 | Out-Null",
+    "node 'scripts/lanes/start.mjs' 12 14",
+    "node scripts\\lanes\\start.mjs 12 14",
+    "node scripts/lanes/start.mjs 12 14 # launch",
+    "(node scripts/lanes/start.mjs 12 14)",
+    "$null = node scripts/lanes/start.mjs 12 14",
+    "[string]$out = node scripts/lanes/start.mjs 12 14",
+    "if ($true) { node scripts/lanes/start.mjs 12 14 }",
+    "Get-Item x | ForEach-Object { node scripts/lanes/start.mjs 12 14 }",
+    "& 'C:\\Program Files\\nodejs\\node.exe' scripts/lanes/start.mjs 12 14",
+    "Start-Process node -ArgumentList 'scripts/lanes/start.mjs','12','14'",
+    "Start-Process -FilePath node -ArgumentList \"scripts/lanes/start.mjs 12 14\" -NoNewWindow",
+    "Start-Process scripts/lanes/start.mjs",
+    "iex 'node scripts/lanes/start.mjs 12 14'",
+    "Invoke-Expression \"node scripts/lanes/start.mjs 12 14\"",
+    "'node scripts/lanes/start.mjs 12 14' | Invoke-Expression",
+    "pwsh -NoProfile -Command \"node scripts/lanes/start.mjs 12 14\"",
+    `powershell -EncodedCommand ${encodedPs("node scripts/lanes/start.mjs 12 14")}`,
+    "$s = 'scripts/lanes/start.mjs'; node $s 12 14",
+    "node (Join-Path scripts/lanes start.mjs) 12 14",
+    "& $node scripts/lanes/start.mjs 12 14",
+    "node scripts/lanes/st`art.mjs 12 14",
+    "iex \"node scripts/lanes/st\u2018\u2019art.mjs 12 14\"",
+    "iex @'\nnode scripts/lanes/start.mjs 12 14\n'@",
+  ]) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+});
+
+test("#61 criterion 2: a background claude launch through PowerShell is always denied", () => {
+  for (const c of [
+    `claude ${BG} x`,
+    "claude.exe --background x",
+    `& claude ${BG}`,
+    `& 'claude' ${BG}`,
+    `Start-Process claude -ArgumentList '${BG}','x'`,
+    `Start-Process claude -ArgumentList "${BG} x"`,
+    `saps claude "${BG} x"`,
+    `[Diagnostics.Process]::Start('claude', '${BG} x')`,
+    `$c = 'claude'; & $c ${BG}`,
+    `iex 'claude ${BG} x'`,
+    `Get-Date; claude ${BG} x`,
+  ]) {
+    assert.deepEqual(decideFor(ps(c), grant()), { decision: "deny", reason: BG_DENY_REASON }, c);
+  }
+});
+
+test("#61 criterion 2: queue.mjs and a program named only at run time are denied through PowerShell too", () => {
+  assert.deepEqual(decideFor(ps("node scripts/lanes/queue.mjs"), grant()), { decision: "deny", reason: QUEUE_DENY_REASON });
+  assert.deepEqual(decideFor(ps("Start-Process node scripts/lanes/queue.mjs"), grant()), { decision: "deny", reason: QUEUE_DENY_REASON });
+  for (const c of ["& $exe", "& (Get-Command $name) 12", "iex $cmd", "$cmd | iex", ". $script"]) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+});
+
+test("#61 criterion 2: a PowerShell command that cannot be read fails closed when it names start.mjs, queue.mjs or --bg", () => {
+  for (const c of [
+    "node scripts/lanes/start.mjs 12 'oops",
+    "node scripts/lanes/start.mjs 12 \"oops",
+    "node scripts/lanes/start.mjs (12",
+    "node scripts/lanes/start.mjs 12 }",
+    "node scripts/lanes/start.mjs 12 < in.txt",
+    "node scripts/lanes/start.mjs 12 <# unclosed",
+    `claude "${BG}`,
+    `claude @'\n${BG}`,
+  ]) {
+    assert.deepEqual(decideFor(ps(c), grant()), { decision: "deny", reason: PARSE_DENY_REASON }, c);
+  }
+  assert.deepEqual(decideFor(ps("node scripts/lanes/queue.mjs 'oops"), grant()), { decision: "deny", reason: QUEUE_DENY_REASON });
+  // Unreadable, but naming nothing the guard looks for: no decision, as for Bash.
+  for (const c of ["Get-Date 'oops", "echo (unclosed", "Write-Output x }"]) assert.equal(decideFor(ps(c)), null, c);
+});
+
+test("#61 criterion 2: ordinary PowerShell commands get no decision", () => {
+  for (const c of [
+    "Get-ChildItem",
+    "Get-Content scripts/lanes/start.mjs",
+    "node --test scripts/lanes/start-guard.test.mjs",
+    "node scripts/lanes/status.mjs",
+    "gh pr merge 72 --auto",
+    "$sha = gh pr view 5 --json headRefOid --jq .headRefOid; gh run list --commit $sha",
+    "if ($LASTEXITCODE -ne 0) { exit 1 }",
+    "Get-ChildItem | ForEach-Object { $_.Name }",
+    "Get-ChildItem | Where-Object { $_.Length -gt 0 } | Select-Object -First 3",
+    "$items = @(1, 2, 3); $items.Count",
+    "\"sha: $sha\"",
+    "git commit -F msg.txt",
+    "gh pr view 72 --json statusCheckRollup --jq '.statusCheckRollup[] as $s | $s.name'",
+    "gh pr view 72 --json x --jq \".x as `$s | `$s\"",
+    "Set-Content -Path body.md -Value 'uses start.mjs to launch'",
+    "@'\nhere-string text\n'@ | Set-Content body.md",
+    "Write-Output 'a' # comment with start.mjs",
+    "git log --oneline -3 2>&1",
+    "cmd /c ver",
+  ]) {
+    assert.equal(decideFor(ps(c)), null, c);
+  }
+});
+
+test("#61 criterion 4: an allowed and a denied PowerShell call through the hook itself", () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, "s1.json"), JSON.stringify(grant()));
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(ps(START)), { dir, now: NOW })).permissionDecision, "allow");
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(ps(`& ${START}`)), { dir, now: NOW })).permissionDecision, "deny");
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(ps(`claude ${BG}`)), { dir, now: NOW })).permissionDecision, "deny");
+    assert.equal(runHook("pre-tool-use", JSON.stringify(ps("Get-Date")), { dir, now: NOW }), "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#61 criterion 5: a quote inside start.mjs, queue.mjs or --bg is still caught through Bash", () => {
+  for (const c of ['node scripts/lanes/st"art.mjs" 12 14', "node scripts/lanes/st'art.mjs' 12 14", "node scripts/lanes/st\\art.mjs 12 14"]) {
+    assert.deepEqual(decideFor(bash(c), grant()), { decision: "deny", reason: DENY_REASON }, c);
+  }
+  for (const c of ['node scripts/lanes/st"art.mjs 12', "node scripts/lanes/st'art.mjs 12", 'bash -c "node scripts/lanes/st\'art.mjs"']) {
+    assert.deepEqual(decideFor(bash(c), grant()), { decision: "deny", reason: PARSE_DENY_REASON }, c);
+  }
+  for (const c of ['claude --"bg" x', "claude --'bg' x", "claude --b'g'", '$(which cla"ude") --"bg"', "$(which claude) --'b'g", '`which cla"ude"` --"bg"']) {
+    assert.deepEqual(decideFor(bash(c), grant()), { decision: "deny", reason: BG_DENY_REASON }, c);
+  }
+  for (const c of ['claude --"bg', "claude --'bg", "claude --b'g", "cla'ude --bg"]) {
+    assert.deepEqual(decideFor(bash(c), grant()), { decision: "deny", reason: PARSE_DENY_REASON }, c);
+  }
+  assert.deepEqual(decideFor(bash('node scripts/lanes/que"ue.mjs'), grant()), { decision: "deny", reason: QUEUE_DENY_REASON });
+  assert.deepEqual(decideFor(bash("X=1; node scripts/lanes/qu'eue.mjs"), grant()), { decision: "deny", reason: QUEUE_DENY_REASON });
+});
+
+test("#61 criterion 5: a quote inside start.mjs, queue.mjs or --bg is still caught through PowerShell", () => {
+  for (const c of ['node scripts/lanes/st"art.mjs" 12 14', "node scripts/lanes/st'art.mjs' 12 14", "node scripts/lanes/st`art.mjs 12 14", "node scripts/lanes/st\u2018art.mjs\u2019 12 14", 'node scripts/lanes/st""art.mjs 12 14']) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+  for (const c of ['node scripts/lanes/st"art.mjs 12', "node scripts/lanes/st'art.mjs 12"]) {
+    assert.deepEqual(decideFor(ps(c), grant()), { decision: "deny", reason: PARSE_DENY_REASON }, c);
+  }
+  for (const c of ['claude --"bg" x', "claude --'bg' x", "claude --b'g'", "claude --`bg", "claude --\u201Cbg\u201D"]) {
+    assert.deepEqual(decideFor(ps(c), grant()), { decision: "deny", reason: BG_DENY_REASON }, c);
+  }
+  for (const c of ['claude --"bg', "claude --'bg"]) assert.deepEqual(decideFor(ps(c), grant()), { decision: "deny", reason: PARSE_DENY_REASON }, c);
+  // A name split by quotes inside a string that PowerShell may run later still fails closed.
+  for (const c of ["$s = \"node scripts/lanes/st'art.mjs' 12\"; $s | Out-Null", "$a = \"claude --'bg'\""]) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+  assert.equal(decideFor(ps('node scripts/lanes/que"ue.mjs'), grant())?.decision, "deny");
+});
+
+const NO_LAUNCH = [
+  "gh pr merge 72 --auto",
+  "gh pr view 72 --json statusCheckRollup --jq '[.statusCheckRollup[] | select(.status != \"COMPLETED\")] as $s | $s | length'",
+  "node scripts/lanes/status.mjs",
+  `node --input-type=module -e 'import { readFileSync, writeFileSync } from "node:fs"; const f = ".lanes/body.md"; writeFileSync(f, readFileSync(f, "utf8").replace("old", "lanes are launched by start.mjs, never by claude ${BG} directly"));'`,
+];
+
+test("#61 criterion 6: commands that launch nothing get no decision, alone and chained with ; or &&", () => {
+  for (const c of NO_LAUNCH) assert.equal(decideFor(bash(c)), null, c);
+  for (const sep of ["; ", " && "]) {
+    assert.equal(decideFor(bash(NO_LAUNCH.join(sep))), null, sep);
+    assert.equal(decideFor(bash(NO_LAUNCH.slice(0, 3).join(sep))), null, sep);
+    for (const a of NO_LAUNCH) for (const b of NO_LAUNCH) assert.equal(decideFor(bash(`${a}${sep}${b}`)), null, `${a}${sep}${b}`);
+  }
+});
+
+test("#61 criterion 6: real start.mjs runs and background claude launches next to them are still denied", () => {
+  for (const sep of ["; ", " && "]) {
+    assert.deepEqual(decideFor(bash([...NO_LAUNCH, START].join(sep)), grant()), { decision: "deny", reason: DENY_REASON });
+    assert.deepEqual(decideFor(bash([...NO_LAUNCH, `claude ${BG} x`].join(sep)), grant()), { decision: "deny", reason: BG_DENY_REASON });
+  }
+  for (const c of [
+    `node -e 'require("child_process").spawn("claude", ["${BG}", "x"])'`,
+    `node --input-type=module -e 'import { spawn } from "node:child_process"; spawn("claude", ["${BG}"])'`,
+    `node -e 'process.getBuiltinModule("child_process").execSync("claude ${BG} x")'`,
+    `node -e 'import("node:child_process").then((m) => m.spawn("claude", ["${BG}"]))'`,
+    `node -e 'const m = "child_" + "process"; process.mainModule.require(m).spawn("claude", ["${BG}"])'`,
+    `node --input-type=module -e 'import run from "./launch.mjs"; run("claude ${BG}")'`,
+    `node -e 'globalThis[k]("claude ${BG}")'`,
+  ]) {
+    assert.deepEqual(decideFor(bash(c), grant()), { decision: "deny", reason: BG_DENY_REASON }, c);
+  }
+  // A substitution in a --jq value still runs in the shell, so it is still read.
+  assert.deepEqual(decideFor(bash('gh pr view 1 --jq "$(node scripts/lanes/queue.mjs)"'), grant()), { decision: "deny", reason: QUEUE_DENY_REASON });
+  assert.equal(decideFor(bash('gh pr view 1 --jq "$(node $X)"'), grant())?.decision, "deny");
+});
+
+test("#61 edge: jq programs, gh --jq/-q/--template values and their = forms keep their $ variables literal", () => {
+  for (const c of [
+    "gh pr view 1 -q '.x as $s | $s'",
+    "gh pr view 1 --jq='.x as $s | $s'",
+    "gh pr view 1 --template '{{range $i, $c := .checks}}{{$c.name}} {{end}}'",
+    "gh pr view 1 -t '{{range $i := .x}}{{$i}}{{end}}'",
+    "gh api repos/o/r/pulls --jq 'map(.number) as $n | $n'",
+    "gh pr view 1 --json x | jq '.x as $s | $s'",
+    "jq -r --arg v 1 '.[] as $s | $s' file.json",
+  ]) {
+    assert.equal(decideFor(bash(c)), null, c);
+  }
+  // Outside those values a quoted script's $ is still read as it was: a quoted word ssh or watch may run as shell text.
+  assert.equal(decideFor(bash("ssh host 'node $S'"), grant())?.decision, "deny");
+  assert.equal(decideFor(bash("gh pr view 1 --body 'x' | sh -c 'node $S'"), grant())?.decision, "deny");
+});
+
+test("#61 edge: a node -e script that names claude and --bg but cannot launch anything gets no decision", () => {
+  for (const c of [
+    `node -e 'console.log("claude ${BG}")'`,
+    `node -p '"use claude ${BG} never"'`,
+    `node --input-type=module -e 'import fs from "node:fs"; fs.writeFileSync("x", "claude ${BG}")'`,
+    `node -p '"see start.mjs and queue.mjs".length'`,
+    `node --input-type=module -e 'import { writeFileSync } from "node:fs"; writeFileSync("b.md", "node scripts/lanes/start.mjs 5 and queue.mjs")'`,
+  ]) {
+    assert.equal(decideFor(bash(c)), null, c);
+  }
+});
+
+test("#61 edge: PowerShell strings, redirections and stop-parsing at the edges of a command", () => {
+  // A string that closes at the very end of the command, and an empty here-string.
+  for (const c of ["Write-Output 'x'", 'Write-Output "x"', "Write-Output ''", "@'\n'@ | Out-Null", "Get-Date *> log.txt", "Get-Date *>&1", "Get-Date 2>> err.txt", "", "   "]) {
+    assert.equal(decideFor(ps(c)), null, JSON.stringify(c));
+  }
+  assert.equal(decideFor({ tool_name: "PowerShell", session_id: "s1" }), null);
+  assert.deepEqual(decideFor(ps("node scripts/lanes/start.mjs 12 '14'"), grant()), { decision: "deny", reason: DENY_REASON });
+  // --% hands the rest of the line to the program as it is: still read, with %NAME% unresolved.
+  assert.equal(decideFor(ps("node --% scripts/lanes/start.mjs 12 14"), grant())?.decision, "deny");
+  assert.equal(decideFor(ps("node --% %SCRIPT% 12"), grant())?.decision, "deny");
+  assert.equal(decideFor(ps("cmd --% /c ver")), null);
+  // A backtick in a bare word only makes the next character literal: `n is n there, not a line break.
+  assert.equal(decideFor(ps("node scripts/lanes/start.mjs 12 1`4"), grant())?.decision, "deny");
+  assert.equal(decideFor(ps(`claude --\`b\`g`), grant())?.decision, "deny");
+});
+
+test("#61 edge: PowerShell variables of every spelling, splatting and code-running .NET routes fail closed", () => {
+  for (const c of ["node $é 12", "node ${my script} 12", "node $env:SCRIPT 12", "node @rest", "node $global:s 12"]) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+  for (const c of ["[scriptblock]::Create('Get-Date').Invoke()", "Add-Type -TypeDefinition $code", "$ExecutionContext.InvokeCommand.InvokeScript($s)", "$p = New-Object System.Diagnostics.ProcessStartInfo"]) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+  // A private-use character (the guards' own markers) or nesting too deep cannot be read.
+  assert.deepEqual(decideFor(ps("node scripts/lanes/start.mjs ''"), grant()), { decision: "deny", reason: PARSE_DENY_REASON });
+  assert.deepEqual(decideFor(ps(`${"(".repeat(40)}node scripts/lanes/start.mjs 12${")".repeat(40)}`), grant()), { decision: "deny", reason: PARSE_DENY_REASON });
+  assert.equal(decideFor(ps(`${"(".repeat(40)}Get-Date${")".repeat(40)}`)), null);
+});
+
+test("#61 edge: a node -e script that names start.mjs or queue.mjs and can load or launch code is still denied", () => {
+  for (const c of [
+    `node -e 'require("child_process").execSync("node scripts/lanes/start.mjs 5")'`,
+    `node --input-type=module -e 'import "./scripts/lanes/start.mjs"'`,
+    `node -e 'import("./scripts/lanes/start.mjs")'`,
+  ]) {
+    assert.deepEqual(decideFor(bash(c), grant()), { decision: "deny", reason: DENY_REASON }, c);
+  }
+  assert.deepEqual(decideFor(bash(`node -e 'require("./scripts/lanes/queue.mjs")'`), grant()), { decision: "deny", reason: QUEUE_DENY_REASON });
+  // A $ the shell expands inside the script could be any code at all.
+  assert.equal(decideFor(bash('node -e "console.log($X)"'), grant())?.decision, "deny");
+});

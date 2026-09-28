@@ -18,10 +18,15 @@
 //     word of its command, though a substitution in it is still read (#191); a backtick substitution is read wherever
 //     it stands (#197); and the command find -exec or xargs runs is read, with what they hand it unresolved (#113).
 //     Text piped into a shell (`cat <<'EOF' | sh`, `echo '…' | bash`) has its backticks read live (#246).
+//   PreToolUse (PowerShell) runs the same hook (#61): the command is read with PowerShell's rules (powershellAsBash in
+//     approve-guard.mjs) and scanned as the Bash command with the same words, under the same grant rules; one that
+//     cannot be read is denied when it names start.mjs, queue.mjs or --bg. Raw-text checks drop quotes first, so a
+//     name split by quoting (st"art.mjs, --"bg") still reads whole. A jq program or gh --jq/--template value keeps its
+//     `$` literal, and a node -e script counts as a run only when it can load or launch code.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isAutomatedInput } from "./approve-guard.mjs";
+import { isAutomatedInput, powershellAsBash } from "./approve-guard.mjs";
 
 export const GRANT_TTL_MS = 15 * 60 * 1000;
 export const DENY_REASON = "lanes are launched only from /start <N> typed by the owner in this session";
@@ -140,6 +145,9 @@ const LIT_TICK = "";
 const QUOTED_TICK = "";
 const literal = (s) => s.replaceAll("$", LIT_DOLLAR).replaceAll("`", LIT_TICK);
 const unliteral = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, QUOTED_TICK);
+// Text with every quote, backslash and backtick dropped (PowerShell's curly quotes too), for the checks that read raw
+// text: a name split by quoting, as in st"art.mjs or --"bg", reads whole (#61, like #62 in approve-guard.mjs).
+const dequoted = (s) => s.replace(new RegExp(`['"\\\\\`‘-„${LIT_TICK}${QUOTED_TICK}]`, "g"), "");
 
 /**
  * `$((…))` at `i`, an arithmetic expansion (#102): its expression and the index of its closing `)`. Null for anything
@@ -410,6 +418,37 @@ const PLACE_COMMANDS = new Set(["cd", "mkdir"]);
 const isDataOnly = ({ segments, writes }) =>
   segments.every((words, k) => PLACE_COMMANDS.has(words[0]) || (WRITE_COMMANDS.has(words[0]) && writes[k] === true));
 
+// The words that are a jq program or a Go template (#61): every argument of jq, and the value of gh's --jq, -q,
+// --template or -t. Neither language runs a command, so a quoted `$s` in one is that language's variable, which the
+// shell never expands; read as the shell's, it denied `gh pr view --jq '.x as $s | $s'` as a program named at run time.
+const GH_PROGRAM_FLAGS = new Set(["--jq", "-q", "--template", "-t"]);
+const JQ_RE = /^(jq|gojq)(\.exe)?$/i;
+const GH_RE = /^gh(\.exe)?$/i;
+
+/** The indexes of a simple command's words that are a jq program or Go template, when jq or gh is its command word. */
+function programWords(words) {
+  const at = new Set();
+  const cmd = words.findIndex((w) => !ASSIGN_RE.test(w));
+  if (cmd === -1) return at;
+  const name = basename(words[cmd]);
+  for (let i = cmd + 1; i < words.length; i += 1) {
+    if (JQ_RE.test(name) || (GH_RE.test(name) && /^--(jq|template)=/.test(words[i]))) at.add(i);
+    else if (GH_RE.test(name) && GH_PROGRAM_FLAGS.has(words[i])) at.add(i + 1);
+  }
+  return at;
+}
+
+// What a node -e script needs to load or launch other code (#61): a process, worker or module API, a dynamic import or
+// require, eval or Function, a computed member (`process[x]`, `globalThis[k]`), an escape that could spell a name, or an
+// import of anything but a file-system, path, URL, OS or util builtin. A script with none of these can only compute
+// and write text, so a string in it that names start.mjs, queue.mjs or claude --bg is no run.
+const JS_LAUNCH_RE = /child_process|worker_threads|\bspawn|\bexec|\bfork\b|getBuiltinModule|binding|dlopen|\bimport\s*\(|\brequire\b|\bWorker\b|\beval\b|\bFunction\b|\bReflect\b|\bconstructor\b|\bglobalThis\b|\bprocess\s*\[|\bmodule\b|\bDeno\b|\bBun\b|\\[ux]|[\w)\]]\s*\[\s*[^\]\s\d]/;
+const JS_IMPORT_RE = /\b(?:from|import)\s*(["'])(.*?)\1/g;
+const SAFE_IMPORT_RE = /^(node:)?(fs|fs\/promises|path|url|os|util)$/;
+const mayLaunch = (js) => JS_LAUNCH_RE.test(js) || [...js.matchAll(JS_IMPORT_RE)].some((m) => !SAFE_IMPORT_RE.test(m[2]));
+// A node -e script's text as names are looked for in it: quotes, `+` and whitespace dropped, so "st" + "art.mjs" reads whole.
+const jsNames = (js) => js.replace(new RegExp(`["'\`+\\s${LIT_TICK}]`, "g"), "");
+
 const EVAL_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-pe"]);
 const EVAL_PROGRAM_RE = /^(node|nodejs|bun)(\.exe)?$/i;
 
@@ -459,9 +498,13 @@ function walk(cmd, depth, visit, onOpaque, onEval) {
   const scan = (words, stdin, piped = false) => {
     if (!dataOnly) visit(words, stdin);
     const scripts = dataOnly ? new Map() : evalScripts(words);
+    const programs = programWords(words);
     words.forEach((w, i) => {
       if (scripts.has(i)) onEval(scripts.get(i));
-      else if (isNestedScript(w) && !(dataOnly && !UNRESOLVED_RE.test(w))) nested(piped || runsAsShell(words, i) ? unliteralLive(w) : unliteral(w));
+      else if (isNestedScript(w) && !(dataOnly && !UNRESOLVED_RE.test(w))) {
+        // A jq program or Go template keeps its quoted `$` literal: `$s` there is its own variable (#61).
+        nested(piped || runsAsShell(words, i) ? unliteralLive(w) : programs.has(i) ? w : unliteral(w));
+      }
     });
     // What a command piped into a shell prints may be its arguments (echo, printf): read them as one live script (#246).
     if (piped && words.length > 1) nested(unliteralLive(words.slice(1).join(" ")));
@@ -586,7 +629,11 @@ function commandWords(words, stdin) {
  * @returns {({ issues: number[] | undefined, standalone: boolean, unparsed?: true } | { auto: "dry" | "go", standalone: true })[]}
  */
 export function findStartInvocations(command) {
-  const cmd = String(command ?? "");
+  return startInvocations(String(command ?? ""), String(command ?? ""));
+}
+
+/** findStartInvocations of the Bash text `cmd`, where `typed` is the command as typed (PowerShell's, for that tool). */
+function startInvocations(cmd, typed) {
   const out = [];
   walk(
     cmd,
@@ -602,19 +649,20 @@ export function findStartInvocations(command) {
       });
     },
     (text) => {
-      if (/start\.mjs/i.test(text)) out.push({ issues: undefined, standalone: false, unparsed: true });
+      if (/start\.mjs/i.test(dequoted(text))) out.push({ issues: undefined, standalone: false, unparsed: true });
     },
-    // A node -e script that names start.mjs could import or spawn it; one the shell expands could be anything.
+    // A node -e script that names start.mjs and can load or launch code could import or spawn it (#61); one the shell
+    // expands could be anything.
     (js) => {
-      if (/start\.mjs/i.test(js) || UNRESOLVED_RE.test(js)) out.push({ issues: undefined, standalone: false });
+      if ((/start\.mjs/i.test(jsNames(js)) && mayLaunch(js)) || UNRESOLVED_RE.test(js)) out.push({ issues: undefined, standalone: false });
     },
   );
   // No raw-text fallback: `node $(echo …start.mjs)` and backticks leave `$` or a backtick in the script word, which
   // the visitor above already counts, and one would deny `git commit -m "…start.mjs" && echo "$X"`.
   // A trailing newline the model appends to a Bash command must not turn the plain command into a wrapped one.
-  const m = PLAIN_RE.exec(cmd.trim());
+  const m = PLAIN_RE.exec(typed.trim());
   if (out.length === 1 && m) out[0] = { issues: m[1].trim().split(" ").map(Number), standalone: true };
-  const a = AUTO_PLAIN_RE.exec(cmd.trim());
+  const a = AUTO_PLAIN_RE.exec(typed.trim());
   if (out.length === 1 && a) out[0] = { auto: a[1] ? "go" : "dry", standalone: true };
   return out;
 }
@@ -638,7 +686,7 @@ function scanQueueInvocations(command) {
   let unresolved = false;
   const cmd = String(command ?? "");
   // What find or xargs hands a command comes from elsewhere in the call: `find -name queue.mjs`, `echo …queue.mjs |`.
-  const namesAnywhere = /queue\.mjs/i.test(withoutLiteralSubstitutions(cmd));
+  const namesAnywhere = /queue\.mjs/i.test(dequoted(withoutLiteralSubstitutions(cmd)));
   walk(
     cmd,
     0,
@@ -655,10 +703,10 @@ function scanQueueInvocations(command) {
       });
     },
     (text) => {
-      if (/queue\.mjs/i.test(text)) found = true;
+      if (/queue\.mjs/i.test(dequoted(text))) found = true;
     },
     (js) => {
-      if (/queue\.mjs/i.test(js)) found = true;
+      if (/queue\.mjs/i.test(jsNames(js)) && mayLaunch(js)) found = true;
       else if (UNRESOLVED_RE.test(js)) unresolved = true;
     },
   );
@@ -687,19 +735,21 @@ function scanBgLaunches(command) {
       if (cmdWord !== undefined && UNRESOLVED_RE.test(cmdWord) && words.some((w) => BG_FLAG_RE.test(w) || (w.startsWith("-") && UNRESOLVED_RE.test(w)))) found = true;
     },
     (text) => {
-      if (/--(bg|background)/.test(text)) opaque = true;
+      if (/--(bg|background)/.test(dequoted(text))) opaque = true;
     },
-    // A node -e script that names claude and --bg could spawn it.
+    // A node -e script that names claude and --bg could spawn it, when it can launch anything at all (#61).
     (js) => {
-      if (/claude/i.test(js) && /--(bg|background)/.test(js)) found = true;
+      const names = jsNames(js);
+      if (/claude/i.test(names) && /--(bg|background)/.test(names) && mayLaunch(js)) found = true;
     },
   );
   // `$(which claude) --bg`: the lexer splits the substitution off, so claude and its flag land in different simple
   // commands. Only a `$(` that names claude, with a --bg word in the same call, fails closed; an unrelated "$VAR" does
   // not, nor does a literal `$(cat <<'EOF' … EOF)` message that merely names both. A call that only writes text has
   // no command a substitution could run as claude: every simple command in it, split-off substitutions included, is
-  // cat, echo, printf, cd or mkdir, and walk() reads each expanding part itself.
-  const raw = withoutLiteralSubstitutions(cmd);
+  // cat, echo, printf, cd or mkdir, and walk() reads each expanding part itself. Quotes are dropped first, so
+  // `$(which cla"ude") --"bg"` is read as it runs (#61).
+  const raw = dequoted(withoutLiteralSubstitutions(cmd));
   if (!found && !writesOnly(cmd) && /\$\([^)]*claude/i.test(raw) && /(^|[\s'"])--(bg|background)([=\s'"]|$)/.test(raw)) found = true;
   return { found: found || opaque, unparsed: !found && opaque };
 }
@@ -754,8 +804,20 @@ export function grantRefusal(grant, sessionId, run, now) {
  * @returns {null | { decision: "allow" | "deny", reason: string }}
  */
 export function decidePreToolUse(input, grant, now = Date.now()) {
-  if (input?.tool_name !== "Bash") return null;
-  const command = input.tool_input?.command;
+  const tool = input?.tool_name;
+  if (tool !== "Bash" && tool !== "PowerShell") return null;
+  const typed = String(input.tool_input?.command ?? "");
+  let command = typed;
+  if (tool === "PowerShell") {
+    // Read with PowerShell's rules, then scanned as Bash (#61). One that cannot be read fails closed on the names.
+    try {
+      command = powershellAsBash(typed);
+    } catch {
+      const text = dequoted(typed);
+      if (/queue\.mjs/i.test(text)) return { decision: "deny", reason: QUEUE_DENY_REASON };
+      return /start\.mjs|--(bg|background)/i.test(text) ? { decision: "deny", reason: PARSE_DENY_REASON } : null;
+    }
+  }
   const bg = scanBgLaunches(command);
   if (bg.found) return { decision: "deny", reason: bg.unparsed ? PARSE_DENY_REASON : BG_DENY_REASON };
   // Before any grant is read: no /start grant, of any form, reaches queue.mjs.
@@ -763,8 +825,8 @@ export function decidePreToolUse(input, grant, now = Date.now()) {
   if (queue.found) return { decision: "deny", reason: QUEUE_DENY_REASON };
   // A program named only at run time could be either script (findStartInvocations denies the same words); a command
   // that names start.mjs keeps the start reason. Only the reason differs: both deny.
-  if (queue.unresolved && !/start\.mjs/i.test(withoutLiteralSubstitutions(String(command ?? "")))) return { decision: "deny", reason: UNRESOLVED_DENY_REASON };
-  const found = findStartInvocations(command);
+  if (queue.unresolved && !/start\.mjs/i.test(dequoted(withoutLiteralSubstitutions(command)))) return { decision: "deny", reason: UNRESOLVED_DENY_REASON };
+  const found = startInvocations(command, typed);
   if (found.length === 0) return null;
   if (found.every((f) => f.unparsed)) return { decision: "deny", reason: PARSE_DENY_REASON };
   const deny = { decision: "deny", reason: DENY_REASON };

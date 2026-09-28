@@ -10,6 +10,9 @@
 //     claims it (renames it to <grant>.json.claimed) before any gh call and deletes that after the status is posted, so every route to review/owner needs a fresh /approve (#81). Every other owner command is denied; anything else gets no
 //     decision. A PreToolUse `allow` cannot skip an `ask` rule (observed on 2.1.283), so there is no `ask` rule for
 //     the owner command any more: this hook's deny is the barrier, and it holds in every permission mode.
+//   PreToolUse (PowerShell) runs the same hook (#61): powershellAsBash reads the command with PowerShell's rules into the
+//     Bash command with the same words, which is scanned as above; the plain form must also hold no character
+//     PowerShell gives a meaning of its own, and a command that cannot be read is denied when it names post-review.
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -711,7 +714,14 @@ function scan(cmd, depth, out) {
  * @returns {{ pr: string | undefined, standalone: boolean, unparsed?: true }[]}
  */
 export function findOwnerInvocations(command) {
-  const cmd = String(command ?? "");
+  return ownerInvocations(String(command ?? ""), String(command ?? ""), SHELL_META_RE);
+}
+
+/**
+ * findOwnerInvocations of the Bash text `cmd`, where `typed` is the command as the session typed it (the PowerShell
+ * text for the PowerShell tool) and `meta` the characters that keep it from being the plain command.
+ */
+function ownerInvocations(cmd, typed, meta) {
   // No raw-text pre-filter: the name can be split by quotes (pos"t-review.mjs) or matched by a glob, so only the
   // lexed words can tell.
   const out = [];
@@ -720,13 +730,386 @@ export function findOwnerInvocations(command) {
   // `echo "owner $X"`, and post-review.mjs itself refuses the owner's approval without a fresh grant (#81, ADR 0004).
   // Leading/trailing whitespace (a trailing newline the model appends to a Bash command is common) must not turn the
   // plain command into a "wrapped" one: trim before checking the exact prefix and for embedded shell metacharacters.
-  const trimmedCmd = cmd.trim();
-  if (out.length === 1 && out[0].pr !== undefined && trimmedCmd.startsWith(PLAIN_PREFIX) && !SHELL_META_RE.test(trimmedCmd)) {
-    const segments = lex(trimmedCmd); // scan() lexed this cmd already, so it cannot throw here
+  const trimmed = typed.trim();
+  if (out.length === 1 && out[0].pr !== undefined && trimmed.startsWith(PLAIN_PREFIX) && !meta.test(trimmed)) {
+    const segments = lex(cmd.trim()); // scan() lexed this cmd already, so it cannot throw here
     if (segments.length === 1 && segments[0][1] === "scripts/lanes/post-review.mjs" && segments[0][2] === "owner") out[0].standalone = true;
   }
   return out;
 }
+
+// --- PowerShell (#61) ------------------------------------------------------------------------------------------------
+// The PowerShell tool's command is read with PowerShell's own rules and written out as a Bash command with the same
+// words, which both guards then scan with their Bash rules. A literal piece of a word goes out single-quoted, and
+// whatever PowerShell expands ($x, ${x}, @x) as `$1`, which no guard resolves, so it reads as unresolved. A group,
+// subexpression, array, hashtable or script block is `$1` in its word too, and its statements go out as statements of
+// their own after the one holding it, so they are scanned as commands, the way a Bash substitution's are. A statement that starts with a value ($x, a string, a group, a type) is an expression
+// PowerShell prints, never a command it runs, so it goes out behind `echo`; `& x` and `. x` run x, so there x stays the
+// command word, whatever it is. Anything that cannot be read throws: the guards fail closed on it when it names what
+// they look for.
+
+const PS_SINGLE = "'‘’‚‛";
+const PS_DOUBLE = '"“”„';
+const PS_ESCAPES = { 0: "\0", a: "\x07", b: "\b", e: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v" };
+const PS_MAX_DEPTH = 32;
+const PS_VAR = "$1";
+const PS_NAME_CHAR_RE = /[\p{L}\p{N}_:]/u;
+// A statement whose first character is one of these starts with a value, not a command name.
+const PS_EXPRESSION_START = `$@([{-${PS_SINGLE}${PS_DOUBLE}`;
+// `$x =`, `[string]$x +=`, `$a, $b =`, `$h['k'].v =`: an assignment, whose right side is a statement of its own.
+const PS_ASSIGN_RE = /^(?:\[[\p{L}\p{N}_.,[\] ]+\]\s*)*\$(?:\{[^}\n]*\}|[\p{L}\p{N}_:]+)(?:\.[\p{L}\p{N}_]+|\[[^\]()\n]*\])*(?:\s*,\s*\$(?:\{[^}\n]*\}|[\p{L}\p{N}_:]+))*\s*(?:[-+*/%]|\?\?)?=(?!=)/u;
+// `>`, `>>`, `2>`, `*>>`, `2>&1`: PowerShell's redirections. `<` is reserved and never parses.
+const PS_REDIRECT_RE = /^([1-6*])?(>>?)(&[1-6])?/;
+// Commands that run a string as PowerShell code: each reads as Bash's eval, with its string arguments read as
+// PowerShell too. powershell and pwsh run their arguments as a command line, read the same way.
+const PS_EVAL_RE = /^(iex|invoke-expression|icm|invoke-command|start-job|sajb|start-threadjob)$/i;
+const PS_SHELL_RE = /^(powershell|pwsh)$/i;
+// Commands that start their first argument as a program, or open it with its file association (node, for a .mjs):
+// each reads as node, with every string argument split into words, as Start-Process joins -ArgumentList.
+const PS_LAUNCH_RE = /^(start-process|saps|start|invoke-item|ii)$/i;
+// .NET and script-block routes to running code or a program that no word shows: a command using any of them fails
+// closed as a whole.
+const PS_OPAQUE_RE = /scriptblock|invokescript|invokecommand|add-type|process\]?::start|processstartinfo|diagnostics\.process|activator\]/i;
+// The names a PowerShell quote or backtick inside a string could hide from a Bash reading.
+const PS_NAMES_RE = /start\.mjs|queue\.mjs|post-review|--(?:bg|background)|claude/gi;
+const psDequoted = (s) => s.replace(/['"`‘-„]/g, "");
+const bashQuote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
+const psNames = (s) => new Set([...s.matchAll(PS_NAMES_RE)].map((m) => m[0].toLowerCase()));
+// Every word of `text`, quotes and backticks dropped, behind `$1`: a command no guard can resolve, so it fails closed.
+const psOpaque = (text) => [PS_VAR, ...psDequoted(text).split(/\s+/).filter(Boolean).map(bashQuote)].join(" ");
+
+/** A word's parts as Bash text: literal runs single-quoted, everything else as it is. */
+function bashWord(parts) {
+  let s = "";
+  for (const p of parts) s += p.lit !== undefined ? bashQuote(p.lit) : p.raw;
+  return s === "" ? "''" : s;
+}
+
+/** Adds literal text to `parts`, joining it to a literal part before it. */
+function addLiteral(parts, s) {
+  if (parts.at(-1)?.lit !== undefined) parts.at(-1).lit += s;
+  else parts.push({ lit: s });
+}
+
+/**
+ * The escape a backtick at `i` starts: its text, and the index of its last character. `special` (in a double-quoted
+ * string or here-string) reads `n, `t, `u{…} and the rest as the characters they stand for; elsewhere a backtick only
+ * makes the next character literal.
+ */
+function psEscape(src, i, special) {
+  const c = src[i + 1];
+  if (c === undefined) throw new Error("backtick at the end");
+  if (special && c === "u" && src[i + 2] === "{") {
+    const close = src.indexOf("}", i + 3);
+    const code = close === -1 ? NaN : Number.parseInt(src.slice(i + 3, close), 16);
+    if (!Number.isInteger(code) || code > 0x10ffff) throw new Error("bad `u{…} escape");
+    return { text: String.fromCodePoint(code), end: close };
+  }
+  return { text: (special && PS_ESCAPES[c]) || c, end: i + 1 };
+}
+
+/**
+ * A group, subexpression, array, hashtable or script block from `from` up to `closer`: its value is `$1` in the word,
+ * and its statements are scanned beside the statement holding it (in `ctx.extra`). Returns the closer's index.
+ */
+function psGroup(src, from, closer, parts, ctx) {
+  const inner = psStatements(src, from, closer, ctx.depth + 1);
+  parts.push({ raw: PS_VAR });
+  if (inner.text.trim() !== "") ctx.extra.push(inner.text);
+  return inner.end;
+}
+
+/** `$…` at `i`: a subexpression, a variable or a literal `$`, added to `parts`. Returns the index of its last character. */
+function psDollar(src, i, parts, ctx) {
+  const next = src[i + 1] ?? "";
+  if (next === "(") return psGroup(src, i + 2, ")", parts, ctx);
+  if (next === "{") {
+    let j = i + 2;
+    for (; j < src.length && src[j] !== "}"; j += 1) if (src[j] === "`") j += 1;
+    if (j >= src.length) throw new Error("unterminated ${");
+    parts.push({ raw: PS_VAR });
+    return j;
+  }
+  if (next !== "" && "$?^".includes(next)) {
+    parts.push({ raw: PS_VAR });
+    return i + 1;
+  }
+  let j = i + 1;
+  while (j < src.length && PS_NAME_CHAR_RE.test(src[j])) j += 1;
+  if (j === i + 1) {
+    addLiteral(parts, "$");
+    return i;
+  }
+  parts.push({ raw: PS_VAR });
+  return j - 1;
+}
+
+/** The expandable text from `i` to `end` (a here-string's body): backtick escapes and `$` expand, quotes are text. */
+function psExpandable(src, i, end, parts, ctx) {
+  for (let j = i; j < end; j += 1) {
+    if (src[j] === "`") {
+      const e = psEscape(src, j, true);
+      addLiteral(parts, e.text);
+      j = e.end;
+    } else if (src[j] === "$") j = psDollar(src, j, parts, ctx);
+    else addLiteral(parts, src[j]);
+  }
+}
+
+/** The index of a here-string's closing quote (at the start of a line, followed by `@`) from `from`, or -1. */
+function hereStringEnd(src, from, quotes) {
+  for (let p = from; p < src.length - 1; p += 1) {
+    if (quotes.includes(src[p]) && src[p + 1] === "@" && (p === from || src[p - 1] === "\n")) return p;
+  }
+  return -1;
+}
+
+/**
+ * One PowerShell word from `start`: its parts (literal text, or raw Bash for what expands), `end` (the index after it),
+ * `value` (its text, with `$1` for each part that expands) and `literal` (nothing in it expands). A group's statements
+ * go to `ctx.extra`.
+ */
+function psWord(src, start, ctx) {
+  const parts = [];
+  let i = start;
+  for (; i < src.length; i += 1) {
+    const c = src[i];
+    if (/\s/.test(c) || ";|&,<>)}".includes(c)) break;
+    const here = i === start && c === "@" && (PS_SINGLE + PS_DOUBLE).includes(src[i + 1] ?? "\0") ? /^[ \t]*\r?\n/.exec(src.slice(i + 2)) : null;
+    if (here) {
+      const single = PS_SINGLE.includes(src[i + 1]);
+      const from = i + 2 + here[0].length;
+      const close = hereStringEnd(src, from, single ? PS_SINGLE : PS_DOUBLE);
+      if (close === -1) throw new Error("unterminated here-string");
+      const bodyEnd = close > from ? close - (src[close - 2] === "\r" ? 2 : 1) : from;
+      if (single) addLiteral(parts, src.slice(from, bodyEnd));
+      else psExpandable(src, from, bodyEnd, parts, ctx);
+      i = close + 1;
+    } else if (i === start && c === "@" && (src[i + 1] === "(" || src[i + 1] === "{")) {
+      i = psGroup(src, i + 2, src[i + 1] === "(" ? ")" : "}", parts, ctx);
+    } else if (i === start && c === "@" && PS_NAME_CHAR_RE.test(src[i + 1] ?? "")) {
+      // Splatting: @args passes a variable's values as arguments.
+      parts.push({ raw: PS_VAR });
+      while (PS_NAME_CHAR_RE.test(src[i + 1] ?? "")) i += 1;
+    } else if (c === "(" || c === "{") {
+      i = psGroup(src, i + 1, c === "(" ? ")" : "}", parts, ctx);
+    } else if (PS_SINGLE.includes(c)) {
+      // A single-quoted string: all literal; two quotes in a row are one quote.
+      let s = "";
+      let j = i + 1;
+      for (; j < src.length; j += 1) {
+        if (!PS_SINGLE.includes(src[j])) s += src[j];
+        else if (PS_SINGLE.includes(src[j + 1] ?? "\0")) s += src[++j];
+        else break;
+      }
+      if (j >= src.length) throw new Error("unterminated '");
+      addLiteral(parts, s);
+      i = j;
+    } else if (PS_DOUBLE.includes(c)) {
+      let j = i + 1;
+      for (; j < src.length; j += 1) {
+        if (PS_DOUBLE.includes(src[j])) {
+          if (!PS_DOUBLE.includes(src[j + 1] ?? "\0")) break;
+          addLiteral(parts, src[++j]);
+        } else if (src[j] === "`") {
+          const e = psEscape(src, j, true);
+          addLiteral(parts, e.text);
+          j = e.end;
+        } else if (src[j] === "$") j = psDollar(src, j, parts, ctx);
+        else addLiteral(parts, src[j]);
+      }
+      if (j >= src.length) throw new Error('unterminated "');
+      if (parts.length === 0) addLiteral(parts, "");
+      i = j;
+    } else if (c === "$") {
+      i = psDollar(src, i, parts, ctx);
+    } else if (c === "`") {
+      // A backtick before a line break continues the line: it ends this word.
+      if (src[i + 1] === "\n" || (src[i + 1] === "\r" && src[i + 2] === "\n")) break;
+      const e = psEscape(src, i, false);
+      addLiteral(parts, e.text);
+      i = e.end;
+    } else if ("*?[]".includes(c)) {
+      // A wildcard stays live: PowerShell 7 expands it in a native command's arguments outside Windows.
+      parts.push({ raw: c, glob: true });
+    } else {
+      addLiteral(parts, c);
+    }
+  }
+  if (i === start && parts.length === 0) throw new Error(`unexpected ${src[i]}`);
+  const value = parts.map((p) => (p.lit !== undefined ? p.lit : p.glob ? p.raw : PS_VAR)).join("");
+  return { parts, end: i, value, literal: parts.every((p) => p.lit !== undefined || p.glob), expression: PS_EXPRESSION_START.includes(src[start]) };
+}
+
+/** A PowerShell command name as the guards compare it: its last path component, lower case, without .exe. */
+const psCommandName = (value) => value.split(/[\\/]/).at(-1).toLowerCase().replace(/\.exe$/, "");
+
+/** Text PowerShell will run as a command, read as PowerShell: its Bash text, or an opaque command when unreadable. */
+function psShadow(text, depth) {
+  try {
+    return psStatements(text, 0, null, depth + 1).text;
+  } catch {
+    return psOpaque(text);
+  }
+}
+
+/**
+ * One statement as Bash text. `extra` collects statements to scan beside it: what a PowerShell runner runs, and a
+ * string whose quotes or backticks hide a name from the Bash reading.
+ */
+function psStatementText(stmt, extra, depth) {
+  const words = stmt.items.filter((x) => x.word).map((x) => x.word);
+  const first = words[0];
+  const expression = !stmt.call && first?.expression;
+  const name = first && !expression ? psCommandName(first.value) : "";
+  const runner = PS_EVAL_RE.test(name) || PS_SHELL_RE.test(name);
+  const launch = PS_LAUNCH_RE.test(name);
+  for (const w of words) {
+    const shown = psNames(w.value);
+    if ([...psNames(psDequoted(w.value))].some((n) => !shown.has(n))) extra.push(psOpaque(w.value));
+  }
+  if (runner) {
+    const args = words.slice(1);
+    // What a runner runs is only known at run time when any argument, or anything piped into it, expands.
+    if (args.some((w) => !w.literal) || (stmt.pipedInto && stmt.pipedLive)) extra.push(PS_VAR);
+    if (args.length > 0) extra.push(psShadow(args.map((w) => w.value).join(" "), depth));
+    for (const [k, w] of args.entries()) {
+      if (k > 0 && isEncodedFlag(args[k - 1].value) && BASE64_RE.test(w.value)) extra.push(psShadow(Buffer.from(w.value, "base64").toString("utf16le"), depth));
+    }
+  }
+  const out = expression ? ["echo"] : [];
+  for (const item of stmt.items) {
+    if (item.redirect) out.push(item.redirect);
+    else if (item.word === first && !expression && PS_EVAL_RE.test(name)) out.push("eval");
+    else if (item.word === first && !expression && launch) out.push("node");
+    else if (launch && item.word.literal) out.push(...item.word.value.split(/\s+/).filter(Boolean).map((s) => bashQuote(s.replaceAll('"', ""))));
+    else out.push(bashWord(item.word.parts));
+  }
+  return out.join(" ");
+}
+
+/**
+ * PowerShell statements from `start` up to `closer` (`)` or `}`, or the end of `src` when null), as Bash text. `end` is
+ * the index of the closer. Throws on anything unreadable: an unterminated string, comment or group, a stray closer, a
+ * `<`, nesting deeper than PS_MAX_DEPTH.
+ */
+function psStatements(src, start, closer, depth) {
+  if (depth > PS_MAX_DEPTH) throw new Error("nesting too deep");
+  const pieces = [];
+  const extra = [];
+  let stmt = { items: [], call: false };
+  // Whether a statement earlier in this pipeline holds a word that expands, and the literal words it sends on.
+  let pipeLive = false;
+  let pipeText = [];
+  const finish = (sep) => {
+    if (stmt.items.length > 0) {
+      stmt.pipedLive = pipeLive;
+      pieces.push(psStatementText(stmt, extra, depth));
+      pipeLive ||= stmt.items.some((x) => x.word && !x.word.literal);
+      pipeText.push(...stmt.items.filter((x) => x.word?.literal).map((x) => x.word.value));
+    }
+    const piped = sep === "|";
+    if (piped) pieces.push("|");
+    else {
+      pipeLive = false;
+      pipeText = [];
+      if (sep) pieces.push(sep);
+    }
+    stmt = { items: [], call: false, pipedInto: piped };
+  };
+  // A runner fed by a pipe runs what the statements before it send: read their literal words as PowerShell too.
+  const feedsRunner = () => {
+    const w = stmt.items.find((x) => x.word)?.word;
+    if (stmt.pipedInto && w && !stmt.call && PS_EVAL_RE.test(psCommandName(w.value)) && pipeText.length > 0) extra.push(psShadow(pipeText.join(" "), depth));
+  };
+  let i = start;
+  while (i < src.length) {
+    const c = src[i];
+    const atStart = stmt.items.length === 0 && !stmt.call;
+    if (/\s/.test(c) && c !== "\n") {
+      i += 1;
+    } else if (c === "`" && /^`\r?\n/.test(src.slice(i))) {
+      i += src[i + 1] === "\r" ? 3 : 2;
+    } else if (c === "<" && src[i + 1] === "#") {
+      const e = src.indexOf("#>", i + 2);
+      if (e === -1) throw new Error("unterminated <#");
+      i = e + 2;
+    } else if (c === "#") {
+      const e = src.indexOf("\n", i);
+      i = e === -1 ? src.length : e;
+    } else if (closer !== null && c === closer) {
+      feedsRunner();
+      finish();
+      return { text: pieces.join(" ") + extra.map((x) => ` ; ${x}`).join(""), end: i };
+    } else if (c === ")" || c === "}" || c === "<") {
+      throw new Error(`unexpected ${c}`);
+    } else if (c === "\n" || c === ";") {
+      feedsRunner();
+      finish(";");
+      i += 1;
+    } else if (c === "|" || (c === "&" && src[i + 1] === "&")) {
+      feedsRunner();
+      const op = src[i + 1] === c ? c + c : c;
+      finish(op);
+      i += op.length;
+    } else if (c === "&" && atStart) {
+      // The call operator: what follows is the command, whatever it is.
+      stmt.call = true;
+      i += 1;
+    } else if (c === "&") {
+      feedsRunner();
+      finish(";");
+      i += 1;
+    } else if (c === "." && atStart && /\s/.test(src[i + 1] ?? "")) {
+      // Dot-sourcing runs what follows, like the call operator.
+      stmt.call = true;
+      i += 1;
+    } else if (atStart && PS_ASSIGN_RE.test(src.slice(i))) {
+      i += PS_ASSIGN_RE.exec(src.slice(i))[0].length;
+    } else if (c === ",") {
+      i += 1;
+    } else if (PS_REDIRECT_RE.test(src.slice(i)) && (c === ">" || src[i + 1] === ">")) {
+      const [op, fd, arrow, dup] = PS_REDIRECT_RE.exec(src.slice(i));
+      stmt.items.push({ redirect: dup ? `${fd && fd !== "*" ? fd : ""}>${dup}` : `${fd === "*" ? "&" : (fd ?? "")}${arrow}` });
+      i += op.length;
+    } else if (/^--%(\s|$)/.test(src.slice(i, i + 4))) {
+      // Stop-parsing: the rest of the line goes to the program as it is, with only %NAME% expanded.
+      const e = src.indexOf("\n", i);
+      const rest = src.slice(i + 3, e === -1 ? src.length : e);
+      for (const chunk of rest.split(/\s+/).filter(Boolean)) {
+        const parts = [];
+        chunk.replaceAll('"', "").split(/(%[^%\s]+%)/).forEach((s, k) => (k % 2 === 1 ? parts.push({ raw: PS_VAR }) : s && addLiteral(parts, s)));
+        stmt.items.push({ word: { parts, value: chunk, literal: parts.every((p) => p.lit !== undefined), expression: false } });
+      }
+      i = e === -1 ? src.length : e;
+    } else {
+      const word = psWord(src, i, { depth, extra });
+      stmt.items.push({ word });
+      i = word.end;
+    }
+  }
+  if (closer !== null) throw new Error(`unclosed ${closer}`);
+  feedsRunner();
+  finish();
+  return { text: pieces.join(" ") + extra.map((x) => ` ; ${x}`).join(""), end: src.length };
+}
+
+/**
+ * A PowerShell command as a Bash command with the same words (see the note above psStatements), for the guards to scan.
+ * Throws when it cannot be read with PowerShell's rules, or holds a private-use character the guards use as a marker.
+ */
+export function powershellAsBash(command) {
+  const src = String(command ?? "");
+  if (/[-]/.test(src)) throw new Error("private-use character");
+  const { text } = psStatements(src, 0, null, 0);
+  return PS_OPAQUE_RE.test(psDequoted(src)) ? `${text} ; ${psOpaque(src)}` : text;
+}
+
+/** A PowerShell command's text with every quote and backtick dropped, for the fail-closed name check. */
+export const unquotedPowerShell = (command) => psDequoted(String(command ?? ""));
+
+// The owner command through PowerShell is plain only without any character PowerShell gives a meaning of its own.
+const PS_META_RE = /[;&|`$<>(){}@,#%*?[\]\n\r\\‘-„]/;
 
 /** The directory the UserPromptSubmit hook writes grants to: .lanes/approve/ in the checkout holding this script. */
 export function grantDir() {
@@ -753,8 +1136,22 @@ export function isFreshGrant(grant, pr, now = Date.now()) {
  * @returns {null | { decision: "allow" | "deny", reason: string }}
  */
 export function decidePreToolUse(input, grant, now = Date.now()) {
-  if (input?.tool_name !== "Bash") return null;
-  const found = findOwnerInvocations(input.tool_input?.command);
+  const tool = input?.tool_name;
+  if (tool !== "Bash" && tool !== "PowerShell") return null;
+  const command = String(input.tool_input?.command ?? "");
+  let found;
+  if (tool === "PowerShell") {
+    // Read with PowerShell's rules (#61); a command that cannot be read fails closed when it names post-review.
+    let bashText;
+    try {
+      bashText = powershellAsBash(command);
+    } catch {
+      return /post-review/i.test(unquotedPowerShell(command)) ? { decision: "deny", reason: UNPARSED_REASON } : null;
+    }
+    found = ownerInvocations(bashText, command, PS_META_RE);
+  } else {
+    found = findOwnerInvocations(command);
+  }
   if (found.length === 0) return null;
   if (found.some((f) => f.unparsed)) return { decision: "deny", reason: UNPARSED_REASON };
   const deny = { decision: "deny", reason: DENY_REASON };

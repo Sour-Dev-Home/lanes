@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AUTOMATED_INPUT_PREFIXES, DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, readGrant, runHook, validGrant } from "./approve-guard.mjs";
+import { AUTOMATED_INPUT_PREFIXES, DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, powershellAsBash, readGrant, runHook, validGrant } from "./approve-guard.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const SHA = "a".repeat(40);
@@ -1098,4 +1098,124 @@ test("#262 edge: a wrapper in another case, a non-string prompt or an empty prom
 
 test("#262 edge: a wrapped prompt with an unsafe session id still does nothing", () => {
   assert.deepEqual(onUserPromptSubmit({ session_id: "../x", prompt: `${WRAPPERS[0]}\n/approve 5` }, NOW), { action: "none" });
+});
+
+// --- #61: the PowerShell tool ---------------------------------------------------------------------------------------
+
+const ps = (command, over = {}) => bash(command, { tool_name: "PowerShell", ...over });
+const encodedPs = (text) => Buffer.from(text, "utf16le").toString("base64");
+
+test("#61 criterion 1: the approve guard's PreToolUse hook matches the PowerShell tool as well as Bash", () => {
+  const s = JSON.parse(readFileSync(".claude/settings.json", "utf8"));
+  const commands = (tool) => s.hooks.PreToolUse.filter((h) => new RegExp(`^(?:${h.matcher})$`).test(tool)).flatMap((h) => h.hooks.map((x) => x.command));
+  for (const tool of ["Bash", "PowerShell"]) assert.ok(commands(tool).some((c) => /scripts\/lanes\/approve-guard\.mjs" pre-tool-use$/.test(c)), tool);
+});
+
+test("#61 criterion 3: through PowerShell, the plain owner command is allowed only with the /approve grant", () => {
+  assert.equal(decidePreToolUse(ps(OWNER), grant(), NOW).decision, "allow");
+  assert.equal(decidePreToolUse(ps(`${OWNER}\r\n`), grant(), NOW).decision, "allow");
+  for (const [g, why] of [
+    [null, "no grant"],
+    [grant({ pr: 17 }), "another PR"],
+    [grant({ sessionId: "s2" }), "another session"],
+    [grant({ at: new Date(NOW - GRANT_TTL_MS).toISOString() }), "stale"],
+    [{ unreadable: true }, "unreadable"],
+  ]) {
+    assert.deepEqual(decidePreToolUse(ps(OWNER), g, NOW), { decision: "deny", reason: DENY_REASON }, why);
+  }
+});
+
+test("#61 criterion 3: the owner command wrapped, spliced or run by PowerShell's own launchers is denied even with a grant", () => {
+  for (const c of [
+    `& ${OWNER}`,
+    `${OWNER}; Get-Date`,
+    `${OWNER} | Out-Null`,
+    `${OWNER} # approve`,
+    `(${OWNER})`,
+    `$null = ${OWNER}`,
+    `if ($true) { ${OWNER} }`,
+    "node scripts/lanes/post-review.mjs owner success \"approved $(Get-Date)\" --pr 16",
+    "node scripts/lanes/post-review.mjs owner success approved --pr 16 --% --sha x",
+    "node scripts/lanes/pos't-review.mjs' owner success x --pr 16",
+    "node scripts/lanes/post-review.mjs `owner success x --pr 16",
+    "node scripts/lanes/post-review.mjs ow‘’ner success x --pr 16",
+    "$r = 'owner'; node scripts/lanes/post-review.mjs $r success x --pr 16",
+    "Start-Process node -ArgumentList 'scripts/lanes/post-review.mjs','owner','success','x','--pr','16'",
+    "Start-Process node \"scripts/lanes/post-review.mjs owner success x --pr 16\"",
+    "iex 'node scripts/lanes/post-review.mjs owner success x --pr 16'",
+    "'node scripts/lanes/post-review.mjs owner success x --pr 16' | Invoke-Expression",
+    "pwsh -c \"node scripts/lanes/post-review.mjs owner success x --pr 16\"",
+    `powershell -EncodedCommand ${encodedPs("node scripts/lanes/post-review.mjs owner success x --pr 16")}`,
+    "& $node scripts/lanes/post-review.mjs owner success x --pr 16",
+    "iex \"node scripts/lanes/pos‘’t-review.mjs owner success x --pr 16\"",
+  ]) {
+    assert.equal(decidePreToolUse(ps(c), grant(), NOW)?.decision, "deny", c);
+  }
+});
+
+test("#61 criterion 3: a PowerShell command that cannot be read fails closed when it names post-review", () => {
+  for (const c of [
+    "node scripts/lanes/post-review.mjs owner 'oops --pr 16",
+    "node scripts/lanes/pos't-review.mjs owner --pr 16",
+    "node scripts/lanes/post-review.mjs owner (16",
+    "node scripts/lanes/post-review.mjs owner --pr 16 }",
+    "node scripts/lanes/post-review.mjs owner --pr 16 < x",
+  ]) {
+    assert.deepEqual(decidePreToolUse(ps(c), grant(), NOW), { decision: "deny", reason: UNPARSED_REASON }, c);
+  }
+  for (const c of ["Get-Date 'oops", "echo (unclosed"]) assert.equal(decidePreToolUse(ps(c), null, NOW), null, c);
+});
+
+test("#61 criterion 3: ordinary PowerShell commands and non-owner reviewers get no decision", () => {
+  for (const c of [
+    "Get-ChildItem",
+    "node scripts/lanes/post-review.mjs --file .lanes/verdicts/test-hunter.json",
+    "node scripts/lanes/post-review.mjs test-hunter success ok --pr 16",
+    "Get-Content scripts/lanes/post-review.mjs",
+    "$sha = gh pr view 16 --json headRefOid --jq .headRefOid; gh pr checks 16",
+    "if ($LASTEXITCODE -ne 0) { exit 1 }",
+    "Get-ChildItem | ForEach-Object { $_.Name }",
+    "gh pr view 16 --json statusCheckRollup --jq '.statusCheckRollup[] as $s | $s.name'",
+  ]) {
+    assert.equal(decidePreToolUse(ps(c), null, NOW), null, c);
+  }
+});
+
+test("#61 criterion 4: an allowed and a denied PowerShell call through the hook itself", () => {
+  const dir = mkdtempSync(join(tmpdir(), "approve-guard-"));
+  const out = (s) => (s === "" ? null : JSON.parse(s).hookSpecificOutput);
+  try {
+    writeFileSync(join(dir, "s1.json"), JSON.stringify(grant()));
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(ps(OWNER)), { dir, now: NOW })).permissionDecision, "allow");
+    assert.equal(out(runHook("pre-tool-use", JSON.stringify(ps(`& ${OWNER}`)), { dir, now: NOW })).permissionDecision, "deny");
+    assert.equal(runHook("pre-tool-use", JSON.stringify(ps("Get-Date")), { dir, now: NOW }), "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#61 edge: powershellAsBash reads PowerShell quoting into Bash words", () => {
+  const words = (c) => findOwnerInvocations(powershellAsBash(c));
+  // The same owner command written with PowerShell's quotes reads as the owner command.
+  for (const c of [
+    "node scripts/lanes/post-review.mjs 'owner' x --pr 16",
+    'node scripts/lanes/post-review.mjs "owner" x --pr 16',
+    "node scripts/lanes/post-review.mjs ow`ner x --pr 16",
+    "node scripts/lanes/post-review.mjs ow''ner x --pr 16",
+    'node scripts/lanes/post-review.mjs ow""ner x --pr 16',
+    "node scripts/lanes/post-review.mjs @'\nowner\n'@ x --pr 16",
+    'node scripts/lanes/post-review.mjs @"\nowner\n"@ x --pr 16',
+    "node scripts/lanes/post-review.mjs `\n owner x --pr 16",
+    "node <# c #> scripts/lanes/post-review.mjs owner x --pr 16",
+  ]) {
+    assert.equal(words(c).length, 1, c);
+  }
+  // A backslash is literal in PowerShell, and two quotes inside a string are one quote character.
+  for (const c of ["node scripts/lanes/post-review.mjs 'o\\wner' x --pr 16", "node scripts/lanes/post-review.mjs 'ow''ner' x --pr 16", 'node scripts/lanes/post-review.mjs "ow""ner" x --pr 16']) {
+    assert.equal(words(c).length, 0, c);
+  }
+  assert.equal(words('Write-Output "$(node scripts/lanes/post-review.mjs owner --pr 16)"').length, 1);
+  assert.equal(decidePreToolUse(ps("node scripts/lanes/post-review.mjs owner success 'approved by owner' --pr 16"), grant(), NOW).decision, "allow");
+  assert.throws(() => powershellAsBash("x ''"), /private-use/);
+  assert.throws(() => powershellAsBash("(".repeat(40) + ")".repeat(40)), /too deep/);
 });
