@@ -142,6 +142,54 @@ test("edge: gitBlobSha matches git's id for the empty blob and for LF-only text"
   assert.equal(gitBlobSha(Buffer.from("hello\n")), "ce013625030ba8dba906f756967f9e9ca394464a");
 });
 
+// .claude/agents/security-reviewer.md (#160, ADR 0009 decision 3): the brief reads INDEX.md, then 1-3 sheets, cites
+// sheet and section, lets a sheet beat the checklist, and keeps the ADR 0004 and 0007 accepted-risk paragraphs verbatim.
+const BRIEF = ".claude/agents/security-reviewer.md";
+// Markdown hard-wraps at 120 columns, so compare prose with whitespace runs collapsed.
+export const flat = (text) => text.replace(/\s+/g, " ").trim();
+const brief = () => flat(read(BRIEF));
+
+const ACCEPTED_RISK = {
+  "ADR 0004": "Accepted risk (ADR 0004, `docs/adr/0004-approve-guard-accepted-risk.md`): the approve guard is best-effort defence in depth, not a barrier to a determined lane. A newly found way to build a command that reaches `post-review.mjs owner`, or to post `review/owner` directly, is `minor`, not a blocker. File it as a follow-up issue with the `lane-filed` label (`gh issue create --label lane-filed --body-file <file>`, the body in the Task form's layout) and name that issue in the finding. A regression, where something the guard or the script check previously caught now passes, is `critical`.",
+  "ADR 0007": "Accepted risk (ADR 0007, `docs/adr/0007-start-guard-accepted-risk.md`): the start guard is best-effort defence in depth, not a barrier to a determined lane. A newly found way to build a command that reaches `start.mjs`, `queue.mjs` or `claude --bg` is `minor`, not a blocker. File it as a follow-up issue with the `lane-filed` label (`gh issue create --label lane-filed --body-file <file>`, the body in the Task form's layout) and name that issue in the finding. A regression, where something the guard or the script check previously caught now passes, is `critical`.",
+};
+
+test("criterion 1 (#160): the brief reads INDEX.md first, then only the 1-3 sheets it points to, never the whole folder", () => {
+  const b = brief();
+  const at = b.indexOf("vendor/owasp-cheatsheets/INDEX.md");
+  assert.ok(at >= 0, "the brief does not name vendor/owasp-cheatsheets/INDEX.md");
+  assert.ok(at < b.indexOf("security-checklist.md"), "the brief must send the reviewer to INDEX.md before the checklist");
+  assert.match(b, /INDEX\.md` first/);
+  assert.match(b, /only the 1-3 sheets it points to/);
+  assert.match(b, /never read the whole folder/i);
+});
+
+test("criterion 2 (#160): every finding names sheet and section, and says so when no sheet matches", () => {
+  const b = brief();
+  assert.match(b, /Every finding names the sheet and section it rests on/);
+  assert.ok(b.includes("Nodejs Security Cheat Sheet § Do not use dangerous functions"), "the brief lacks the citation example");
+  assert.match(b, /no matching sheet/);
+});
+
+test("criterion 2 (#160): the brief's citation example names a real sheet and a real section of it", () => {
+  const sheet = read(join(SHEETS, "Nodejs_Security_Cheat_Sheet.md"));
+  assert.match(sheet, /^#+ Do not use dangerous functions\s*$/m);
+});
+
+test("criterion 3 (#160): where a sheet and security-checklist.md differ, the sheet wins", () => {
+  assert.match(brief(), /Where a sheet and `vendor\/agent-skills\/references\/security-checklist\.md` differ, the sheet wins/);
+});
+
+test("criterion 4 (#160): the ADR 0004 and ADR 0007 accepted-risk paragraphs are present word for word", () => {
+  const b = brief();
+  for (const [adr, para] of Object.entries(ACCEPTED_RISK)) assert.ok(b.includes(flat(para)), `the ${adr} accepted-risk paragraph changed or is missing`);
+});
+
+test("edge: flat collapses newlines and indentation so re-wrapped prose still matches", () => {
+  assert.equal(flat("  a\n  b\r\n\tc  "), "a b c");
+  assert.equal(flat(""), "");
+});
+
 test("edge: blobTable skips malformed rows", () => {
   const t = blobTable(`| ${"b".repeat(40)} | A.md |\n| nothex | B.md |\n| ${"c".repeat(39)} | C.md |`);
   assert.deepEqual([...t.keys()], ["A.md"]);
