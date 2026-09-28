@@ -1,11 +1,29 @@
 // scripts/lanes/start.test.mjs
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { START_DEFAULTS, inFlightIssues, launchArgs, main, parseSessionId, planStart, startConfig } from "./start.mjs";
+import { START_DEFAULTS, inFlightIssues, launchArgs, main as runStart, parseSessionId, planStart, startConfig } from "./start.mjs";
+import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
+
+// #118: start.mjs needs this session's fresh /start grant. Unless a test gives its own `session`, main runs as the
+// owner who just typed the matching /start: a grant for exactly these arguments is written before each call.
+const GRANT_DIR = mkdtempSync(join(tmpdir(), "start-grant-"));
+after(() => rmSync(GRANT_DIR, { recursive: true, force: true }));
+const OWNER = "owner-session";
+function matchingGrant(argv, at = Date.now()) {
+  const args = argv.map((a) => String(a).replace(/^#/, ""));
+  if (args[0] === "--auto") return { sessionId: OWNER, auto: args[1] === "--go" ? "go" : "dry", at: new Date(at).toISOString() };
+  return { sessionId: OWNER, issues: [...new Set(args.map(Number))], at: new Date(at).toISOString() };
+}
+function main(argv, deps) {
+  if (!deps || "session" in deps) return runStart(argv, deps);
+  writeFileSync(join(GRANT_DIR, `${OWNER}.json`), `${JSON.stringify(matchingGrant(argv))}\n`);
+  return runStart(argv, { ...deps, session: () => OWNER, grantDir: () => GRANT_DIR, now: () => Date.now() });
+}
 
 const ok = { code: 0, message: "no open blockers" };
 const issue = (number, over = {}) => ({ number, state: "OPEN", labels: ["ready", "tier:quick"], blockers: ok, ...over });
@@ -172,31 +190,43 @@ test("a mixed batch launches only what passes, in request order", () => {
 });
 
 // Criterion 8: exact launch arguments.
-test("launch arguments are exactly --bg and /lane N, with no permission flags", () => {
-  assert.deepEqual(launchArgs(18), ["--bg", "/lane 18"]);
+// #195: every lane is named lane-<N>, so `claude agents` shows which issue a session works.
+const NAMED = (n) => ["--bg", "--name", `lane-${n}`];
+
+test("launch arguments are exactly --bg, --name lane-N and /lane N, with no permission flags", () => {
+  assert.deepEqual(launchArgs(18), [...NAMED(18), "/lane 18"]);
 });
 
 // #153 criterion 2: --model <name> goes before /lane N when the tier has a model, and nothing is added otherwise.
-test("launch arguments add --model before /lane N for a tier with a model, per tier", () => {
+// #195: --name lane-N sits next to it.
+test("launch arguments add --model before /lane N for a tier with a model, per tier, next to --name lane-N", () => {
   const models = { skip: "haiku", quick: "sonnet", full: "opus" };
   for (const tier of ["skip", "quick", "full"]) {
-    assert.deepEqual(launchArgs(18, { tier, models }), ["--bg", "--model", models[tier], "/lane 18"], tier);
+    assert.deepEqual(launchArgs(18, { tier, models }), [...NAMED(18), "--model", models[tier], "/lane 18"], tier);
   }
 });
 
-test("launch arguments carry no --model when the tier has none", () => {
+test("launch arguments carry --name lane-N but no --model when the tier has none", () => {
   for (const tier of ["skip", "quick", "full"]) {
-    assert.deepEqual(launchArgs(18, { tier, models: {} }), ["--bg", "/lane 18"], tier);
-    assert.deepEqual(launchArgs(18, { tier }), ["--bg", "/lane 18"], tier);
+    assert.deepEqual(launchArgs(18, { tier, models: {} }), [...NAMED(18), "/lane 18"], tier);
+    assert.deepEqual(launchArgs(18, { tier }), [...NAMED(18), "/lane 18"], tier);
   }
-  assert.deepEqual(launchArgs(18, { tier: "full", models: { skip: "sonnet", quick: "sonnet" } }), ["--bg", "/lane 18"]);
+  assert.deepEqual(launchArgs(18, { tier: "full", models: { skip: "sonnet", quick: "sonnet" } }), [...NAMED(18), "/lane 18"]);
 });
 
 test("edge: launch arguments ignore an unknown or missing tier", () => {
   const models = { quick: "sonnet" };
-  assert.deepEqual(launchArgs(18, { models }), ["--bg", "/lane 18"]);
-  assert.deepEqual(launchArgs(18, { tier: "toString", models }), ["--bg", "/lane 18"]);
-  assert.deepEqual(launchArgs(18, { tier: "__proto__", models }), ["--bg", "/lane 18"]);
+  assert.deepEqual(launchArgs(18, { models }), [...NAMED(18), "/lane 18"]);
+  assert.deepEqual(launchArgs(18, { tier: "toString", models }), [...NAMED(18), "/lane 18"]);
+  assert.deepEqual(launchArgs(18, { tier: "__proto__", models }), [...NAMED(18), "/lane 18"]);
+});
+
+test("edge: each lane's name carries its own issue number, one word with no leading dash", () => {
+  for (const n of [1, 7, 118, 999999999]) {
+    const args = launchArgs(n, { tier: "quick", models: { quick: "sonnet" } });
+    assert.equal(args[args.indexOf("--name") + 1], `lane-${n}`);
+    assert.equal(args.filter((a) => a === "--name").length, 1);
+  }
 });
 
 // Criterion 7 and 9: id parsing.
@@ -409,8 +439,8 @@ test("main launches from the repository root and prints #N → id", () => {
   assert.equal(code, 0);
   assert.deepEqual(lines, ["#1 → id1", "#2 → id2"]);
   assert.deepEqual(launches, [
-    { args: ["--bg", "/lane 1"], cwd: "/repo" },
-    { args: ["--bg", "/lane 2"], cwd: "/repo" },
+    { args: [...NAMED(1), "/lane 1"], cwd: "/repo" },
+    { args: [...NAMED(2), "/lane 2"], cwd: "/repo" },
   ]);
 });
 
@@ -758,9 +788,9 @@ test("edge: main launches on the models from this repository's own lanes.config.
   const { code } = main(["1", "2", "3"], deps);
   assert.equal(code, 0);
   assert.deepEqual(launches, [
-    { args: ["--bg", "--model", "sonnet", "/lane 1"], cwd: "/repo" },
-    { args: ["--bg", "--model", "sonnet", "/lane 2"], cwd: "/repo" },
-    { args: ["--bg", "/lane 3"], cwd: "/repo" },
+    { args: [...NAMED(1), "--model", "sonnet", "/lane 1"], cwd: "/repo" },
+    { args: [...NAMED(2), "--model", "sonnet", "/lane 2"], cwd: "/repo" },
+    { args: [...NAMED(3), "/lane 3"], cwd: "/repo" },
   ]);
 });
 
@@ -987,9 +1017,9 @@ test("main launches each issue on its tier's model from start.models, in both mo
     3: { labels: ["ready", "tier:full"], body: form({ scope: "In: `c.mjs`." }) },
   };
   const expected = [
-    { args: ["--bg", "--model", "haiku", "/lane 1"], cwd: "/repo" },
-    { args: ["--bg", "--model", "sonnet", "/lane 2"], cwd: "/repo" },
-    { args: ["--bg", "/lane 3"], cwd: "/repo" },
+    { args: [...NAMED(1), "--model", "haiku", "/lane 1"], cwd: "/repo" },
+    { args: [...NAMED(2), "--model", "sonnet", "/lane 2"], cwd: "/repo" },
+    { args: [...NAMED(3), "/lane 3"], cwd: "/repo" },
   ];
   for (const argv of [["1", "2", "3"], ["--auto", "--go"]]) {
     const { deps, launches } = fakes({ issues, config });
@@ -1002,7 +1032,7 @@ test("main launches each issue on its tier's model from start.models, in both mo
 test("main launches with no --model when lanes.config.json sets no models", () => {
   const { deps, launches } = fakes({ issues: { 1: { labels: ["ready", "tier:full"] } } });
   assert.equal(main(["1"], deps).code, 0);
-  assert.deepEqual(launches, [{ args: ["--bg", "/lane 1"], cwd: "/repo" }]);
+  assert.deepEqual(launches, [{ args: [...NAMED(1), "/lane 1"], cwd: "/repo" }]);
 });
 
 test("edge: main launches nothing when start.models is malformed, in either mode", () => {
@@ -1199,4 +1229,377 @@ test("edge: a session in a bare issue-60 folder does not put #6 in flight", () =
   const { deps } = fakes({ issues: autoIssues(), sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-60" }] });
   const lines = main(["--auto"], deps).lines;
   assert.ok(lines.includes("#6: would start"), lines.join("\n"));
+});
+
+// --- #118: start.mjs checks the /start grant itself (ADR 0007 part 2) ----------------------------------------------
+
+const NOW = Date.parse("2026-09-28T12:00:00Z");
+// A fresh grant directory and deps running as session `session`, with grant `grant` on disk (none when null).
+function granted(grant, { session = OWNER, now = NOW, issues = { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } } } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "start-grant-"));
+  if (grant !== null) writeFileSync(join(dir, `${session}.json`), typeof grant === "string" ? grant : `${JSON.stringify(grant)}\n`);
+  const f = fakes({ issues });
+  const deps = { ...f.deps, session: () => session, grantDir: () => dir, now: () => now };
+  return { ...f, deps, dir, file: join(dir, `${session}.json`), done: () => rmSync(dir, { recursive: true, force: true }) };
+}
+const numbered = (issues, at = NOW, over = {}) => ({ sessionId: OWNER, issues, at: new Date(at).toISOString(), ...over });
+const autoForm = (auto, at = NOW) => ({ sessionId: OWNER, auto, at: new Date(at).toISOString() });
+
+// Refused: exit 2, one line, nothing read, cleaned or launched, and the grant (if any) left as it was.
+function assertRefused(g, argv, pattern) {
+  const before = existsSync(g.file) ? readFileSync(g.file, "utf8") : null;
+  const { code, lines } = runStart(argv, g.deps);
+  assert.equal(code, 2, lines.join("\n"));
+  assert.equal(lines.length, 1, lines.join("\n"));
+  assert.match(lines[0], /^nothing launched: /);
+  assert.match(lines[0], pattern);
+  assert.deepEqual(g.launches, []);
+  assert.deepEqual(g.calls, [], "nothing is read or cleaned before the grant is checked");
+  assert.equal(existsSync(g.file) ? readFileSync(g.file, "utf8") : null, before, "a refused run leaves the grant as it was");
+}
+
+test("#118 criterion 1: no grant for this session refuses <N...>, --auto and --auto --go", () => {
+  for (const argv of [["1"], ["--auto"], ["--auto", "--go"]]) {
+    const g = granted(null);
+    try {
+      assertRefused(g, argv, /no \/start grant/);
+    } finally {
+      g.done();
+    }
+  }
+});
+
+test("#118 criterion 1: a grant older than GRANT_TTL_MS refuses; one just under it runs", () => {
+  const stale = granted(numbered([1], NOW - GRANT_TTL_MS));
+  try {
+    assertRefused(stale, ["1"], /older than 15 minutes/);
+  } finally {
+    stale.done();
+  }
+  const fresh = granted(numbered([1], NOW - GRANT_TTL_MS + 1));
+  try {
+    assert.equal(runStart(["1"], fresh.deps).code, 0);
+  } finally {
+    fresh.done();
+  }
+});
+
+test("#118 criterion 1: a grant for other issue numbers refuses", () => {
+  for (const [grant, argv] of [[[1], ["2"]], [[1, 2], ["1"]], [[1], ["1", "2"]], [[2], ["1"]]]) {
+    const g = granted(numbered(grant));
+    try {
+      assertRefused(g, argv, /other issue numbers/);
+    } finally {
+      g.done();
+    }
+  }
+});
+
+test("#118 criterion 1: a dry-run grant with --go refuses", () => {
+  const g = granted(autoForm("dry"));
+  try {
+    assertRefused(g, ["--auto", "--go"], /--auto grant never allows --go/);
+  } finally {
+    g.done();
+  }
+});
+
+test("#118 criterion 1: by default the grant is .lanes/start/<CLAUDE_CODE_SESSION_ID>.json, beside the scripts", () => {
+  const src = readFileSync(new URL("./start.mjs", import.meta.url), "utf8");
+  assert.match(src, /process\.env\.CLAUDE_CODE_SESSION_ID/);
+  assert.match(src, /new URL\("\.\.\/\.\.\/\.lanes\/start\/", import\.meta\.url\)/);
+});
+
+test("#118 criterion 2: after its launches start.mjs deletes the grant, and a second run in the same turn is refused", () => {
+  const g = granted(numbered([1, 2]));
+  try {
+    const first = runStart(["1", "2"], g.deps);
+    assert.equal(first.code, 0, first.lines.join("\n"));
+    assert.equal(g.launches.length, 2);
+    assert.ok(!existsSync(g.file), "the grant is used up");
+    g.launches.length = 0;
+    g.calls.length = 0;
+    assertRefused(g, ["1", "2"], /no \/start grant/);
+  } finally {
+    g.done();
+  }
+});
+
+test("#118 criterion 2: a --auto --go run uses up its go grant", () => {
+  const g = granted(autoForm("go"), { issues: autoIssues() });
+  try {
+    assert.equal(runStart(["--auto", "--go"], g.deps).code, 0);
+    assert.ok(g.launches.length > 0);
+    assert.ok(!existsSync(g.file));
+  } finally {
+    g.done();
+  }
+});
+
+test("#118 criterion 4: a dry run needs a grant, and uses up only a dry-run grant", () => {
+  const dry = granted(autoForm("dry"), { issues: autoIssues() });
+  try {
+    const { code, lines } = runStart(["--auto"], dry.deps);
+    assert.equal(code, 0, lines.join("\n"));
+    assert.deepEqual(dry.launches, []);
+    assert.ok(!existsSync(dry.file), "the dry-run grant is used up");
+  } finally {
+    dry.done();
+  }
+  // A go grant is not spent on a dry run: it stays for the --auto --go it was typed for.
+  const go = granted(autoForm("go"), { issues: autoIssues() });
+  try {
+    assertRefused(go, ["--auto"], /--auto --go/);
+    assert.ok(existsSync(go.file), "a go grant survives a refused dry run");
+  } finally {
+    go.done();
+  }
+  const numberedGrant = granted(numbered([1]), { issues: autoIssues() });
+  try {
+    assertRefused(numberedGrant, ["--auto"], /issue numbers/);
+  } finally {
+    numberedGrant.done();
+  }
+});
+
+test("#118 edge: an auto grant never allows a numbered run", () => {
+  for (const auto of ["dry", "go"]) {
+    const g = granted(autoForm(auto));
+    try {
+      assertRefused(g, ["1"], /--auto/);
+    } finally {
+      g.done();
+    }
+  }
+});
+
+test("#118 edge: another session's grant, a missing or unsafe session id, or a malformed grant file refuses", () => {
+  const at = new Date(NOW).toISOString();
+  const cases = [
+    [numbered([1], NOW, { sessionId: "someone-else" }), OWNER, /another session/],
+    [numbered([1]), undefined, /no session id/],
+    [numbered([1]), "", /no session id/],
+    [numbered([1]), "../../etc", /no session id/],
+    ["{not json", OWNER, /unreadable or malformed/],
+    [JSON.stringify({ sessionId: OWNER, issues: [1], at: "yesterday" }), OWNER, /unreadable or malformed/],
+    [JSON.stringify({ sessionId: OWNER, issues: [1, 1], at }), OWNER, /unreadable or malformed/],
+    [JSON.stringify({ sessionId: OWNER, issues: [1], auto: "go", at }), OWNER, /unreadable or malformed/],
+    [JSON.stringify(null), OWNER, /no \/start grant/],
+    [JSON.stringify([1]), OWNER, /unreadable or malformed/],
+    ["", OWNER, /unreadable or malformed/],
+  ];
+  for (const [grant, session, pattern] of cases) {
+    const g = granted(grant);
+    g.deps.session = () => session;
+    try {
+      assertRefused(g, ["1"], pattern);
+    } finally {
+      g.done();
+    }
+  }
+});
+
+test("#118 edge: a grant dated in the future refuses", () => {
+  const g = granted(numbered([1], NOW + 60_000));
+  try {
+    assertRefused(g, ["1"], /dated in the future/);
+  } finally {
+    g.done();
+  }
+});
+
+test("#118 edge: bad arguments are refused as usage before the grant is read or spent", () => {
+  const g = granted(numbered([1]));
+  try {
+    const { code, lines } = runStart(["1", "x"], g.deps);
+    assert.equal(code, 2);
+    assert.match(lines[0], /^usage: /);
+    assert.ok(existsSync(g.file));
+  } finally {
+    g.done();
+  }
+});
+
+test("#118 edge: a run that stops after the grant check still uses up the grant", () => {
+  const g = granted(numbered([1]));
+  g.deps.config = () => ({ start: { maxLanes: 0 } });
+  try {
+    assert.equal(runStart(["1"], g.deps).code, 2);
+    assert.ok(!existsSync(g.file), "a grant is single use even when the run stops early");
+  } finally {
+    g.done();
+  }
+});
+
+test("#118 edge: a grant that cannot be removed is reported and fails the run", () => {
+  const g = granted(numbered([1]));
+  g.deps.removeGrant = () => {
+    throw new Error("EPERM: operation not permitted");
+  };
+  try {
+    const { code, lines } = runStart(["1"], g.deps);
+    assert.equal(code, 1, lines.join("\n"));
+    assert.deepEqual(g.launches.length, 1);
+    assert.equal(lines.at(-1), "the /start grant could not be removed: EPERM: operation not permitted");
+  } finally {
+    g.done();
+  }
+});
+
+// Extra case (not in the criteria or the lane's edge: list): Math.max(result.code, 1) must not downgrade a worse
+// exit code (2, from a run that never got to launch anything) to 1 just because the grant also failed to clear.
+test("#118 edge: a grant that cannot be removed does not downgrade a worse exit code", () => {
+  const g = granted(numbered([1]));
+  g.deps.config = () => ({ start: { maxLanes: 0 } });
+  g.deps.removeGrant = () => {
+    throw new Error("EPERM: operation not permitted");
+  };
+  try {
+    const { code, lines } = runStart(["1"], g.deps);
+    assert.equal(code, 2, lines.join("\n"));
+    assert.equal(lines.at(-1), "the /start grant could not be removed: EPERM: operation not permitted");
+    assert.deepEqual(g.launches, []);
+  } finally {
+    g.done();
+  }
+});
+
+test("#118 edge (#217): an overlapping run on the same grant is refused, because the first run claims it up front", () => {
+  const g = granted(numbered([1]));
+  let inner;
+  const config = g.deps.config;
+  g.deps.config = () => {
+    // A second start.mjs 1 arriving while the first is mid-run.
+    inner = runStart(["1"], { ...g.deps, config });
+    return config();
+  };
+  try {
+    const outer = runStart(["1"], g.deps);
+    assert.equal(outer.code, 0, outer.lines.join("\n"));
+    assert.deepEqual(inner, { code: 2, lines: ["nothing launched: no /start grant in this session"] });
+    assert.equal(g.launches.length, 1, "only one run launched");
+    assert.deepEqual(readdirSync(g.dir), [], "no grant or claimed copy is left behind");
+  } finally {
+    g.done();
+  }
+});
+
+test("#118 edge: a grant that stops matching between the check and the claim is refused and put back", () => {
+  const g = granted(numbered([1], NOW - GRANT_TTL_MS + 1));
+  let calls = 0;
+  g.deps.now = () => (calls++ === 0 ? NOW : NOW + 1);
+  try {
+    const before = readFileSync(g.file, "utf8");
+    const { code, lines } = runStart(["1"], g.deps);
+    assert.equal(code, 2);
+    assert.deepEqual(lines, ["nothing launched: the /start grant is older than 15 minutes"]);
+    assert.deepEqual(g.launches, []);
+    assert.deepEqual(readdirSync(g.dir), [`${OWNER}.json`]);
+    assert.equal(readFileSync(g.file, "utf8"), before);
+  } finally {
+    g.done();
+  }
+});
+
+// Extra case (not in the criteria or the lane's edge: list): the rename that claims the grant can itself race a
+// second run's own claim attempt (as opposed to the #217 test above, where the second run's *initial* check already
+// sees no file). Here the initial check still sees the still-present grant, but the file is gone by the time this
+// run tries to rename it away, exercising the renameSync catch block itself.
+test("#118 edge: a grant claimed by another run between the check and the rename is refused, not silently reused", () => {
+  const g = granted(numbered([1]));
+  g.deps.now = () => {
+    rmSync(g.file, { force: true });
+    return NOW;
+  };
+  try {
+    const { code, lines } = runStart(["1"], g.deps);
+    assert.equal(code, 2, lines.join("\n"));
+    assert.deepEqual(lines, ["nothing launched: the /start grant was already used by another run"]);
+    assert.deepEqual(g.launches, []);
+    assert.deepEqual(readdirSync(g.dir), [], "no grant or claimed copy left behind");
+  } finally {
+    g.done();
+  }
+});
+
+// Extra case: a fresh grant can be written to the session's path (by a new /start prompt) while the old one sits
+// claimed under review. If the claimed copy then turns out stale, the run must not clobber the fresh grant that has
+// since appeared at the original path, even though that leaves its own claimed copy behind unused.
+test("#118 edge: a fresh grant written while the old one is claimed is not clobbered when the claim turns out stale", () => {
+  const g = granted(numbered([1], NOW - GRANT_TTL_MS + 1));
+  const freshGrant = `${JSON.stringify(numbered([1], NOW))}\n`;
+  let calls = 0;
+  g.deps.now = () => {
+    calls++;
+    if (calls === 2) writeFileSync(g.file, freshGrant);
+    return calls === 1 ? NOW : NOW + GRANT_TTL_MS;
+  };
+  try {
+    const { code, lines } = runStart(["1"], g.deps);
+    assert.equal(code, 2, lines.join("\n"));
+    assert.deepEqual(lines, ["nothing launched: the /start grant is older than 15 minutes"]);
+    assert.deepEqual(g.launches, []);
+    const entries = readdirSync(g.dir);
+    assert.ok(entries.includes(`${OWNER}.json`), entries.join(", "));
+    assert.ok(entries.some((e) => e.includes(".claimed-")), entries.join(", "));
+    assert.equal(entries.length, 2, entries.join(", "));
+    assert.equal(readFileSync(g.file, "utf8"), freshGrant, "the fresh grant on disk is untouched");
+  } finally {
+    g.done();
+  }
+});
+
+test("#118 criterion 3, end to end: the hook allows start.mjs and leaves the grant; start.mjs then spends it", () => {
+  const g = granted(null);
+  try {
+    runHook("user-prompt-submit", JSON.stringify({ session_id: OWNER, prompt: "/start 1 2" }), { dir: g.dir, now: NOW });
+    const hook = JSON.parse(runHook("pre-tool-use", JSON.stringify({ tool_name: "Bash", session_id: OWNER, tool_input: { command: "node scripts/lanes/start.mjs 1 2" } }), { dir: g.dir, now: NOW + 1000 }));
+    assert.equal(hook.hookSpecificOutput.permissionDecision, "allow");
+    assert.ok(existsSync(g.file), "the hook no longer deletes the grant");
+    g.deps.now = () => NOW + 2000;
+    assert.equal(runStart(["1", "2"], g.deps).code, 0);
+    assert.ok(!existsSync(g.file));
+  } finally {
+    g.done();
+  }
+});
+
+// --- #185: an issue carrying needs-owner is refused -----------------------------------------------------------------
+
+test("#185: planStart refuses an issue carrying needs-owner, with the reason needs-owner", () => {
+  assert.deepEqual(plan([issue(1, { labels: ["ready", "tier:quick", "needs-owner"] }), issue(2)]), {
+    launch: [2],
+    refused: [{ number: 1, reason: "needs-owner" }],
+  });
+});
+
+test("#185: start <N> and --auto both refuse a needs-owner issue", () => {
+  const one = fakes({ issues: { 1: { labels: ["ready", "tier:quick", "needs-owner"] } } });
+  assert.deepEqual(main(["1"], one.deps), { code: 1, lines: ["#1: refused: needs-owner"] });
+  assert.equal(one.launches.length, 0);
+  const issues = autoIssues();
+  const n = Number(Object.keys(issues)[0]);
+  issues[n] = { ...issues[n], labels: ["ready", "tier:quick", "needs-owner"] };
+  const auto = fakes({ issues });
+  const lines = main(["--auto"], auto.deps).lines;
+  assert.ok(lines.includes(`#${n}: skipped: needs-owner`), lines.join("\n"));
+});
+
+test("#185 edge: needs-owner is checked after the issue's state, so a closed issue still says not open", () => {
+  assert.deepEqual(plan([issue(1, { state: "CLOSED", labels: ["ready", "tier:quick", "needs-owner"] })]).refused, [{ number: 1, reason: "not open" }]);
+});
+
+// --- #111: the docs say every /start runs the cleanup first --------------------------------------------------------
+
+test("#111: USING.md step 7 and start.md say /start runs the merged-lane cleanup first", () => {
+  const using = readFileSync(new URL("../../docs/USING.md", import.meta.url), "utf8");
+  const step7 = using.slice(using.indexOf("7. **Clean up merged lanes**"), using.indexOf("## What merges without you"));
+  assert.match(step7, /`\/start`/);
+  assert.match(step7, /issue numbers/);
+  assert.match(step7, /`--auto`/);
+  assert.match(step7, /same cleanup first/);
+  assert.match(step7, /`--auto` without `--go` only prints what it would remove/);
+  const start = readFileSync(new URL("../../.claude/commands/start.md", import.meta.url), "utf8");
+  assert.match(start, /prints cleanup lines first/);
+  assert.match(start, /`cleanup failed: <reason>` line never changes the plan/);
 });

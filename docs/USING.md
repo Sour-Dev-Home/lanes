@@ -10,23 +10,24 @@
 2. **Start up to 8 lanes**: open a fresh Claude Code session per issue and run `/lane <issue>`. Each lane works in its
    own worktree, writes the failing tests first, runs its reviewers, opens the PR and turns auto-merge on, then ends.
    Faster: `/start <issue> [<issue> ...]` checks each issue the way `/lane` does and launches the rest as background
-   sessions with `claude --bg "/lane <issue>"`, printing `#<issue> → <id>` for `claude attach` or `claude logs`. It
-   refuses, with the reason, an issue that is not open, lacks `ready` or one `tier:*` label, has an open blocker or is
-   already in flight; both issues of a pair whose paths overlap (pick one and run `/start` again); and anything past
+   sessions named `lane-<issue>` with `claude --bg --name lane-<issue> "/lane <issue>"`, printing `#<issue> → <id>`
+   for `claude attach` or `claude logs`. It refuses, with the reason, an issue that is not open, lacks `ready` or one
+   `tier:*` label, carries `needs-owner`, has an open blocker or is already in flight; both issues of a pair whose paths overlap (pick one and run `/start` again); and anything past
    `start.maxLanes` in `lanes.config.json` (8) lanes in flight, counting open `issue-*` PRs and running sessions.
    `/start --auto` picks for you: it prints which ready issues it would start and why it skips each of the rest (a
    blocker, an overlap with another pick or with files running work already touches, the cap), and launches nothing.
    `/start --auto --go` recomputes that plan and launches exactly its picks; the paths in `start.softPaths` (this file
    and `README.md` by default) never count as overlaps. Owner only: a lane or a schedule never runs it.
    `start.models` (optional) picks each lane's model by its issue's tier: it maps `skip`, `quick` and `full` to a
-   model name, and `/start` launches that tier's lanes with `claude --bg --model <name> "/lane <issue>"`. A tier left
+   model name, and `/start` adds `--model <name>` to that tier's launches. A tier left
    out runs on your default model. This repository sets `skip` and `quick` to `sonnet` and leaves `full` unset, so
    full-tier (security-sensitive) lanes keep the default. Any other key, or a value that is not one word (or starts
    with `-`), refuses the whole run with nothing launched.
    The start guard (`scripts/lanes/start-guard.mjs`, two hooks in `.claude/settings.json` next to the approve guard)
-   enforces that: it lets `start.mjs` run once, for the same issue numbers or the same `--auto` form, within 15 minutes
+   enforces that: it lets `start.mjs` run only for the same issue numbers or the same `--auto` form, within 15 minutes
    of you typing `/start <N ...>`, `/start --auto` or `/start --auto --go` in that session (a `/start --auto` never
-   allows `--go`), and it denies a direct `claude --bg` in every session and permission mode.
+   allows `--go`), and it denies a direct `claude --bg` in every session and permission mode. `start.mjs` checks the
+   same grant itself and deletes it after its launches, so it runs once per `/start` however it was reached (ADR 0007).
 3. **Watch with `/status`**: WAITING ON YOU, IN FLIGHT (each PR's stage), READY TO START, MERGED.
    A `Notification` hook (`scripts/lanes/notify-hook.mjs`) pops a notification when a lane stops at a permission
    prompt or needs input (with the `claude attach <id>` to reach it), or finishes with its PR waiting on you or failing.
@@ -42,8 +43,10 @@
    `issue-<N>-…` lane whose PR merged at exactly its local branch tip and whose worktree has no uncommitted or
    untracked changes, it runs `claude rm <id>` for its background session, `git worktree remove` and `git branch -D`,
    never with a force or discard flag; anything else is skipped with the reason, and a failed step stops only that
-   lane. `/health` runs it; `/status` prints `N merged lanes to clean up` when some are waiting. Remote branches are
-   left to GitHub's delete-on-merge, and closed-unmerged lanes are never touched.
+   lane. `/health` runs it; `/status` prints `N merged lanes to clean up` when some are waiting. Every `/start`, with
+   issue numbers or with `--auto`, runs the same cleanup first, so merged lanes no longer count as in flight;
+   `--auto` without `--go` only prints what it would remove. Remote branches are left to GitHub's delete-on-merge, and
+   closed-unmerged lanes are never touched.
 
 ## What merges without you
 
