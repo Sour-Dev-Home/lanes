@@ -146,7 +146,7 @@ test("edge: a bare issue-N worktree folder matches", () => {
 });
 
 test("edge: a cwd inside the lane's worktree matches", () => {
-  assert.equal(tick({ issueState: "CLOSED", sessions: [lane({ cwd: "/home/u/repo/.claude/worktrees/issue-7-x/scripts/" })] }).action, "remove");
+  assert.equal(tick({ issueState: "CLOSED", sessions: [lane({ cwd: "/repo/.claude/worktrees/issue-7-x/scripts/" })] }).action, "remove");
 });
 
 test("edge: issue-70 is not issue-7", () => {
