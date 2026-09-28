@@ -43,6 +43,13 @@ not gated by `start-guard.mjs`, and any session may already run `cleanup.mjs`'s 
 5. A single long-lived daemon covering every lane is rejected: it needs its own supervision story and is a single
    point of failure for every lane's cleanup. One reaper per lane needs no supervisor, exits on its own within 48
    hours, and its failure affects only its own issue.
+6. Amendment (#248, 2026-09-28): a relaunched issue's new reaper takes the lock over from an old reaper whose
+   session has ended, rather than exiting on a lock whose holder is gone. It takes the lock over — overwriting it
+   with its own pid and session — only once `claude agents --json` no longer lists the lock's session; while that
+   session is still listed, or the check itself fails to read, the new reaper leaves the lock alone and exits, as
+   before. Every reaper re-reads its own lock on each poll and exits at once, before touching the lane, the moment
+   the lock names a session other than its own — so an old reaper, once superseded, is inert from its very next
+   poll rather than acting on a lane it no longer owns.
 
 ## Decisions for the owner
 
@@ -58,6 +65,9 @@ not gated by `start-guard.mjs`, and any session may already run `cleanup.mjs`'s 
 - Up to `maxLanes` small `node` background processes exist at once, each polling `gh` and `claude` every 5 minutes.
 - `.lanes/reap/` joins `.lanes/start/` as git-ignored bookkeeping; losing it on a crash only risks a duplicate reaper,
   which the lock's pid and session check catches on the next launch.
+- One reaper per lane is exclusive up to a one-poll window, not at every instant: a relaunch's reaper may briefly
+  run alongside an old reaper whose session has already ended, until that old reaper's own next poll finds the lock
+  taken over and exits. Only one reaper is ever taking `remove` actions on the lane at a time.
 - No new security boundary: `reap.mjs`'s authority is exactly `cleanup.mjs`'s existing authority, scoped to one issue.
 
 ## Governs
