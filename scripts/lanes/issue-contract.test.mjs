@@ -43,6 +43,38 @@ test("a complete task carrying lane-filed never gets ready, even from the owner"
   assert.match(p.comment, /lane-filed/);
 });
 
+// #136: a lane that found its criteria already met swapped ready for needs-owner; the contract check must not undo it
+test("a complete task carrying needs-owner never gets ready, even from the owner, and loses it if present", () => {
+  const p = issuePlan(body, ["needs-owner", "ready", "tier:quick"], true);
+  assert.deepEqual(p.add, ["tier:full"]);
+  assert.deepEqual(p.remove, ["tier:quick", "ready"]);
+  assert.match(p.comment, /needs-owner/);
+  assert.ok(p.comment.startsWith(MARKER));
+});
+
+test("edge: needs-owner without ready adds no ready and removes nothing but stale tiers", () => {
+  const p = issuePlan(body, ["needs-owner", "tier:full"], true);
+  assert.deepEqual([p.add, p.remove], [["tier:full"], []]);
+});
+
+test("edge: needs-owner and lane-filed together still give neither ready, and the comment names lane-filed", () => {
+  const p = issuePlan(body, ["needs-owner", "lane-filed", "ready"], true);
+  assert.ok(!p.add.includes("ready"));
+  assert.ok(p.remove.includes("ready"));
+  assert.match(p.comment, /lane-filed/);
+});
+
+test("edge: an incomplete task carrying needs-owner still loses ready and lists what is missing", () => {
+  const p = issuePlan(body.replace("\ns\n", "\n_No response_\n"), ["needs-owner", "ready"], true);
+  assert.deepEqual(p.remove, ["ready"]);
+  assert.match(p.comment, /missing: scope/);
+});
+
+test("edge: a label that only contains needs-owner in its name does not hold the issue back", () => {
+  const p = issuePlan(body, ["not-needs-owner"], true);
+  assert.deepEqual(p.add, ["tier:full", "ready"]);
+});
+
 // main() looks the author's permission up by login and only then decides; `gh` is faked, so nothing leaves the test.
 function fakeGh(permission) {
   const calls = [];

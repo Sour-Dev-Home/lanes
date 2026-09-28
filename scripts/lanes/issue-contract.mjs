@@ -30,12 +30,16 @@ export function issuePlan(body, labels, canWrite) {
   const laneFiled = labels.includes("lane-filed");
   // C1: an untrusted author's issue never gets `ready`, however complete its contract.
   // I4: a lane's own follow-up (lane-filed) never gets `ready` automatically, even from the owner.
-  if (laneFiled || canWrite !== true) {
+  // #136: a lane that found the criteria already met swapped `ready` for `needs-owner`; re-adding `ready` would undo it.
+  const needsOwner = labels.includes("needs-owner");
+  if (laneFiled || needsOwner || canWrite !== true) {
     // R2: hand-adding `ready` will not help here — the gate itself rejects an issue not opened by someone with write
     // access, whatever labels it carries — so the real path is a maintainer opening the task themselves.
     const why = laneFiled
       ? "a maintainer must remove the lane-filed label to approve it"
-      : "a maintainer must open this task themselves; adding ready by hand will not help, since a lane also checks the issue's author";
+      : needsOwner
+        ? "a lane found nothing to build, so a maintainer must close it or rewrite it and remove the needs-owner label"
+        : "a maintainer must open this task themselves; adding ready by hand will not help, since a lane also checks the issue's author";
     return {
       isTask: true,
       add: [want],
