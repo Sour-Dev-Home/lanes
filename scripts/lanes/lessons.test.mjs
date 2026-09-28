@@ -155,7 +155,9 @@ for (const [label, f, reason] of failures) {
   test(`--check fails and names the file: ${label}`, () => {
     const r = main(["--check"], io([{ regular: true, ...f }, frag("general", "fine", 1)]));
     assert.equal(r.code, 1);
-    assert.match(r.err, new RegExp(`${f.name.replace(/\./g, "\\.")}: .*${reason.source}`));
+    const line = r.err.split("\n").find((l) => l.startsWith(`${f.name}: `));
+    assert.ok(line, `no line names ${f.name}:\n${r.err}`);
+    assert.match(line.slice(f.name.length + 2), reason);
     assert.doesNotMatch(r.err, /general-fine-1\.md/);
   });
 }
