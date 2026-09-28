@@ -1446,6 +1446,24 @@ test("#118 edge: a grant that cannot be removed is reported and fails the run", 
   }
 });
 
+// Extra case (not in the criteria or the lane's edge: list): Math.max(result.code, 1) must not downgrade a worse
+// exit code (2, from a run that never got to launch anything) to 1 just because the grant also failed to clear.
+test("#118 edge: a grant that cannot be removed does not downgrade a worse exit code", () => {
+  const g = granted(numbered([1]));
+  g.deps.config = () => ({ start: { maxLanes: 0 } });
+  g.deps.removeGrant = () => {
+    throw new Error("EPERM: operation not permitted");
+  };
+  try {
+    const { code, lines } = runStart(["1"], g.deps);
+    assert.equal(code, 2, lines.join("\n"));
+    assert.equal(lines.at(-1), "the /start grant could not be removed: EPERM: operation not permitted");
+    assert.deepEqual(g.launches, []);
+  } finally {
+    g.done();
+  }
+});
+
 test("#118 criterion 3, end to end: the hook allows start.mjs and leaves the grant; start.mjs then spends it", () => {
   const g = granted(null);
   try {
