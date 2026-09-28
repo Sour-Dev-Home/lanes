@@ -67,7 +67,8 @@ export function planTick({ issues = [], prs = [], sessions = [], maxLanes = STAR
   const candidates = [];
   for (const issue of openIssues) {
     if (!labelsOf(issue).includes("ready") || busy.has(issue.number)) continue;
-    const why = refusal(issue, openNumbers);
+    // #136: a lane found nothing to build; the owner closes or rewrites the issue before it can run again.
+    const why = labelsOf(issue).includes("needs-owner") ? "needs-owner" : refusal(issue, openNumbers);
     if (why) skipped.push({ number: issue.number, reason: why });
     else candidates.push(issue);
   }

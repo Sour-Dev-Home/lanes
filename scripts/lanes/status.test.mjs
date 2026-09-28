@@ -614,6 +614,51 @@ test("a pushed branch with no PR and no busy session is WAITING ON YOU as stoppe
   }
 });
 
+// #136: a lane that found its criteria already met left the issue labelled needs-owner
+const ALREADY_MET = "close it or rewrite it";
+const needsOwner = (n, ...more) => ({ ...issue(n), labels: [{ name: "needs-owner" }, ...more.map((name) => ({ name }))] });
+
+test("an open issue labelled needs-owner is WAITING ON YOU as [already met]", () => {
+  const s = summarize({ prs: [], issues: [needsOwner(60), issue(61)], merged: [], sessions: new Map() });
+  assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage, i.note]), [[60, "already met", ALREADY_MET]]);
+  assert.match(render(s, "24h"), /WAITING ON YOU \(1\)\n  #60 \[already met\] issue 60 — close it or rewrite it\n/);
+});
+
+test("edge: needs-owner wins even if the issue still carries ready, so it is never listed as ready to start", () => {
+  const s = summarize({ prs: [], issues: [needsOwner(60, "ready", "tier:quick")], merged: [], sessions: new Map() });
+  assert.deepEqual([s.waitingOnOwner.map((i) => i.number), s.ready, s.blocked], [[60], [], []]);
+});
+
+test("edge: an issue without needs-owner, ready or not, is never listed as already met", () => {
+  const s = summarize({ prs: [], issues: [issue(60), { ...issue(61), labels: [{ name: "lane-filed" }] }], merged: [], sessions: new Map() });
+  assert.deepEqual(s.waitingOnOwner, []);
+});
+
+test("edge: a needs-owner issue that still has a lane branch is listed once as already met, not also as stopped", () => {
+  const s = summarize({ prs: [], issues: [needsOwner(60, "ready")], merged: [], sessions: new Map(), laneBranches: branches(60) });
+  assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage]), [[60, "already met"]]);
+  assert.deepEqual(s.inFlight, []);
+});
+
+test("edge: a needs-owner issue with an open PR or a busy session keeps showing as the PR or the running lane, not as already met", () => {
+  const withPr = summarize({ prs: [pr(7, [gate("PENDING", "waiting for review/test-hunter")], { closingIssuesReferences: [{ number: 60 }] })], issues: [needsOwner(60)], merged: [], sessions: new Map() });
+  assert.deepEqual([withPr.waitingOnOwner, withPr.inFlight.map((i) => i.number)], [[], [7]]);
+  const sessions = laneSessions([agent("42c93c57", wt("issue-60-x"))], ROOT);
+  const running = summarize({ prs: [], issues: [needsOwner(60)], merged: [], sessions });
+  assert.deepEqual([running.waitingOnOwner, running.inFlight.map((i) => [i.number, i.stage])], [[], [[60, "running"]]]);
+});
+
+test("edge: a needs-owner issue whose session is waiting on a prompt shows as the waiting lane, not as already met", () => {
+  const sessions = laneSessions([waitingAgent("42c93c57", wt("issue-60-x"))], ROOT);
+  const s = summarize({ prs: [], issues: [needsOwner(60)], merged: [], sessions });
+  assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage]), [[60, "running"]]);
+});
+
+test("edge: several needs-owner issues are each listed once, in issue order", () => {
+  const s = summarize({ prs: [], issues: [needsOwner(60), needsOwner(62)], merged: [], sessions: new Map() });
+  assert.deepEqual(s.waitingOnOwner.map((i) => i.number), [60, 62]);
+});
+
 test("--json carries the stopped stage, with the idle session when there is one", () => {
   const sessions = laneSessions([idleAgent("42c93c57", wt("issue-10-x"))], ROOT);
   const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions, laneBranches: branches(10) });

@@ -253,6 +253,12 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
     const session = taken.has(issue.number) ? undefined : sessions.get(issue.number);
     // A lane that pushed or kept a branch and then stopped (e.g. at a usage limit) opens no PR: the owner restarts it.
     const idle = !session || (session.state === PROMPT_STATE && !session.waiting);
+    // A lane found every criterion already met on main and took the issue out of the ready pool (#136). An open PR
+    // or a busy session on the issue still shows as such.
+    if (labels.includes("needs-owner") && !taken.has(issue.number) && idle) {
+      out.waitingOnOwner.push({ number: issue.number, title: issue.title, stage: "already met", note: "close it or rewrite it" });
+      continue;
+    }
     if (!taken.has(issue.number) && labels.includes("ready") && branches.length && idle) {
       const item = { number: issue.number, title: issue.title, stage: "stopped", note: `no PR yet: restart with /start ${issue.number}` };
       out.waitingOnOwner.push(session ? { ...item, session: { id: session.id, state: session.state } } : item);

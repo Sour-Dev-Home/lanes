@@ -172,6 +172,29 @@ test("edge: empty snapshot is idle with no launches, waits or skips", () => {
   assert.ok(out.lines.length >= 1);
 });
 
+// #136: a needs-owner issue is never launched, even if it still carries ready
+test("a needs-owner issue that still carries ready is skipped, not launched, and says why", () => {
+  const out = tick({ issues: [issue(1, ["src/a.mjs"], { labels: ["ready", "needs-owner", "tier:quick"] }), issue(2, ["src/b.mjs"])] });
+  assert.deepEqual(out.launch, [2]);
+  assert.ok(out.lines.some((l) => l === "#1: skipped: needs-owner"));
+});
+
+test("edge: needs-owner without ready is not launched and not listed as skipped", () => {
+  const out = tick({ issues: [issue(1, ["src/a.mjs"], { labels: ["needs-owner", "tier:quick"] })] });
+  assert.deepEqual(out.launch, []);
+  assert.ok(!out.lines.some((l) => l.startsWith("#1:")));
+});
+
+test("edge: a needs-owner issue does not claim a lane slot from the cap", () => {
+  const out = tick({ maxLanes: 1, issues: [issue(1, ["src/a.mjs"], { labels: ["ready", "needs-owner", "tier:quick"] }), issue(2, ["src/b.mjs"])] });
+  assert.deepEqual(out.launch, [2]);
+});
+
+test("edge: a ready issue whose label only contains needs-owner in its name is still launched", () => {
+  const out = tick({ issues: [issue(1, ["src/a.mjs"], { labels: ["ready", "not-needs-owner", "tier:quick"] })] });
+  assert.deepEqual(out.launch, [1]);
+});
+
 test("edge: a ready issue without exactly one tier:* label is skipped, not launched", () => {
   const out = tick({ issues: [issue(1, ["src/a.mjs"], { labels: ["ready"] }), issue(2, ["src/b.mjs"], { labels: ["ready", "tier:quick", "tier:full"] })] });
   assert.deepEqual(out.launch, []);

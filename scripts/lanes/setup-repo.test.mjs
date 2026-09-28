@@ -26,6 +26,23 @@ test("labels include the tiers, ready, contract:breaking, digest and lane-filed"
   for (const n of ["tier:skip", "tier:quick", "tier:full", "ready", "contract:breaking", "digest", "lane-filed"]) assert.ok(names.includes(n), n);
 });
 
+// #136: a lane that finds nothing to build labels the issue needs-owner; adopters get the label from setup-repo
+test("labels include needs-owner, next to lane-filed, with the description the lane relies on", () => {
+  const names = LABELS.map((l) => l.name);
+  const label = LABELS.find((l) => l.name === "needs-owner");
+  assert.ok(label, "needs-owner is created");
+  assert.equal(label.description, "A lane found nothing to build; the owner closes or rewrites it");
+  assert.equal(names.indexOf("needs-owner"), names.indexOf("lane-filed") + 1);
+});
+
+test("edge: every label has a name, a 6-digit hex color and a description of at most 100 characters (GitHub's limit), and names are unique", () => {
+  for (const l of LABELS) {
+    assert.match(l.color, /^[0-9a-f]{6}$/i, l.name);
+    assert.ok(l.description.length > 0 && l.description.length <= 100, l.name);
+  }
+  assert.equal(new Set(LABELS.map((l) => l.name)).size, LABELS.length);
+});
+
 // M6: setup-repo must update an existing "main (lanes)" ruleset by id, never create a duplicate
 test("findRulesetId finds an existing ruleset by name, or null", () => {
   assert.equal(findRulesetId([{ id: 1, name: "other" }, { id: 42, name: "main (lanes)" }], "main (lanes)"), 42);
