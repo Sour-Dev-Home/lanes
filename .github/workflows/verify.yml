@@ -7,11 +7,33 @@ on:
 permissions:
   contents: read
 jobs:
-  verify:
-    runs-on: ubuntu-latest
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: 22
+          - os: ubuntu-latest
+            node: 24
+          - os: windows-latest
+            node: 22
+            # Informational until #249 confirms the suite is green on the hosted windows-latest runner.
+            informational: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.informational == true }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
       - run: npm test
+  verify:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      # informational (windows) legs use continue-on-error, so a windows failure never turns needs.test.result
+      # to failure; this only fails when a required (non-windows) matrix entry fails.
+      - if: needs.test.result != 'success'
+        run: exit 1
