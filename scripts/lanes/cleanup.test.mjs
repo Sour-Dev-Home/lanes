@@ -514,6 +514,21 @@ test("cleanupMerged retries a claimed claude rm with a sessionEnded dep, and rep
   assert.match(lines[0], /^failed issue-7-x \(PR #90\) at claude rm s7: .*session x9 is still running/);
 });
 
+test("edge: cleanupMerged's default sessionEnded consults the loaded sessions and run, not a stub", () => {
+  const inputs = { worktrees: [main, wt("issue-7-x")], sessions: [session("s7", "issue-7-x")], prs: [merged("issue-7-x")] };
+  const path = `${ROOT}/.claude/worktrees/issue-7-x`;
+  const ran = [];
+  const run = (cmd, args) => {
+    const line = `${cmd} ${args.join(" ")}`;
+    if (line === "claude rm s7" && !ran.includes("claude rm x9")) throw CLAIM("x9");
+    if (line === "claude logs x9") throw Object.assign(new Error("exit 1"), { stderr: "No job matching 'x9'." });
+    ran.push(line);
+  };
+  const lines = cleanupMerged({ deps: { load: () => inputs, run, stillThere: () => true } });
+  assert.deepEqual(ran, ["claude rm x9", "claude rm s7", `git worktree remove ${path}`, "git branch -D issue-7-x"]);
+  assert.match(lines[0], /^removed issue-7-x \(PR #90\)/);
+});
+
 test("/health runs cleanup.mjs and states it as its one exception; /status only shows output and runs nothing", async () => {
   const { readFileSync } = await import("node:fs");
   const read = (name) => readFileSync(new URL(`../../.claude/commands/${name}`, import.meta.url), "utf8");
