@@ -23,7 +23,8 @@ const git = (cwd, ...args) => execFileSync("git", args, gitOptions(cwd)).trim();
 
 // A repository with a bare origin and one pushed commit on main. `w.calls` records every fake `run`.
 function world() {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "lanes-lifecycle-")));
+  // The native form: on Windows the temp dir can be an 8.3 short path (RUNNER~1) that git never reports.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "lanes-lifecycle-")));
   const origin = join(dir, "origin.git");
   const root = join(dir, "repo");
   mkdirSync(root);
