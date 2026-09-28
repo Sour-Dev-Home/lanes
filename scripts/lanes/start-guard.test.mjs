@@ -965,3 +965,169 @@ test("#118: an allowed pre-tool-use leaves every grant form in place", () => {
     }
   }
 });
+
+// --- #113: runs through find -exec and xargs, redirection targets (#191), backtick substitutions (#197) -------------
+
+const decide = (cmd) => decidePreToolUse(bash(cmd), grant(), NOW);
+
+test("#113 criterion 1: find -exec/-execdir node runs of queue.mjs and start.mjs are denied with their own reason", () => {
+  for (const cmd of ["find scripts -name queue.mjs -exec node {} \\;", "find . -name queue.mjs -execdir node {} +", "find scripts/lanes -name 'queue.mjs' -exec node {} ';'"]) {
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: QUEUE_DENY_REASON }, cmd);
+    assert.equal(findQueueInvocations(cmd), true, cmd);
+  }
+  for (const cmd of ["find scripts -name start.mjs -exec node {} \\;", "find . -name start.mjs -execdir node {} 12 +"]) {
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: DENY_REASON }, cmd);
+    assert.ok(findStartInvocations(cmd).length > 0, cmd);
+  }
+});
+
+test("#113 criterion 2: xargs node, and xargs -I{} node {}, are denied", () => {
+  for (const cmd of ["echo scripts/lanes/queue.mjs | xargs node", "echo scripts/lanes/queue.mjs | xargs -I{} node {}", "echo scripts/lanes/queue.mjs | xargs -I {} node {}", "echo scripts/lanes/queue.mjs | xargs -n 1 node"]) {
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: QUEUE_DENY_REASON }, cmd);
+  }
+  for (const cmd of ["echo scripts/lanes/start.mjs | xargs node", "echo scripts/lanes/start.mjs | xargs -I{} node {} 12"]) {
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+});
+
+test("extra (test-hunter): a queue.mjs run reached through find -exec or xargs is denied under every grant shape, like every other QUEUE_RUNS form", () => {
+  // Not covered by #95's own QUEUE_RUNS list (written before #113 added find/xargs indirection) nor by #113's own
+  // tests (which only check the default valid /start grant via the `decide` helper): a /start or /start --auto --go
+  // grant, or an unreadable one, must not open a path to queue.mjs through find -exec/xargs any more than the direct
+  // forms already covered above.
+  const grants = [null, grant(), grant({ issues: [12] }), AUTO_GO_GRANT(), { unreadable: true }];
+  for (const cmd of ["find scripts -name queue.mjs -exec node {} \\;", "echo scripts/lanes/queue.mjs | xargs node"]) {
+    assert.equal(findQueueInvocations(cmd), true, cmd);
+    for (const g of grants) assert.deepEqual(decidePreToolUse(bash(cmd), g, NOW), { decision: "deny", reason: QUEUE_DENY_REASON }, `${JSON.stringify(g)} ${cmd}`);
+  }
+});
+
+test("#113 criterion 3: find without -exec and xargs running something else stay allowed", () => {
+  for (const cmd of ["find . -name queue.mjs", "find scripts -name start.mjs -print", "git ls-files | xargs grep queue", "xargs grep queue < files.txt", "find . -name '*.mjs' -exec grep -l queue {} \\;"]) {
+    assert.equal(decide(cmd), null, cmd);
+    assert.equal(findQueueInvocations(cmd), false, cmd);
+    assert.deepEqual(findStartInvocations(cmd), [], cmd);
+  }
+});
+
+test("#113 criterion 5 (#191): a node --test run redirected to a path holding a variable gets no decision", () => {
+  const cmd = 'node --test a.test.mjs > "$OUTDIR/t.txt" 2>&1';
+  assert.deepEqual(findStartInvocations(cmd), []);
+  assert.equal(decide(cmd), null);
+});
+
+test("#113 criterion 6 (#191): a redirection target and the fd number before it are not words of the command", () => {
+  for (const cmd of ["node a.mjs 2>$ERR", "node --test a.test.mjs >> $LOG", "node -r x a.mjs < $IN", 'node --test a.test.mjs 2> "$D/e.txt" 1>&2', "node --test a.test.mjs &> $OUT", "node --test a.test.mjs >| $OUT"]) {
+    assert.deepEqual(findStartInvocations(cmd), [], cmd);
+    assert.equal(decide(cmd), null, cmd);
+  }
+  // A fd number with a space before `>` is an argument, and a target that is start.mjs is not a run.
+  assert.equal(decide("node --test a.test.mjs 2 > out.txt"), null);
+  assert.equal(decide("node a.mjs > scripts/lanes/start.mjs"), null);
+  assert.equal(decide("node a.mjs > scripts/lanes/queue.mjs"), null);
+});
+
+test("#113 criterion 7 (#191): a substitution in a redirection target still fails closed, and a herestring is a script", () => {
+  for (const cmd of ['echo x > "$(node scripts/lanes/start.mjs 12)"', 'echo x > "`node scripts/lanes/start.mjs 12`"', "echo x > `node scripts/lanes/start.mjs 12`", 'bash <<< "node scripts/lanes/start.mjs 12"', 'node a.mjs 2> "$(node scripts/lanes/start.mjs 12)"']) {
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+});
+
+test("#113 criterion 9 (#197): a backtick queue.mjs run as a printf's redirection target is denied", () => {
+  for (const cmd of ["printf x > `node scripts/lanes/queue.mjs 12`", "printf '%s' x > `node scripts/lanes/queue.mjs 12`", "printf x >`node scripts/lanes/queue.mjs 12`"]) {
+    assert.equal(findQueueInvocations(cmd), true, cmd);
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: QUEUE_DENY_REASON }, cmd);
+  }
+});
+
+test("#113 criterion 10 (#197): the same backtick target for start.mjs and claude --bg is denied with its reason", () => {
+  assert.deepEqual(decide("printf x > `node scripts/lanes/start.mjs 12`"), { decision: "deny", reason: DENY_REASON });
+  assert.deepEqual(decide("printf x > `claude --bg -p hi`"), { decision: "deny", reason: BG_DENY_REASON });
+  assert.equal(findBgLaunches("printf x > `claude --bg -p hi`"), true);
+  // Not only as a target: a backtick run anywhere after the command word.
+  assert.deepEqual(decide("ls `node scripts/lanes/queue.mjs 12`"), { decision: "deny", reason: QUEUE_DENY_REASON });
+});
+
+test("#113 edge: find with a later -exec, a shell -exec, or no terminator still runs node on what it found", () => {
+  for (const cmd of ["find . -name queue.mjs -exec echo {} \\; -exec node {} \\;", "find . -name queue.mjs -exec sh -c 'node {}' \\;", "find . -name queue.mjs -ok node {} \\;"]) {
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: QUEUE_DENY_REASON }, cmd);
+  }
+  // Nothing names a lane script, but the found path is known only at run time: it fails closed, as `node $X` does.
+  for (const cmd of ["find . -exec node {}", "find . -name '*.test.mjs' -exec node --test {} +"]) {
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: UNRESOLVED_DENY_REASON }, cmd);
+  }
+});
+
+test("#113 edge: xargs replace-string forms, value options and --, and input run as the command itself", () => {
+  for (const cmd of ["echo scripts/lanes/queue.mjs | xargs --replace=X node X", "echo scripts/lanes/queue.mjs | xargs -i node {}", "echo scripts/lanes/queue.mjs | xargs -d x -P 4 -- node", "echo scripts/lanes/queue.mjs | xargs -I{} {}", "echo scripts/lanes/queue.mjs | timeout 5 xargs node"]) {
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: QUEUE_DENY_REASON }, cmd);
+  }
+  assert.deepEqual(decide("git ls-files | xargs node"), { decision: "deny", reason: UNRESOLVED_DENY_REASON });
+  assert.deepEqual(decide("echo --bg | xargs claude"), { decision: "deny", reason: BG_DENY_REASON });
+});
+
+test("#113 edge: a bare xargs (it runs echo), or one missing its -I value, gets no decision", () => {
+  for (const cmd of ["echo scripts/lanes/queue.mjs | xargs", "xargs -I", "xargs -n 1", "xargs -- "]) assert.equal(decide(cmd), null, cmd);
+});
+
+test("#113 edge: node reads a stdin target as its script only when no argument is one", () => {
+  assert.deepEqual(decide("node < $IN"), { decision: "deny", reason: UNRESOLVED_DENY_REASON });
+  assert.deepEqual(decide("node < scripts/lanes/start.mjs"), { decision: "deny", reason: DENY_REASON });
+  for (const cmd of ["node a.mjs < $IN", "node a.mjs < scripts/lanes/start.mjs", "cat < scripts/lanes/queue.mjs"]) assert.equal(decide(cmd), null, cmd);
+});
+
+test("#113 edge: a redirection with no target, fd duplication into a pipe, and a heredoc after a target", () => {
+  for (const cmd of ["node a.mjs >", "node --test x.test.mjs 2>&1 | tail -5", "node --test x.test.mjs 2>/dev/null", "cat > x.txt <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF"]) {
+    assert.equal(decide(cmd), null, JSON.stringify(cmd));
+  }
+});
+
+test("#113 edge: a literal backtick (single quotes, a quoted heredoc message) is text, a live one in double quotes runs", () => {
+  for (const cmd of ["git commit -m 'Fix `start.mjs` parsing'", "git commit -m \"$(cat <<'EOF'\nFix `node scripts/lanes/start.mjs 12` and `queue.mjs`\nEOF\n)\"", "printf '%s' '`node scripts/lanes/queue.mjs 12`' > f"]) {
+    assert.equal(decide(cmd), null, JSON.stringify(cmd));
+  }
+  assert.deepEqual(decide('git commit -m "Fix `start.mjs` parsing"'), { decision: "deny", reason: DENY_REASON });
+});
+
+test("#113 edge: a literal backtick in a script a shell runs (-c, eval, a heredoc on its stdin) runs", () => {
+  for (const cmd of ["bash -c 'echo `node scripts/lanes/start.mjs 12`'", "sh -lc 'x=`node scripts/lanes/start.mjs 12`'", "eval 'echo `node scripts/lanes/start.mjs 12`'", "bash <<'EOF'\necho `node scripts/lanes/start.mjs 12`\nEOF"]) {
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: DENY_REASON }, JSON.stringify(cmd));
+  }
+  assert.deepEqual(decide("bash -c 'echo `node scripts/lanes/queue.mjs`'"), { decision: "deny", reason: QUEUE_DENY_REASON });
+  assert.equal(decide("git commit -F - <<'EOF'\nFix `start.mjs` and `queue.mjs`\nEOF"), null);
+});
+
+test("#113 edge (test-hunter): a double-quoted backtick around a bare script path, with no node or argument, runs", () => {
+  for (const cmd of ['echo "`scripts/lanes/queue.mjs`"', 'echo x > "`scripts/lanes/queue.mjs`"', "echo `scripts/lanes/queue.mjs`"]) {
+    assert.deepEqual(decide(cmd), { decision: "deny", reason: QUEUE_DENY_REASON }, cmd);
+  }
+  assert.deepEqual(decide('echo "`scripts/lanes/start.mjs`"'), { decision: "deny", reason: DENY_REASON });
+  assert.equal(decide('echo "`date`" > log.txt'), null);
+});
+
+test("#113 edge: an unterminated backtick that names a lane script fails closed", () => {
+  assert.deepEqual(decide("echo `node scripts/lanes/start.mjs 12"), { decision: "deny", reason: PARSE_DENY_REASON });
+  assert.equal(findQueueInvocations("echo `node scripts/lanes/queue.mjs"), true);
+  assert.equal(decide("echo `date"), null);
+});
+
+test("#113 edge (test-hunter): 'eval', 'source' or '.' used as an ordinary word, not the command itself, does not make a later quoted word's backticks live", () => {
+  for (const cmd of ["echo eval 'note: `start.mjs` was renamed'", "grep . 'about `start.mjs`' file.txt", "cp source 'note about `start.mjs`'"]) {
+    assert.equal(decide(cmd), null, cmd);
+  }
+  // The real forms (the command word itself is eval, source or .) still run; a shell found anywhere earlier still
+  // counts for -c (so a wrapper like `env bash -c` or `timeout 5 bash -c` is still read), even where that costs a
+  // false positive on an unrelated command whose own -c flag happens to follow a "bash"-named argument.
+  assert.deepEqual(decide("bash -c 'echo `node scripts/lanes/start.mjs 12`'"), { decision: "deny", reason: DENY_REASON });
+  assert.deepEqual(decide("env bash -c 'echo `node scripts/lanes/start.mjs 12`'"), { decision: "deny", reason: DENY_REASON });
+  assert.deepEqual(decide("eval 'echo `node scripts/lanes/start.mjs 12`'"), { decision: "deny", reason: DENY_REASON });
+});
+
+// test-hunter extra: not covered by any #113/#191/#197 criterion or its listed edge cases, which only exercise the
+// backtick form of a redirection target (criteria 9-10) or the $(...) form for start.mjs (criterion 7): a $(...)
+// redirection target names queue.mjs or claude --bg too, denied with their own reason, the same as the backtick form.
+test("#113 edge (test-hunter): a $(...) redirection target naming queue.mjs or claude --bg is denied with its own reason", () => {
+  assert.deepEqual(decide('printf x > "$(node scripts/lanes/queue.mjs 12)"'), { decision: "deny", reason: QUEUE_DENY_REASON });
+  assert.deepEqual(decide("printf x > $(node scripts/lanes/queue.mjs 12)"), { decision: "deny", reason: QUEUE_DENY_REASON });
+  assert.deepEqual(decide('printf x > "$(claude --bg -p hi)"'), { decision: "deny", reason: BG_DENY_REASON });
+});

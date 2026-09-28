@@ -13,7 +13,9 @@
 //     session ever needs it. A `queue.mjs` run is always denied too, grant or not: the owner runs it in their own
 //     terminal (#95, ADR 0005). Anything else gets no decision. A deny holds in every permission mode.
 //     Text a call only writes to a file (cat, echo or printf with `>`, beside cd or mkdir), a `node -e` script that
-//     names no lane script, and arithmetic `$((…))` are not read as commands (#89, #102).
+//     names no lane script, and arithmetic `$((…))` are not read as commands (#89, #102). A redirection target is no
+//     word of its command, though a substitution in it is still read (#191); a backtick substitution is read wherever
+//     it stands (#197); and the command find -exec or xargs runs is read, with what they hand it unresolved (#113).
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,7 +76,18 @@ export function onUserPromptSubmit(input, now = Date.now()) {
 // `<<D`, `<<-D`, `<<'D'`, `<<"D"` or `<<\D`; a quoted delimiter makes the body literal. `<<<` is a here-string, not this.
 const HEREDOC_RE = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([^\s;&|()<>'"`$]+))/;
 // `$(cat <<D` and the end of its line: the start of a substitution whose output is only a heredoc's body.
-const CAT_HEREDOC_RE = /^\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z0-9_.-]+))[ \t]*\r?\n/;
+/** The index of the backtick closing the one at `i` (a backslash escapes the next character), or -1. */
+function backtickEnd(cmd, i) {
+  for (let j = i + 1; j < cmd.length; j += 1) {
+    if (cmd[j] === "\\") j += 1;
+    else if (cmd[j] === "`") return j;
+  }
+  return -1;
+}
+
+// A redirection operator: `>`, `>>`, `>|`, `>&`, `<`, `<&`, `<>`, `&>` or `&>>` (#191).
+const REDIRECT_RE = /^(?:&>>?|>[>|&]?|<[&>]?)/;
+const CAT_HEREDOC_RE =/^\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z0-9_.-]+))[ \t]*\r?\n/;
 
 /**
  * The body of a heredoc starting at `from`: every line up to the one that is exactly `delim` (after leading tabs,
@@ -115,8 +128,12 @@ function literalSubstitution(cmd, i) {
 // the shell that runs it (bash -c, eval) expands them.
 const LIT_DOLLAR = "";
 const LIT_TICK = "";
+// A restored backtick comes back as this one: still unresolved, but lexed as a plain character, not as the start of a
+// substitution the way a live backtick is (#197), so a literal message such as 'Fix `start.mjs`' is not read as a
+// run of start.mjs.
+const QUOTED_TICK = "";
 const literal = (s) => s.replaceAll("$", LIT_DOLLAR).replaceAll("`", LIT_TICK);
-const unliteral = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, "`");
+const unliteral = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, QUOTED_TICK);
 
 /**
  * `$((…))` at `i`, an arithmetic expansion (#102): its expression and the index of its closing `)`. Null for anything
@@ -148,26 +165,39 @@ const arithmeticScript = (expr) => expr.replace(/\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$
  * Shell-ish lexer (the same rules as approve-guard.mjs): words (quotes and backslashes resolved, nothing expanded)
  * grouped into simple commands split on ; & | ( ) newlines and redirections. A heredoc's body is not lexed as
  * commands: it is returned in `bodies`, for the caller to read as a quoted script, as is an arithmetic expansion's
- * expression (its word reads as `0`). A body is `literal` when the shell expands nothing in it. Throws on an
- * unterminated quote.
- * @returns {{ segments: string[][], writes: boolean[], bodies: { text: string, literal: boolean, start?: number, end?: number }[] }}
+ * expression (its word reads as `0`), as is an unquoted backtick substitution's command (#197). A body is `literal`
+ * when the shell expands nothing in it. A redirection target (and a fd number right before its operator, as in
+ * `2>file`) is no word of its command: it is returned in `targets`, for the caller to scan for a substitution (#191).
+ * A here-string (`<<<`) stays a word. Throws on an unterminated quote or backtick.
+ * @returns {{ segments: string[][], writes: (boolean | "dup")[], stdin: (string | undefined)[], targets: string[], bodies: { text: string, literal: boolean, start?: number, end?: number }[] }}
  */
 function lex(cmd) {
   const segments = [[]];
-  // Per segment: whether it holds an output redirection (`>`), so writes to a file.
+  // Per segment: true when it holds an output redirection (`>`), so writes to a file; "dup" once it duplicates an fd.
   const writes = [false];
+  // Per segment: the target of its input redirection (`<`), which node reads as its script when no argument is one.
+  const stdin = [undefined];
+  const targets = [];
   const bodies = [];
   const pending = [];
   let word = null;
+  // Whether the next word is a redirection target: false, "stdin" or "other".
+  let target = false;
   const endWord = () => {
-    if (word !== null) segments.at(-1).push(word);
+    if (word !== null && target) {
+      targets.push(word);
+      if (target === "stdin") stdin[stdin.length - 1] = word;
+      target = false;
+    } else if (word !== null) segments.at(-1).push(word);
     word = null;
   };
   const endSegment = () => {
     endWord();
+    target = false;
     if (segments.at(-1).length > 0) {
       segments.push([]);
       writes.push(false);
+      stdin.push(undefined);
     }
   };
   for (let i = 0; i < cmd.length; i += 1) {
@@ -194,6 +224,16 @@ function lex(cmd) {
           j = arith.end;
           continue;
         }
+        if (cmd[j] === "`") {
+          // A live backtick substitution runs even with no whitespace to make the word a nested script, as in
+          // "`scripts/lanes/queue.mjs`" (#113 test-hunter): its command is a body to walk; the word keeps its text.
+          const close = backtickEnd(cmd, j);
+          if (close === -1) throw new Error("unterminated `");
+          bodies.push({ text: cmd.slice(j + 1, close).replace(/\\([`$\\"])/g, "$1"), literal: false });
+          s += cmd.slice(j, close + 1);
+          j = close;
+          continue;
+        }
         if (cmd[j] === "\\" && '"\\$`'.includes(cmd[j + 1] ?? "")) {
           j += 1;
           s += literal(cmd[j]);
@@ -213,6 +253,16 @@ function lex(cmd) {
       bodies.push({ text: arithmeticScript(arith.expr), literal: false });
       word = (word ?? "") + "0";
       i = arith.end;
+    } else if (c === "`") {
+      // A backtick substitution is one word, whitespace and all (#197). Its command runs, so it is returned as a body
+      // to walk; the word holds it between QUOTED_TICKs (so it still reads as unresolved) with no shell syntax, so
+      // walk() does not read the same text again as a nested script.
+      const j = backtickEnd(cmd, i);
+      if (j === -1) throw new Error("unterminated `");
+      const inner = cmd.slice(i + 1, j).replace(/\\([`$\\])/g, "$1");
+      bodies.push({ text: inner, literal: false });
+      word = (word ?? "") + QUOTED_TICK + inner.replace(/[\s;&|()<>]/g, "_") + QUOTED_TICK;
+      i = j;
     } else if (c === "\\") {
       if (cmd[i + 1] !== "\n") word = (word ?? "") + literal(cmd[i + 1] ?? "");
       i += 1;
@@ -222,20 +272,36 @@ function lex(cmd) {
       let end = i;
       for (const h of pending.splice(0)) {
         const r = readHeredoc(cmd, end + 1, h.delim, h.stripTabs);
-        bodies.push({ text: r.body, literal: h.quoted || !/[$`\\]/.test(r.body), start: end + 1, end: r.end });
+        bodies.push({ text: r.body, literal: h.quoted || !/[$`\\]/.test(r.body), toShell: h.toShell, start: end + 1, end: r.end });
         end = r.end;
       }
       i = end;
+    } else if (c === "<" && cmd.startsWith("<<<", i)) {
+      // A here-string: its word is the command's input, read as a script like any quoted word.
+      endWord();
+      i += 2;
+    } else if (REDIRECT_RE.test(cmd.slice(i, i + 3)) && !cmd.startsWith("<<", i)) {
+      // A bare fd number right before the operator (`2>file`) belongs to it (#191).
+      if (c !== "&" && word !== null && /^[0-9]+$/.test(word)) word = null;
+      endWord();
+      const op = REDIRECT_RE.exec(cmd.slice(i, i + 3))[0];
+      // An fd duplication (`2>&1`) keeps its command from reading as data-only, as when `&` still split it off.
+      if (/[<>]&/.test(op)) writes[writes.length - 1] = "dup";
+      else if (op.includes(">") && writes.at(-1) !== "dup") writes[writes.length - 1] = true;
+      target = op === "<" || op === "<>" ? "stdin" : "other";
+      i += op.length - 1;
     } else if (";&|()\n\r".includes(c)) {
       endSegment();
     } else if (c === "<" && cmd[i - 1] !== "<" && cmd[i + 1] === "<" && cmd[i + 2] !== "<" && HEREDOC_RE.test(cmd.slice(i))) {
       const m = HEREDOC_RE.exec(cmd.slice(i));
       endWord();
-      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-", quoted: m[4] === undefined });
+      // `toShell`: a shell reads the body as its script (`bash <<'EOF'`), so even a quoted body's backticks run.
+      const program = segments.at(-1).find((w) => !ASSIGN_RE.test(w));
+      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-", quoted: m[4] === undefined, toShell: program !== undefined && SHELL_RE.test(basename(program)) });
       i += m[0].length - 1;
-    } else if ("<>".includes(c) || /\s/.test(c)) {
+    } else if (c === "<" || /\s/.test(c)) {
+      // A `<<` that HEREDOC_RE does not read ends the word, as before.
       endWord();
-      if (c === ">") writes[writes.length - 1] = true;
     } else {
       word = (word ?? "") + c;
     }
@@ -243,7 +309,7 @@ function lex(cmd) {
   endSegment();
   // Only the last segment can be empty, so `writes` stays aligned with the segments kept.
   const kept = segments.filter((s) => s.length > 0);
-  return { segments: kept, writes: writes.slice(0, kept.length), bodies };
+  return { segments: kept, writes: writes.slice(0, kept.length), stdin: stdin.slice(0, kept.length), targets, bodies };
 }
 
 /** `cmd` without its literal `$(cat <<'D' … D)` substitutions, for the raw-text checks: their text is only data. */
@@ -260,7 +326,7 @@ function withoutLiteralSubstitutions(cmd) {
 const ASSIGN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
 const VAR_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
 // What is left of a word after substitution that could still expand to anything.
-const UNRESOLVED_RE = /[$`]/;
+const UNRESOLVED_RE = /[$`]/;
 
 /**
  * Same-command `NAME=value` assignments substituted into every `$NAME`/`${NAME}` reference, whole word or spliced
@@ -287,6 +353,23 @@ function resolveSegments(segments) {
 /** A quoted script, as in bash -c "…", sh -c '…', eval "…" or node -e "…": a word holding shell syntax. */
 const isNestedScript = (w) => /[\s;&|()<>]/.test(w);
 
+const SHELL_RE = /^(bash|sh|zsh|dash|ksh|ash)(\.exe)?$/i;
+/**
+ * True when word `i` is a script a shell runs: the value of a shell's `-c` (`-lc`, `-ec`, …), with a shell named
+ * anywhere earlier (so `env bash -c`, `timeout 5 bash -c` still count, the same as node is found behind a wrapper
+ * elsewhere in this file), or an argument of eval or source when the command word itself (not merely some earlier
+ * one) is eval, source or `.`: unlike a shell run through a wrapper, eval and source are shell builtins, so nothing
+ * can run them but the shell itself as the command word, and anchoring there keeps an unrelated word that happens to
+ * equal "." or "eval" (a grep pattern, a commit message word, a directory) from turning a later quoted word live.
+ * Its literal backticks then run too, while a literal message elsewhere ('Fix `start.mjs`') stays text.
+ */
+const runsAsShell = (words, i) => {
+  if (i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(words[i - 1]) && words.slice(0, i - 1).some((w) => SHELL_RE.test(basename(w)))) return true;
+  const cmdAt = words.findIndex((w) => !ASSIGN_RE.test(w));
+  return cmdAt !== -1 && cmdAt < i && (words[cmdAt] === "eval" || words[cmdAt] === "source" || words[cmdAt] === ".");
+};
+const unliteralLive = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, "`");
+
 // Programs that write what they are given to a file, and never run it (#89); cd and mkdir may come alongside.
 const WRITE_COMMANDS = new Set(["cat", "echo", "printf"]);
 const PLACE_COMMANDS = new Set(["cd", "mkdir"]);
@@ -299,7 +382,7 @@ const PLACE_COMMANDS = new Set(["cd", "mkdir"]);
  * `bash file`. Only the top level counts: a nested script's output may be run by the command around it.
  */
 const isDataOnly = ({ segments, writes }) =>
-  segments.every((words, k) => PLACE_COMMANDS.has(words[0]) || (WRITE_COMMANDS.has(words[0]) && writes[k]));
+  segments.every((words, k) => PLACE_COMMANDS.has(words[0]) || (WRITE_COMMANDS.has(words[0]) && writes[k] === true));
 
 const EVAL_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-pe"]);
 const EVAL_PROGRAM_RE = /^(node|nodejs|bun)(\.exe)?$/i;
@@ -329,7 +412,8 @@ function evalScripts(words) {
 
 /**
  * Walks every simple command of `cmd`, recursing into every quoted script and every heredoc body (either may be run:
- * `bash -c "…"`, `bash <<EOF`, `cat <<EOF | sh`). `visit(words)` is called per simple command; `onOpaque(text)` for a
+ * `bash -c "…"`, `bash <<EOF`, `cat <<EOF | sh`) and every redirection target. `visit(words, stdin)` is called per simple command
+ * (with its `<` target, if any), including the one find -exec or xargs runs; `onOpaque(text)` for a
  * part that cannot be read (unterminated quote, nesting too deep), which the caller fails closed on when the text
  * names what it looks for; `onEval(text)` for a `node -e` script, which is JavaScript, not shell (#89). A whole call
  * that only prints or writes text (isDataOnly) has only what the shell expands in it walked: a word with a `$` or
@@ -345,15 +429,76 @@ function walk(cmd, depth, visit, onOpaque, onEval) {
   }
   const nested = (text) => (depth >= MAX_DEPTH ? onOpaque(text) : walk(text, depth + 1, visit, onOpaque, onEval));
   const dataOnly = depth === 0 && isDataOnly(lexed);
-  for (const words of resolveSegments(lexed.segments)) {
-    if (!dataOnly) visit(words);
+  const scan = (words, stdin) => {
+    if (!dataOnly) visit(words, stdin);
     const scripts = dataOnly ? new Map() : evalScripts(words);
     words.forEach((w, i) => {
       if (scripts.has(i)) onEval(scripts.get(i));
-      else if (isNestedScript(w) && !(dataOnly && !UNRESOLVED_RE.test(w))) nested(unliteral(w));
+      else if (isNestedScript(w) && !(dataOnly && !UNRESOLVED_RE.test(w))) nested(runsAsShell(words, i) ? unliteralLive(w) : unliteral(w));
     });
+  };
+  for (const [k, words] of resolveSegments(lexed.segments).entries()) {
+    scan(words, lexed.stdin[k]);
+    // The command find -exec or xargs runs is a simple command of its own (#113).
+    if (!dataOnly) for (const sub of runnerCommands(words)) scan(sub);
   }
-  for (const body of lexed.bodies) if (!(dataOnly && body.literal)) nested(body.text);
+  // A redirection target is no word, but a substitution in it still runs (#191).
+  for (const t of lexed.targets) if (isNestedScript(t) && !(dataOnly && !UNRESOLVED_RE.test(t))) nested(unliteral(t));
+  // A quoted heredoc's backticks are literal text, as in a single-quoted word.
+  for (const body of lexed.bodies) if (!(dataOnly && body.literal)) nested(body.literal && !body.toShell ? body.text.replaceAll("`", QUOTED_TICK) : body.text);
+}
+
+// What find hands its -exec command for `{}`, and the arguments xargs appends from its input: known only at run time,
+// so each reads as unresolved (#113).
+const FOUND_PATH = "${LANES_FIND_PATH}";
+const XARGS_INPUT = "${LANES_XARGS_INPUT}";
+const FIND_RE = /^find(\.exe)?$/i;
+const XARGS_RE = /^xargs(\.exe)?$/i;
+const FIND_EXEC = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+// xargs options whose value may be the next word.
+const XARGS_VALUE_FLAGS = new Set(["-a", "-d", "-E", "-L", "-n", "-P", "-s", "--arg-file", "--delimiter", "--eof", "--max-lines", "--max-args", "--max-procs", "--max-chars", "--process-slot-var"]);
+const fromInput = (w) => w.includes(FOUND_PATH) || w.includes(XARGS_INPUT);
+
+/**
+ * The commands a simple command runs through find (`-exec`, `-execdir`, `-ok`, `-okdir` up to `;` or `+`, with `{}`
+ * as FOUND_PATH) or xargs (the words after its options, with its -I/-i replace string as XARGS_INPUT, or XARGS_INPUT
+ * appended). Empty for anything else, `find` without -exec, or a bare `xargs` (which runs echo).
+ */
+function runnerCommands(words) {
+  const plain = words.filter((w) => !ASSIGN_RE.test(w));
+  const at = plain.findIndex((w) => FIND_RE.test(basename(w)) || XARGS_RE.test(basename(w)));
+  if (at === -1) return [];
+  const subs = [];
+  if (FIND_RE.test(basename(plain[at]))) {
+    for (let i = at + 1; i < plain.length; i += 1) {
+      if (!FIND_EXEC.has(plain[i])) continue;
+      const sub = [];
+      for (i += 1; i < plain.length && plain[i] !== ";" && plain[i] !== "+"; i += 1) sub.push(plain[i].replaceAll("{}", FOUND_PATH));
+      if (sub.length > 0) subs.push(sub);
+    }
+    return subs;
+  }
+  let replace = null;
+  let i = at + 1;
+  for (; i < plain.length; i += 1) {
+    const w = plain[i];
+    if (w === "--") {
+      i += 1;
+      break;
+    }
+    if (!w.startsWith("-") || w === "-") break;
+    if (w === "-I") {
+      replace = plain[i + 1] ?? null;
+      i += 1;
+    } else if (w.startsWith("-I")) replace = w.slice(2);
+    else if (w === "-i" || w === "--replace") replace = "{}";
+    else if (w.startsWith("-i")) replace = w.slice(2);
+    else if (w.startsWith("--replace=")) replace = w.slice("--replace=".length);
+    else if (XARGS_VALUE_FLAGS.has(w)) i += 1;
+  }
+  if (i >= plain.length) return [];
+  const sub = plain.slice(i);
+  return [replace ? sub.map((w) => w.replaceAll(replace, XARGS_INPUT)) : [...sub, XARGS_INPUT]];
 }
 
 /** True when a whole Bash call only writes text (isDataOnly); false when it cannot be read. */
@@ -391,6 +536,19 @@ function scriptCandidates(plain, nodeAt) {
 }
 
 /**
+ * A simple command's words without assignments, then its stdin target when it has one, as `plain`; node's index; the
+ * indexes node could run as its script; and `counts(i)`, false for a stdin target that is no such index: node reads
+ * its stdin as the script only when no argument is one (`node < queue.mjs`, #95), and a target is no argument (#191).
+ */
+function commandWords(words, stdin) {
+  const own = words.filter((w) => !ASSIGN_RE.test(w));
+  const plain = stdin === undefined ? own : [...own, stdin];
+  const nodeAt = own.findIndex((p) => NODE_RE.test(basename(p)));
+  const scripts = scriptCandidates(plain, nodeAt);
+  return { plain, nodeAt, scripts, counts: (i) => i < own.length || scripts.has(i) };
+}
+
+/**
  * Every run of `start.mjs` in a Bash command: the script as the command itself, or as an argument of node, including
  * runs behind env, chains, subshells or `bash -c`. `standalone` is true only for the plain
  * `node scripts/lanes/start.mjs <N ...>` (with its `issues`) or `node scripts/lanes/start.mjs --auto [--go]` (with its
@@ -404,11 +562,10 @@ export function findStartInvocations(command) {
   walk(
     cmd,
     0,
-    (words) => {
-      const plain = words.filter((w) => !ASSIGN_RE.test(w));
-      const nodeAt = plain.findIndex((p) => NODE_RE.test(basename(p)));
-      const scripts = scriptCandidates(plain, nodeAt);
+    (words, stdin) => {
+      const { plain, nodeAt, scripts, counts } = commandWords(words, stdin);
       plain.forEach((w, i) => {
+        if (!counts(i)) return;
         // Unquoted `scripts\lanes\start.mjs` loses its backslashes in the lexer, as in bash: match the word's end.
         if (START_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i))) out.push({ issues: undefined, standalone: false });
         // The command word, or a word node could run as its script, that still holds `$` or a backtick could expand to start.mjs.
@@ -450,15 +607,17 @@ export function findQueueInvocations(command) {
 function scanQueueInvocations(command) {
   let found = false;
   let unresolved = false;
+  const cmd = String(command ?? "");
+  // What find or xargs hands a command comes from elsewhere in the call: `find -name queue.mjs`, `echo …queue.mjs |`.
+  const namesAnywhere = /queue\.mjs/i.test(withoutLiteralSubstitutions(cmd));
   walk(
-    String(command ?? ""),
+    cmd,
     0,
-    (words) => {
-      const plain = words.filter((w) => !ASSIGN_RE.test(w));
-      const nodeAt = plain.findIndex((p) => NODE_RE.test(basename(p)));
-      const scripts = scriptCandidates(plain, nodeAt);
-      const names = plain.some((w) => /queue\.mjs/i.test(w));
+    (words, stdin) => {
+      const { plain, nodeAt, scripts, counts } = commandWords(words, stdin);
+      const names = plain.some((w) => /queue\.mjs/i.test(w)) || (namesAnywhere && plain.some(fromInput));
       plain.forEach((w, i) => {
+        if (!counts(i)) return;
         if (QUEUE_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i))) found = true;
         else if (UNRESOLVED_RE.test(w) && (i === 0 || scripts.has(i))) {
           if (names) found = true;
