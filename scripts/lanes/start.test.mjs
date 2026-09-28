@@ -489,6 +489,32 @@ test("edge: an issue whose Scope names no paths is not refused for running overl
   assert.deepEqual(main(["1"], deps).lines, ["#1 → id1"]);
 });
 
+test("edge: a contract path (not in Scope) overlaps an open PR's files and a running lane's contract", () => {
+  const viaPr = fakes({ issues: { 1: { body: form({ scope: "In: `b.mjs`.", contract: "Exports in `a.mjs`." }) } }, prs: [prFor(7, "a.mjs")] });
+  assert.deepEqual(main(["1"], viaPr.deps).lines, ["#1: refused: overlaps running #107 on a.mjs"]);
+  const viaRunning = fakes({
+    issues: { 1: { body: form({ scope: "In: `b.mjs`." }) }, 9: { body: form({ scope: "In: `c.mjs`.", contract: "Exports in `b.mjs`." }) } },
+    sessions: [runningSession(9)],
+  });
+  assert.deepEqual(main(["1"], viaRunning.deps).lines, ["#1: refused: overlaps running #9 on b.mjs"]);
+});
+
+test("edge: a requested issue that already has an open PR is refused as in flight, not as overlapping its own PR", () => {
+  const { deps, launches } = fakes({ issues: { 1: { body: form({ scope: "In: `a.mjs`." }) } }, prs: [prFor(1, "a.mjs")] });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ["#1: refused: already in flight"]);
+  assert.equal(launches.length, 0);
+});
+
+test("edge: a soft path is ignored but a hard path shared with the same PR still refuses", () => {
+  const { deps } = fakes({
+    issues: { 1: { body: form({ scope: "In: `docs/USING.md`, `a.mjs`." }) } },
+    prs: [prFor(7, "docs/USING.md", "a.mjs")],
+  });
+  assert.deepEqual(main(["1"], deps).lines, ["#1: refused: overlaps running #107 on a.mjs"]);
+});
+
 test("edge: main launches nothing when the open issues cannot be read", () => {
   const { deps, launches } = fakes({ issues: { 1: {} } });
   const gh = deps.gh;
