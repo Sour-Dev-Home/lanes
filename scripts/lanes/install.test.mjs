@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { install, MANIFEST } from "./install.mjs";
@@ -18,6 +18,27 @@ function hookScripts(settings) {
         for (const m of (hook.command ?? "").matchAll(/\$CLAUDE_PROJECT_DIR\/([^"\s]+)/g)) scripts.add(m[1]);
   return [...scripts];
 }
+
+test("MANIFEST ships the OWASP licence, provenance note, index and every vendored sheet", () => {
+  const dir = "vendor/owasp-cheatsheets";
+  for (const f of ["LICENSE", "VENDORED.md", "INDEX.md"]) assert.ok(MANIFEST.includes(`${dir}/${f}`), f);
+  const sheets = readdirSync(`${dir}/sheets`);
+  assert.ok(sheets.length > 0);
+  for (const s of sheets) assert.ok(MANIFEST.includes(`${dir}/sheets/${s}`), s);
+});
+
+test("edge: MANIFEST lists no OWASP sheet that is not vendored", () => {
+  const listed = MANIFEST.filter((f) => f.startsWith("vendor/owasp-cheatsheets/sheets/"));
+  assert.deepEqual(listed.map((f) => path.basename(f)).sort(), readdirSync("vendor/owasp-cheatsheets/sheets").sort());
+});
+
+test("edge: install copies the OWASP sheets byte for byte", () => {
+  const target = mkdtempSync(path.join(tmpdir(), "lanes-owasp-"));
+  install(".", target);
+  const all = [...["LICENSE", "VENDORED.md", "INDEX.md"], ...readdirSync("vendor/owasp-cheatsheets/sheets").map((s) => `sheets/${s}`)];
+  for (const f of all)
+    assert.deepEqual(readFileSync(path.join(target, "vendor/owasp-cheatsheets", f)), readFileSync(path.join("vendor/owasp-cheatsheets", f)));
+});
 
 test("MANIFEST includes the approve guard", () => {
   assert.ok(MANIFEST.includes("scripts/lanes/approve-guard.mjs"));
