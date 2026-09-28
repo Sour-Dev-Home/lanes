@@ -34,13 +34,16 @@ function readLog(file) {
   return readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 }
 
+// Command output reaches the reason, so strip control characters and bound its length before it is logged or printed.
+const clean = (s) => String(s).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 200);
+
 function measure(v, result) {
-  if (result.error) return { reason: `command failed to run: ${result.error.message}` };
+  if (result.error) return { reason: `command failed to run: ${clean(result.error.message)}` };
   if (result.status !== 0) return { reason: `command exited ${result.status ?? `by signal ${result.signal}`}` };
   const m = new RegExp(v.regex).exec(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
   if (!m) return { reason: "regex did not match the output" };
   const value = Number(m[1]);
-  if (m[1] === undefined || m[1].trim() === "" || !Number.isFinite(value)) return { reason: `capture "${m[1]}" is not a number` };
+  if (m[1] === undefined || m[1].trim() === "" || !Number.isFinite(value)) return { reason: `capture "${clean(m[1])}" is not a number` };
   return { value };
 }
 
@@ -84,9 +87,20 @@ export function main(argv, deps = {}) {
   if (!v) return cannot(`criterion ${index} is not a validate: line`);
 
   const file = join(dir, "validate", `${issue}.jsonl`);
-  const entries = readLog(file).filter((e) => e.criterion === Number(index));
+  let entries;
+  try {
+    entries = readLog(file).filter((e) => e.criterion === Number(index));
+  } catch (err) {
+    return cannot(`attempt log unreadable (${err.message})`);
+  }
   if (entries.length < v.attempts) {
-    const outcome = measure(v, exec(splitCommand(v.command)));
+    let result;
+    try {
+      result = exec(splitCommand(v.command));
+    } catch (err) {
+      result = { error: err };
+    }
+    const outcome = measure(v, result);
     const entry = {
       attempt: entries.length + 1,
       value: outcome.value ?? null,
@@ -95,8 +109,12 @@ export function main(argv, deps = {}) {
       criterion: Number(index),
       ...(outcome.reason ? { reason: outcome.reason } : {}),
     };
-    mkdirSync(join(dir, "validate"), { recursive: true });
-    appendFileSync(file, `${JSON.stringify(entry)}\n`);
+    try {
+      mkdirSync(join(dir, "validate"), { recursive: true });
+      appendFileSync(file, `${JSON.stringify(entry)}\n`);
+    } catch (err) {
+      return cannot(`attempt log not writable (${err.message})`);
+    }
     entries.push(entry);
   }
   const last = entries[entries.length - 1];

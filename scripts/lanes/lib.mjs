@@ -275,7 +275,7 @@ export function parseValidation(line) {
   return { command: command.trim(), regex, op, threshold: Number(threshold), attempts: n };
 }
 
-export const PR_SECTIONS =["what changed", "contract changes", "tests added", "reviewer results", "needs the owner", "not done"];
+export const PR_SECTIONS = ["what changed", "contract changes", "tests added", "reviewer results", "needs the owner", "not done"];
 const CONTRACT_CHANGES = ["none", "additive", "breaking"];
 
 export function parsePrBody(body) {

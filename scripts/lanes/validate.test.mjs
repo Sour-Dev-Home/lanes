@@ -1,7 +1,7 @@
 // scripts/lanes/validate.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main, splitCommand } from "./validate.mjs";
@@ -136,4 +136,45 @@ test("the real runner executes an argument array without a shell", () => {
   delete t.deps.run;
   assert.equal(main(args, t.deps).code, 0);
   t.cleanup();
+});
+
+test("edge: a throwing runner is a failed attempt, and control characters are stripped from the reason", () => {
+  const t = setup(line("x", "(\\w+) passed >= 3 (attempts: 3)"), [ok("\u001b[31mred\u0007 passed")]);
+  t.deps.run = () => {
+    throw new Error("bad\u001b[2Jthing");
+  };
+  assert.equal(main(args, t.deps).code, 1);
+  assert.doesNotMatch(t.log()[0].reason, /[\u0000-\u001f]/);
+  const u = setup(line("x", "(\\S+) passed >= 3 (attempts: 3)"), [ok("\u001b[31mred passed")]);
+  const r = main(args, u.deps);
+  assert.doesNotMatch(r.message, /\u001b/);
+  t.cleanup();
+  u.cleanup();
+});
+
+test("edge: a corrupt log line is a cannot-run (exit 3), never a crash or a below-cap exit 1", () => {
+  const t = setup(line("node --test"), [ok("5 passed")]);
+  mkdirSync(join(t.dir, "validate"), { recursive: true });
+  writeFileSync(join(t.dir, "validate", "276.jsonl"), '{"attempt":1\n');
+  assert.equal(main(args, t.deps).code, 3);
+  t.cleanup();
+});
+
+test("edge: an unwritable log directory is a cannot-run (exit 3), not a crash", () => {
+  const t = setup(line("node --test"), [ok("5 passed")]);
+  writeFileSync(join(t.dir, "validate"), "a file where the directory should be");
+  assert.equal(main(args, t.deps).code, 3);
+  t.cleanup();
+});
+
+test("edge: inclusive operators pass at exactly the threshold, strict ones do not", () => {
+  for (const [op, expected] of [["<=", 0], [">=", 0], ["<", 2], [">", 2]]) {
+    const t = setup(line("node --test", `(\\d+) passed ${op} 3 (attempts: 1)`), [ok("3 passed")]);
+    assert.equal(main(args, t.deps).code, expected, op);
+    t.cleanup();
+  }
+});
+
+test("edge: an empty quoted argument survives splitCommand", () => {
+  assert.deepEqual(splitCommand('node -e ""'), ["node", "-e", ""]);
 });
