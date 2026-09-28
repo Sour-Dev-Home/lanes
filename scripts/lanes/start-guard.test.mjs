@@ -1276,6 +1276,25 @@ test("#240 edge (security review, round 2): a `<<` inside an expansion, arithmet
   }
 });
 
+test("#240 edge (security review, round 3): a delimiter bash unquotes differently keeps the body read", () => {
+  for (const [cmd, reason] of [
+    ["gh issue comment 1 --body-file - <<E\\OF\nx\nEOF\nnode scripts/lanes/queue.mjs\nE\\OF", QUEUE_DENY_REASON],
+    ['gh issue comment 1 --body-file - <<"E\\$F"\nE$F\nnode scripts/lanes/queue.mjs\nE\\$F', QUEUE_DENY_REASON],
+    ['gh issue comment 1 --body-file - <<"E\\\\F"\nE\\F\nnode scripts/lanes/start.mjs 12\nE\\\\F', DENY_REASON],
+    ["gh issue comment 1 --body-file - <<\\EOF\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
+    ["cat > f <<E\\OF\nx\nEOF\nnode scripts/lanes/queue.mjs\nE\\OF", QUEUE_DENY_REASON],
+  ]) {
+    assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(reason), cmd);
+  }
+  // A plain delimiter, bare, single- or double-quoted, or after <<- and a space, still has its body skipped (a bare
+  // one only for a body with nothing to expand: PROSE's backticks would run there).
+  for (const open of ["<<EOF", "<<'EOF'", '<<"END_1.x"', "<<- 'EOF'"]) {
+    const text = open === "<<EOF" ? "The owner's queue.mjs runs in their own terminal." : PROSE;
+    const cmd = `gh issue comment 1 --body-file - ${open}\n${text}\n${open.includes("END") ? "END_1.x" : "EOF"}`;
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, cmd);
+  }
+});
+
 test("#240 edge: a # inside a quoted word or a heredoc body is no comment and keeps the body skipped", () => {
   for (const cmd of [
     `cat > .lanes/c.md <<'EOF'\n# Heading for #240\n${PROSE}\nEOF\ngh issue comment 240 --body-file .lanes/c.md`,

@@ -77,6 +77,9 @@ export function onUserPromptSubmit(input, now = Date.now()) {
 
 // `<<D`, `<<-D`, `<<'D'`, `<<"D"` or `<<\D`; a quoted delimiter makes the body literal. `<<<` is a here-string, not this.
 const HEREDOC_RE = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([^\s;&|()<>'"`$]+))/;
+// An opener whose delimiter bash and this lexer read the same: letters, digits, `_`, `.` or `-`, bare or quoted, no
+// backslash. bash removes quotes and backslashes from a delimiter (`E\OF`, "E\$F"), which readHeredoc does not (#240).
+const PLAIN_DELIM_RE = /^<<-?[ \t]*(?:'[A-Za-z0-9_.-]+'|"[A-Za-z0-9_.-]+"|[A-Za-z0-9_.-]+)$/;
 // `$(cat <<D` and the end of its line: the start of a substitution whose output is only a heredoc's body.
 /** The index of the backtick closing the one at `i` (a backslash escapes the next character), or -1. */
 function backtickEnd(cmd, i) {
@@ -282,7 +285,7 @@ function lex(cmd) {
       let end = i;
       for (const h of pending.splice(0)) {
         const r = readHeredoc(cmd, end + 1, h.delim, h.stripTabs);
-        bodies.push({ text: r.body, literal: h.quoted || !/[$`\\]/.test(r.body), toShell: h.toShell, seg: h.seg, start: end + 1, end: r.end });
+        bodies.push({ text: r.body, literal: h.quoted || !/[$`\\]/.test(r.body), toShell: h.toShell, seg: h.seg, plain: h.plain, start: end + 1, end: r.end });
         end = r.end;
       }
       i = end;
@@ -309,7 +312,7 @@ function lex(cmd) {
       endWord();
       // `toShell`: a shell reads the body as its script (`bash <<'EOF'`), so even a quoted body's backticks run.
       const program = segments.at(-1).find((w) => !ASSIGN_RE.test(w));
-      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-", quoted: m[4] === undefined, toShell: program !== undefined && SHELL_RE.test(basename(program)), seg: segments.length - 1 });
+      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-", quoted: m[4] === undefined, toShell: program !== undefined && SHELL_RE.test(basename(program)), seg: segments.length - 1, plain: PLAIN_DELIM_RE.test(m[0]) });
       i += m[0].length - 1;
     } else if (c === "<" || /\s/.test(c)) {
       // A `<<` that HEREDOC_RE does not read ends the word, as before.
@@ -434,12 +437,13 @@ const SUBSTITUTION_RE = /[`]|\$\(/;
  * `gh issue comment --body-file` is only text, and no substitution runs, not even one that only prints (a
  * `--body "`bash c.md`"` would run the file just written), and nothing unquoted the lexer does not model (`unsure`:
  * a `#` comment, `$`, `{}`, `[]`, `()`, a backslash), where a `<<` it reads as a heredoc may be no heredoc to bash, so
- * the lines of its "body" run. Unlike isDataOnly, gh's own words are still read as before.
+ * the lines of its "body" run; nor a delimiter bash would unquote differently (PLAIN_DELIM_RE), so the two end a body
+ * on different lines. Unlike isDataOnly, gh's own words are still read as before.
  */
 const isTextOnly = ({ segments, writes, targets, bodies, unsure }) =>
   !unsure &&
   segments.every((words, k) => PLACE_COMMANDS.has(words[0]) || (WRITE_COMMANDS.has(words[0]) && writes[k] === true) || sendsText(words)) &&
-  bodies.every((b) => b.seg !== undefined && b.literal) &&
+  bodies.every((b) => b.seg !== undefined && b.literal && b.plain) &&
   ![...segments.flat(), ...targets].some((w) => SUBSTITUTION_RE.test(w));
 
 const EVAL_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-pe"]);
