@@ -8,6 +8,11 @@ command below once, only in the turn where the owner typed `/start` with these s
 `--auto` form (`/start --auto` never allows `--auto --go`), and denies a direct `claude --bg` in every session. Never
 work around a denial; report it.
 
+First bring the lanes scripts up to date: if `git branch --show-current` prints `main` and `git status --porcelain`
+prints nothing, run `git pull --ff-only`. Otherwise print one line, `lanes scripts may be stale: this checkout is not a
+clean main`, and carry on. If the pull fails, report its error in one line and carry on. Run each of these git
+commands on its own, never chained to the `start.mjs` run below, which the guard allows only as the plain command.
+
 1. With issue numbers, run `node scripts/lanes/start.mjs $ARGUMENTS`, exactly in this form (nothing chained or
    wrapped). It checks each issue the way `/lane` does (open, `ready`, one `tier:*` label, no open blocker), refuses a
    pair whose paths overlap (the `/status` overlap check) and anything past `start.maxLanes` lanes in flight (from
