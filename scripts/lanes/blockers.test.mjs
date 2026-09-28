@@ -1,7 +1,7 @@
 // scripts/lanes/blockers.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { blockerReport, main } from "./blockers.mjs";
+import { blockerReport, main, parseBlockedBy, readBlockerReport } from "./blockers.mjs";
 
 const form = (blockedBy) =>
   ["### Goal", "g", "### Acceptance criteria", "- [ ] a", "### Interface contract", "c", "### Scope", "s", "### Blocked by", blockedBy, "### Tier", "quick"].join("\n\n");
@@ -177,4 +177,52 @@ test("edge: a blocker listed twice is read once", () => {
   const gh = fakeGh({ bodies: { 15: form("#3, #3") }, states: { 3: "open" } });
   assert.deepEqual(main(["15"], gh.run), { code: 1, message: "#15: blocked by #3 (open)" });
   assert.equal(gh.calls.length, 2);
+});
+
+// #36: one reader shared by this CLI and lanes/gate.
+const reader = (states) => {
+  const calls = [];
+  const read = (b) => {
+    calls.push(b);
+    if (!(b in states)) throw new Error("404");
+    return states[b];
+  };
+  return { read, calls };
+};
+
+test("readBlockerReport: no blockers is ok and reads nothing", () => {
+  const r = reader({});
+  assert.deepEqual(readBlockerReport(form("none"), r.read), { ok: true, open: [], unreadable: [] });
+  assert.equal(r.calls.length, 0);
+});
+
+test("readBlockerReport: open, closed and unreadable blockers are reported", () => {
+  assert.deepEqual(readBlockerReport(form("#3, #4, #5"), reader({ 3: "open", 4: "closed" }).read), { ok: false, open: [3], unreadable: [5] });
+  assert.deepEqual(readBlockerReport(form("#4"), reader({ 4: "closed" }).read), { ok: true, open: [], unreadable: [] });
+});
+
+test("readBlockerReport: a state other than open or closed is unreadable", () => {
+  assert.deepEqual(readBlockerReport(form("#3"), reader({ 3: "weird" }).read), { ok: false, open: [], unreadable: [3] });
+});
+
+test("readBlockerReport: a repeated blocker is read once", () => {
+  const r = reader({ 3: "open" });
+  readBlockerReport(form("#3, #3"), r.read);
+  assert.deepEqual(r.calls, [3]);
+});
+
+test("readBlockerReport: a missing or malformed field gives an error and reads nothing", () => {
+  for (const body of [undefined, "### Goal\n\ng\n", form("soon")]) {
+    const r = reader({});
+    const report = readBlockerReport(body, r.read);
+    assert.equal(report.ok, false, String(body));
+    assert.match(report.error, /blocked by/, String(body));
+    assert.equal(r.calls.length, 0);
+  }
+});
+
+test("parseBlockedBy: the distinct blockers, or the field's error", () => {
+  assert.deepEqual(parseBlockedBy(form("#3, #3, #4")), { blockedBy: [3, 4] });
+  assert.deepEqual(parseBlockedBy(form("none")), { blockedBy: [] });
+  assert.match(parseBlockedBy("### Goal\n\ng\n").error, /missing: blocked by/);
 });

@@ -75,7 +75,7 @@ comments; a lane cannot grant it to itself.
 | Handoff | Contract | Enforced by |
 | --- | --- | --- |
 | Owner → lane | The Task issue form | `issue-contract` (labels `ready`) |
-| Lane → lane | A contract file (type + schema + contract test) merged first; "Blocked by" | `/lane` refuses open blockers; `lanes/gate` requires "Contract changes" to match the diff |
+| Lane → lane | A contract file (type + schema + contract test) merged first; "Blocked by" | `/lane` refuses open blockers; `lanes/gate` enforces "Blocked by" (stays pending while a blocker is open, fails if one cannot be read, re-runs when one closes) and requires "Contract changes" to match the diff |
 | Lane → owner | The PR template | `lanes/gate` (all sections, `Closes #N`, contract word) |
 | Idea → issues | `/plan-issues` draft in `.lanes/plans/`, approved by the owner | Nothing is created on GitHub before approval |
 | Reviewer → gate | A JSON verdict (pass or fail per acceptance criterion, findings with `fixed`), posted as `review/<name>` | `post-review.mjs --file` refuses invalid or dishonest-looking verdicts; `lanes/gate` requires the reviewers per tier and diff |

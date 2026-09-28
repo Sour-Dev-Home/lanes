@@ -449,3 +449,59 @@ test("a tier:skip PR adding an ADR still waits on the owner (ADR 0002 owner-only
 test("edge: without adrs the gate decides as before", () => {
   assert.deepEqual(full({ files: ["src/a.ts"] }), READY("full"));
 });
+
+// #36: the gate enforces the linked issue's "Blocked by", after the contract checks and before the reviewer checks.
+const blockers = (open = [], unreadable = [], extra = {}) => ({ ok: open.length === 0 && unreadable.length === 0, open, unreadable, ...extra });
+
+test("no blockers leaves the decision unchanged", () => {
+  const skip = { issueLabels: ["tier:skip", "ready"], files: ["docs/a.md"] };
+  assert.deepEqual(run({ ...skip, blockers: blockers() }), run(skip));
+  assert.deepEqual(run({ blockers: blockers() }), run({}));
+});
+
+test("one open blocker keeps the gate pending at stage blocked", () => {
+  assert.deepEqual(run({ issueLabels: ["tier:skip", "ready"], files: ["docs/a.md"], blockers: blockers([3]) }), {
+    state: "pending",
+    description: "waiting for blocker #3 (open)",
+    stage: "blocked",
+  });
+});
+
+test("several open blockers are all named", () => {
+  assert.equal(run({ blockers: blockers([3, 4]) }).description, "waiting for blocker #3 (open), #4");
+});
+
+test("an unreadable blocker fails closed, even alongside an open one", () => {
+  assert.deepEqual(run({ blockers: blockers([], [9]) }), { state: "failure", description: "cannot check blockers of #7: #9 unreadable", stage: "blocked" });
+  assert.equal(run({ blockers: blockers([3], [9, 10]) }).description, "cannot check blockers of #7: #9, #10 unreadable");
+});
+
+test("the blocker check runs after the contract checks", () => {
+  const d = run({ prBody: body("breaking"), files: ["contracts/x.ts"], blockers: blockers([3]) });
+  assert.equal(d.state, "failure");
+  assert.match(d.description, /contract:breaking/);
+});
+
+test("the blocker check runs before the reviewer and owner checks", () => {
+  assert.equal(run({ statuses: [st("review/test-hunter", "failure"), st("review/owner")], blockers: blockers([3]) }).stage, "blocked");
+});
+
+test("edge: a blocker report that is not ok but names nothing, or is malformed, fails closed", () => {
+  for (const b of [{ ok: false, open: [], unreadable: [] }, { ok: false }, null, "none", { ok: "yes", open: [], unreadable: [] }, { ok: true, open: [3], unreadable: [] }]) {
+    const d = run({ blockers: b });
+    assert.notEqual(d.state, "success", JSON.stringify(b));
+    assert.equal(d.stage, "blocked", JSON.stringify(b));
+  }
+  assert.match(run({ blockers: null }).description, /^cannot check blockers of #7/);
+});
+
+test("edge: a blocker report's own error is shown", () => {
+  assert.equal(run({ blockers: { ok: false, open: [], unreadable: [], error: "missing: blocked by" } }).description, "cannot check blockers of #7: missing: blocked by");
+});
+
+test("edge: gateDecision stays pure with blockers (same input, same output, input untouched)", () => {
+  const b = blockers([3]);
+  const copy = structuredClone(b);
+  assert.deepEqual(run({ blockers: b }), run({ blockers: b }));
+  assert.deepEqual(b, copy);
+});
