@@ -14,6 +14,11 @@ import { cleanupMerged, loadCleanupInputs, pidRunning, sessionsFrom } from "./cl
 export const GIVE_UP_MS = 48 * 60 * 60 * 1000;
 export const GIVE_UP_FAILURES = 3;
 export const POLL_MS = 5 * 60 * 1000;
+// A lane starts at the repository root and only then enters its `issue-N` worktree (#201), so the reaper (spawned at
+// launch) does not poll for FIRST_POLL_MS and, for STARTUP_GRACE_MS, waits for a session that is not listed yet or has
+// not left the root. Past the grace, or for a session already in another issue's worktree, that is a give-up.
+export const FIRST_POLL_MS = 60 * 1000;
+export const STARTUP_GRACE_MS = 30 * 60 * 1000;
 
 // The same patterns as cleanup.mjs: a lane's branch is `issue-<N>-<slug>`, its worktree folder `issue-<N>[-<slug>]`.
 const LANE_BRANCH = /^issue-(\d+)-./;
@@ -53,8 +58,8 @@ const time = (v, name) => {
  * @param {number|Date} input.now this poll's time
  * @param {number} [input.failures] consecutive polls whose reads failed, counting this one; default 0
  * @returns {{ action: "wait"|"remove"|"give-up", reason: string }}
- *   give-up at `GIVE_UP_MS` or `GIVE_UP_FAILURES`, or when the session is gone or its cwd is not an `issue-<issue>`
- *   worktree; otherwise wait while anything is unread, a lane PR is open, the issue is open with no merged lane PR,
+ *   give-up at `GIVE_UP_MS` or `GIVE_UP_FAILURES`, or when the session's cwd is another issue's worktree; a session
+ *   not listed yet or in no worktree yet (the repository root) waits for `STARTUP_GRACE_MS`, then gives up; otherwise wait while anything is unread, a lane PR is open, the issue is open with no merged lane PR,
  *   or the session is busy; otherwise remove (a lane PR merged or the issue closed, and the session is not busy).
  * @throws {TypeError} on a malformed issue, session, time or failure count
  */
@@ -70,10 +75,16 @@ export function reapTick({ issue, session, issueState, prs, sessions, startedAt,
 
   // A mismatched or missing target session is a give-up on its own (ADR 0010's correctness check against a
   // mismatched pair), so it outranks an issue state or PR list that could not be read: those never make the pair
-  // any less wrong.
+  // any less wrong. A session in another issue's worktree is a mismatch at once; one not listed yet or not in any
+  // worktree yet (the root) is only a give-up once the startup grace is over.
+  const starting = age < STARTUP_GRACE_MS;
   const target = sessions.find((s) => s?.id === session);
-  if (!target) return { action: "give-up", reason: `session ${session} not found` };
-  if (typeof target.cwd !== "string" || cwdIssue(target.cwd) !== issue) {
+  if (!target) {
+    return starting ? { action: "wait", reason: `session ${session} is not listed yet` } : { action: "give-up", reason: `session ${session} not found` };
+  }
+  const at = typeof target.cwd === "string" ? cwdIssue(target.cwd) : null;
+  if (at !== issue) {
+    if (at === null && starting) return { action: "wait", reason: `session ${session} is not in an issue-${issue} worktree yet` };
     return { action: "give-up", reason: `session ${session}'s cwd is not an issue-${issue} worktree` };
   }
 
@@ -221,7 +232,7 @@ function removeLane(issue, { root, cleanupDeps = {} }) {
 
 /**
  * Runs one lane's reaper until it removes the lane or gives up; returns the exit code (0 removed or lock held by a
- * live reaper, 1 gave up, 2 bad arguments). Polls at once and then every POLL_MS; logs started, waiting (when the
+ * live reaper, 1 gave up, 2 bad arguments). Polls first FIRST_POLL_MS after it starts and then every POLL_MS; logs started, waiting (when the
  * reason changes), removed, gave up and error lines to `<root>/.lanes/reap/<issue>.log`. A poll fails when a read
  * fails or the removal fails; GIVE_UP_FAILURES failed polls in a row give up.
  * @param {string[]} argv
@@ -262,6 +273,7 @@ export async function main(argv, deps) {
       if (reason !== lastWait) log("waiting", reason);
       lastWait = reason;
     };
+    await sleep(FIRST_POLL_MS);
     for (;;) {
       const state = readState({ issue, root, run });
       for (const e of state.errors) log("error", e);
