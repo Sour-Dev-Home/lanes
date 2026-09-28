@@ -1,0 +1,19 @@
+node scripts/lanes/po*-review.mjs owner --pr 16
+node scripts/lanes/p{ost-review.mjs,x} owner --pr 16
+node scripts/lanes/post-revie{w..w}.mjs owner --pr 16
+node scripts/lanes/post-review.mj{r..t} owner --pr 16
+node scripts/lanes/post-review.mj{a..z} owner --pr 16
+node scripts/lanes/post-{review,x}{.mjs,} owner --pr 16
+scripts/lanes/po*-review.mjs owner --pr 16
+ls scripts/*.mjs
+git diff -- 'scripts/lanes/*.mjs'
+node 'scripts/lanes/po*-review.mjs' owner --pr 16
+node scripts/lanes/post-rev[!x]ew.mjs owner
+node scripts/lanes/post-rev[^x]ew.mjs owner
+node scripts/lanes/post-rev[]i]ew.mjs owner
+node scripts/lanes/post-review.m{j,x}s owner
+node scripts/lanes/post-review.mjs{,} owner
+node scripts/lanes/post-{re{v,x}iew}.mjs owner
+node scripts/lanes/post-review.mj{1..3} owner
+node scripts/lanes/test.mjs {a,b}
+node scripts/lanes/*.mjs
