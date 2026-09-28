@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compileConfig, gateDecision, isBotStatus, loadConfig, parseAdr } from "./lib.mjs";
+import { compileConfig, gateDecision, isBotStatus, loadConfig, parseAdr, reusableReviewers, reuseBlockedBy } from "./lib.mjs";
 
 const config = compileConfig({
   requiredChecks: ["verify"],
@@ -497,6 +497,147 @@ test("edge: a blocker report that is not ok but names nothing, or is malformed, 
 
 test("edge: a blocker report's own error is shown", () => {
   assert.equal(run({ blockers: { ok: false, open: [], unreadable: [], error: "missing: blocked by" } }).description, "cannot check blockers of #7: missing: blocked by");
+});
+
+// #154: the #25 test-hunter reuse, generalised to the security-reviewer and the architecture-advisor
+const both = { files: [".github/w.yml", "contracts/a.md"], prBody: body("additive") };
+const reusedFrom = (sha, ...names) => names.map((n) => ({ sha, status: st(`review/${n}`) }));
+const fullBoth = (over) =>
+  full({
+    ...both,
+    statuses: [st("review/test-hunter")],
+    verdicts: [verdict("test-hunter"), verdict("security-reviewer", { sha: OLD }), verdict("architecture-advisor", { sha: OLD })],
+    reused: reusedFrom(OLD, "security-reviewer", "architecture-advisor"),
+    ...over,
+  });
+const NOTE = ", reused security-reviewer+architecture-advisor from bbbbbbb";
+
+test("reuses a security-reviewer and an architecture-advisor success from an earlier commit, with their verdicts there", () => {
+  assert.deepEqual(fullBoth({}), { state: "success", description: `unattended-eligible (tier:full), reviews in${NOTE}`, stage: "ready" });
+});
+
+test("the description says reused <reviewer> from <sha7>, grouped by the reviewed commit", () => {
+  const one = fullBoth({
+    statuses: [st("review/test-hunter"), st("review/architecture-advisor")],
+    verdicts: [verdict("test-hunter"), verdict("architecture-advisor"), verdict("security-reviewer", { sha: OLD })],
+    reused: reusedFrom(OLD, "security-reviewer"),
+  });
+  assert.equal(one.description, "unattended-eligible (tier:full), reviews in, reused security-reviewer from bbbbbbb");
+  const other = "c".repeat(40);
+  const two = fullBoth({
+    statuses: [],
+    verdicts: [verdict("test-hunter", { sha: other }), verdict("security-reviewer", { sha: OLD }), verdict("architecture-advisor", { sha: OLD })],
+    reused: [...reusedFrom(other, "test-hunter"), ...reusedFrom(OLD, "security-reviewer", "architecture-advisor")],
+  });
+  assert.equal(two.description, `unattended-eligible (tier:full), reviews in, reused test-hunter from ccccccc${NOTE}`);
+});
+
+test("a reused failure is never turned into a pass, as a status or as a verdict comment", () => {
+  for (const state of ["failure", "pending", "error"]) {
+    const d = fullBoth({ reused: [{ sha: OLD, status: st("review/security-reviewer", state) }, ...reusedFrom(OLD, "architecture-advisor")] });
+    assert.equal(d.description, "waiting for review/security-reviewer", state);
+  }
+  const comment = fullBoth({ verdicts: [verdict("test-hunter"), verdict("security-reviewer", { sha: OLD, result: "failure" }), verdict("architecture-advisor", { sha: OLD })] });
+  assert.equal(comment.state, "pending");
+  assert.equal(comment.description, `waiting on owner (/approve) (verdict from security-reviewer is not success)${NOTE}`);
+  const finding = { severity: "important", file: "a", line: 1, summary: "s", fixed: false };
+  const unfixed = fullBoth({ verdicts: [verdict("test-hunter"), verdict("security-reviewer", { sha: OLD }), verdict("architecture-advisor", { sha: OLD, findings: [finding] })] });
+  assert.equal(unfixed.description, `waiting on owner (/approve) (unfixed important finding from architecture-advisor)${NOTE}`);
+});
+
+test("a reused status brings along only its own reviewer's verdict for the reused commit", () => {
+  // The security-reviewer's verdict at OLD does not stand in for the architecture-advisor's, nor the test-hunter's.
+  const d = fullBoth({ verdicts: [verdict("test-hunter"), verdict("security-reviewer", { sha: OLD }), verdict("architecture-advisor", { sha: "c".repeat(40) })] });
+  assert.equal(d.description, `waiting on owner (/approve) (no verdict for head from architecture-advisor)${NOTE}`);
+  const hunter = fullBoth({ verdicts: [verdict("test-hunter", { sha: OLD }), verdict("security-reviewer", { sha: OLD }), verdict("architecture-advisor", { sha: OLD })] });
+  assert.match(hunter.description, /no verdict for head from test-hunter/);
+});
+
+test("review/owner is never reused, nor the ui-reviewer", () => {
+  const owner = run({ files: ["scripts/lanes/gate.mjs"], statuses: [st("review/test-hunter")], reused: [{ sha: OLD, status: st("review/owner") }] });
+  assert.equal(owner.description, "waiting on owner (/approve) (owner-only path)");
+  const ui = run({ files: ["frontend/a.tsx"], statuses: [st("review/test-hunter")], reused: [{ sha: OLD, status: st("review/ui-reviewer") }] });
+  assert.equal(ui.description, "waiting for review/ui-reviewer");
+});
+
+test("edge: a reused status for a reviewer the head already has a trusted status for is ignored", () => {
+  const d = fullBoth({ statuses: [st("review/test-hunter"), st("review/security-reviewer", "failure"), st("review/architecture-advisor")] });
+  assert.equal(d.description, "review/security-reviewer is failure");
+});
+
+test("edge: malformed reused entries are dropped one by one, never the whole list trusted or refused", () => {
+  const good = reusedFrom(OLD, "architecture-advisor");
+  for (const bad of [
+    null,
+    "x",
+    { sha: OLD },
+    { sha: "nope", status: st("review/security-reviewer") },
+    { sha: OLD, status: st("review/security-reviewer", "success", "ok", "2026-09-26T10:00:00Z", { type: "Bot", login: "github-actions[bot]" }) },
+    { sha: OLD, status: st("review/security-reviewers") },
+  ]) {
+    const d = fullBoth({ reused: [bad, ...good] });
+    assert.equal(d.description, "waiting for review/security-reviewer", JSON.stringify(bad));
+  }
+  // Two entries for the same reviewer: neither is trusted over the other.
+  const dup = fullBoth({ reused: [...reusedFrom(OLD, "security-reviewer"), ...reusedFrom("c".repeat(40), "security-reviewer"), ...good] });
+  assert.equal(dup.description, "waiting for review/security-reviewer");
+  assert.equal(fullBoth({ reused: [] }).description, "waiting for review/security-reviewer");
+});
+
+const reuseAdr = (n, status, ...governs) => parseAdr(`# ${n}: t\n\nStatus: ${status}\n\n## Governs\n\n${governs.map((g) => `- ${g}`).join("\n")}\n`);
+const REUSE_ADRS = [reuseAdr("0003", "accepted", "src/"), reuseAdr("0008", "accepted", "scripts/lanes/lib.mjs"), reuseAdr("0009", "superseded by 0010", "src/a.ts")];
+
+test("reuseBlockedBy: a change to the reviewer's own brief since the review blocks reuse, for every reusable reviewer", () => {
+  for (const r of ["test-hunter", "security-reviewer", "architecture-advisor"]) {
+    assert.equal(reuseBlockedBy(r, [`.claude/agents/${r}.md`], ["src/a.ts"], REUSE_ADRS), `.claude/agents/${r}.md`, r);
+    assert.equal(reuseBlockedBy(r, [".claude/agents/ui-reviewer.md", "README.md", "src/b.ts"], ["src/a.ts"], []), null, r);
+  }
+  // The checklists a lane hands the test-hunter are what it checks against too.
+  for (const f of ["vendor/agent-skills/references/definition-of-done.md", "vendor/agent-skills/references/testing-patterns.md"]) {
+    assert.equal(reuseBlockedBy("test-hunter", [f], ["src/a.ts"], []), f);
+  }
+});
+
+test("reuseBlockedBy: the security checklist or any OWASP cheat sheet blocks only the security-reviewer's reuse", () => {
+  for (const f of ["vendor/agent-skills/references/security-checklist.md", "vendor/owasp-cheatsheets/Input_Validation.md", "vendor/owasp-cheatsheets/deep/x.md"]) {
+    assert.equal(reuseBlockedBy("security-reviewer", [f], ["src/a.ts"], []), f);
+    assert.equal(reuseBlockedBy("architecture-advisor", [f], ["src/a.ts"], []), null, f);
+  }
+  assert.equal(reuseBlockedBy("security-reviewer", ["vendor/owasp-cheatsheets-old/x.md", "vendor/agent-skills/references/other.md"], ["src/a.ts"], []), null);
+});
+
+test("reuseBlockedBy: an ADR governing the PR's files blocks the architecture-advisor's reuse; others do not", () => {
+  assert.equal(reuseBlockedBy("architecture-advisor", ["docs/adr/0003-src.md"], ["src/a.ts"], REUSE_ADRS), "docs/adr/0003-src.md");
+  assert.equal(reuseBlockedBy("architecture-advisor", ["docs/adr/0008-map.md"], ["src/a.ts"], REUSE_ADRS), null);
+  assert.equal(reuseBlockedBy("architecture-advisor", ["docs/adr/0008-map.md"], ["src/a.ts", "scripts/lanes/lib.mjs"], REUSE_ADRS), "docs/adr/0008-map.md");
+  // An ADR superseded since the review still governed what the advisor checked against.
+  assert.equal(reuseBlockedBy("architecture-advisor", ["docs/adr/0009-old.md"], ["src/a.ts"], REUSE_ADRS), "docs/adr/0009-old.md");
+  assert.equal(reuseBlockedBy("security-reviewer", ["docs/adr/0003-src.md"], ["src/a.ts"], REUSE_ADRS), null);
+});
+
+test("edge: reuseBlockedBy fails closed on an ADR it cannot tie to a number, and on unreadable input", () => {
+  assert.equal(reuseBlockedBy("architecture-advisor", ["docs/adr/README.md"], ["src/a.ts"], REUSE_ADRS), "docs/adr/README.md");
+  assert.equal(reuseBlockedBy("architecture-advisor", ["docs/adr/new-thing.md"], ["src/a.ts"], [{ error: "bad" }]), "docs/adr/new-thing.md");
+  assert.equal(reuseBlockedBy("architecture-advisor", ["docs/adr/diagram.png"], ["src/a.ts"], REUSE_ADRS), null);
+  assert.equal(reuseBlockedBy("architecture-advisor", ["docs\\adr\\0003-src.md"], ["src/a.ts"], REUSE_ADRS), "docs\\adr\\0003-src.md");
+  for (const changed of [null, undefined, "x", [1]]) assert.notEqual(reuseBlockedBy("security-reviewer", changed, ["src/a.ts"], []), null, JSON.stringify(changed));
+  assert.notEqual(reuseBlockedBy("owner", [], [], []), null);
+  assert.notEqual(reuseBlockedBy("ui-reviewer", [], [], []), null);
+  assert.equal(reuseBlockedBy("test-hunter", [], ["src/a.ts"], REUSE_ADRS), null);
+});
+
+// edge: not named by the acceptance criteria or the lane's edge: cases, which only exercise reuse end-to-end through
+// gateDecision/evaluatePr; reusableReviewers is the direct generalisation from #25's single-reviewer testHunterReusable
+// and had no unit test of its own naming more than one candidate, or excluding a required reviewer that is never reusable.
+test("reusableReviewers: every required, reusable reviewer missing a trusted head status is a candidate; the ui-reviewer never is", () => {
+  const uiFull = { issueLabels: ["tier:full", "ready"], files: ["frontend/a.tsx", ".github/w.yml", "contracts/a.md"], statuses: [], config };
+  assert.deepEqual(reusableReviewers(uiFull), ["test-hunter", "security-reviewer", "architecture-advisor"]);
+  // The head already has a trusted status for two of them: only the third remains a candidate.
+  const partial = { ...uiFull, statuses: [st("review/test-hunter"), st("review/security-reviewer")] };
+  assert.deepEqual(reusableReviewers(partial), ["architecture-advisor"]);
+  // No tier, or a tier that needs none of the reusable reviewers: no candidates.
+  assert.deepEqual(reusableReviewers({ ...uiFull, issueLabels: ["tier:skip"] }), []);
+  assert.deepEqual(reusableReviewers({ issueLabels: ["tier:quick", "ready"], files: ["src/a.ts"], statuses: [], config }), ["test-hunter"]);
 });
 
 test("edge: gateDecision stays pure with blockers (same input, same output, input untouched)", () => {

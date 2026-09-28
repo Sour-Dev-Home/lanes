@@ -544,7 +544,7 @@ const quickPr = {
 
 test("edge: gateDecision refuses a reused status that is not a trusted test-hunter success on a real SHA", () => {
   const sha = "e".repeat(40);
-  assert.match(gateDecision({ ...quickPr, reused: { sha, status: hunterOk } }).description, /test-hunter reused from eeeeeee$/);
+  assert.match(gateDecision({ ...quickPr, reused: { sha, status: hunterOk } }).description, /reused test-hunter from eeeeeee$/);
   for (const reused of [
     { sha, status: { ...hunterOk, creator: { type: "Bot", login: "github-actions[bot]" } } },
     { sha, status: { ...hunterOk, state: "failure" } },

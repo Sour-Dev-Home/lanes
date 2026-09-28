@@ -336,6 +336,7 @@ const FIRST = "1".repeat(40);
 const ownDiff = (index, hunk, line = "+y") => `diff --git a/src/a.ts b/src/a.ts\nindex ${index}..9999999 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ ${hunk} @@\n-x\n${line}\n`;
 const statusesRoute = (sha) => `repos/o/r/commits/${sha}/statuses?per_page=100`;
 const compareRoute = (sha) => `repos/o/r/compare/main...${sha}`;
+const sinceRoute = (sha) => `repos/o/r/compare/${sha}...${SHA}`;
 const WAIT_HUNTER = "waiting for review/test-hunter";
 // A full PR at head SHA whose test-hunter reviewed OLD; since then main was merged in, moving the diff's line numbers.
 function reuseRoutes({ tier = "full", headDiff = ownDiff("2222222", "-40,1 +41,1"), oldStatuses = [{ ...reviewStatus }], commits = [FIRST, OLD, SHA], comments } = {}) {
@@ -349,11 +350,15 @@ function reuseRoutes({ tier = "full", headDiff = ownDiff("2222222", "-40,1 +41,1
     [statusesRoute(MID)]: [],
     [statusesRoute(FIRST)]: [],
     [compareRoute(OLD)]: ownDiff("1111111", "-1,1 +1,1"),
+    [compareRoute(MID)]: ownDiff("1111111", "-1,1 +1,1"),
+    // #154: what changed between each reviewed commit and the head (the merge from main), count first.
+    [sinceRoute(OLD)]: "1\nsrc/other.ts\n",
+    [sinceRoute(MID)]: "1\nsrc/other.ts\n",
   };
   if (headDiff !== null) routes[compareRoute(SHA)] = headDiff;
   return routes;
 }
-const REUSED = `unattended-eligible (tier:full), reviews in, test-hunter reused from ${OLD.slice(0, 7)}`;
+const REUSED = `unattended-eligible (tier:full), reviews in, reused test-hunter from ${OLD.slice(0, 7)}`;
 
 test("evaluatePr reuses a test-hunter success after a merge from main that left the PR's own diff unchanged", () => {
   const { api, posted } = fakeApi(reuseRoutes());
@@ -367,9 +372,11 @@ test("evaluatePr fetches each commit's own diff from the three-dot compare API w
   const { api } = fakeApi(reuseRoutes());
   const calls = [];
   evaluatePr((a) => (calls.push(a), api(a)), "o/r", 5, config);
-  const compares = calls.filter((a) => a[0].startsWith("repos/o/r/compare/"));
+  const compares = calls.filter((a) => a[0].startsWith("repos/o/r/compare/main..."));
   assert.deepEqual(compares.map((a) => a[0]).sort(), [compareRoute(OLD), compareRoute(SHA)].sort());
   for (const a of compares) assert.ok(a.includes("Accept: application/vnd.github.diff"), a.join(" "));
+  // #154: plus one list of the files changed between the reviewed commit and the head.
+  assert.deepEqual(calls.filter((a) => a[0] === sinceRoute(OLD)).length, 1);
 });
 
 test("evaluatePr does not reuse when the PR's own diff changed", () => {
@@ -440,7 +447,119 @@ test("edge: a reused full-tier status still needs the test-hunter's verdict comm
 
 test("edge: a quick-tier PR passes on a reused status alone", () => {
   const { api } = fakeApi(reuseRoutes({ tier: "quick", comments: [] }));
-  assert.equal(evaluatePr(api, "o/r", 5, config).description, `unattended-eligible (tier:quick), reviews in, test-hunter reused from ${OLD.slice(0, 7)}`);
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, `unattended-eligible (tier:quick), reviews in, reused test-hunter from ${OLD.slice(0, 7)}`);
+});
+
+// #154: the same reuse for the security-reviewer and the architecture-advisor
+const secArch = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: ["^src/"], ui: [] } });
+const srcAdrs = [parseAdr("# 0003: src\n\nStatus: accepted\n\n## Governs\n\n- src/\n")];
+const THREE = ["test-hunter", "security-reviewer", "architecture-advisor"];
+const at = (sha, names) => names.map((n) => ({ ...reviewStatus, context: `review/${n}` }));
+// `reusedNames` were reviewed at OLD only; every other required reviewer reviewed the head.
+function threeRoutes(reusedNames, over = {}) {
+  const onHead = THREE.filter((n) => !reusedNames.includes(n));
+  const routes = reuseRoutes({
+    oldStatuses: at(OLD, THREE),
+    comments: [...THREE.map((n) => verdictComment("leo", n, OLD)), ...onHead.map((n) => verdictComment("leo", n, SHA))],
+    ...over,
+  });
+  routes[statusesRoute(SHA)] = at(SHA, onHead);
+  return routes;
+}
+const decide = (routes) => evaluatePr(fakeApi(routes).api, "o/r", 5, secArch, srcAdrs);
+const reusedNote = (...names) => `unattended-eligible (tier:full), reviews in, reused ${names.join("+")} from ${OLD.slice(0, 7)}`;
+
+test("evaluatePr reuses a security-reviewer or architecture-advisor success after a merge from main, each on its own", () => {
+  for (const name of ["security-reviewer", "architecture-advisor"]) {
+    const d = decide(threeRoutes([name]));
+    assert.equal(d.state, "success", name);
+    assert.equal(d.description, reusedNote(name));
+  }
+  assert.equal(decide(threeRoutes(THREE)).description, reusedNote(...THREE));
+});
+
+test("evaluatePr reuses none of them when the PR's own diff changed", () => {
+  for (const name of ["security-reviewer", "architecture-advisor"]) {
+    assert.equal(decide(threeRoutes([name], { headDiff: ownDiff("2222222", "-40,1 +41,1", "+z") })).description, `waiting for review/${name}`);
+  }
+});
+
+test("evaluatePr does not reuse a review after its brief, its checklist or a governing ADR changed since", () => {
+  const cases = [
+    ["test-hunter", ".claude/agents/test-hunter.md"],
+    ["security-reviewer", ".claude/agents/security-reviewer.md"],
+    ["security-reviewer", "vendor/agent-skills/references/security-checklist.md"],
+    ["security-reviewer", "vendor/owasp-cheatsheets/Injection_Prevention_Cheat_Sheet.md"],
+    ["architecture-advisor", ".claude/agents/architecture-advisor.md"],
+    ["architecture-advisor", "docs/adr/0003-src.md"],
+  ];
+  for (const [name, file] of cases) {
+    const routes = threeRoutes([name]);
+    routes[sinceRoute(OLD)] = `2\nsrc/other.ts\n${file}\n`;
+    assert.equal(decide(routes).description, `waiting for review/${name}`, file);
+  }
+  // Only the reviewer whose inputs changed loses its reuse: the others still carry over.
+  const routes = threeRoutes(THREE);
+  routes[sinceRoute(OLD)] = "1\nvendor/agent-skills/references/security-checklist.md\n";
+  const d = decide(routes);
+  assert.equal(d.description, "waiting for review/security-reviewer");
+});
+
+test("evaluatePr reuses the architecture-advisor across an ADR that does not govern the PR's files", () => {
+  const routes = threeRoutes(["architecture-advisor"]);
+  routes[sinceRoute(OLD)] = "2\ndocs/adr/0004-other.md\n.claude/agents/ui-reviewer.md\n";
+  assert.equal(decide(routes).description, reusedNote("architecture-advisor"));
+});
+
+test("evaluatePr never reuses a security-reviewer or architecture-advisor failure", () => {
+  for (const name of ["security-reviewer", "architecture-advisor"]) {
+    for (const state of ["failure", "pending", "error"]) {
+      const routes = threeRoutes([name]);
+      routes[statusesRoute(OLD)] = at(OLD, THREE).map((s) => (s.context === `review/${name}` ? { ...s, state } : s));
+      assert.equal(decide(routes).description, `waiting for review/${name}`, `${name} ${state}`);
+    }
+  }
+});
+
+test("edge: a failure verdict comment on the reused commit still waits on the owner", () => {
+  const failed = verdictComment("leo", "security-reviewer", OLD);
+  failed.body = failed.body.replace('"verdict": "success"', '"verdict": "failure"');
+  assert.match(failed.body, /"verdict": "failure"/);
+  const routes = threeRoutes(["security-reviewer"], { comments: [failed, ...["test-hunter", "architecture-advisor"].map((n) => verdictComment("leo", n, SHA))] });
+  const d = decide(routes);
+  assert.equal(d.state, "pending");
+  assert.match(d.description, /^waiting on owner \(\/approve\) \(verdict from security-reviewer is not success\), reused security-reviewer from eeeeeee$/);
+});
+
+test("edge: no reuse when the files changed since the review cannot be listed, or the list may be cut short", () => {
+  for (const since of [undefined, "", "x\nsrc/a.ts\n", "300\nsrc/a.ts\n", "-1\n"]) {
+    const routes = threeRoutes(["security-reviewer"]);
+    if (since === undefined) delete routes[sinceRoute(OLD)];
+    else routes[sinceRoute(OLD)] = since;
+    assert.equal(decide(routes).description, "waiting for review/security-reviewer", JSON.stringify(since));
+  }
+  const edge = threeRoutes(["security-reviewer"]);
+  edge[sinceRoute(OLD)] = "299\nsrc/a.ts\n";
+  assert.equal(decide(edge).description, reusedNote("security-reviewer"));
+});
+
+test("edge: each commit's diff, statuses and changed files are read once, however many reviewers reuse it", () => {
+  const { api } = fakeApi(threeRoutes(THREE));
+  const calls = [];
+  evaluatePr((a) => (calls.push(a[0]), api(a)), "o/r", 5, secArch, srcAdrs);
+  for (const route of [compareRoute(OLD), compareRoute(SHA), sinceRoute(OLD), statusesRoute(OLD)]) {
+    assert.equal(calls.filter((c) => c === route).length, 1, route);
+  }
+});
+
+test("edge: a reviewer the head already has a status for is never looked up on older commits", () => {
+  const routes = threeRoutes(["security-reviewer"]);
+  const { api } = fakeApi(routes);
+  const calls = [];
+  const d = evaluatePr((a) => (calls.push(a), api(a)), "o/r", 5, secArch, srcAdrs);
+  assert.equal(d.description, reusedNote("security-reviewer"));
+  // One reviewer to reuse, so the head's own diff and the reviewed commit's diff: two compares, not six.
+  assert.equal(calls.filter((a) => a[0].startsWith("repos/o/r/compare/main...")).length, 2);
 });
 
 test("edge: a skip-tier PR never looks for a reusable verdict", () => {
