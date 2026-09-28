@@ -22,8 +22,17 @@ export const PATH_PATTERNS = [
   ["C:", "\\\\Users"].join(""), // the same path escaped inside JSON or a string literal
 ];
 
-/** Exactly the files CI's security job skips (security.yml): workflows, CLAUDE.md docs, the license. No wider. */
+/**
+ * Exactly the files CI's security job skips (security.yml): workflows, CLAUDE.md docs, the license. No wider.
+ * PATH_SCAN_EXEMPT is skipped by the PATH_PATTERNS only, never by the private patterns, again exactly as security.yml does:
+ * the vendored OWASP sheets are byte-identical upstream text (ADR 0009) whose URL fragments (a users/profile route, a
+ * report-uri.com home/hash link) look like local paths. They are safe to skip because scripts/lanes/vendor.test.mjs proves
+ * their integrity by git blob id, so an edit that adds a real local path fails that test instead. The rest of vendor/
+ * (INDEX.md, VENDORED.md, LICENSE) is written or chosen here and is still scanned. Keep both lists in step with
+ * security.yml; scripts/security-workflow.test.mjs checks that they are.
+ */
 export const SCAN_EXEMPT = [/^\.github\//, /CLAUDE\.md$/, /^LICENSE$/];
+export const PATH_SCAN_EXEMPT = [/^vendor\/owasp-cheatsheets\/sheets\//];
 
 /** Git's fixed hash for the empty tree object (`git hash-object -t tree --stdin < /dev/null`); exists in every repo. */
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -94,16 +103,20 @@ function headerPath(value) {
 
 /**
  * @param {{ file: string; line: number; text: string }[]} lines
- * @param {string[]} patterns fixed strings, matched case-insensitively
+ * @param {string[]} patterns fixed strings, matched case-insensitively; those equal to a PATH_PATTERNS entry are the
+ *   path patterns, which PATH_SCAN_EXEMPT files skip
  * @returns {{ file: string; line: number; pattern: number }[]} pattern is an index, never the text
  */
 export function scanLines(lines, patterns) {
   const lowered = patterns.map((pattern) => pattern.toLowerCase());
+  const pathShapes = new Set(PATH_PATTERNS.map((pattern) => pattern.toLowerCase()));
   const hits = [];
   for (const { file, line, text } of lines) {
     if (SCAN_EXEMPT.some((exempt) => exempt.test(file))) continue;
+    const pathExempt = PATH_SCAN_EXEMPT.some((exempt) => exempt.test(file));
     const haystack = text.toLowerCase();
     lowered.forEach((pattern, index) => {
+      if (pathExempt && pathShapes.has(pattern)) return;
       if (pattern !== "" && haystack.includes(pattern)) hits.push({ file, line, pattern: index });
     });
   }

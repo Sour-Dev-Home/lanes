@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { EMPTY_TREE, PATH_PATTERNS, addedLines, checkPr, dedupeHits, diffBase, scanLines, scanMessages } from "./preflight.mjs";
+import { EMPTY_TREE, PATH_PATTERNS, PATH_SCAN_EXEMPT, addedLines, checkPr, dedupeHits, diffBase, scanLines, scanMessages } from "./preflight.mjs";
 
 // The path shapes are taken from the module, so this file does not contain them literally (CI's PII scan would flag it).
 const [WINDOWS_PATH] = PATH_PATTERNS;
@@ -60,6 +60,53 @@ test("only the files CI's scan skips are exempt, and no wider", () => {
   for (const file of ["scripts/other.mjs", "scripts/preflight.mjs", "docs/LICENSE", "README.md"]) {
     assert.equal(scanLines([{ file, line: 1, text: WINDOWS_PATH }], PATH_PATTERNS).length, 1, file);
   }
+});
+
+// #183: the vendored OWASP sheets are upstream bytes with URL fragments such as a users/profile route.
+const SHEET = "vendor/owasp-cheatsheets/sheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.md";
+const URL_LINE = `fetch('${["", "users", "profile"].join("/")}', { method: 'POST' })`;
+
+test("a sheet line containing a users/profile route is not a hit", () => {
+  assert.deepEqual(scanLines([{ file: SHEET, line: 942, text: URL_LINE }], PATH_PATTERNS), []);
+});
+
+test("the same line anywhere else under vendor/ is a hit, including the OWASP index", () => {
+  for (const file of ["vendor/owasp-cheatsheets/INDEX.md", "vendor/other/x.md"]) {
+    assert.equal(scanLines([{ file, line: 1, text: URL_LINE }], PATH_PATTERNS).length, 1, file);
+  }
+});
+
+test("a sheet line matching a private pattern is still a hit, and only for that pattern", () => {
+  const hits = scanLines([{ file: SHEET, line: 3, text: `${URL_LINE} secret-name` }], [...PATH_PATTERNS, "Secret-Name"]);
+  assert.deepEqual(hits, [{ file: SHEET, line: 3, pattern: PATH_PATTERNS.length }]);
+});
+
+test("the path exemption is exactly the sheets folder and no wider", () => {
+  assert.deepEqual(PATH_SCAN_EXEMPT.map((exempt) => exempt.source), ["^vendor\\/owasp-cheatsheets\\/sheets\\/"]);
+});
+
+test("edge: near-miss paths are still scanned for local paths", () => {
+  for (const file of [
+    "vendor/owasp-cheatsheets/VENDORED.md",
+    "vendor/owasp-cheatsheets/LICENSE",
+    "vendor/owasp-cheatsheets/sheets", // a file named like the folder, not inside it
+    "vendor/owasp-cheatsheets/sheets-extra/a.md",
+    "vendor/owasp-cheatsheets/sheetsa.md",
+    "docs/vendor/owasp-cheatsheets/sheets/a.md", // not anchored at the repo root
+    "Vendor/owasp-cheatsheets/sheets/a.md", // case differs: git paths are case-sensitive
+    "(commit message)",
+  ]) {
+    assert.equal(scanLines([{ file, line: 1, text: URL_LINE }], PATH_PATTERNS).length, 1, file);
+  }
+});
+
+test("edge: every path shape, including the JSON-escaped one, is skipped in a sheet", () => {
+  const lines = PATH_PATTERNS.map((pattern, index) => ({ file: SHEET, line: index + 1, text: `see ${pattern}x` }));
+  assert.deepEqual(scanLines(lines, PATH_PATTERNS), []);
+});
+
+test("edge: a commit message naming a sheet path is still scanned", () => {
+  assert.equal(scanMessages(`${SHEET}\n${URL_LINE}`, PATH_PATTERNS).length, 1);
 });
 
 test("an added line whose text starts with '++ ' is content, not a file header", () => {
