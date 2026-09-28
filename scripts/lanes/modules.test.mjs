@@ -306,8 +306,28 @@ test("the map claims every non-test file in scripts/lanes/ and scripts/preflight
   const files = repoFiles();
   const sources = Object.keys(files).filter((f) => !f.endsWith(".test.mjs") && (f.startsWith("scripts/lanes/") || f === "scripts/preflight.mjs"));
   assert.ok(sources.includes("scripts/preflight.mjs") && sources.includes("scripts/lanes/modules.mjs"), "the scan found the expected sources");
-  const { unmapped } = checkModules({ map: realConfig().modules, files });
+  const sourceFiles = Object.fromEntries(Object.entries(files).filter(([f]) => !f.endsWith(".test.mjs")));
+  const { unmapped } = checkModules({ map: realConfig().modules, files: sourceFiles });
   assert.deepEqual(unmapped, []);
+});
+
+test("the map claims the vendor.* prefix in a module that imports nothing", () => {
+  const entry = realConfig().modules.entries.find((e) => e.paths.includes("scripts/lanes/vendor."));
+  assert.ok(entry, "an entry claims the scripts/lanes/vendor. prefix");
+  assert.deepEqual(entry.imports, []);
+});
+
+test("edge: a vendor.test.mjs that imports only node: built-ins is mapped and violates nothing", () => {
+  const files = { ...repoFiles(), "scripts/lanes/vendor.test.mjs": imp("node:test") + imp("node:fs") };
+  const r = checkModules({ map: realConfig().modules, files });
+  assert.deepEqual(r.unmapped, []);
+  assert.deepEqual(r.violations, []);
+});
+
+test("edge: the real map passes on a tree with no vendor.* file (a prefix that matches nothing is not an error)", () => {
+  const files = Object.fromEntries(Object.entries(repoFiles()).filter(([f]) => !f.startsWith("scripts/lanes/vendor.")));
+  const r = checkModules({ map: realConfig().modules, files });
+  assert.deepEqual([r.unmapped, r.violations, r.cycles], [[], [], []]);
 });
 
 test("allowCycles is empty, and the graph has no cycle at all (pick.mjs and status.mjs no longer import each other)", () => {
