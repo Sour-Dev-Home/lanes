@@ -275,7 +275,9 @@ export function render(summary, sinceLabel) {
 }
 
 const NONE_STATED = "(none stated)";
-const firstLine = (text) => (text ?? "").trim().split("\n")[0] || NONE_STATED;
+// PR text is untrusted: control characters (ANSI escapes) are dropped before it reaches the owner's terminal.
+const plain = (text) => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+const firstLine = (text) => plain((text ?? "").trim().split("\n")[0]).trim() || NONE_STATED;
 
 // The open PRs in `summary.waitingOnOwner` that wait on the owner's /approve: the gate's own owner wait, or a body
 // asking for /approve. Prompts, stopped lanes and issues also wait on the owner but are not approvals.
@@ -288,7 +290,7 @@ export function waitingApprovals(prs, summary) {
     const sections = parsePrBody(pr.body).sections;
     const needs = (sections["needs the owner"] ?? "").trim();
     if (item.stage !== "owner" && !/\/approve\b/i.test(needs)) continue;
-    out.push({ number: pr.number, title: pr.title, needs: firstLine(needs), contract: firstLine(sections["contract changes"]), files: (pr.files ?? []).length });
+    out.push({ number: pr.number, title: plain(pr.title ?? ""), needs: firstLine(needs), contract: firstLine(sections["contract changes"]), files: (pr.files ?? []).length });
   }
   return out;
 }

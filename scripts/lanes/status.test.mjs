@@ -784,6 +784,12 @@ test("edge: --waiting includes a PR whose body asks for /approve while its gate 
   assert.match(waitingOf([p]), /^#4 pr 4/);
 });
 
+test("edge: --waiting strips control characters from the title and body lines", () => {
+  const out = waitingOf([waitingPr(7, { title: "a\u001b[31mred", body: waitingBody("go\u001b[2Jnow") })]);
+  assert.equal(out.includes("\u001b"), false);
+  assert.match(out, /#7 a\[31mred/);
+});
+
 test("approveLine lists at most 10 numbers and is empty for none", () => {
   const prs = Array.from({ length: 12 }, (_, i) => waitingPr(i + 1));
   const numbers = waitingApprovals(prs, summarize({ prs, issues: [], merged: [] })).map((w) => w.number);
