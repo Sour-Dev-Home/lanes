@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { install, MANIFEST } from "./install.mjs";
+import { install, MANIFEST, publicFromArgs, repoIsPublic } from "./install.mjs";
 
 test("every manifest file exists in this repo", () => {
   for (const f of MANIFEST) assert.ok(existsSync(f), f);
@@ -195,4 +195,64 @@ test("install copies the manifest and never overwrites without force", () => {
   assert.equal(readFileSync(path.join(target, "lanes.config.json"), "utf8"), "{}");
   assert.ok(existsSync(path.join(target, "scripts/lanes/gate.mjs")));
   assert.equal(install(".", target, { force: true }).skipped.length, 0);
+});
+
+// #278 (ADR 0012): the dashboard's script, schema and workflow ship; the workflow stays off unless the repo is public.
+test("MANIFEST ships snapshot.mjs, its schema and the dashboard workflow, and what snapshot.mjs imports", () => {
+  for (const f of ["scripts/lanes/snapshot.mjs", "contracts/snapshot.schema.json", ".github/workflows/dashboard.yml", "scripts/lanes/status.mjs", "scripts/lanes/lib.mjs"]) assert.ok(MANIFEST.includes(f), f);
+});
+
+test("install leaves the dashboard workflow disabled by default: an inert .disabled copy, no live workflow", () => {
+  const target = mkdtempSync(path.join(tmpdir(), "lanes-"));
+  const r = install(".", target, {});
+  assert.ok(!existsSync(path.join(target, ".github/workflows/dashboard.yml")));
+  assert.equal(readFileSync(path.join(target, ".github/workflows/dashboard.yml.disabled"), "utf8"), readFileSync(".github/workflows/dashboard.yml", "utf8"));
+  assert.deepEqual(r.disabled, [".github/workflows/dashboard.yml"]);
+  assert.ok(existsSync(path.join(target, "scripts/lanes/snapshot.mjs")));
+  assert.ok(existsSync(path.join(target, "contracts/snapshot.schema.json")));
+});
+
+test("install enables the dashboard workflow for a public repository", () => {
+  const target = mkdtempSync(path.join(tmpdir(), "lanes-"));
+  const r = install(".", target, { isPublic: true });
+  assert.ok(existsSync(path.join(target, ".github/workflows/dashboard.yml")));
+  assert.ok(!existsSync(path.join(target, ".github/workflows/dashboard.yml.disabled")));
+  assert.deepEqual(r.disabled, []);
+});
+
+test("edge: a private install never overwrites or removes a dashboard workflow the target already has", () => {
+  const target = mkdtempSync(path.join(tmpdir(), "lanes-"));
+  mkdirSync(path.join(target, ".github/workflows"), { recursive: true });
+  writeFileSync(path.join(target, ".github/workflows/dashboard.yml"), "mine");
+  const r = install(".", target, { force: true });
+  assert.equal(readFileSync(path.join(target, ".github/workflows/dashboard.yml"), "utf8"), "mine");
+  assert.ok(r.skipped.includes(".github/workflows/dashboard.yml"));
+  assert.deepEqual(r.disabled, []);
+});
+
+test("edge: a second private install keeps the .disabled copy without --force", () => {
+  const target = mkdtempSync(path.join(tmpdir(), "lanes-"));
+  install(".", target, {});
+  writeFileSync(path.join(target, ".github/workflows/dashboard.yml.disabled"), "edited");
+  const r = install(".", target, {});
+  assert.equal(readFileSync(path.join(target, ".github/workflows/dashboard.yml.disabled"), "utf8"), "edited");
+  assert.ok(r.skipped.includes(".github/workflows/dashboard.yml.disabled"));
+});
+
+test("repoIsPublic reads gh's isPrivate, and treats every failure or odd answer as private", () => {
+  const answer = (text) => () => text;
+  assert.equal(repoIsPublic("t", answer('{"isPrivate":false}')), true);
+  assert.equal(repoIsPublic("t", answer('{"isPrivate":true}')), false);
+  assert.equal(repoIsPublic("t", answer("{}")), false);
+  assert.equal(repoIsPublic("t", answer("not json")), false);
+  assert.equal(repoIsPublic("t", answer('{"isPrivate":"false"}')), false);
+  assert.equal(repoIsPublic("t", () => { throw new Error("gh not found"); }), false);
+});
+
+test("edge: --public and --private on the command line decide before gh is asked", () => {
+  const never = () => { throw new Error("gh must not be asked"); };
+  assert.equal(publicFromArgs(["dir", "--public"], never), true);
+  assert.equal(publicFromArgs(["dir", "--private"], never), false);
+  assert.throws(() => publicFromArgs(["dir", "--public", "--private"], never), /not both/);
+  assert.equal(publicFromArgs(["dir"], () => '{"isPrivate":false}'), true);
 });

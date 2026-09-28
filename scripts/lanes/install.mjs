@@ -1,5 +1,6 @@
 // Copies the lanes workflow into another repository: node scripts/lanes/install.mjs <target-dir> [--force]
 // Existing files are kept unless --force. Afterwards edit the target's lanes.config.json paths for its layout.
+import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,29 +82,68 @@ export const MANIFEST = [
   "scripts/lanes/structure-report.mjs",
   "scripts/lanes/lessons.mjs",
   "scripts/lanes/validate.mjs",
+  "scripts/lanes/snapshot.mjs",
+  "contracts/snapshot.schema.json",
+  ".github/workflows/dashboard.yml",
   "docs/USING.md",
 ];
 
-export function install(source, target, { force = false } = {}) {
+// GitHub Pages sites are public even for a private repository (ADR 0012), so this workflow is only live in a public one.
+const DASHBOARD_WORKFLOW = ".github/workflows/dashboard.yml";
+
+/**
+ * Copies MANIFEST into `target`. Unless `isPublic`, the dashboard workflow is copied as `dashboard.yml.disabled`, which
+ * GitHub ignores; renaming it turns the dashboard on. An existing `dashboard.yml` is never replaced by a disabled copy.
+ * @returns {{ copied: string[], skipped: string[], disabled: string[] }} `disabled` lists the files copied disabled
+ */
+export function install(source, target, { force = false, isPublic = false } = {}) {
   const copied = [];
   const skipped = [];
+  const disabled = [];
   for (const rel of MANIFEST) {
-    const to = path.join(target, rel);
-    if (existsSync(to) && !force) {
+    const off = rel === DASHBOARD_WORKFLOW && !isPublic;
+    if (off && existsSync(path.join(target, rel))) {
       skipped.push(rel);
+      continue;
+    }
+    const dest = off ? `${rel}.disabled` : rel;
+    const to = path.join(target, dest);
+    if (existsSync(to) && !force) {
+      skipped.push(dest);
       continue;
     }
     mkdirSync(path.dirname(to), { recursive: true });
     copyFileSync(path.join(source, rel), to);
-    copied.push(rel);
+    copied.push(dest);
+    if (off) disabled.push(rel);
   }
-  return { copied, skipped };
+  return { copied, skipped, disabled };
+}
+
+const ghRepoView = (target) => execFileSync("gh", ["repo", "view", "--json", "isPrivate"], { cwd: target, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
+
+/** True only when gh says the target's repository is not private; any failure or odd answer counts as private. */
+export function repoIsPublic(target, run = ghRepoView) {
+  try {
+    return JSON.parse(run(target)).isPrivate === false;
+  } catch {
+    return false;
+  }
+}
+
+/** `--public` or `--private` decides; without either, gh is asked. */
+export function publicFromArgs(argv, run = ghRepoView) {
+  const [isPublic, isPrivate] = [argv.includes("--public"), argv.includes("--private")];
+  if (isPublic && isPrivate) throw new Error("--public and --private are exclusive: pass one, not both");
+  if (isPublic || isPrivate) return isPublic;
+  return repoIsPublic(argv[0], run);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const target = process.argv[2];
-  if (!target) throw new Error("usage: install.mjs <target-dir> [--force]");
-  const r = install(".", target, { force: process.argv.includes("--force") });
+  if (!target) throw new Error("usage: install.mjs <target-dir> [--force] [--public|--private]");
+  const r = install(".", target, { force: process.argv.includes("--force"), isPublic: publicFromArgs([target, ...process.argv.slice(3)]) });
   console.log(`copied ${r.copied.length}, kept ${r.skipped.length} existing${r.skipped.length ? `: ${r.skipped.join(", ")}` : ""}`);
+  if (r.disabled.length) console.log("The dashboard workflow is disabled (the repository is private or unknown); rename dashboard.yml.disabled to enable it. Pages sites are public.");
   console.log("Next: edit lanes.config.json, add `setup` and `preflight` npm scripts, then run setup-repo.mjs (owner).");
 }

@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { parseAdr, parseIssueForm, parsePrBody, parseSections, duplicateHeadings, parseVerdictComment } from "./lib.mjs";
 import { buildVerdictComment, validateVerdict } from "./post-review.mjs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const issue = (over = {}) => {
   const f = { Goal: "Add the snapshot schema", "Acceptance criteria": "- [ ] schema validates a sample\n- [ ] rejects a missing id", "Interface contract": "contracts/snapshot.ts", Scope: "In: contracts/. Out: UI.", "Blocked by": "none", Tier: "quick", ...over };
@@ -144,17 +148,27 @@ test("a verdict comment round-trips through the builder and the parser", () => {
 // The reviewer metrics contract: contracts/review-metrics.schema.json and validateVerdict must agree.
 const metricsSchema = JSON.parse(readFileSync("contracts/review-metrics.schema.json", "utf8"));
 
-/** The JSON Schema subset the metrics schema uses (type, enum, minimum, required, properties, additionalProperties). */
+/**
+ * The JSON Schema subset the contracts use (type, enum, const, minimum, pattern, maxLength, items, required,
+ * properties, additionalProperties). A keyword outside it makes the schema throw, so it can never pass unchecked.
+ */
+const KNOWN_KEYWORDS = new Set(["$schema", "$id", "title", "description", "type", "enum", "const", "minimum", "pattern", "maxLength", "items", "required", "properties", "additionalProperties"]);
 function schemaAccepts(schema, value) {
+  for (const k of Object.keys(schema)) if (!KNOWN_KEYWORDS.has(k)) throw new Error(`schemaAccepts does not implement "${k}"`);
   const types = [].concat(schema.type ?? []);
   const isType = (t) =>
     t === "object" ? value !== null && typeof value === "object" && !Array.isArray(value)
+    : t === "array" ? Array.isArray(value)
     : t === "integer" ? Number.isInteger(value)
     : t === "number" ? typeof value === "number" && Number.isFinite(value)
     : typeof value === t;
   if (types.length && !types.some(isType)) return false;
   if (schema.enum && !schema.enum.includes(value)) return false;
+  if ("const" in schema && value !== schema.const) return false;
   if (schema.minimum !== undefined && !(value >= schema.minimum)) return false;
+  if (schema.pattern !== undefined && !(typeof value === "string" && new RegExp(schema.pattern).test(value))) return false;
+  if (schema.maxLength !== undefined && !(typeof value === "string" && value.length <= schema.maxLength)) return false;
+  if (schema.items && Array.isArray(value) && !value.every((v) => schemaAccepts(schema.items, v))) return false;
   if (types.includes("object")) {
     if ((schema.required ?? []).some((k) => !Object.hasOwn(value, k))) return false;
     for (const [k, v] of Object.entries(value)) {
@@ -229,4 +243,101 @@ test("every docs/adr/*.md parses, and its file name carries its number", () => {
 test("4 backticks are not closed by 3 backticks", () => {
   const body = "````\nCloses #999\n```\n\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\nnothing\n## Not done\nnothing\n";
   assert.equal(parsePrBody(body).closes, null);
+});
+
+// The snapshot contract: contracts/snapshot.schema.json and snapshot.mjs's buildSnapshot must agree, field by field.
+const snapshotSchema = JSON.parse(readFileSync("contracts/snapshot.schema.json", "utf8"));
+const SNAP_SHA = "0123456789abcdef0123456789abcdef01234567";
+const snapForm = (blockedBy) => `### Goal\n\ng\n\n### Acceptance criteria\n\n- [ ] a\n\n### Interface contract\n\nx\n\n### Scope\n\nIn: a.\n\n### Blocked by\n\n${blockedBy}\n\n### Tier\n\nfull\n`;
+// snapshot.mjs belongs to another module, so it is run as a command (`--from` builds offline, without gh), not imported.
+const builtSnapshot = () => {
+  const dir = mkdtempSync(join(tmpdir(), "snapshot-contract-"));
+  try {
+    writeFileSync(join(dir, "input.json"), JSON.stringify(snapshotInput));
+    execFileSync(process.execPath, ["scripts/lanes/snapshot.mjs", "--from", join(dir, "input.json"), "--out", join(dir, "snapshot.json")], { stdio: "pipe" });
+    return JSON.parse(readFileSync(join(dir, "snapshot.json"), "utf8"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+const snapshotInput = {
+    generatedAt: "2026-09-28T12:00:00.000Z",
+    issues: [
+      { number: 1, title: "A", labels: [{ name: "ready" }, { name: "tier:full" }], body: snapForm("none") },
+      { number: 2, title: "B", labels: [{ name: "ready" }, { name: "tier:quick" }], body: snapForm("#1") },
+      { number: 3, title: "C", labels: [{ name: "tier:skip" }], body: snapForm("none") },
+    ],
+    prs: [
+      {
+        number: 9,
+        headRefOid: SNAP_SHA,
+        isCrossRepository: false,
+        statusCheckRollup: [{ name: "verify", conclusion: "FAILURE" }, { context: "lanes/gate", state: "PENDING", description: "waiting on owner (/approve)" }],
+        closingIssuesReferences: [{ number: 3 }],
+        comments: [{ authorAssociation: "OWNER", body: buildVerdictComment({ reviewer: "test-hunter", verdict: "success", summary: "s", criteria: [{ index: 1, result: "pass", evidence: "e" }], findings: [] }, SNAP_SHA) }],
+      },
+    ],
+};
+
+test("the snapshot schema defines every top-level and per-issue field, required ones listed, no other keys", () => {
+  assert.deepEqual([...snapshotSchema.required].sort(), ["edges", "generatedAt", "issues", "version"]);
+  assert.deepEqual(Object.keys(snapshotSchema.properties).sort(), ["edges", "generatedAt", "issues", "version"]);
+  assert.equal(snapshotSchema.additionalProperties, false);
+  const issue = snapshotSchema.properties.issues.items;
+  assert.deepEqual([...issue.required].sort(), ["blockedBy", "number", "stage", "tier", "title"]);
+  assert.deepEqual(Object.keys(issue.properties).sort(), ["blockedBy", "criteria", "number", "pr", "stage", "tier", "title"]);
+  assert.deepEqual(issue.properties.tier.enum, ["skip", "quick", "full", "unknown"]);
+  assert.deepEqual(issue.properties.blockedBy.items.properties.kind.enum, ["issue", "check", "review", "owner", "queue"]);
+  assert.deepEqual(Object.keys(issue.properties.pr.properties).sort(), ["checks", "headSha", "number"]);
+  assert.deepEqual(Object.keys(issue.properties.criteria.items.properties).sort(), ["index", "result"]);
+  assert.deepEqual(Object.keys(snapshotSchema.properties.edges.items.properties).sort(), ["from", "to"]);
+});
+
+test("a snapshot built by snapshot.mjs conforms to the schema, and it exercises every optional field", () => {
+  const s = builtSnapshot();
+  assert.equal(schemaAccepts(snapshotSchema, s), true);
+  const three = s.issues.find((i) => i.number === 3);
+  assert.ok(three.pr && three.criteria && three.blockedBy.length, "the sample covers pr, criteria and blockedBy");
+  assert.ok(s.edges.length, "the sample covers edges");
+});
+
+test("every stage snapshot.mjs can emit is in the schema's stage enum", () => {
+  const stages = snapshotSchema.properties.issues.items.properties.stage.enum;
+  for (const s of ["ready", "blocked", "not-ready", "already met", "starting", "failing", "contract", "owner", "gate", "review", "queued"]) assert.ok(stages.includes(s), s);
+});
+
+test("the snapshot schema rejects a bad snapshot, field by field", () => {
+  const mutate = (fn) => {
+    const s = structuredClone(builtSnapshot());
+    fn(s);
+    return s;
+  };
+  const three = (s) => s.issues.find((i) => i.number === 3);
+  const cases = [
+    ["a login on an issue", (s) => (s.issues[0].author = "someone")],
+    ["a body on the pr", (s) => (three(s).pr.body = "text")],
+    ["an unknown top-level key", (s) => (s.comments = [])],
+    ["a missing generatedAt", (s) => delete s.generatedAt],
+    ["a non-UTC generatedAt", (s) => (s.generatedAt = "2026-09-28 12:00")],
+    ["a wrong version", (s) => (s.version = 1)],
+    ["a missing stage", (s) => delete s.issues[0].stage],
+    ["an unknown stage", (s) => (s.issues[0].stage = "flying")],
+    ["an unknown tier", (s) => (s.issues[0].tier = "huge")],
+    ["a string number", (s) => (s.issues[0].number = "1")],
+    ["a zero number", (s) => (s.issues[0].number = 0)],
+    ["a 201-character title", (s) => (s.issues[0].title = "x".repeat(201))],
+    ["an unknown blocker kind", (s) => (s.issues[1].blockedBy[0].kind = "person")],
+    ["a blocker without a reason", (s) => delete s.issues[1].blockedBy[0].reason],
+    ["a short headSha", (s) => (three(s).pr.headSha = "abc")],
+    ["an unknown check result", (s) => (three(s).pr.checks[0].result = "green")],
+    ["a criterion index of 0", (s) => (three(s).criteria[0].index = 0)],
+    ["an unknown criterion result", (s) => (three(s).criteria[0].result = "maybe")],
+    ["an edge missing to", (s) => delete s.edges[0].to],
+    ["issues that is not an array", (s) => (s.issues = {})],
+  ];
+  for (const [name, fn] of cases) assert.equal(schemaAccepts(snapshotSchema, mutate(fn)), false, name);
+});
+
+test("edge: schemaAccepts refuses a schema keyword it does not implement", () => {
+  assert.throws(() => schemaAccepts({ type: "string", format: "email" }, "a@b.c"), /does not implement "format"/);
 });
