@@ -213,13 +213,15 @@ test("parseSessionId returns null when no id is printed", () => {
 const form = ({ scope = "In: `a.mjs`.", blockedBy = "none", contract = "none" } = {}) =>
   ["### Goal", "g", "### Acceptance criteria", "- [ ] a", "### Interface contract", contract, "### Scope", scope, "### Blocked by", blockedBy, "### Tier", "quick"].join("\n\n");
 
-function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config } = {}) {
+function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config, cleanup = () => [] } = {}) {
   const launches = [];
+  const calls = [];
   const view = (n) => {
     const i = issues[n];
     return { number: n, state: i.state ?? "OPEN", labels: (i.labels ?? ["ready", "tier:quick"]).map((name) => ({ name })), body: i.body ?? form() };
   };
   const gh = (args) => {
+    calls.push(`gh ${args[0]} ${args[1]}`);
     if (args[0] === "issue" && args[1] === "view") {
       const n = Number(args[2]);
       if (!(n in issues)) throw new Error("gh: Could not resolve to an issue");
@@ -240,7 +242,11 @@ function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut
     if (launchFail.includes(n)) throw new Error("claude: spawn failed");
     return launchOut[n] ?? `backgrounded · id${n}`;
   };
-  return { deps: { gh, claude, root: () => "/repo", config: () => config }, launches };
+  const cleanupFake = (options) => {
+    calls.push(`cleanup ${JSON.stringify(options)}`);
+    return cleanup(options);
+  };
+  return { deps: { gh, claude, root: () => "/repo", config: () => config, cleanup: cleanupFake }, launches, calls };
 }
 
 test("main launches from the repository root and prints #N → id", () => {
@@ -641,4 +647,114 @@ test("docs/USING.md's /start paragraph describes --auto", () => {
   const paragraph = doc.slice(doc.indexOf("Faster: `/start"), doc.indexOf("\n3. "));
   assert.match(paragraph, /`\/start --auto`/);
   assert.match(paragraph, /`\/start --auto --go`/);
+});
+
+// #94: every /start (issue numbers or --auto) runs cleanupMerged first and prints its lines first.
+const REMOVED = "removed issue-7-x (PR #90): claude rm s7; git worktree remove /repo/.claude/worktrees/issue-7-x; git branch -D issue-7-x";
+
+test("cleanup with nothing to clean prints its line first, then the start run's lines", () => {
+  const { deps } = fakes({ issues: { 1: {} }, cleanup: () => ["no lanes to clean up"] });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["no lanes to clean up", "#1 → id1"]);
+});
+
+test("cleanup runs before planning, for <N...>, --auto and --auto --go alike", () => {
+  for (const argv of [["1"], ["--auto"], ["--auto", "--go"]]) {
+    const { deps, calls } = fakes({ issues: { 1: {} } });
+    main(argv, deps);
+    assert.match(calls[0], /^cleanup /, `${argv.join(" ")}: ${calls.join(", ")}`);
+    assert.equal(calls.filter((c) => c.startsWith("cleanup ")).length, 1);
+  }
+});
+
+test("one merged lane cleaned: its removed line comes first, and the session count sees it gone", () => {
+  const sessions = [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-7-x" }];
+  const cleanup = () => {
+    sessions.length = 0;
+    return [REMOVED];
+  };
+  const { deps } = fakes({ issues: { 1: {} }, sessions, config: { start: { maxLanes: 1 } }, cleanup });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, [REMOVED, "#1 → id1"]);
+});
+
+test("--auto --go and <N...> clean up for real (dryRun: false)", () => {
+  for (const argv of [["--auto", "--go"], ["1"]]) {
+    const { deps, calls } = fakes({ issues: { 1: {} }, cleanup: () => [REMOVED] });
+    const { lines } = main(argv, deps);
+    assert.equal(calls[0], 'cleanup {"dryRun":false}');
+    assert.equal(lines[0], REMOVED);
+  }
+});
+
+test("--auto (dry run) runs cleanup with dryRun: true, so it removes nothing", () => {
+  const would = "would remove issue-7-x (PR #90): git branch -D issue-7-x";
+  const { deps, calls } = fakes({ issues: { 1: {} }, cleanup: ({ dryRun }) => [dryRun ? would : REMOVED] });
+  const { code, lines } = main(["--auto"], deps);
+  assert.equal(code, 0);
+  assert.equal(calls[0], 'cleanup {"dryRun":true}');
+  assert.equal(lines[0], would);
+  assert.equal(lines.at(-1), "dry run, nothing launched: /start --auto --go launches the 1 marked would start");
+});
+
+test("cleanup throwing prints cleanup failed: <reason>, and the run continues with the same plan and exit code", () => {
+  for (const argv of [["1", "2"], ["--auto"], ["--auto", "--go"]]) {
+    const issues = { 1: {}, 2: { labels: ["ready"] } };
+    const plain = main(argv, fakes({ issues }).deps);
+    const cleanup = () => {
+      throw new Error("gh: not logged in\nmore detail");
+    };
+    const { code, lines } = main(argv, fakes({ issues, cleanup }).deps);
+    assert.deepEqual(lines, ["cleanup failed: gh: not logged in", ...plain.lines], argv.join(" "));
+    assert.equal(code, plain.code);
+  }
+});
+
+test("a failed cleanup step is printed as cleanup failed: <reason>, other cleanup lines as they are", () => {
+  const failedLine = "failed issue-7-x (PR #90) at git worktree remove /w: fatal: cannot remove";
+  const { deps } = fakes({ issues: { 1: {} }, cleanup: () => [failedLine, "skipped issue-8-y: not merged"] });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["cleanup failed: issue-7-x (PR #90) at git worktree remove /w: fatal: cannot remove", "skipped issue-8-y: not merged", "#1 → id1"]);
+});
+
+test("edge: a cleanup throw with a stderr uses its first line as the reason", () => {
+  const cleanup = () => {
+    throw Object.assign(new Error("Command failed"), { stderr: "claude: agents failed\n" });
+  };
+  assert.equal(main(["1"], fakes({ issues: { 1: {} }, cleanup }).deps).lines[0], "cleanup failed: claude: agents failed");
+});
+
+test("edge: cleanup returning a non-array is reported as a cleanup failure, not a crash", () => {
+  const { deps } = fakes({ issues: { 1: {} }, cleanup: () => undefined });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 0);
+  assert.match(lines[0], /^cleanup failed: /);
+  assert.equal(lines[1], "#1 → id1");
+});
+
+test("edge: bad arguments or a bad config run no cleanup", () => {
+  for (const [argv, config] of [[["x"]], [[]], [["--auto", "--now"]], [["1"], { start: { maxLanes: 0 } }]]) {
+    const { deps, calls } = fakes({ issues: { 1: {} }, config });
+    const { code } = main(argv, deps);
+    assert.equal(code, 2);
+    assert.deepEqual(calls.filter((c) => c.startsWith("cleanup ")), [], argv.join(" "));
+  }
+});
+
+test("edge: the in-flight count failing after cleanup still prints the cleanup lines first", () => {
+  const { deps, launches } = fakes({ issues: { 1: {} }, agentsFail: true, cleanup: () => [REMOVED] });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 2);
+  assert.equal(lines[0], REMOVED);
+  assert.match(lines[1], /^cannot count lanes in flight, nothing launched: /);
+  assert.deepEqual(launches, []);
+});
+
+test("start.mjs's default deps clean up with cleanupMerged", () => {
+  const src = readFileSync(new URL("./start.mjs", import.meta.url), "utf8");
+  assert.match(src, /import \{ cleanupMerged \} from "\.\/cleanup\.mjs";/);
+  assert.match(src, /deps = \{[^}]*cleanup: cleanupMerged[^}]*\}/);
 });

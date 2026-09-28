@@ -189,16 +189,28 @@ const branchExists = (branch) => {
   }
 };
 
+const DEFAULT_DEPS = {
+  load: () => loadCleanupInputs(),
+  run: (cmd, args) => sh(cmd, args),
+  stillThere: (onlyIf) => (onlyIf.path ? existsSync(onlyIf.path) : branchExists(onlyIf.branch)),
+};
+
+/**
+ * Removes every merged lane (or, with `dryRun`, only plans it) and returns render's lines, one per lane or
+ * `["no lanes to clean up"]`; a failed step's line starts with `failed `. Throws when the inputs cannot be read.
+ * `deps` holds fakes in tests: `load()` returns planCleanup's inputs, and `run` and `stillThere` are runCleanup's.
+ * @param {{ dryRun?: boolean, deps?: { load?: Function, run?: Function, stillThere?: Function } }} [options]
+ * @returns {string[]}
+ */
+export function cleanupMerged({ dryRun = false, deps = {} } = {}) {
+  const { load, run, stillThere } = { ...DEFAULT_DEPS, ...deps };
+  return render(runCleanup(planCleanup(load()), { dryRun, run, stillThere })).split("\n");
+}
+
 function main(argv = process.argv.slice(2)) {
-  const dryRun = argv.includes("--dry-run");
-  const plan = planCleanup(loadCleanupInputs());
-  const results = runCleanup(plan, {
-    dryRun,
-    run: (cmd, args) => sh(cmd, args),
-    stillThere: (onlyIf) => (onlyIf.path ? existsSync(onlyIf.path) : branchExists(onlyIf.branch)),
-  });
-  console.log(render(results));
-  if (results.some((r) => r.status === "failed")) process.exitCode = 1;
+  const lines = cleanupMerged({ dryRun: argv.includes("--dry-run") });
+  console.log(lines.join("\n"));
+  if (lines.some((line) => line.startsWith("failed "))) process.exitCode = 1;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main();
