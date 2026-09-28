@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // vendor/owasp-cheatsheets/ (ADR 0009, #159): the sheets are upstream bytes at one pinned commit, and the lanes-written
@@ -33,6 +34,13 @@ export const importsChildProcess = (text) => /from ["']node:child_process["']/.t
 // `| <blob sha> | <file> |` rows of VENDORED.md's hash table, as a Map of file -> sha.
 export const blobTable = (text) => new Map([...text.matchAll(/^\|\s*`?([0-9a-f]{40})`?\s*\|\s*`?([A-Za-z0-9_.-]+)`?\s*\|/gm)].map((m) => [m[2], m[1]]));
 
+// The blob-id check itself, over `{ name, bytes }` entries: one message per file that VENDORED.md does not list or whose
+// bytes differ from the recorded id. Empty means every file matches the pinned upstream tree.
+export const blobIdProblems = (table, entries) => entries.flatMap(({ name, bytes }) => {
+  if (!table.has(name)) return [`VENDORED.md records no blob id for ${name}`];
+  return gitBlobSha(bytes) === table.get(name) ? [] : [`${name} differs from the pinned upstream bytes`];
+});
+
 const vendored = () => read(join(DIR, "VENDORED.md"));
 const index = () => read(join(DIR, "INDEX.md"));
 const sheetFiles = () => readdirSync(SHEETS).sort();
@@ -42,12 +50,43 @@ test("criterion 1: sheets/ holds exactly the sixteen approved sheets", () => {
 });
 
 test("criterion 1: every sheet and the licence match the blob ids recorded from the pinned upstream tree", () => {
-  const table = blobTable(vendored());
-  for (const f of [...sheetFiles(), "LICENSE"]) {
-    const path = f === "LICENSE" ? join(DIR, f) : join(SHEETS, f);
-    assert.ok(table.has(f), `VENDORED.md records no blob id for ${f}`);
-    assert.equal(gitBlobSha(readFileSync(path)), table.get(f), `${f} differs from the pinned upstream bytes`);
+  assert.deepEqual(blobIdProblems(blobTable(vendored()), realEntries()), []);
+});
+
+// The vendored sheets are exempt from the local-path and secret scans (#183), so this check is what stops a changed or
+// unlisted sheet slipping through: the negative tests below run the same helper the real test above uses.
+const realEntries = () => [...sheetFiles().map((f) => ({ name: f, bytes: readFileSync(join(SHEETS, f)) })), { name: "LICENSE", bytes: readFileSync(join(DIR, "LICENSE")) }];
+
+test("criterion 1: the blob-id check passes for the real vendored files", () => {
+  assert.deepEqual(blobIdProblems(blobTable(vendored()), realEntries()), []);
+});
+
+test("criterion 1 (negative): a sheet copy with one added line fails the blob-id check, naming the file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "vendor-blob-"));
+  try {
+    const name = sheetFiles()[0];
+    const copy = join(dir, name);
+    // Built at run time so this source file carries no absolute local path itself.
+    const localPath = ["C:", "Users", "someone", "notes.txt"].join("\\");
+    writeFileSync(copy, `${read(join(SHEETS, name))}see ${localPath}\n`);
+    assert.deepEqual(blobIdProblems(blobTable(vendored()), [{ name, bytes: readFileSync(copy) }]), [`${name} differs from the pinned upstream bytes`]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("criterion 2 (negative): a sheet missing from VENDORED.md's blob-id table fails the check, naming the file", () => {
+  const name = sheetFiles()[0];
+  const table = blobTable(vendored());
+  table.delete(name);
+  assert.deepEqual(blobIdProblems(table, realEntries()), [`VENDORED.md records no blob id for ${name}`]);
+});
+
+test("edge: blobIdProblems reports an empty table for every file, and a changed licence as well as a changed sheet", () => {
+  const entries = [{ name: "a.md", bytes: Buffer.from("a\n") }, { name: "LICENSE", bytes: Buffer.from("b\n") }];
+  assert.deepEqual(blobIdProblems(new Map(), entries), ["VENDORED.md records no blob id for a.md", "VENDORED.md records no blob id for LICENSE"]);
+  assert.deepEqual(blobIdProblems(new Map([["a.md", gitBlobSha(entries[0].bytes)], ["LICENSE", "0".repeat(40)]]), entries), ["LICENSE differs from the pinned upstream bytes"]);
+  assert.deepEqual(blobIdProblems(new Map(), []), []);
 });
 
 test("criterion 2 and 5: the licence file exists and is CC BY-SA 4.0", () => {
