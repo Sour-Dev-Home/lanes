@@ -129,7 +129,7 @@ const normalPath = (p) => {
 };
 
 // Issue N → `{ id, state, waiting }` for each background session whose cwd is inside a worktree of `repoRoot`
-// named `issue-<N>-…`. Two sessions on one issue: the most recently started wins.
+// named `issue-<N>-…`, or bare `issue-<N>` (#134). Two sessions on one issue: the most recently started wins.
 export function laneSessions(agents, repoRoot) {
   const root = `${normalPath(repoRoot)}/`;
   const found = new Map();
@@ -137,7 +137,7 @@ export function laneSessions(agents, repoRoot) {
     if (a?.kind !== "background" || typeof a.id !== "string" || typeof a.cwd !== "string") continue;
     const cwd = normalPath(a.cwd);
     if (!cwd.startsWith(root)) continue;
-    const number = cwd.slice(root.length).split("/").map((s) => /^issue-(\d+)-./.exec(s)?.[1]).find(Boolean);
+    const number = cwd.slice(root.length).split("/").map((s) => /^issue-(\d+)(?:-.*)?$/.exec(s)?.[1]).find(Boolean);
     if (!number) continue;
     const previous = found.get(Number(number));
     if (previous && previous.startedAt > (a.startedAt ?? 0)) continue;

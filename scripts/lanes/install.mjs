@@ -53,6 +53,10 @@ export const MANIFEST = [
   "scripts/lanes/approve-guard.mjs",
   "scripts/lanes/start-guard.mjs",
   "scripts/lanes/notify-hook.mjs",
+  "scripts/lanes/blockers.mjs",
+  "scripts/lanes/pick.mjs",
+  "scripts/lanes/cleanup.mjs",
+  "scripts/lanes/review-metrics.mjs",
   "docs/USING.md",
 ];
 

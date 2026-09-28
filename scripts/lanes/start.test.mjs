@@ -772,3 +772,38 @@ test("start.mjs's default deps clean up with cleanupMerged", () => {
   assert.match(src, /import \{ cleanupMerged \} from "\.\/cleanup\.mjs";/);
   assert.match(src, /deps = \{[^}]*cleanup: cleanupMerged[^}]*\}/);
 });
+
+// #134: a lane whose worktree folder is `issue-<N>` with no slug is still that issue's lane.
+test("inFlightIssues maps a session in an issue-<N> or issue-<N>-<slug> folder to N, never a look-alike number", () => {
+  const sessions = [
+    { kind: "background", cwd: "C:\\repo\\.claude\\worktrees\\issue-104" },
+    { kind: "background", cwd: "/repo/.claude/worktrees/issue-106/scripts/lanes" },
+    { kind: "background", cwd: "/repo/.claude/worktrees/issue-7-slug" },
+    { kind: "background", cwd: "/repo/.claude/worktrees/issue-5x" },
+    { kind: "background", cwd: "/repo/.claude/worktrees/issue-5x-slug" },
+    { kind: "background", cwd: "/repo/.claude/worktrees/issue-" },
+    { kind: "background", cwd: "/repo/.claude/worktrees/issue-9-" },
+    { kind: "background", cwd: "/repo/.claude/worktrees/issue-50" },
+  ];
+  // `issue-9-` (an empty slug) still counts: a false "in flight" only delays a launch, a miss runs two lanes.
+  assert.deepEqual(inFlightIssues({ prs: [], sessions }), [7, 9, 50, 104, 106]);
+});
+
+for (const status of ["idle", "busy"]) {
+  test(`start <N> and --auto treat an ${status} session in a bare issue-<N> folder as already in flight`, () => {
+    const sessions = [{ kind: "background", status, cwd: "C:\\repo\\.claude\\worktrees\\issue-6" }];
+    const one = fakes({ issues: { 6: { body: form({ scope: "In: `f.mjs`." }) } }, sessions });
+    assert.deepEqual(main(["6"], one.deps).lines, ["#6: refused: already in flight"]);
+    assert.equal(one.launches.length, 0);
+    const auto = fakes({ issues: autoIssues(), sessions });
+    const lines = main(["--auto"], auto.deps).lines;
+    assert.ok(lines.includes("#6: skipped: already in flight"), lines.join("\n"));
+    assert.equal(auto.launches.length, 0);
+  });
+}
+
+test("edge: a session in a bare issue-60 folder does not put #6 in flight", () => {
+  const { deps } = fakes({ issues: autoIssues(), sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-60" }] });
+  const lines = main(["--auto"], deps).lines;
+  assert.ok(lines.includes("#6: would start"), lines.join("\n"));
+});

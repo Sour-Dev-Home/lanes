@@ -59,11 +59,12 @@ export function parseSessionId(output) {
 }
 
 const branchIssue = (name) => String(name ?? "").match(/^issue-(\d+)-/)?.[1];
-const sessionIssue = (s) => (s.kind === "background" ? String(s.cwd ?? "").match(/(?:^|[\\/])issue-(\d+)-[^\\/]*(?:[\\/]|$)/)?.[1] : undefined);
+// A lane's worktree folder is `issue-<N>-<slug>`, or bare `issue-<N>` when the lane skipped the slug (#134).
+const sessionIssue = (s) => (s.kind === "background" ? String(s.cwd ?? "").match(/(?:^|[\\/])issue-(\d+)(?:-[^\\/]*)?(?:[\\/]|$)/)?.[1] : undefined);
 
 /**
  * The issues with a lane in flight: open PRs from `issue-<N>-` branches, plus background sessions whose cwd is
- * (inside) an `issue-<N>-` worktree, except sessions of a `finished` issue (its PR merged or the issue closed), which
+ * (inside) an `issue-<N>` or `issue-<N>-<slug>` worktree, except sessions of a `finished` issue (its PR merged or the issue closed), which
  * are idle leftovers. Each issue counts once.
  * @param {{ prs: { headRefName: string }[], sessions: { kind: string, cwd: string }[], finished?: number[] }} input
  * @returns {number[]} ascending

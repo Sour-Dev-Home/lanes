@@ -31,7 +31,9 @@ path, command or CI output, secret, token or personal data (point to the PR or i
    equivalent) and watch it fail, then implement until it passes. The criteria are a minimum: after the
    per-criterion tests, add tests for the edge cases you found while implementing (empty, boundary, malformed and
    error inputs), and list each under "Tests added" as `edge: <case>`. Run the full suite once at the end.
-6. `node scripts/lanes/reviewers.mjs <tier>` lists the reviewers this diff needs. Spawn each as a fresh subagent,
+6. Commit your work first, so the reviewers listed match what the gate will see; then
+   `node scripts/lanes/reviewers.mjs <tier>` lists the reviewers this diff needs (it refuses when there is no diff
+   at all). Spawn each as a fresh subagent,
    never a fork, with model sonnet: test-hunter (FULL for tier full, QUICK for tier quick), ui-reviewer,
    security-reviewer, architecture-advisor. Give each the issue's numbered acceptance criteria and require its final
    message to end with a JSON verdict: `{ "reviewer", "verdict": "success"|"failure", "summary", "criteria":
