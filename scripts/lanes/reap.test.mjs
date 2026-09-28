@@ -195,6 +195,13 @@ test("edge: an unread session list waits during and after the grace, as before",
   assert.equal(tick({ sessions: null, now: T0 + HOUR }).action, "wait");
 });
 
+test("edge: a session in a subfolder of another issue's worktree gives up during the grace, one in its own subfolder does not", () => {
+  const sub = (n) => lane({ cwd: `C:\\repo\\.claude\\worktrees\\issue-${n}-y\\scripts` });
+  assert.equal(tick({ sessions: [sub(8)], now: T0 + MIN }).action, "give-up");
+  assert.equal(tick({ sessions: [sub(7)], now: T0 + MIN }).action, "wait");
+  assert.equal(tick({ sessions: [sub(7)], now: T0 + MIN, issueState: "CLOSED" }).action, "remove");
+});
+
 test("the defaults are ADR 0010's", () => {
   assert.equal(GIVE_UP_MS, 48 * HOUR);
   assert.equal(GIVE_UP_FAILURES, 3);
