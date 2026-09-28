@@ -238,11 +238,11 @@ function readState({ issue, root, run }) {
 
 // Removes the one lane through cleanup.mjs: `{ removed }`, `{ skipped }` (cleanup's own rules refused it), or
 // `{ failed }` (a step failed or the inputs could not be read).
-function removeLane(issue, { root, cleanupDeps = {} }) {
-  const load = cleanupDeps.load ?? (() => loadCleanupInputs(root));
+function removeLane(issue, { root, run, cleanupDeps = {} }) {
+  const load = cleanupDeps.load ?? (() => loadCleanupInputs(root, cleanupDeps.run ?? run));
   let lines;
   try {
-    lines = cleanupMerged({ deps: { ...cleanupDeps, load: () => laneInputs(load(), issue) } });
+    lines = cleanupMerged({ deps: { run, ...cleanupDeps, load: () => laneInputs(load(), issue) } });
   } catch (err) {
     return { failed: `cleanup: ${errLine(err)}` };
   }
@@ -267,7 +267,7 @@ function removeLane(issue, { root, cleanupDeps = {} }) {
  * @param {{ root: string, pid: number, run: Function, now: () => number, sleep: (ms: number) => Promise<void>,
  *   isRunning: (pid: number) => boolean, err: (line: string) => void, trap: (release: Function) => void,
  *   cleanupDeps?: object }} deps `run(cmd, args)` returns stdout or throws; `trap(release)` arranges for the lock to
- *   be released on a signal; `cleanupDeps` go to cleanupMerged (its `load` defaults to loadCleanupInputs(root)).
+ *   be released on a signal; `cleanupDeps` go to cleanupMerged (its `run` defaults to this `run`, and its `load` to loadCleanupInputs(root, run)).
  * @returns {Promise<number>}
  */
 export async function main(argv, deps) {

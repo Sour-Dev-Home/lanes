@@ -301,9 +301,9 @@ export const shOptions = (opts = {}) => ({ encoding: "utf8", stdio: ["ignore", "
 const sh = (cmd, args, opts) => execFileSync(cmd, args, shOptions(opts));
 
 // Lanes run in worktrees of the main checkout, so the root is the common git dir's parent, not --show-toplevel.
-const repoRoot = () => dirname(sh("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim());
+const repoRoot = (run = sh) => dirname(run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim());
 
-function porcelain(path) {
+function porcelain(path, sh) {
   try {
     return sh("git", ["-C", path, "status", "--porcelain"]).trim() !== "";
   } catch {
@@ -312,7 +312,7 @@ function porcelain(path) {
 }
 
 // How many of a branch's commits are on no remote, or null when git cannot say.
-function unpushedCount(branch) {
+function unpushedCount(branch, sh) {
   try {
     return Number(sh("git", ["rev-list", "--count", `refs/heads/${branch}`, "--not", "--remotes"]).trim());
   } catch {
@@ -322,18 +322,21 @@ function unpushedCount(branch) {
 
 // The inputs to planCleanup, read from git, gh, `claude agents --json` and the .claude/worktrees folder. Throws when
 // any of them cannot be read: cleaning without knowing the sessions could remove a worktree from under one.
-export function loadCleanupInputs(root = repoRoot()) {
+// `run(cmd, args)` returns stdout or throws, and defaults to `sh`; every read goes through it.
+export function loadCleanupInputs(rootArg, run = sh) {
+  const sh = run;
+  const root = rootArg ?? repoRoot(run);
   const trees = parseWorktrees(sh("git", ["worktree", "list", "--porcelain"]));
   const onBranch = new Set(trees.map((t) => t.branch));
   const worktrees = trees.map((t) => {
     const lane = LANE_BRANCH.test(t.branch ?? "") && !t.main;
-    const tree = { ...t, dirty: lane ? porcelain(t.path) : false, ...(lane ? { unpushed: unpushedCount(t.branch) } : {}) };
+    const tree = { ...t, dirty: lane ? porcelain(t.path, sh) : false, ...(lane ? { unpushed: unpushedCount(t.branch, sh) } : {}) };
     const pid = lockPid(t.locked);
     return pid ? { ...tree, lockRunning: pidRunning(pid) } : tree;
   });
   for (const line of sh("git", ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/"]).split(/\r?\n/)) {
     const [branch, head] = line.split(" ");
-    if (LANE_BRANCH.test(branch ?? "") && !onBranch.has(branch)) worktrees.push({ path: null, branch, head, dirty: false, main: false, unpushed: unpushedCount(branch) });
+    if (LANE_BRANCH.test(branch ?? "") && !onBranch.has(branch)) worktrees.push({ path: null, branch, head, dirty: false, main: false, unpushed: unpushedCount(branch, sh) });
   }
   const prs = JSON.parse(sh("gh", ["pr", "list", "--state", "all", "--limit", String(PR_LIMIT), "--json", "number,state,headRefName,headRefOid"]));
   const issues = JSON.parse(sh("gh", ["issue", "list", "--state", "all", "--limit", String(PR_LIMIT), "--json", "number,state"]));
@@ -457,7 +460,8 @@ export function sessionsFrom(agents, root) {
   for (const a of agents) {
     if (a?.kind !== "background" || typeof a.cwd !== "string") continue;
     const cwd = normalPath(a.cwd);
-    if (!cwd.startsWith(top)) continue;
+    // The root itself counts: a lane that has not entered its worktree yet sits there, with no issue.
+    if (cwd !== normalPath(root) && !cwd.startsWith(top)) continue;
     const issue = Number(cwd.slice(top.length).split("/").map((s) => LANE_FOLDER.exec(s)?.[1]).find(Boolean)) || null;
     const readable = typeof a.id === "string" && SESSION_ID.test(a.id);
     const session = { ...(readable ? { id: a.id } : { unreadableId: true }), cwd: a.cwd, issue, status: a.status, state: a.state };
@@ -524,7 +528,6 @@ const branchExists = (branch) => {
 };
 
 const DEFAULT_DEPS = {
-  load: () => loadCleanupInputs(),
   run: (cmd, args) => sh(cmd, args),
   stillThere: (onlyIf) => (onlyIf.path ? existsSync(onlyIf.path) : branchExists(onlyIf.branch)),
   removeDir: removeEmptyDir,
@@ -543,7 +546,7 @@ const DEFAULT_DEPS = {
  */
 export function cleanupMerged({ dryRun = false, deps = {} } = {}) {
   const { load, run, stillThere, sessionEnded: ended, saveLog, removeDir, waitStopped: waited, sleep } = { ...DEFAULT_DEPS, ...deps };
-  const inputs = load();
+  const inputs = load ? load() : loadCleanupInputs(undefined, run);
   const isEnded = ended ?? ((id) => sessionEnded(id, { sessions: inputs.sessions, run }));
   const save = saveLog ?? (inputs.root ? (id, issue) => saveSessionLog(id, issue, { run, root: inputs.root }) : undefined);
   const waitStopped = waited ?? ((id) => waitForStop(id, { run, sleep }));

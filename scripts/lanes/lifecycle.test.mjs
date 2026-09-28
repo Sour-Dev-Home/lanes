@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupMerged, findOrphans, parseWorktrees, sessionsFrom, shOptions } from "./cleanup.mjs";
+import { cleanupMerged, loadCleanupInputs, shOptions } from "./cleanup.mjs";
 import { FIRST_POLL_MS, POLL_MS, STARTUP_GRACE_MS, main as reap, runOptions } from "./reap.mjs";
 import { main as start } from "./start.mjs";
 
@@ -99,30 +99,10 @@ function world() {
   };
   w.count = (cmd, ...args) => w.calls.filter((c) => c.cmd === cmd && args.every((a, i) => c.args[i] === a)).length;
 
-  // cleanup.mjs's loadCleanupInputs reads through its own private execFileSync, so the test reads the same things
-  // through the shared run and hands cleanupMerged the result.
-  w.load = (by) => () => {
-    const run = (cmd, args) => w.run(cmd, args, shOptions(), by);
-    const trees = parseWorktrees(run("git", ["worktree", "list", "--porcelain"]));
-    const onBranch = new Set(trees.map((t) => t.branch));
-    const isLane = (b) => /^issue-\d+-./.test(b ?? "");
-    const unpushed = (b) => Number(run("git", ["rev-list", "--count", `refs/heads/${b}`, "--not", "--remotes"]).trim());
-    const worktrees = trees.map((t) => {
-      const lane = isLane(t.branch) && !t.main;
-      return { ...t, dirty: lane ? run("git", ["-C", t.path, "status", "--porcelain"]).trim() !== "" : false, ...(lane ? { unpushed: unpushed(t.branch) } : {}) };
-    });
-    for (const line of run("git", ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/"]).split(/\r?\n/)) {
-      const [branch, head] = line.split(" ");
-      if (isLane(branch) && !onBranch.has(branch)) worktrees.push({ path: null, branch, head, dirty: false, main: false, unpushed: unpushed(branch) });
-    }
-    const prs = JSON.parse(run("gh", ["pr", "list", "--state", "all", "--limit", "1000", "--json", "number,state,headRefName,headRefOid"]));
-    const issues = JSON.parse(run("gh", ["issue", "list", "--state", "all", "--limit", "1000", "--json", "number,state"]));
-    const sessions = sessionsFrom(JSON.parse(run("claude", ["agents", "--json"])), root);
-    return { root, worktrees, sessions, prs, issues, orphans: findOrphans(root, trees.map((t) => t.path)) };
-  };
-  // cleanup.mjs's own defaults for these use the process's cwd and real timers, so the test supplies them.
-  w.cleanupDeps = (by) => ({
-    load: w.load(by),
+  // cleanup.mjs's own defaults for these use the process's cwd and real timers, so the test supplies them. The load step
+  // is the real loadCleanupInputs over the shared run; `ownLoad: false` leaves it to reap.mjs's own wiring.
+  w.cleanupDeps = (by, { ownLoad = true } = {}) => ({
+    ...(ownLoad ? { load: () => loadCleanupInputs(root, (cmd, args) => w.run(cmd, args, shOptions(), by)) } : {}),
     run: (cmd, args) => w.run(cmd, args, shOptions(), by),
     stillThere: (onlyIf) => {
       if (onlyIf.path) return existsSync(onlyIf.path);
@@ -187,7 +167,7 @@ function reaper(w, session, onSleep, { jump } = {}) {
     isRunning: () => false,
     err: () => {},
     trap: () => {},
-    cleanupDeps: w.cleanupDeps("reap-cleanup"),
+    cleanupDeps: w.cleanupDeps("reap-cleanup", { ownLoad: false }),
   });
 }
 
@@ -236,7 +216,8 @@ test("scenario 1: a lane starts, the reaper waits through the startup, and remov
   const log = reaperLog(w);
   assert.equal(log.match(/ removed: /g).length, 1);
   assert.match(log, /waiting: session sess1 is not listed yet/);
-  // A session at the repository root is not under `root/` for sessionsFrom, so it reads as not listed, not "at the root".
+  // A session at the repository root is kept by sessionsFrom, so the reaper waits for it to enter its worktree.
+  assert.match(log, /waiting: session sess1 is not in an issue-233 worktree yet/);
   assert.doesNotMatch(log, /gave up|error/);
   assert.match(log, /waiting: PR #300 is open/);
 });
