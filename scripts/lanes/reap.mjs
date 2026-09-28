@@ -1,11 +1,19 @@
 // scripts/lanes/reap.mjs
 // One lane's reaper (ADR 0010): each poll it reads the issue, its `issue-N-*` PRs and the lane's session, and
 // `reapTick` says whether to wait, remove the lane (through cleanup.mjs's own logic), or give up and leave it for the
-// next /start or /health. This file holds only the pure decision so far; the poll loop and lock come later.
+// next /start or /health. One reaper per issue holds `.lanes/reap/<issue>.json` and logs to `.lanes/reap/<issue>.log`.
+// Usage: node scripts/lanes/reap.mjs --issue N --session ID
+// Exit: 0 removed (or another reaper already holds the lock), 1 gave up, 2 bad arguments.
+import { execFileSync } from "node:child_process";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { cleanupMerged, loadCleanupInputs, pidRunning, sessionsFrom } from "./cleanup.mjs";
 
 // The ADR's defaults, which the owner may tune without another ADR.
 export const GIVE_UP_MS = 48 * 60 * 60 * 1000;
 export const GIVE_UP_FAILURES = 3;
+export const POLL_MS = 5 * 60 * 1000;
 
 // The same patterns as cleanup.mjs: a lane's branch is `issue-<N>-<slug>`, its worktree folder `issue-<N>[-<slug>]`.
 const LANE_BRANCH = /^issue-(\d+)-./;
@@ -79,4 +87,250 @@ export function reapTick({ issue, session, issueState, prs, sessions, startedAt,
   const done = merged ? `PR #${merged.number} merged` : `issue #${issue} closed`;
   if (stillWorking(target)) return { action: "wait", reason: `${done}; session ${session} is busy` };
   return { action: "remove", reason: `${done}; session ${session} is not busy` };
+}
+
+const laneOf = (branch) => Number(LANE_BRANCH.exec(branch ?? "")?.[1]) || null;
+
+/**
+ * cleanup.mjs's inputs narrowed to one lane, so its planCleanup removes that lane and nothing else: other lanes'
+ * branches and sessions and every orphan folder are dropped; non-lane worktrees stay, since planCleanup uses them to
+ * place sessions and never removes them. The input is not changed.
+ * @param {{ worktrees?: object[], sessions?: object[], orphans?: object[] }} inputs loadCleanupInputs's result
+ * @param {number} issue
+ */
+export function laneInputs(inputs, issue) {
+  return {
+    ...inputs,
+    worktrees: (inputs.worktrees ?? []).filter((w) => [null, issue].includes(laneOf(w.branch))),
+    sessions: (inputs.sessions ?? []).filter((s) => s.issue === issue),
+    orphans: [],
+  };
+}
+
+// Everything below does I/O.
+
+const USAGE = "usage: node scripts/lanes/reap.mjs --issue N --session ID";
+// A session id goes to `claude rm` as an argument, so it must never read as a flag.
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+// A lock older than any reaper can live is stale even if its pid now belongs to some other process.
+const LOCK_MAX_AGE = GIVE_UP_MS + 2 * POLL_MS;
+
+// `{ issue, session }` from exactly `--issue N --session ID` in either order, or null.
+function parseArgs(argv) {
+  if (argv.length !== 4) return null;
+  const opts = {};
+  for (let i = 0; i < 4; i += 2) {
+    if (!["--issue", "--session"].includes(argv[i]) || argv[i] in opts) return null;
+    opts[argv[i]] = argv[i + 1];
+  }
+  const issue = /^[1-9]\d*$/.test(opts["--issue"] ?? "") ? Number(opts["--issue"]) : NaN;
+  if (!Number.isSafeInteger(issue) || !SESSION_ID.test(opts["--session"] ?? "")) return null;
+  return { issue, session: opts["--session"] };
+}
+
+// One line, control characters out, so a log line stays one line.
+const oneLine = (text) =>
+  String(text)
+    .split(/\r?\n|\r/)[0]
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, "")
+    .trim();
+const errLine = (err) => oneLine(String(err?.stderr ?? "").trim() || err?.message || err);
+
+function readLock(file) {
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// Writes the lock unless a live reaper holds it; `{ held }` names that reaper. A stale lock (malformed, its pid not
+// running, or older than any reaper lives) is replaced.
+function takeLock(file, lock, { isRunning, now }) {
+  mkdirSync(dirname(file), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      writeFileSync(file, `${JSON.stringify(lock)}\n`, { flag: "wx" });
+      return {};
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+    }
+    const held = readLock(file);
+    const started = Date.parse(held?.started);
+    const live = Number.isInteger(held?.pid) && isRunning(held.pid) && Number.isFinite(started) && now - started < LOCK_MAX_AGE;
+    if (live) return { held };
+    rmSync(file, { force: true });
+  }
+  return { held: readLock(file) ?? {} };
+}
+
+// Removes the lock only while it is still this reaper's.
+function releaseLock(file, lock) {
+  const held = readLock(file);
+  if (held?.pid === lock.pid && held?.session === lock.session && held?.started === lock.started) rmSync(file, { force: true });
+}
+
+// This poll's reads; each one that fails is null, with its error line in `errors`.
+function readState({ issue, root, run }) {
+  const errors = [];
+  const read = (label, fn) => {
+    try {
+      return fn();
+    } catch (err) {
+      errors.push(`${label}: ${errLine(err)}`);
+      return null;
+    }
+  };
+  const issueState = read("gh issue view", () => {
+    const state = String(run("gh", ["issue", "view", String(issue), "--json", "state", "--jq", ".state"])).trim();
+    if (state !== "OPEN" && state !== "CLOSED") throw new Error(`unexpected state ${JSON.stringify(state.slice(0, 40))}`);
+    return state;
+  });
+  const prs = read("gh pr list", () => {
+    const list = JSON.parse(run("gh", ["pr", "list", "--state", "all", "--limit", "1000", "--json", "number,state,headRefName"]));
+    if (!Array.isArray(list)) throw new Error("not a list");
+    return list;
+  });
+  const sessions = read("claude agents", () => {
+    const agents = JSON.parse(run("claude", ["agents", "--json"]));
+    if (!Array.isArray(agents)) throw new Error("not a list");
+    return sessionsFrom(agents, root);
+  });
+  return { issueState, prs, sessions, errors };
+}
+
+// Removes the one lane through cleanup.mjs: `{ removed }`, `{ skipped }` (cleanup's own rules refused it), or
+// `{ failed }` (a step failed or the inputs could not be read).
+function removeLane(issue, { root, cleanupDeps = {} }) {
+  const load = cleanupDeps.load ?? (() => loadCleanupInputs(root));
+  let lines;
+  try {
+    lines = cleanupMerged({ deps: { ...cleanupDeps, load: () => laneInputs(load(), issue) } });
+  } catch (err) {
+    return { failed: `cleanup: ${errLine(err)}` };
+  }
+  const failed = lines.filter((l) => l.startsWith("failed "));
+  if (failed.length > 0) return { failed: failed.join("; ") };
+  const removed = lines.filter((l) => l.startsWith("removed ")).map((l) => l.slice("removed ".length));
+  if (removed.length > 0) return { removed: removed.join("; ") };
+  const skipped = lines.filter((l) => l.startsWith("skipped "));
+  if (skipped.length > 0) return { skipped: `cleanup ${skipped.join("; ")}` };
+  return { removed: "nothing left to remove" };
+}
+
+/**
+ * Runs one lane's reaper until it removes the lane or gives up; returns the exit code (0 removed or lock held by a
+ * live reaper, 1 gave up, 2 bad arguments). Polls at once and then every POLL_MS; logs started, waiting (when the
+ * reason changes), removed, gave up and error lines to `<root>/.lanes/reap/<issue>.log`. A poll fails when a read
+ * fails or the removal fails; GIVE_UP_FAILURES failed polls in a row give up.
+ * @param {string[]} argv
+ * @param {{ root: string, pid: number, run: Function, now: () => number, sleep: (ms: number) => Promise<void>,
+ *   isRunning: (pid: number) => boolean, err: (line: string) => void, trap: (release: Function) => void,
+ *   cleanupDeps?: object }} deps `run(cmd, args)` returns stdout or throws; `trap(release)` arranges for the lock to
+ *   be released on a signal; `cleanupDeps` go to cleanupMerged (its `load` defaults to loadCleanupInputs(root)).
+ * @returns {Promise<number>}
+ */
+export async function main(argv, deps) {
+  const args = parseArgs(argv);
+  if (!args) {
+    deps.err(USAGE);
+    return 2;
+  }
+  const { issue, session } = args;
+  const { root, run, now, sleep } = deps;
+  const dir = join(root, ".lanes", "reap");
+  const lockPath = join(dir, `${issue}.json`);
+  const logPath = join(dir, `${issue}.log`);
+  const startedAt = now();
+  const lock = { pid: deps.pid, session, started: new Date(startedAt).toISOString() };
+
+  const { held } = takeLock(lockPath, lock, { isRunning: deps.isRunning, now: startedAt });
+  if (held) {
+    deps.err(`reap: issue #${issue} already has a live reaper (pid ${held.pid ?? "unknown"}); exiting`);
+    return 0;
+  }
+  const release = () => releaseLock(lockPath, lock);
+  deps.trap(release);
+  const log = (event, detail) => appendFileSync(logPath, `${new Date(now()).toISOString()} ${event}: ${oneLine(detail)}\n`);
+
+  try {
+    log("started", `issue #${issue}, session ${session}`);
+    let failures = 0;
+    let lastWait = null;
+    const wait = (reason) => {
+      if (reason !== lastWait) log("waiting", reason);
+      lastWait = reason;
+    };
+    for (;;) {
+      const state = readState({ issue, root, run });
+      for (const e of state.errors) log("error", e);
+      let failed = state.errors.length > 0;
+      const tick = reapTick({ issue, session, ...state, startedAt, now: now(), failures: failures + (failed ? 1 : 0) });
+      if (tick.action === "give-up") {
+        log("gave up", tick.reason);
+        return 1;
+      }
+      if (tick.action === "wait") wait(tick.reason);
+      else {
+        const result = removeLane(issue, deps);
+        if (result.removed) {
+          log("removed", result.removed);
+          return 0;
+        }
+        if (result.skipped) wait(result.skipped);
+        else {
+          log("error", result.failed);
+          lastWait = null;
+          failed = true;
+        }
+      }
+      failures = failed ? failures + 1 : 0;
+      if (failures >= GIVE_UP_FAILURES) {
+        log("gave up", `${failures} consecutive failed polls`);
+        return 1;
+      }
+      await sleep(POLL_MS);
+    }
+  } catch (err) {
+    log("error", errLine(err));
+    throw err;
+  } finally {
+    release();
+  }
+}
+
+// Lanes run in worktrees of the main checkout, so the root is the common git dir's parent, not --show-toplevel.
+const repoRoot = () => dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
+
+function defaultDeps() {
+  const root = repoRoot();
+  return {
+    root,
+    pid: process.pid,
+    run: (cmd, args) => execFileSync(cmd, args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }),
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    isRunning: pidRunning,
+    err: (line) => console.error(line),
+    trap: (release) => {
+      for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
+        process.once(signal, () => {
+          release();
+          process.exit(code);
+        });
+      }
+    },
+  };
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main(process.argv.slice(2), defaultDeps()).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (err) => {
+      console.error(`reap: ${err?.stack ?? err}`);
+      process.exitCode = 1;
+    },
+  );
 }
