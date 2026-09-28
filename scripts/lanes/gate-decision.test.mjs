@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compileConfig, gateDecision, isBotStatus, loadConfig, parseAdr, reuseBlockedBy } from "./lib.mjs";
+import { compileConfig, gateDecision, isBotStatus, loadConfig, parseAdr, reusableReviewers, reuseBlockedBy } from "./lib.mjs";
 
 const config = compileConfig({
   requiredChecks: ["verify"],
@@ -624,6 +624,20 @@ test("edge: reuseBlockedBy fails closed on an ADR it cannot tie to a number, and
   assert.notEqual(reuseBlockedBy("owner", [], [], []), null);
   assert.notEqual(reuseBlockedBy("ui-reviewer", [], [], []), null);
   assert.equal(reuseBlockedBy("test-hunter", [], ["src/a.ts"], REUSE_ADRS), null);
+});
+
+// edge: not named by the acceptance criteria or the lane's edge: cases, which only exercise reuse end-to-end through
+// gateDecision/evaluatePr; reusableReviewers is the direct generalisation from #25's single-reviewer testHunterReusable
+// and had no unit test of its own naming more than one candidate, or excluding a required reviewer that is never reusable.
+test("reusableReviewers: every required, reusable reviewer missing a trusted head status is a candidate; the ui-reviewer never is", () => {
+  const uiFull = { issueLabels: ["tier:full", "ready"], files: ["frontend/a.tsx", ".github/w.yml", "contracts/a.md"], statuses: [], config };
+  assert.deepEqual(reusableReviewers(uiFull), ["test-hunter", "security-reviewer", "architecture-advisor"]);
+  // The head already has a trusted status for two of them: only the third remains a candidate.
+  const partial = { ...uiFull, statuses: [st("review/test-hunter"), st("review/security-reviewer")] };
+  assert.deepEqual(reusableReviewers(partial), ["architecture-advisor"]);
+  // No tier, or a tier that needs none of the reusable reviewers: no candidates.
+  assert.deepEqual(reusableReviewers({ ...uiFull, issueLabels: ["tier:skip"] }), []);
+  assert.deepEqual(reusableReviewers({ issueLabels: ["tier:quick", "ready"], files: ["src/a.ts"], statuses: [], config }), ["test-hunter"]);
 });
 
 test("edge: gateDecision stays pure with blockers (same input, same output, input untouched)", () => {
