@@ -1283,6 +1283,11 @@ test("#240 edge (security review, round 3): a delimiter bash unquotes differentl
     ['gh issue comment 1 --body-file - <<"E\\\\F"\nE\\F\nnode scripts/lanes/start.mjs 12\nE\\\\F', DENY_REASON],
     ["gh issue comment 1 --body-file - <<\\EOF\nnode scripts/lanes/queue.mjs\nEOF", QUEUE_DENY_REASON],
     ["cat > f <<E\\OF\nx\nEOF\nnode scripts/lanes/queue.mjs\nE\\OF", QUEUE_DENY_REASON],
+    // Round 4: a quoted fragment right after the delimiter joins its word to bash (X'y' is Xy), not to the lexer.
+    ["gh issue comment 1 --body-file g <<X'y'\nX\ncat > g <<'Z'\nXy\nnode scripts/lanes/queue.mjs\nZ", QUEUE_DENY_REASON],
+    ['gh issue comment 1 --body-file g <<X"y"\nX\ncat > g <<\'Z\'\nXy\nnode scripts/lanes/queue.mjs\nZ', QUEUE_DENY_REASON],
+    ["gh issue comment 1 --body-file g <<'X'y\nX\ncat > g <<'Z'\nXy\nnode scripts/lanes/start.mjs 12\nZ", DENY_REASON],
+    ["cat > f <<X'y'\nX\ncat > g <<'Z'\nXy\nnode scripts/lanes/queue.mjs\nZ", QUEUE_DENY_REASON],
   ]) {
     assert.deepEqual(decidePreToolUse(bash(cmd), null, NOW), deny(reason), cmd);
   }

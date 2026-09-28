@@ -80,6 +80,8 @@ const HEREDOC_RE = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([^\s;&|()<>'"`$]
 // An opener whose delimiter bash and this lexer read the same: letters, digits, `_`, `.` or `-`, bare or quoted, no
 // backslash. bash removes quotes and backslashes from a delimiter (`E\OF`, "E\$F"), which readHeredoc does not (#240).
 const PLAIN_DELIM_RE = /^<<-?[ \t]*(?:'[A-Za-z0-9_.-]+'|"[A-Za-z0-9_.-]+"|[A-Za-z0-9_.-]+)$/;
+// What must follow such an opener for bash's delimiter word to end there too: `<<X'y'` is `Xy` to bash (#240).
+const DELIM_END_RE = /^(?:[\s;&|<>()]|)$/;
 // `$(cat <<D` and the end of its line: the start of a substitution whose output is only a heredoc's body.
 /** The index of the backtick closing the one at `i` (a backslash escapes the next character), or -1. */
 function backtickEnd(cmd, i) {
@@ -312,7 +314,7 @@ function lex(cmd) {
       endWord();
       // `toShell`: a shell reads the body as its script (`bash <<'EOF'`), so even a quoted body's backticks run.
       const program = segments.at(-1).find((w) => !ASSIGN_RE.test(w));
-      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-", quoted: m[4] === undefined, toShell: program !== undefined && SHELL_RE.test(basename(program)), seg: segments.length - 1, plain: PLAIN_DELIM_RE.test(m[0]) });
+      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-", quoted: m[4] === undefined, toShell: program !== undefined && SHELL_RE.test(basename(program)), seg: segments.length - 1, plain: PLAIN_DELIM_RE.test(m[0]) && DELIM_END_RE.test(cmd.slice(i + m[0].length, i + m[0].length + 1)) });
       i += m[0].length - 1;
     } else if (c === "<" || /\s/.test(c)) {
       // A `<<` that HEREDOC_RE does not read ends the word, as before.
