@@ -612,6 +612,28 @@ test("edge: an old reaper exits at its next poll once another session takes its 
     assert.equal(readFileSync(lockFile(root), "utf8"), JSON.stringify({ pid: 9999, session: "s7", started: new Date(T0).toISOString() }));
   }));
 
+test("edge: a third writer's lock overwrite during the claude-agents check is not clobbered by the takeover", () =>
+  withRoot(async (root) => {
+    writeLock(root, { pid: 999, session: "s6", started: new Date(T0).toISOString() });
+    const w = world(root, { issue: "CLOSED", prs: merged });
+    w.deps.isRunning = (pid) => pid === 999 || pid === 888;
+    const run = w.deps.run;
+    let agentsCalls = 0;
+    w.deps.run = (cmd, args) => {
+      if (cmd === "claude" && args[0] === "agents") {
+        agentsCalls++;
+        if (agentsCalls === 1) writeFileSync(lockFile(root), JSON.stringify({ pid: 888, session: "s5", started: new Date(T0).toISOString() }));
+      }
+      return run(cmd, args);
+    };
+    assert.equal(await main(ARGS, w.deps), 0);
+    // 2 calls to reassess the lock (the interjected one, then the reassessed one), plus the normal poll's own read.
+    assert.equal(agentsCalls, 3);
+    const log = logLines(root).join("\n");
+    assert.match(log, /took over: from session s5/);
+    assert.doesNotMatch(log, /took over: from session s6/);
+  }));
+
 test("edge: on exit it does not remove a lock another reaper wrote over its own", () =>
   withRoot(async (root) => {
     const other = JSON.stringify({ pid: 555, session: "s7", started: new Date(T0).toISOString() });
@@ -623,6 +645,35 @@ test("edge: on exit it does not remove a lock another reaper wrote over its own"
     };
     assert.equal(await main(ARGS, w.deps), 0);
     assert.equal(readFileSync(lockFile(root), "utf8"), other);
+  }));
+
+// #248 edge: a malformed old session (missing or non-string) is still a mismatch, so it is taken over once
+// listed() no longer names it (a session id of undefined or a number can never appear in that set).
+test("edge: a live lock with no session field at all is taken over", () =>
+  withRoot(async (root) => {
+    writeLock(root, { pid: 999, started: new Date(T0).toISOString() });
+    const w = world(root, { issue: "CLOSED", prs: merged });
+    w.deps.isRunning = (pid) => pid === 999 || pid === MY_PID;
+    assert.equal(await main(ARGS, w.deps), 0);
+    assert.equal(w.cleanupLoads.length, 1);
+    assert.match(logLines(root).join("\n"), /took over: from session undefined/);
+    assert.equal(existsSync(lockFile(root)), false);
+  }));
+
+// #248 edge: a lock file that goes missing between polls (a transient read glitch, or someone else's cleanup) is
+// never mistaken for a takeover: `readLock` returns null, and null never satisfies `current.session !== session`,
+// so the reaper keeps running rather than exiting on a lock it still in fact holds.
+test("edge: a lock file missing at a poll is not treated as a takeover", () =>
+  withRoot(async (root) => {
+    const w = world(root, { issue: "CLOSED", prs: merged });
+    const sleep = w.deps.sleep;
+    w.deps.sleep = async (ms) => {
+      rmSync(lockFile(root), { force: true });
+      await sleep(ms);
+    };
+    assert.equal(await main(ARGS, w.deps), 0);
+    assert.equal(w.cleanupLoads.length, 1);
+    assert.doesNotMatch(logLines(root).join("\n"), /lock taken over/);
   }));
 
 test("edge: an unexpected throw is logged as an error and the lock is still removed", () =>

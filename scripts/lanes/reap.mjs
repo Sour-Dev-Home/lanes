@@ -171,13 +171,16 @@ function listedSessions(run) {
 // running, or older than any reaper lives) is replaced. A live lock naming a different session is taken over
 // (`{ tookOver }` names the old session) once `listed()` (called only for this check, `claude agents --json`) no
 // longer lists that session (#248); while it still does, or that read failed, this reaper leaves the lock alone, as
-// before.
+// before. `listed()` shells out, so the lock is re-read once more right after: if some other writer already
+// replaced it in that gap, this reaper drops its now-stale view and reassesses the new lock instead of clobbering it.
 function takeLock(file, lock, { isRunning, now, listed }) {
   mkdirSync(dirname(file), { recursive: true });
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let takenOver = false;
+  let tookOver;
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       writeFileSync(file, `${JSON.stringify(lock)}\n`, { flag: "wx" });
-      return {};
+      return takenOver ? { tookOver } : {};
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
     }
@@ -188,8 +191,10 @@ function takeLock(file, lock, { isRunning, now, listed }) {
       if (held.session === lock.session) return { held };
       const set = listed();
       if (set == null || set.has(held.session)) return { held };
-      writeFileSync(file, `${JSON.stringify(lock)}\n`);
-      return { tookOver: held.session };
+      const recheck = readLock(file);
+      if (recheck?.pid !== held.pid || recheck?.session !== held.session || recheck?.started !== held.started) continue;
+      takenOver = true;
+      tookOver = held.session;
     }
     rmSync(file, { force: true });
   }
@@ -279,7 +284,8 @@ export async function main(argv, deps) {
   const startedAt = now();
   const lock = { pid: deps.pid, session, started: new Date(startedAt).toISOString() };
 
-  const { held, tookOver } = takeLock(lockPath, lock, { isRunning: deps.isRunning, now: startedAt, listed: () => listedSessions(run) });
+  const taken = takeLock(lockPath, lock, { isRunning: deps.isRunning, now: startedAt, listed: () => listedSessions(run) });
+  const { held } = taken;
   if (held) {
     deps.err(`reap: issue #${issue} already has a live reaper (pid ${held.pid ?? "unknown"}); exiting`);
     return 0;
@@ -289,7 +295,7 @@ export async function main(argv, deps) {
   const log = (event, detail) => appendFileSync(logPath, `${new Date(now()).toISOString()} ${event}: ${oneLine(detail)}\n`);
 
   try {
-    if (tookOver) log("took over", `from session ${tookOver}`);
+    if ("tookOver" in taken) log("took over", `from session ${taken.tookOver}`);
     log("started", `issue #${issue}, session ${session}`);
     let failures = 0;
     let lastWait = null;
