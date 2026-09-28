@@ -134,15 +134,17 @@ function refusal(issue) {
  *   issues: { number: number, state?: string, labels?: string[], blockers?: { code: number, message: string }, error?: string }[],
  *   inFlight: number[],
  *   overlaps: (a: number, b: number) => boolean,
+ *   running?: (n: number) => string | null,
  *   maxLanes?: number,
- * }} input issues in request order; `error` marks one that could not be read; `maxLanes` is start.maxLanes
+ * }} input issues in request order; `error` marks one that could not be read; `running` gives the reason an issue
+ *   overlaps running work (open lane PRs, running lanes), or null; `maxLanes` is start.maxLanes
  * @returns {{ launch: number[], refused: { number: number, reason: string }[] }} both in request order
  */
-export function planStart({ issues, inFlight, overlaps, maxLanes = START_DEFAULTS.maxLanes }) {
+export function planStart({ issues, inFlight, overlaps, running = () => null, maxLanes = START_DEFAULTS.maxLanes }) {
   const reasons = new Map();
   const busy = new Set(inFlight);
   for (const issue of issues) {
-    const reason = refusal(issue) ?? (busy.has(issue.number) ? "already in flight" : null);
+    const reason = refusal(issue) ?? (busy.has(issue.number) ? "already in flight" : running(issue.number));
     if (reason) reasons.set(issue.number, reason);
   }
 
@@ -309,15 +311,25 @@ function cleanupLines(deps, dryRun) {
 // <N...>: checks each requested issue the way /lane does and launches what passes.
 function startIssues(args, deps, config) {
   const numbers = [...new Set(args.map(Number))];
-  let inFlight;
+  let prs, inFlight;
   try {
-    ({ inFlight } = readInFlight(deps, "headRefName"));
+    ({ prs, inFlight } = readInFlight(deps, "number,headRefName,files"));
   } catch (err) {
     return { code: 2, lines: [`cannot count lanes in flight, nothing launched: ${reason(err)}`] };
   }
+  // A running lane without a PR claims its issue's Scope, so the open issues' bodies are needed as in --auto.
+  let openIssues;
+  try {
+    openIssues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,body"]));
+    if (openIssues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to read running lanes`);
+  } catch (err) {
+    return { code: 2, lines: [`cannot check running lanes, nothing launched: ${reason(err)}`] };
+  }
+  const claimed = claimedPaths({ openPrs: prs, runningIssues: openIssues.filter((i) => inFlight.includes(i.number)) });
 
   const issues = [];
   const pathsOf = new Map();
+  const runningOverlap = new Map();
   for (const n of numbers) {
     let view;
     try {
@@ -328,12 +340,18 @@ function startIssues(args, deps, config) {
     }
     const form = parseIssueForm(view.body ?? "").fields;
     // As in /status: an issue whose Scope names no paths is left out of overlap comparisons.
-    if (issuePaths({ scope: form.scope }).length) pathsOf.set(n, issuePaths(form));
+    if (issuePaths({ scope: form.scope }).length) {
+      pathsOf.set(n, issuePaths(form));
+      // The same check --auto makes: pickStartable on this one issue against what running work claims.
+      const { skipped } = pickStartable({ candidates: [{ number: n, body: view.body }], claimed, openIssues: [], maxLanes: 1, inFlightCount: 0, softPaths: config.softPaths });
+      const hit = skipped.find((s) => s.reason.startsWith("overlaps running "));
+      if (hit) runningOverlap.set(n, hit.reason);
+    }
     issues.push({ number: n, state: view.state, labels: (view.labels ?? []).map((l) => l.name), blockers: checkBlockers([String(n)], deps.gh) });
   }
   const overlaps = (a, b) => pathsOf.has(a) && pathsOf.has(b) && pathsOverlap(pathsOf.get(a), pathsOf.get(b));
 
-  const { launch, refused } = planStart({ issues, inFlight, overlaps, maxLanes: config.maxLanes });
+  const { launch, refused } = planStart({ issues, inFlight, overlaps, running: (n) => runningOverlap.get(n) ?? null, maxLanes: config.maxLanes });
   const tiers = new Map(issues.filter((i) => i.labels).map((i) => [i.number, tierOf(i.labels)]));
   const launched = launchAll(launch, deps, { tiers, models: config.models });
   const lines = new Map([...refused.map((r) => [r.number, `#${r.number}: refused: ${r.reason}`]), ...launched.lines]);

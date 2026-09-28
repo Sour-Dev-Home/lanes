@@ -408,6 +408,116 @@ test("main rejects bad arguments and ignores duplicates", () => {
   assert.equal(launches.length, 1);
 });
 
+// #149: explicit numbers are also checked against open lane PRs and running lanes, as --auto does.
+const runningSession = (n) => ({ kind: "background", cwd: `/repo/.claude/worktrees/issue-${n}-x` });
+const prFor = (n, ...files) => ({ number: n + 100, headRefName: `issue-${n}-x`, files: files.map((path) => ({ path })) });
+
+test("planStart refuses an issue whose running overlap reason is given, and does not compare it further", () => {
+  const running = (n) => (n === 1 ? "overlaps running #7 on a.mjs" : null);
+  const { launch, refused } = planStart({ issues: [issue(1), issue(2)], inFlight: [], overlaps: (a, b) => a + b === 3, running });
+  assert.deepEqual(launch, [2]);
+  assert.deepEqual(refused, [{ number: 1, reason: "overlaps running #7 on a.mjs" }]);
+});
+
+test("main refuses an issue that overlaps the files an open lane PR changes", () => {
+  const { deps, launches } = fakes({ issues: { 1: { body: form({ scope: "In: `a.mjs`." }) } }, prs: [prFor(7, "a.mjs", "z.mjs")] });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ["#1: refused: overlaps running #107 on a.mjs"]);
+  assert.equal(launches.length, 0);
+});
+
+test("main refuses an issue that overlaps the Scope of a running lane with no PR", () => {
+  const { deps, launches } = fakes({
+    issues: { 1: { body: form({ scope: "In: `a.mjs`." }) }, 9: { body: form({ scope: "In: `a.mjs`, `b.mjs`." }) } },
+    sessions: [runningSession(9)],
+  });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ["#1: refused: overlaps running #9 on a.mjs"]);
+  assert.equal(launches.length, 0);
+});
+
+test("main ignores a soft path shared with running work", () => {
+  const { deps } = fakes({
+    issues: { 1: { body: form({ scope: "In: `docs/USING.md`." }) }, 9: { body: form({ scope: "In: `docs/USING.md`." }) } },
+    prs: [prFor(7, "README.md", "docs/USING.md")],
+    sessions: [runningSession(9)],
+  });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1"]);
+});
+
+test("main launches an issue that overlaps no running work", () => {
+  const { deps } = fakes({
+    issues: { 1: { body: form({ scope: "In: `a.mjs`." }) }, 9: { body: form({ scope: "In: `b.mjs`." }) } },
+    prs: [prFor(7, "c.mjs")],
+    sessions: [runningSession(9)],
+  });
+  assert.deepEqual(main(["1"], deps).lines, ["#1 → id1"]);
+});
+
+test("edge: a running lane's Scope directory overlaps a requested file under it", () => {
+  const { deps } = fakes({ issues: { 1: { body: form({ scope: "In: `src/x.mjs`." }) } }, prs: [prFor(7, "src/y.mjs")] });
+  assert.deepEqual(main(["1"], deps).lines, ["#1 → id1"]);
+  const dir = fakes({ issues: { 1: { body: form({ scope: "In: `src/`." }) } }, prs: [prFor(7, "src/y.mjs")] });
+  assert.deepEqual(main(["1"], dir.deps).lines, ["#1: refused: overlaps running #107 on src/"]);
+});
+
+test("edge: only the overlapping requested issue is refused, the others launch", () => {
+  const { deps, launches } = fakes({
+    issues: { 1: { body: form({ scope: "In: `a.mjs`." }) }, 2: { body: form({ scope: "In: `b.mjs`." }) } },
+    prs: [prFor(7, "a.mjs")],
+  });
+  const { code, lines } = main(["1", "2"], deps);
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ["#1: refused: overlaps running #107 on a.mjs", "#2 → id2"]);
+  assert.equal(launches.length, 1);
+});
+
+test("edge: a requested issue refused for running overlap does not refuse its requested partner", () => {
+  const { deps } = fakes({
+    issues: { 1: { body: form({ scope: "In: `a.mjs`, `c.mjs`." }) }, 2: { body: form({ scope: "In: `c.mjs`." }) } },
+    prs: [prFor(7, "a.mjs")],
+  });
+  assert.deepEqual(main(["1", "2"], deps).lines, ["#1: refused: overlaps running #107 on a.mjs", "#2 → id2"]);
+});
+
+test("edge: an issue whose Scope names no paths is not refused for running overlap", () => {
+  const { deps } = fakes({ issues: { 1: { body: form({ scope: "the whole repo" }) } }, prs: [prFor(7, "a.mjs")] });
+  assert.deepEqual(main(["1"], deps).lines, ["#1 → id1"]);
+});
+
+test("edge: main launches nothing when the open issues cannot be read", () => {
+  const { deps, launches } = fakes({ issues: { 1: {} } });
+  const gh = deps.gh;
+  deps.gh = (args) => {
+    if (args[0] === "issue" && args[1] === "list") throw new Error("gh: rate limited");
+    return gh(args);
+  };
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 2);
+  assert.match(lines[0], /cannot check running lanes, nothing launched.*gh: rate limited/);
+  assert.equal(launches.length, 0);
+});
+
+test("edge: main launches nothing when the open-issue list may be truncated", () => {
+  const { deps, launches } = fakes({ issues: { 1: {} } });
+  const gh = deps.gh;
+  deps.gh = (args) => (args[0] === "issue" && args[1] === "list" ? JSON.stringify(Array.from({ length: 1000 }, (_, i) => ({ number: 5000 + i }))) : gh(args));
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 2);
+  assert.match(lines[0], /cannot check running lanes.*1000\+ open issues/);
+  assert.equal(launches.length, 0);
+});
+
+test("start.md step 1 says running lanes and open PRs are compared too", () => {
+  const md = readFileSync(new URL("../../.claude/commands/start.md", import.meta.url), "utf8");
+  const step1 = md.split(/^2\. /m)[0].replace(/\s+/g, " ");
+  assert.match(step1, /running lanes and open PRs/);
+});
+
 // Criterion 10.
 test("docs/USING.md describes /start", () => {
   const doc = readFileSync(new URL("../../docs/USING.md", import.meta.url), "utf8");

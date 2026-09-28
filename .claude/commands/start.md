@@ -15,7 +15,8 @@ commands on its own, never chained to the `start.mjs` run below, which the guard
 
 1. With issue numbers, run `node scripts/lanes/start.mjs $ARGUMENTS`, exactly in this form (nothing chained or
    wrapped). It checks each issue the way `/lane` does (open, `ready`, one `tier:*` label, no open blocker), refuses a
-   pair whose paths overlap (the `/status` overlap check) and anything past `start.maxLanes` lanes in flight (from
+   pair whose paths overlap (the `/status` overlap check), refuses an issue whose paths overlap the files of running
+   lanes and open PRs (as `--auto` does, ignoring `start.softPaths`) and anything past `start.maxLanes` lanes in flight (from
    `lanes.config.json`, 8 by default, at most 10), counting open `issue-*` PRs and running background sessions in
    `issue-<N>-` worktrees. It launches the rest from the repository root with `claude --bg "/lane <N>"`, one attempt
    each.
