@@ -2,7 +2,8 @@
 // Wired in .claude/settings.json as two hooks:
 //   UserPromptSubmit: node scripts/lanes/approve-guard.mjs user-prompt-submit
 //     a prompt that is exactly `/approve <N>` writes a grant { sessionId, pr: N, at } to .lanes/approve/<session>.json;
-//     any other prompt in that session deletes it.
+//     any other prompt in that session deletes it, except an automated input (AUTOMATED_INPUT_PREFIXES), which neither
+//     creates nor deletes one (#262).
 //   PreToolUse (Bash): node scripts/lanes/approve-guard.mjs pre-tool-use
 //     `post-review.mjs owner` is allowed (no prompt) only as the plain command, only with a grant from this
 //     session under 15 minutes old for the same --pr. The allow keeps the grant: post-review.mjs checks it again
@@ -34,10 +35,31 @@ export function parseApprovePrompt(prompt) {
   return m ? Number(m[1]) : null;
 }
 
-/** UserPromptSubmit: grant for `/approve <N>`, clear for any other prompt, nothing for a session id unsafe as a file name. */
+// How the harness opens an input the owner did not type: a subagent or background task finishing, or a message or
+// idle notice from another session. It arrives as a prompt of its own. Shared with start-guard.mjs (#262).
+export const AUTOMATED_INPUT_PREFIXES = Object.freeze([
+  "<task-notification>",
+  "Another Claude session sent a message:",
+  "<cross-session-message",
+  "[Cross-session idle notice]",
+]);
+
+/** True for a prompt that starts (after leading whitespace) with one of AUTOMATED_INPUT_PREFIXES, exact case. */
+export function isAutomatedInput(prompt) {
+  if (typeof prompt !== "string") return false;
+  const p = prompt.trimStart();
+  return AUTOMATED_INPUT_PREFIXES.some((w) => p.startsWith(w));
+}
+
+/**
+ * UserPromptSubmit: grant for `/approve <N>`, clear for any other prompt, nothing for a session id unsafe as a file
+ * name or for an automated input (#262). Keeping the grant across an automated input is safe: such a prompt never
+ * creates one, whatever its body says, and the grant still lapses after GRANT_TTL_MS and is spent by its one run.
+ */
 export function onUserPromptSubmit(input, now = Date.now()) {
   const sessionId = input?.session_id;
   if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId)) return { action: "none" };
+  if (isAutomatedInput(input.prompt)) return { action: "none" };
   const pr = parseApprovePrompt(input.prompt);
   if (pr === null) return { action: "clear", sessionId };
   return { action: "grant", sessionId, grant: { sessionId, pr, at: new Date(now).toISOString() } };
