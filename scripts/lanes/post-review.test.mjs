@@ -1,10 +1,10 @@
 // scripts/lanes/post-review.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildStatus, buildVerdictComment, checkSha, main, metricsWarning, parseArgs, validateVerdict } from "./post-review.mjs";
+import { buildStatus, buildVerdictComment, checkSha, claimGrant, main, metricsWarning, parseArgs, requireOwnerGrant, validateVerdict } from "./post-review.mjs";
 
 test("skipped is a success whose description starts with skipped", () => {
   assert.deepEqual(buildStatus("ui-reviewer", "skipped", "no visible change"), { context: "review/ui-reviewer", state: "success", description: "skipped: no visible change" });
@@ -446,6 +446,98 @@ test("edge: gh resolving --pr to a different PR number is refused for the owner,
   assert.throws(() => main(["owner", "success", "approved", "--pr", "13"], { run: gh.run, ...quiet, grantDir: dir, now: NOW }), /refusing: gh resolved --pr 13 to #12/);
   assert.deepEqual(gh.writes, []);
   assert.equal(existsSync(join(dir, "s1.json")), true);
+});
+
+// #180: an owner run claims the grant (renames it to a marker) before any gh call, so two runs can never both spend it.
+const CLAIMED = /refusing: the \/approve 12 grant s1\.json is already claimed by another run/;
+
+test("two interleaved owner runs against one grant: exactly one posts, the other refuses naming the claimed grant (#180)", () => {
+  const dir = grantDirWith({ "s1.json": grantFor(12) });
+  const second = fakeGh();
+  let refusal = null;
+  const first = fakeGh();
+  const run = (args) => {
+    // The second run starts while the first is between its grant check and its status post.
+    if (refusal === null && args[0] === "pr" && args[1] === "view") {
+      try {
+        main(approval(), { run: second.run, ...quiet, grantDir: dir, now: NOW });
+        refusal = "posted";
+      } catch (e) {
+        refusal = e.message;
+      }
+    }
+    return first.run(args);
+  };
+  main(approval(), { run, ...quiet, grantDir: dir, now: NOW });
+  assert.match(refusal, CLAIMED);
+  assert.deepEqual(first.writes.map((w) => w.kind), ["status"]);
+  assert.deepEqual(second.writes, []);
+  assert.deepEqual(readdirSync(dir), []);
+});
+
+test("two runs that both found the grant before either claimed it: only the first claim wins (#180)", () => {
+  const dir = grantDirWith({ "s1.json": grantFor(12) });
+  const a = requireOwnerGrant("12", dir, NOW);
+  const b = requireOwnerGrant("12", dir, NOW);
+  assert.equal(a, b);
+  const marker = claimGrant(a, "12");
+  assert.equal(existsSync(marker), true);
+  assert.equal(existsSync(a), false);
+  assert.throws(() => claimGrant(b, "12"), CLAIMED);
+});
+
+test("the grant is claimed before any gh call, and the marker is deleted after a successful post (#180)", () => {
+  const dir = grantDirWith({ "s1.json": grantFor(12) });
+  const gh = fakeGh();
+  const seen = [];
+  const run = (args) => {
+    seen.push(readdirSync(dir).sort());
+    return gh.run(args);
+  };
+  main(approval(), { run, ...quiet, grantDir: dir, now: NOW });
+  assert.ok(seen.length > 0);
+  for (const names of seen) assert.deepEqual(names, ["s1.json.claimed"]);
+  assert.deepEqual(readdirSync(dir), []);
+});
+
+test("a post that fails before the status is written restores the claimed grant (#180)", () => {
+  for (const failOn of ["status", "pr view"]) {
+    const dir = grantDirWith({ "s1.json": grantFor(12) });
+    const gh = fakeGh({ failOn });
+    const run = (args) => {
+      if (failOn === "pr view" && args[0] === "pr" && args[1] === "view") throw new Error("gh pr view failed");
+      return gh.run(args);
+    };
+    assert.throws(() => main(approval(), { run, ...quiet, grantDir: dir, now: NOW }), /failed/, failOn);
+    assert.deepEqual(readdirSync(dir), ["s1.json"], failOn);
+    // The restored grant still works for a retry.
+    main(approval(), { run: fakeGh().run, ...quiet, grantDir: dir, now: NOW });
+    assert.deepEqual(readdirSync(dir), [], failOn);
+  }
+});
+
+test("edge: restoring a claimed grant never overwrites a newer grant written meanwhile (#180)", () => {
+  const dir = grantDirWith({ "s1.json": grantFor(12) });
+  const newer = grantFor(12, 1000);
+  const run = (args) => {
+    if (args[0] === "pr" && args[1] === "view") {
+      writeFileSync(join(dir, "s1.json"), JSON.stringify(newer));
+      throw new Error("gh pr view failed");
+    }
+    return "";
+  };
+  assert.throws(() => main(approval(), { run, ...quiet, grantDir: dir, now: NOW }), /failed/);
+  assert.deepEqual(readdirSync(dir), ["s1.json"]);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "s1.json"), "utf8")), newer);
+});
+
+test("edge: a claimed marker is never read as a grant, and a stale marker does not block a fresh grant (#180)", () => {
+  const dir = grantDirWith({ "old.json.claimed": grantFor(12, GRANT_TTL + 1, "old") });
+  assert.throws(() => main(approval(), { run: fakeGh().run, ...quiet, grantDir: dir, now: NOW }), NO_GRANT);
+  writeFileSync(join(dir, "s1.json"), JSON.stringify(grantFor(12)));
+  const gh = fakeGh();
+  main(approval(), { run: gh.run, ...quiet, grantDir: dir, now: NOW });
+  assert.equal(gh.writes.length, 1);
 });
 
 test("edge: a non-owner skipped post needs no grant", () => {

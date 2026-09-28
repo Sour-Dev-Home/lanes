@@ -8,9 +8,10 @@
 //     unused /approve <N> grant, which it consumes once the status is posted)
 //   node scripts/lanes/post-review.mjs ui-reviewer skipped "no visible change"
 import { execFileSync } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { linkSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findFreshGrant, grantDir } from "./approve-guard.mjs";
+import { findFreshGrant, grantDir, isFreshGrant, readGrant } from "./approve-guard.mjs";
 import { parseIssueForm, parsePrBody, REVIEWERS, reviewContext } from "./lib.mjs";
 
 const RESULTS = ["pass", "fail", "not-applicable"];
@@ -178,8 +179,52 @@ export function checkSha(sha, headRefOid) {
 export function requireOwnerGrant(prArg, dir, now) {
   if (prArg === undefined || !/^[1-9][0-9]{0,8}$/.test(prArg)) throw new Error("the owner's approval needs --pr N (the PR the /approve grant names)");
   const file = findFreshGrant(dir, Number(prArg), now);
-  if (file === null) throw new Error(`no fresh /approve ${prArg} grant: run /approve ${prArg} in the owner's session`);
-  return file;
+  if (file !== null) return file;
+  const claimed = claimedGrant(dir, Number(prArg), now);
+  if (claimed !== null) throw new Error(claimedMessage(prArg, claimed));
+  throw new Error(`no fresh /approve ${prArg} grant: run /approve ${prArg} in the owner's session`);
+}
+
+const CLAIMED_SUFFIX = ".claimed";
+const claimedMessage = (prArg, file) => `refusing: the /approve ${prArg} grant ${basename(file)} is already claimed by another run`;
+
+/** The grant file (without the marker suffix) whose claimed marker in `dir` holds a fresh grant for `pr`, or null. */
+function claimedGrant(dir, pr, now) {
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const marker = names.sort().find((name) => name.endsWith(`.json${CLAIMED_SUFFIX}`) && isFreshGrant(readGrant(join(dir, name)), pr, now));
+  return marker === undefined ? null : join(dir, marker.slice(0, -CLAIMED_SUFFIX.length));
+}
+
+/**
+ * #180: claims a grant for this run by renaming it to its marker, so a second run racing on the same grant cannot
+ * spend it too. A rename that fails because the grant is gone means another run claimed it first: refuse. Returns
+ * the marker's path.
+ */
+export function claimGrant(file, prArg) {
+  const marker = `${file}${CLAIMED_SUFFIX}`;
+  try {
+    renameSync(file, marker);
+  } catch (e) {
+    if (e.code === "ENOENT") throw new Error(claimedMessage(prArg, file));
+    throw e;
+  }
+  return marker;
+}
+
+/** Puts a claimed grant back for a retry, unless a newer grant has been written in its place meanwhile. */
+function restoreGrant(marker) {
+  // A hard link fails when the name is taken, so a newer grant is never overwritten (no check-then-rename window).
+  try {
+    linkSync(marker, marker.slice(0, -CLAIMED_SUFFIX.length));
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+  }
+  rmSync(marker, { force: true });
 }
 
 /**
@@ -188,9 +233,26 @@ export function requireOwnerGrant(prArg, dir, now) {
  */
 export function main(argv = process.argv.slice(2), { run = gh, log = console.log, warn = console.warn, grantDir: dir = grantDir(), now = Date.now() } = {}) {
   const parsed = parseArgs(argv);
-  const grantFile = !parsed.file && parsed.positional[0] === "owner" ? requireOwnerGrant(parsed.pr, dir, now) : null;
+  // #180: the grant is claimed before any gh call, so two racing runs cannot both spend it.
+  const marker = !parsed.file && parsed.positional[0] === "owner" ? claimGrant(requireOwnerGrant(parsed.pr, dir, now), parsed.pr) : null;
+  let pr;
+  let status;
+  try {
+    ({ pr, status } = post(parsed, marker !== null, { run, warn }));
+  } catch (e) {
+    // The status was not written: give the grant back for a retry.
+    if (marker) restoreGrant(marker);
+    throw e;
+  }
+  // Consumed only after the post succeeds.
+  if (marker) rmSync(marker, { force: true });
+  log(`${status.context}=${status.state} on #${pr.number} at ${pr.headRefOid.slice(0, 7)}`);
+}
+
+/** Everything up to and including the status post. Throws, with nothing posted as the status, on any failure. */
+function post(parsed, owner, { run, warn }) {
   const pr = JSON.parse(run(["pr", "view", ...(parsed.pr ? [parsed.pr] : []), "--json", "number,headRefOid,body"]));
-  if (grantFile && String(pr.number) !== parsed.pr) throw new Error(`refusing: gh resolved --pr ${parsed.pr} to #${pr.number}`);
+  if (owner && String(pr.number) !== parsed.pr) throw new Error(`refusing: gh resolved --pr ${parsed.pr} to #${pr.number}`);
   const staleSha = checkSha(parsed.sha, pr.headRefOid);
   if (staleSha) throw new Error(staleSha);
   const repo = run(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim();
@@ -212,9 +274,7 @@ export function main(argv = process.argv.slice(2), { run = gh, log = console.log
   }
   if (comment) run(["pr", "comment", String(pr.number), "--body", comment]);
   run(["api", `repos/${repo}/statuses/${pr.headRefOid}`, "-f", `state=${status.state}`, "-f", `context=${status.context}`, "-f", `description=${status.description}`]);
-  // Consumed only after the post succeeds: a failed post throws above and keeps the grant for a retry.
-  if (grantFile) rmSync(grantFile, { force: true });
-  log(`${status.context}=${status.state} on #${pr.number} at ${pr.headRefOid.slice(0, 7)}`);
+  return { pr, status };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main();
