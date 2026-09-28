@@ -673,11 +673,10 @@ test("verify.yml's test job matrix covers ubuntu-latest on Node 22 and 24, and w
 
 // edge: the matrix must hold exactly the three named entries, not grow an unlisted fourth combination
 // (e.g. windows + node 24 as a required leg) that the acceptance criteria's substring checks would miss.
-test("verify.yml's matrix has exactly three entries, one informational, and only windows is informational", () => {
+test("verify.yml's matrix has exactly three entries, and none is informational", () => {
   const yml = verifyYml();
   assert.equal((yml.match(/^\s*- os: /gm) ?? []).length, 3);
-  assert.equal((yml.match(/informational: true/g) ?? []).length, 1);
-  assert.match(yml, /- os: windows-latest\n\s+node: 22\n\s+#[^\n]*\n\s+informational: true\n/);
+  assert.doesNotMatch(yml, /informational/);
 });
 
 // #232: a final job named verify needs the matrix and fails when any required entry fails
@@ -687,12 +686,13 @@ test("verify.yml's final job is named verify, needs the test matrix, and fails t
   assert.match(yml, /needs\.test\.result != 'success'/);
 });
 
-// #232: the windows entry is informational at first, kept out of the required result, with a linked follow-up
-test("verify.yml's windows entry is informational: continue-on-error, and a comment links the promotion follow-up", () => {
+// #249: the windows entry is promoted to required: no continue-on-error anywhere, so a Windows failure fails
+// needs.test.result and with it the required verify check
+test("verify.yml's windows entry is required: no continue-on-error, so a windows failure blocks the merge", () => {
   const yml = verifyYml();
-  assert.match(yml, /informational: true/);
-  assert.match(yml, /continue-on-error: \$\{\{ matrix\.informational == true \}\}/);
-  assert.match(yml, /# Informational until #\d+ confirms the suite is green on the hosted windows-latest runner\./);
+  assert.doesNotMatch(yml, /continue-on-error/);
+  assert.doesNotMatch(yml, /Informational until/);
+  assert.match(yml, /- os: windows-latest\n\s+node: 22\n/);
 });
 
 test("verify.yml's matrix uses fail-fast: false, so one failing entry does not cancel the others", () => {
