@@ -16,19 +16,27 @@ import { parseIssueForm } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { issuePaths, pathsOverlap } from "./status.mjs";
 
-export const START_DEFAULTS = Object.freeze({ maxLanes: 8, softPaths: Object.freeze(["^docs/USING\\.md$", "^README\\.md$"]) });
+export const START_DEFAULTS = Object.freeze({
+  maxLanes: 8,
+  softPaths: Object.freeze(["^docs/USING\\.md$", "^README\\.md$"]),
+  models: Object.freeze({}),
+});
 const MAX_LANES_LIMIT = 10;
+const TIERS = Object.freeze(["skip", "quick", "full"]);
+// A model name is one word that cannot start with `-`, so claude never reads it as a flag.
+const MODEL_NAME = /^[^\s-]\S*$/;
 const PR_LIMIT = 1000;
 const ISSUE_LIMIT = 1000;
 
 /**
  * The `start` block of a parsed lanes.config.json, each missing key (or the whole block) filled from START_DEFAULTS.
- * Throws when maxLanes is not a whole number from 1 to 10, or softPaths is not an array of valid regex strings.
- * @returns {{ maxLanes: number, softPaths: string[] }}
+ * Throws when maxLanes is not a whole number from 1 to 10, softPaths is not an array of valid regex strings, or
+ * models is not an object mapping tiers (skip, quick, full) to model names.
+ * @returns {{ maxLanes: number, softPaths: string[], models: { skip?: string, quick?: string, full?: string } }}
  */
 export function startConfig(raw) {
   const start = raw?.start;
-  if (start === undefined) return { maxLanes: START_DEFAULTS.maxLanes, softPaths: [...START_DEFAULTS.softPaths] };
+  if (start === undefined) return { maxLanes: START_DEFAULTS.maxLanes, softPaths: [...START_DEFAULTS.softPaths], models: {} };
   if (start === null || typeof start !== "object" || Array.isArray(start)) throw new Error("lanes.config.json: start must be an object");
   // A key present as null is a typo, not an absent key, so only a missing key takes the default.
   const maxLanes = start.maxLanes === undefined ? START_DEFAULTS.maxLanes : start.maxLanes;
@@ -44,11 +52,39 @@ export function startConfig(raw) {
       throw new Error(`lanes.config.json: start.softPaths: invalid regex ${JSON.stringify(source)}`);
     }
   }
-  return { maxLanes, softPaths: [...softPaths] };
+  return { maxLanes, softPaths: [...softPaths], models: startModels(start.models) };
 }
 
-/** The claude arguments for one lane. No permission-mode flag: a lane runs under the owner's normal settings. */
-export const launchArgs = (n) => ["--bg", `/lane ${n}`];
+// start.models, validated and copied; no models when the key is missing.
+function startModels(models) {
+  if (models === undefined) return {};
+  if (models === null || typeof models !== "object" || Array.isArray(models)) {
+    throw new Error("lanes.config.json: start.models must be an object mapping skip, quick or full to a model name");
+  }
+  const copy = {};
+  for (const [tier, model] of Object.entries(models)) {
+    if (!TIERS.includes(tier)) throw new Error(`lanes.config.json: start.models: unknown tier ${JSON.stringify(tier)}, expected one of ${TIERS.join(", ")}`);
+    if (typeof model !== "string" || !MODEL_NAME.test(model)) {
+      throw new Error(`lanes.config.json: start.models.${tier} must be a model name (one word, not starting with -), got ${JSON.stringify(model)}`);
+    }
+    copy[tier] = model;
+  }
+  return copy;
+}
+
+/**
+ * The claude arguments for one lane: `--model <name>` before `/lane <n>` when start.models has a model for the
+ * issue's tier, and none otherwise. No permission-mode flag: a lane runs under the owner's normal settings.
+ * @param {number} n
+ * @param {{ tier?: string, models?: { skip?: string, quick?: string, full?: string } }} [options] tier without `tier:`
+ */
+export function launchArgs(n, { tier, models = {} } = {}) {
+  const model = TIERS.includes(tier) && Object.hasOwn(models, tier) ? models[tier] : undefined;
+  return model ? ["--bg", "--model", model, `/lane ${n}`] : ["--bg", `/lane ${n}`];
+}
+
+// The tier of an issue from its label names (`tier:quick` → `quick`), or undefined.
+const tierOf = (labels) => labels.find((l) => l.startsWith("tier:"))?.slice("tier:".length);
 
 // ANSI escape sequences: CSI (colours, cursor moves) and OSC (e.g. hyperlinks), ended by BEL or ESC \.
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
@@ -164,8 +200,9 @@ function finishedIssues(deps, prs, sessions) {
   });
 }
 
-// Launches each issue from the repository root, one attempt each. Returns issue → line, and whether any failed.
-function launchAll(numbers, deps) {
+// Launches each issue from the repository root, one attempt each, on its tier's model (`tiers`: issue → tier).
+// Returns issue → line, and whether any failed.
+function launchAll(numbers, deps, { tiers, models }) {
   const lines = new Map();
   let failed = false;
   const root = numbers.length ? deps.root() : null;
@@ -174,7 +211,7 @@ function launchAll(numbers, deps) {
     let id = null;
     let why = "no session id in output";
     try {
-      id = parseSessionId(deps.claude(launchArgs(n), { cwd: root }));
+      id = parseSessionId(deps.claude(launchArgs(n, { tier: tiers.get(n), models }), { cwd: root }));
     } catch (err) {
       why = reason(err);
     }
@@ -189,7 +226,7 @@ function launchAll(numbers, deps) {
 
 // --auto: every ready issue is checked the way /lane does, then pickStartable chooses among the rest against the
 // paths open PRs change and running lanes claim. Prints the plan; launches it only with `go`.
-function autoStart(go, deps, { maxLanes, softPaths }) {
+function autoStart(go, deps, { maxLanes, softPaths, models }) {
   let prs, inFlight, openIssues;
   try {
     ({ prs, inFlight } = readInFlight(deps, "number,headRefName,files"));
@@ -222,7 +259,8 @@ function autoStart(go, deps, { maxLanes, softPaths }) {
     const trailer = start.length ? `dry run, nothing launched: /start --auto --go launches the ${start.length} marked would start` : "dry run: nothing to start";
     return { code: 0, lines: [...start.map((n) => `#${n}: would start`), ...skipLines, trailer] };
   }
-  const { lines, failed } = launchAll(start, deps);
+  const tiers = new Map(candidates.map((i) => [i.number, tierOf(labelsOf(i))]));
+  const { lines, failed } = launchAll(start, deps, { tiers, models });
   return { code: failed ? 1 : 0, lines: [...start.map((n) => lines.get(n)), ...skipLines] };
 }
 
@@ -297,7 +335,8 @@ function startIssues(args, deps, config) {
   const overlaps = (a, b) => pathsOf.has(a) && pathsOf.has(b) && pathsOverlap(pathsOf.get(a), pathsOf.get(b));
 
   const { launch, refused } = planStart({ issues, inFlight, overlaps, maxLanes: config.maxLanes });
-  const launched = launchAll(launch, deps);
+  const tiers = new Map(issues.filter((i) => i.labels).map((i) => [i.number, tierOf(i.labels)]));
+  const launched = launchAll(launch, deps, { tiers, models: config.models });
   const lines = new Map([...refused.map((r) => [r.number, `#${r.number}: refused: ${r.reason}`]), ...launched.lines]);
   return { code: refused.length || launched.failed ? 1 : 0, lines: numbers.map((n) => lines.get(n)) };
 }
