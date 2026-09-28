@@ -196,6 +196,21 @@ test("edge: give-up limits win over unread inputs", () => {
   assert.equal(tick({ now: T0 + 49 * HOUR, sessions: null }).action, "give-up");
 });
 
+// Not covered by the criteria or the listed edge cases: a mismatched session's cwd must give up even when the
+// issue state or PR list could not be read that same poll, since neither unread input makes the pair any less
+// wrong (regression: this previously returned "wait" instead, masking the mismatch).
+test("edge: a mismatched session's cwd gives up even when the issue state is unread", () => {
+  const r = tick({ issueState: null, sessions: [lane({ cwd: "C:\\repo\\.claude\\worktrees\\issue-8-x" })] });
+  assert.equal(r.action, "give-up");
+  assert.match(r.reason, /not an issue-7 worktree/);
+});
+
+test("edge: a mismatched session's cwd gives up even when the PR list is unread", () => {
+  const r = tick({ prs: null, sessions: [lane({ cwd: "C:\\repo\\.claude\\worktrees\\issue-8-x" })] });
+  assert.equal(r.action, "give-up");
+  assert.match(r.reason, /not an issue-7 worktree/);
+});
+
 test("edge: Date values for startedAt and now work", () => {
   assert.equal(tick({ startedAt: new Date(T0), now: new Date(T0 + 48 * HOUR) }).action, "give-up");
 });

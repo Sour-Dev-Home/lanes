@@ -57,15 +57,19 @@ export function reapTick({ issue, session, issueState, prs, sessions, startedAt,
 
   if (failures >= GIVE_UP_FAILURES) return { action: "give-up", reason: `${failures} consecutive failed polls` };
   if (age >= GIVE_UP_MS) return { action: "give-up", reason: `still not done after ${GIVE_UP_MS / 3_600_000} hours` };
-  if (issueState == null) return { action: "wait", reason: "issue state not read" };
-  if (prs == null) return { action: "wait", reason: "PR list not read" };
   if (sessions == null) return { action: "wait", reason: "session list not read" };
 
+  // A mismatched or missing target session is a give-up on its own (ADR 0010's correctness check against a
+  // mismatched pair), so it outranks an issue state or PR list that could not be read: those never make the pair
+  // any less wrong.
   const target = sessions.find((s) => s?.id === session);
   if (!target) return { action: "give-up", reason: `session ${session} not found` };
   if (typeof target.cwd !== "string" || cwdIssue(target.cwd) !== issue) {
     return { action: "give-up", reason: `session ${session}'s cwd is not an issue-${issue} worktree` };
   }
+
+  if (issueState == null) return { action: "wait", reason: "issue state not read" };
+  if (prs == null) return { action: "wait", reason: "PR list not read" };
 
   const lanePrs = prs.filter((p) => Number(LANE_BRANCH.exec(p?.headRefName ?? "")?.[1]) === issue);
   const open = lanePrs.find((p) => p.state === "OPEN");
