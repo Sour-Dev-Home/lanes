@@ -170,10 +170,6 @@ export function checkSha(sha, headRefOid) {
 }
 
 /**
- * Runs the CLI. `run` stands in for `gh` in tests. With `--file` the verdict comment is posted before the status: the
- * status event re-runs lanes/gate, which must find the comment then (#42). A failed comment throws before any status.
- */
-/**
  * #81: the owner's approval needs an unused, unexpired `/approve N` grant for exactly that PR, however the command was
  * built. Returns the grant file to consume once the status is posted; throws when there is none.
  */
@@ -184,6 +180,10 @@ export function requireOwnerGrant(prArg, dir, now) {
   return file;
 }
 
+/**
+ * Runs the CLI. `run` stands in for `gh` in tests. With `--file` the verdict comment is posted before the status: the
+ * status event re-runs lanes/gate, which must find the comment then (#42). A failed comment throws before any status.
+ */
 export function main(argv = process.argv.slice(2), { run = gh, log = console.log, warn = console.warn, grantDir: dir = grantDir(), now = Date.now() } = {}) {
   const parsed = parseArgs(argv);
   const grantFile = !parsed.file && parsed.positional[0] === "owner" ? requireOwnerGrant(parsed.pr, dir, now) : null;

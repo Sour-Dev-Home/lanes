@@ -406,6 +406,14 @@ test("edge: a grant directory that does not exist counts as no grant", () => {
   assert.deepEqual(gh.writes, []);
 });
 
+test("edge: gh resolving --pr to a different PR number is refused for the owner, and the grant is kept", () => {
+  const gh = fakeGh(); // fakeGh's "pr view" always answers with number: 12, whatever --pr asked for
+  const dir = grantDirWith({ "s1.json": grantFor(13) });
+  assert.throws(() => main(["owner", "success", "approved", "--pr", "13"], { run: gh.run, ...quiet, grantDir: dir, now: NOW }), /refusing: gh resolved --pr 13 to #12/);
+  assert.deepEqual(gh.writes, []);
+  assert.equal(existsSync(join(dir, "s1.json")), true);
+});
+
 test("edge: a non-owner skipped post needs no grant", () => {
   const gh = fakeGh();
   main(["ui-reviewer", "skipped", "no visible change"], { run: gh.run, ...quiet, grantDir: grantDirWith(), now: NOW });
