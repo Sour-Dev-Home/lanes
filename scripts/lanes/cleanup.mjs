@@ -3,8 +3,8 @@
 // touched. Each removed session's log is saved to .lanes/logs first (git-ignored, never posted).
 // Usage: node scripts/lanes/cleanup.mjs [--dry-run]
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 const LANE_BRANCH = /^issue-(\d+)-./;
 // A lane's worktree folder: `issue-<N>-<slug>`, or bare `issue-<N>` when the lane skipped the slug (#134).
@@ -301,10 +301,25 @@ export function loadCleanupInputs(root = repoRoot()) {
   return { root, worktrees, sessions, prs, issues, orphans: findOrphans(root, trees.map((t) => t.path)) };
 }
 
-// Files (anything but a folder, links included) anywhere under `dir`, or null when it cannot be read.
+// Whether `<dir>/.git` is a plain file naming a `gitdir:` that no longer exists: what git leaves behind in a worktree
+// folder it pruned. A relative gitdir resolves against `dir`. Anything else (a folder, a link, no gitdir line) is not.
+function hasStalePointer(dir) {
+  const file = join(dir, ".git");
+  try {
+    if (!lstatSync(file).isFile()) return false;
+    const target = /^gitdir:[ \t]*(.+?)[ \t]*$/.exec(readFileSync(file, "utf8").split(/\r?\n/, 1)[0])?.[1];
+    return Boolean(target) && !existsSync(resolve(dir, target));
+  } catch {
+    return false;
+  }
+}
+
+// Files (anything but a folder, links included) anywhere under `dir`, or null when it cannot be read. A stale `.git`
+// pointer directly in `dir` does not count: it is debris, removed with the folder.
 function countFiles(dir) {
   try {
-    return readdirSync(dir, { recursive: true, withFileTypes: true }).filter((e) => !e.isDirectory()).length;
+    const stale = hasStalePointer(dir) ? join(dir, ".git") : null;
+    return readdirSync(dir, { recursive: true, withFileTypes: true }).filter((e) => !e.isDirectory() && join(e.parentPath, e.name) !== stale).length;
   } catch {
     return null;
   }
@@ -336,7 +351,8 @@ export function findOrphans(root, tracked) {
 
 /**
  * Deletes `path` if it holds no files (empty folders inside go with it); throws otherwise. Folders are removed deepest
- * first with a plain rmdir, which refuses a non-empty one, so a file written after the count is never deleted.
+ * first with a plain rmdir, which refuses a non-empty one, so a file written after the count is never deleted. The one
+ * file unlinked outright is a stale `.git` pointer directly in `path` (see hasStalePointer), which is not counted.
  */
 export function removeEmptyDir(path) {
   const files = countFiles(path);
@@ -346,6 +362,7 @@ export function removeEmptyDir(path) {
     .filter((e) => e.isDirectory())
     .map((e) => join(e.parentPath, e.name))
     .sort((a, b) => b.length - a.length);
+  if (hasStalePointer(path)) unlinkSync(join(path, ".git"));
   for (const dir of [...inner, path]) rmdirSync(dir);
 }
 
