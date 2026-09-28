@@ -23,7 +23,7 @@ Scripts that import `node:child_process` (each call site runs `gh`, `git`, `clau
 `scripts/preflight.mjs`, `scripts/lanes/blockers.mjs`, `scripts/lanes/cleanup.mjs`,
 `scripts/lanes/delivery-metrics.mjs`, `scripts/lanes/gate.mjs`, `scripts/lanes/issue-contract.mjs`,
 `scripts/lanes/new-project.mjs`, `scripts/lanes/notify-hook.mjs`, `scripts/lanes/post-review.mjs`,
-`scripts/lanes/reap.mjs`, `scripts/lanes/reviewers.mjs`, `scripts/lanes/review-metrics.mjs`,
+`scripts/lanes/queue.mjs`, `scripts/lanes/reap.mjs`, `scripts/lanes/reviewers.mjs`, `scripts/lanes/review-metrics.mjs`,
 `scripts/lanes/setup-repo.mjs`, `scripts/lanes/start.mjs`, `scripts/lanes/status.mjs`,
 `scripts/lanes/structure-report.mjs` (runs `npx` with `shell: true` on Windows). `scripts/lanes/vendor.test.mjs` fails when a script gains a
 child process without a line here; since `vendor/` is an owner path, adding that line brings the PR to owner review.
