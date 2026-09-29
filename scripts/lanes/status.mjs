@@ -397,16 +397,19 @@ export const STATUS_QUERY =
 export function readBudget(repoRoot, rawAgents, { readConfig = () => readFileSync(join(repoRoot, "lanes.config.json"), "utf8"), load = loadBudget } = {}) {
   const notes = [];
   let caps = { ...BUDGET_DEFAULTS };
+  let text;
   try {
-    let text;
-    try {
-      text = readConfig();
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-    }
-    if (text !== undefined) caps = budgetConfig(JSON.parse(text));
+    text = readConfig();
   } catch (err) {
-    notes.push(`lanes.config.json budget not read (${String(err.message).split("\n")[0]}), defaults used`);
+    // A file system error's message carries the file's absolute path, so only a fixed string is reported.
+    if (err.code !== "ENOENT") notes.push("lanes.config.json unreadable, budget defaults used");
+  }
+  if (text !== undefined) {
+    try {
+      caps = budgetConfig(JSON.parse(text));
+    } catch (err) {
+      notes.push(`lanes.config.json budget not read (${String(err.message).split("\n")[0]}), defaults used`);
+    }
   }
   let lanes = [];
   try {

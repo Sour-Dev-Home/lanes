@@ -945,6 +945,12 @@ test("edge: readBudget uses the defaults for a missing config and says so for a 
   assert.match(bad.note, /running lanes unreadable/);
 });
 
+test("edge: readBudget never puts a file system error's path in its note", () => {
+  const r = readBudget("/repo", "[]", { readConfig: () => { throw Object.assign(new Error("EACCES: permission denied, open '/secret/lanes.config.json'"), { code: "EACCES" }); }, load: okLoad() });
+  assert.equal(r.note, "lanes.config.json unreadable, budget defaults used");
+  assert.equal(r.perNightTokens, 100_000_000);
+});
+
 test("edge: readBudget keeps loadBudget's own note", () => {
   const r = readBudget("/repo", "[]", { readConfig: () => "{}", load: okLoad({ note: "no .lanes/costs.jsonl yet, counted as 0" }) });
   assert.equal(r.note, "no .lanes/costs.jsonl yet, counted as 0");

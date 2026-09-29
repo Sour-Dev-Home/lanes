@@ -181,6 +181,19 @@ test("edge: spentSince skips bad lines, null tokens and empty text", () => {
   assert.equal(spentSince(undefined, { now: BNOW }), 0);
 });
 
+test("edge: spentSince includes a lane removed exactly 24 h ago and excludes one a millisecond older", () => {
+  const at = JSON.stringify({ removedAt: new Date(BNOW - 24 * 3_600_000).toISOString(), tokens: { total: 5 } });
+  const past = JSON.stringify({ removedAt: new Date(BNOW - 24 * 3_600_000 - 1).toISOString(), tokens: { total: 7 } });
+  assert.equal(spentSince([at, past].join("\n"), { now: BNOW }), 5);
+});
+
+test("edge: budgetReport with no running lanes and a lane exactly at its cap", () => {
+  const r = budgetReport({ removedSpent: 10, live: new Map([[1, 5]]), perNightTokens: 10, perLaneTokens: 5 });
+  assert.equal(r.over, true, "10 + 5 passes 10");
+  assert.deepEqual(r.lanesOver, [], "exactly at the lane cap is not over");
+  assert.equal(budgetReport({ removedSpent: 10, live: new Map(), perNightTokens: 10, perLaneTokens: 5 }).over, false);
+});
+
 test("budgetReport adds live totals, is over only past the cap, and lists lanes past their own cap", () => {
   const args = { perNightTokens: 1000, perLaneTokens: 300 };
   const under = budgetReport({ ...args, removedSpent: 400, live: new Map([[7, 300], [5, 200]]) });
