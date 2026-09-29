@@ -27,13 +27,16 @@
 //     PowerShell call of its own, and never allowed; a word ending in claude counts as claude (`CommandLine=claude`,
 //     a Windows path whose backslashes a nested script drops); and a WMI/CIM process creation (Win32_Process Create,
 //     wmic process call create) whose call holds anything expanded at run time is denied.
+//   Either tool (#378): shell text known only at run time (`eval "$X"`, `source "$F"`, `sh -c "$(cat f)"`) is denied
+//     with or without a grant; a Win32_Process method named at run time (`$o.$m(…)`) counts as a WMI process creation;
+//     and a program glob that could expand to node (`n*de`, `[n]ode`) is read as node. The rules live in shell-lex.mjs.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isAutomatedInput, powershellAsBash, preToolUseOutput } from "./approve-guard.mjs";
 import {
-  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, SHELL_RE, basename, dequoted, feedsShell, launchedCommands, lex, mayExpandTo,
-  readGrant, scriptSubcommand, withoutLiteralSubstitutions, wmiProcessCreate,
+  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, SHELL_RE, basename, dequoted, feedsShell, launchedCommands, lex, mayBeNode, mayExpandTo,
+  readGrant, runtimeTextWords, scriptSubcommand, withoutLiteralSubstitutions, wmiProcessCreate,
 } from "./shell-lex.mjs";
 
 // start.mjs reads the grant with the guard's own reader.
@@ -49,6 +52,8 @@ export const PARSE_DENY_REASON =
   "this command could not be parsed (an unterminated quote or nesting too deep) and it names start.mjs or --bg, so start-guard denies it; rewrite it, for example a commit message with git commit -F <file>";
 export const WMI_DENY_REASON =
   "this WMI/CIM process creation (Win32_Process Create, wmic process call create) builds its command line at run time (a variable, a hashtable or an expression), which could be claude --bg or a lane script, so start-guard denies it; run the program directly";
+export const RUNTIME_TEXT_DENY_REASON =
+  "this command runs shell text known only at run time (eval, source or a shell's -c given $VAR, $(…) or a backtick), which could be start.mjs, queue.mjs or claude --bg, so start-guard denies it; run the command itself";
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const START_PROMPT_RE = /^\/start((?:\s+[1-9][0-9]{0,8})+)$/;
 // The only form that may be allowed: the plain command with plain issue numbers, nothing chained, wrapped or redirected.
@@ -58,7 +63,6 @@ const AUTO_PLAIN_RE = /^node scripts\/lanes\/start\.mjs --auto( --go)?$/;
 const AUTO_FORMS = { dry: "--auto", go: "--auto --go" };
 const START_WORD_RE = /start\.mjs$/i;
 const QUEUE_WORD_RE = /queue\.mjs$/i;
-const NODE_RE =/^(node|nodejs|bun|deno)(\.exe)?$/i;
 // Matched at a word's end (#316): `CommandLine=claude` in a WMI hashtable, or `C:toolsclaude.exe` once a nested script
 // has dropped a Windows path's backslashes. Not after a dot, so a `~/.claude` directory is no claude.
 const CLAUDE_RE = /(?<!\.)claude(-code)?(\.exe|\.cmd|\.ps1)?$/i;
@@ -224,7 +228,7 @@ function evalScripts(words) {
     for (let i = at + 2; i < words.length; i += 1) if (!words[i].startsWith("-")) scripts.set(i, words[i]);
     return scripts;
   }
-  if (!EVAL_PROGRAM_RE.test(basename(words[at]))) return scripts;
+  if (!EVAL_PROGRAM_RE.test(basename(words[at])) && !(/[*?[{]/.test(words[at]) && mayBeNode(words[at]))) return scripts;
   let afterFlag = false;
   for (let i = at + 1; i < words.length; i += 1) {
     const w = words[i];
@@ -386,7 +390,8 @@ function scriptCandidates(plain, nodeAt) {
 function commandWords(words, stdin) {
   const own = words.filter((w) => !ASSIGN_RE.test(w));
   const plain = stdin === undefined ? own : [...own, stdin];
-  const nodeAt = own.findIndex((p) => NODE_RE.test(basename(p)));
+  // A glob that could expand to node (`n*de`, `[n]ode`) runs node too (#378).
+  const nodeAt = own.findIndex(mayBeNode);
   const scripts = scriptCandidates(plain, nodeAt);
   return { plain, nodeAt, scripts, counts: (i) => i < own.length || scripts.has(i) };
 }
@@ -484,6 +489,29 @@ function scanQueueInvocations(command) {
     },
   );
   return { found, unresolved };
+}
+
+/**
+ * Whether a simple command anywhere in a Bash command, nested scripts included, runs shell text known only at run time
+ * (shell-lex.mjs's runtimeTextWords: `eval "$X"`, `source "$F"`, `sh -c "$(cat f)"`), which could be any command
+ * (#378), as `found`; and `leading`, when such text starts with the expansion, so nothing of it is known at all.
+ */
+function scanRuntimeText(command) {
+  let found = false;
+  let leading = false;
+  walk(
+    String(command ?? ""),
+    0,
+    (words) => {
+      for (const w of runtimeTextWords(words)) {
+        found = true;
+        if (w[0] === "$" || w[0] === "`" || w[0] === QUOTED_TICK) leading = true;
+      }
+    },
+    () => {},
+    () => {},
+  );
+  return { found, leading };
 }
 
 /** True when a Bash command runs `claude --bg` (or `--background`) directly, behind any wrapper, or cannot be read. */
@@ -652,9 +680,15 @@ function decide(input, grant, now, depth) {
   // Before any grant is read: no /start grant, of any form, reaches queue.mjs.
   const queue = scanQueueInvocations(command);
   if (queue.found) return { decision: "deny", reason: QUEUE_DENY_REASON };
+  // Shell text known only at run time could be either script or claude --bg: denied whatever grant there is (#378).
+  // Text that starts with the expansion (`eval "$X"`) gets this reason; text with a known start whose program word
+  // is the unknown part (`bash -c "x |$Y"`) keeps the reason below. Only the reason differs: both deny.
+  const runtimeText = scanRuntimeText(command);
+  if (runtimeText.leading) return { decision: "deny", reason: RUNTIME_TEXT_DENY_REASON };
   // A program named only at run time could be either script (findStartInvocations denies the same words); a command
   // that names start.mjs keeps the start reason. Only the reason differs: both deny.
   if (queue.unresolved && !/start\.mjs/i.test(dequoted(withoutLiteralSubstitutions(command)))) return { decision: "deny", reason: UNRESOLVED_DENY_REASON };
+  if (runtimeText.found) return { decision: "deny", reason: RUNTIME_TEXT_DENY_REASON };
   const found = startInvocations(command, typed);
   // A WMI/CIM process creation's literal command line was read above; one built at run time could be anything (#316).
   // For the PowerShell tool a hashtable or expression reads as `$` in the Bash text, so that is where it is looked for.

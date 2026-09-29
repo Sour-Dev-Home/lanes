@@ -16,7 +16,7 @@
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { dequoted, launchedCommands, lex, mayExpandTo, readGrant, RUNS_ON_EXPANSION_RE, scriptSubcommand, unmark, wmiProcessCreate } from "./shell-lex.mjs";
+import { dequoted, launchedCommands, lex, mayBeNode, mayExpandTo, readGrant, RUNS_ON_EXPANSION_RE, runsRuntimeText, scriptSubcommand, unmark, wmiProcessCreate } from "./shell-lex.mjs";
 
 // post-review.mjs reads the grant with the guard's own reader.
 export { readGrant } from "./shell-lex.mjs";
@@ -147,10 +147,9 @@ const ASSIGN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
 const VAR_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
 // What is left of a word after substitution that could still expand to anything.
 const UNRESOLVED_RE = /[$`]/;
-// bun and deno run a script too (start-guard.mjs already counts them for the analogous concern); each takes a
+// bun and deno run a script too (shell-lex.mjs's mayBeNode, shared with start-guard.mjs); each takes a
 // `run` subcommand ahead of its options and script, and deno an `eval` ahead of its code (shell-lex.mjs's
 // scriptSubcommand, #308), which is not itself an option or the script.
-const NODE_RE = /^(node|nodejs|bun|deno)(\.exe)?$/i;
 // Commands that run their arguments as shell text: eval and source always, a shell after a -c flag.
 const EVAL_RE = /^(eval|source|\.)$/;
 const SHELL_RE = /^(sh|bash|zsh|dash|ksh|ash|busybox)(\.exe)?$/i;
@@ -363,7 +362,8 @@ function scan(cmd, depth, out) {
       if (!heredocIsData || (!quoted && RUNS_ON_EXPANSION_RE.test(body))) scanScript(body, depth, out);
     }
     plain.forEach((p, at) => {
-      if ((at > 0 && !runsArgs) || !NODE_RE.test(p.split(/[\\/]/).at(-1))) return;
+      // A glob that could expand to node (`n*de`, `[n]ode`) runs node too (#378).
+      if ((at > 0 && !runsArgs) || !mayBeNode(p)) return;
       // bun/deno's own `run` (or deno's `eval`) sits ahead of the options and script; skip over it before scanning those.
       const start = scriptSubcommand(plain, at) ? at + 1 : at;
       for (let j = start + 1; j <= nodeScriptEnd(plain, start); j += 1) nodeRange.add(j);
@@ -388,6 +388,9 @@ function scan(cmd, depth, out) {
         if (c !== -1) evalFrom = c + 1;
       }
     });
+    // Shell text known only at run time (shell-lex.mjs's runsRuntimeText, shared with start-guard.mjs) could be
+    // post-review.mjs owner; the scan below denies it too, and this keeps both guards reading it by one rule (#378).
+    if (runsArgs && runsRuntimeText(plain)) out.push({ pr: undefined, standalone: false });
     // What powershell, pwsh, cmd or fish runs: its arguments as one command line, scanned in bash terms (#119).
     if (foreignFrom !== Infinity) {
       const line = plain.slice(foreignFrom).map((_, j) => foreignText(plain, foreignFrom + j, foreignName)).join(" ");

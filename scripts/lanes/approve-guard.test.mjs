@@ -1466,3 +1466,46 @@ test("#310 edge: $\"…\", a backslash-newline in double quotes, a redirect targ
   assert.deepEqual(decideBash("node scripts/lanes/post-revie$'\\x77'.mjs owner --pr 5\necho 'x"), { decision: "deny", reason: UNPARSED_REASON });
   assert.equal(decideBash("echo $'unterminated"), null);
 });
+
+// --- #378: text, WMI methods and programs known only at run time -------------------------------------------------
+
+test("#378 criterion 1: eval, source and a shell's -c given run-time text stay denied, with or without a grant", () => {
+  for (const cmd of ['eval "$X"', "eval $A$B", 'source "$F"', 'bash -c "$X"', 'sh -c "$(cat f)"', 'eval "$(ssh-agent -s)"', '. "$F"', 'builtin eval "$X"']) {
+    assert.deepEqual(decideBash(cmd), { decision: "deny", reason: DENY_REASON }, cmd);
+    assert.deepEqual(decideBash(cmd, grant({ pr: 1 })), { decision: "deny", reason: DENY_REASON }, `${cmd} with a grant`);
+  }
+});
+
+test("#378 criterion 2: a Win32_Process method named at run time is denied through the PowerShell tool", () => {
+  for (const cmd of [
+    "([wmiclass]'Win32_Process').$m(1)", "$o = [wmiclass]'Win32_Process'; $o.$m($c)", "$o = [wmiclass]'Win32_Process'; $o.$m.Invoke($c)",
+    "$o = [wmiclass]'Win32_Process'; $o.InvokeMethod($m, $a)",
+  ]) {
+    assert.deepEqual(decidePs(cmd), { decision: "deny", reason: WMI_REASON }, cmd);
+    assert.deepEqual(decidePs(cmd, grant({ pr: 1 })), { decision: "deny", reason: WMI_REASON }, `${cmd} with a grant`);
+  }
+});
+
+test("#378 criterion 3: a program glob that could be node running post-review.mjs owner is denied through either tool", () => {
+  for (const decideTool of [decideBash, decidePs]) {
+    for (const cmd of ["n*de scripts/lanes/post-review.mjs owner success ok --pr 1", "[n]ode scripts/lanes/post-review.mjs owner success ok --pr 1"]) {
+      assert.deepEqual(decideTool(cmd), { decision: "deny", reason: DENY_REASON }, cmd);
+      assert.deepEqual(decideTool(cmd, grant({ pr: 1 })), { decision: "deny", reason: DENY_REASON }, `${cmd} with a grant`);
+    }
+  }
+});
+
+test("#378 edge: a program glob that could be node, running a script named at run time, is denied", () => {
+  for (const cmd of ["n*de $S owner --pr 1", "no?e --require $R x.mjs", "env [n]ode $S"]) {
+    assert.deepEqual(decideBash(cmd), { decision: "deny", reason: DENY_REASON }, cmd);
+  }
+});
+
+test("#378 criterion 4: commands that only print, pass or read such text get no decision", () => {
+  for (const cmd of ['echo "$X"', "git commit -F msg.txt", "gh pr view 5 --jq '.x as $s | $s'", "ls n*", "node --test scripts/lanes/*.test.mjs"]) {
+    assert.equal(decideBash(cmd), null, cmd);
+  }
+  for (const cmd of ["([wmiclass]'Win32_Process').Properties", "Get-CimInstance Win32_Process", "ls n*", "git commit -F msg.txt"]) {
+    assert.equal(decidePs(cmd), null, cmd);
+  }
+});

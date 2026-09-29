@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CAT_HEREDOC_RE, HEREDOC_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, ansiCString, dequoted, heredocOperator, launchedCommands, lex, literalSubstitution, mark,
-  mayExpandTo, plainLiteralSubstitution, readGrant, readHeredoc, skipRedirectTarget, unmark, wmiProcessCreate,
+  mayBeNode, mayExpandTo, plainLiteralSubstitution, readGrant, readHeredoc, runsRuntimeText, skipRedirectTarget, unmark, wmiProcessCreate,
 } from "./shell-lex.mjs";
 
 const source = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
@@ -442,4 +442,48 @@ test("#310 criterion 5: a $ bash expands stays live, and so do $\"…\", $[…] 
   // `$[` is bash's old arithmetic: live, so the `[` is no glob bracket here either.
   assert.equal(lex('echo "a$[1]"')[0][1], `a$${mark("[")}1]`);
   assert.equal(lex('echo "a$[1]"', { bodies: true }).segments[0][1], "a$[1]");
+});
+
+test("#378 criterion 1: runsRuntimeText reads eval, source and a shell's -c given text known only at run time", () => {
+  for (const cmd of [
+    'eval "$X"', "eval $A$B", 'source "$F"', 'bash -c "$X"', 'sh -c "$(cat f)"', 'eval "$(ssh-agent -s)"', '. "$F"', "eval `cat f`",
+    'X=1 eval "$Y"', 'builtin eval "$X"', 'command source "$F"', 'env bash -c "$X"', 'timeout 5 sh -c "$X"', 'bash -lc "$X"', "eval echo $X",
+  ]) {
+    assert.equal(runsRuntimeText(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of [
+    'echo "$X"', "git commit -F msg.txt", "eval echo hi", "source ~/.bashrc", "bash -c 'echo $HOME'", "eval 'echo $X'", 'grep -c "$X" f',
+    'bash -c "echo hi" "$X"', 'bash "$F"', "eval", "source", 'echo eval "$X"', 'command -v eval "$X"',
+  ]) {
+    assert.equal(runsRuntimeText(lex(cmd)[0]), false, cmd);
+  }
+  // edge: nothing to read, or no command word at all.
+  assert.equal(runsRuntimeText([]), false);
+  assert.equal(runsRuntimeText(["X=1"]), false);
+});
+
+test("#378 criterion 2: wmiProcessCreate reads a Win32_Process method named at run time", () => {
+  for (const t of [
+    "([wmiclass]'Win32_Process').$m(1)", "$o = [wmiclass]'Win32_Process'; $o.$m($c)", "$o = [wmiclass]'Win32_Process'; $o.\"$m\"($c)",
+    "$o = [wmiclass]'Win32_Process'; $o.($m)($c)", "$o = [wmiclass]'Win32_Process'; $o.${m}($c)", "$o = [wmiclass]'Win32_Process'; $o.$($n)($c)",
+    "$o = [wmiclass]'Win32_Process'; $o.$m.Invoke($c)", "$o = [wmiclass]'Win32_Process'; $o.PSObject.Methods[$m].Invoke($c)",
+    "$o = [wmiclass]'Win32_Process'; $o.InvokeMethod($m, $a)", "([wmiclass]'Win32_Pro*').$m(1)", "([wmiclass]'Win32_Process') . $m (1)",
+  ]) {
+    assert.equal(wmiProcessCreate(t), true, t);
+  }
+  for (const t of [
+    "([wmiclass]'Win32_Process').Properties", "Get-CimInstance Win32_Process", "Get-CimInstance Win32_Process | % { $_.$p }",
+    "$o = [wmiclass]'Win32_Process'; $o.$p", "$x.$m(1)", "([wmiclass]'Win32_Service').$m(1)", "",
+  ]) {
+    assert.equal(wmiProcessCreate(t), false, t);
+  }
+});
+
+test("#378 criterion 3: mayBeNode reads node, and a glob that could expand to it, as node", () => {
+  for (const w of ["node", "node.exe", "/usr/bin/node", "nodejs", "bun", "deno", "n*de", "no?e", "[n]ode", "/usr/bin/n*de", "N*DE", "n{o,x}de", "*", "n*"]) {
+    assert.equal(mayBeNode(w), true, w);
+  }
+  for (const w of ["ls", "n*y", "nod", "[n]odx", "scripts/lanes/*.test.mjs", "no?e?x", mark("n*de"), ""]) {
+    assert.equal(mayBeNode(w), false, w);
+  }
 });

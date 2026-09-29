@@ -404,6 +404,42 @@ export function mayExpandTo(w, names) {
   });
 }
 
+// node and the runtimes that run a script or code given as an argument the same way.
+export const NODE_RE = /^(node|nodejs|bun|deno)(\.exe)?$/i;
+const NODE_NAMES = ["node", "nodejs", "bun", "deno", "node.exe", "nodejs.exe", "bun.exe", "deno.exe"];
+
+/**
+ * True when word `w` names node, nodejs, bun or deno, or is a glob that could expand to one (#378): `n*de`, `no?e` or
+ * `[n]ode` runs node once a file of that name matches, so both guards read it as node. Shared by approve-guard.mjs
+ * and start-guard.mjs.
+ */
+export const mayBeNode = (w) => NODE_RE.test(basename(w)) || mayExpandTo(w, NODE_NAMES);
+
+// `$`, a backtick, or the QUOTED_TICK lex's bodies shape puts around an unquoted backtick substitution it walks apart.
+const LIVE_RE = new RegExp(`[$\`${QUOTED_TICK}]`);
+const EVAL_WORDS = new Set(["eval", "source", "."]);
+const SHELL_C_RE = /^-[A-Za-z]*c[A-Za-z]*$/;
+
+/**
+ * The words of simple command `words`, as lex gives them, that are shell text known only at run time (#378): an
+ * argument of eval, source or `.` as the command word (also behind builtin or command) that still holds `$` or a
+ * backtick, or such a -c script of a shell named anywhere earlier (`env bash -c`). Such text could be any command at
+ * all. A `$` or backtick in single quotes is marked by lex, so `bash -c 'echo $HOME'` and `eval 'echo $X'` hold none.
+ */
+export function runtimeTextWords(words) {
+  let at = words.findIndex((w) => !ASSIGN_RE.test(w));
+  while (at !== -1 && (words[at] === "builtin" || words[at] === "command")) at += 1;
+  if (at !== -1 && EVAL_WORDS.has(words[at])) return words.slice(at + 1).filter((w) => LIVE_RE.test(w));
+  return words.filter((w, i) => i > 1 && LIVE_RE.test(w) && SHELL_C_RE.test(words[i - 1]) && words.slice(0, i - 1).some((p) => SHELL_RE.test(basename(p))));
+}
+
+/** True when simple command `words` runs shell text known only at run time (runtimeTextWords), #378. */
+export const runsRuntimeText = (words) => runtimeTextWords(words).length > 0;
+
+// A PowerShell method named at run time (#378): `.$m(…)`, `."$m"(…)`, `.($m)(…)`, `.${m}(…)`, `.$($n)(…)`, each maybe
+// through `.Invoke(…)`; a method looked up by a computed key (`.PSObject.Methods[$m]`); or WMI's own `.InvokeMethod(`.
+const COMPUTED_METHOD_RE = /\.\s*(?:\(\s*\$[^)]*\)|\$\{[^}]*\}|\$\([^)]*\)|\$[\w:]+)\s*(?:\.\s*invoke\s*)?\(|\bmethods\s*\[|\binvokemethod\s*\(/i;
+
 // Programs that start another program from their arguments with no `node` or shell `-c` in sight (#308).
 const CMD_RE = /^cmd(\.exe)?$/i;
 const START_RE = /^start(\.exe)?$/i;
@@ -518,8 +554,9 @@ export const dequoted = (s) => (s.includes("$'") ? `${s}\n${ansiCResolved(s)}` :
 export function wmiProcessCreate(text) {
   const plain = dequoted(withoutLiteralSubstitutions(String(text ?? ""))).replace(/\+/g, "");
   const flat = plain.replace(/[\s()]/g, "").toLowerCase();
-  // Create, or a WMI/CIM method call whose method name may be built at run time (-MethodName $m, security review round 1).
-  if (!/create/.test(flat) && !/\b(invoke-(cim|wmi)method|icim|iwmi)\b/i.test(plain)) return false;
+  // Create, or a WMI/CIM method call whose method name may be built at run time (-MethodName $m, security review round
+  // 1; `$o.$m(…)`, `$o.PSObject.Methods[$m]`, `$o.InvokeMethod($m, …)`, #378).
+  if (!/create/.test(flat) && !/\b(invoke-(cim|wmi)method|icim|iwmi)\b/i.test(plain) && !COMPUTED_METHOD_RE.test(plain)) return false;
   if (/win32_process/.test(flat) || (/wmic/.test(flat) && /process/.test(flat))) return true;
   // Each word, and what follows a `[type]` cast glued to it ([wmiclass]Win32_Proc* once quotes are dropped).
   const words = plain.split(/[^\w.*?[\]]+/).flatMap((t) => [t, ...[...t.matchAll(/\](?=[\w*?])/g)].map((m) => t.slice(m.index + 1))]);
