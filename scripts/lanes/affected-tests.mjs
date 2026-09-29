@@ -7,7 +7,7 @@
 // A changed file selects the `*.test.mjs` files of the module owning it (lanes.config.json `modules`) and of every
 // module that imports that module, directly or transitively. ALL is printed when a changed file maps to no module,
 // is under .github/ or contracts/, is package.json, package-lock.json or lanes.config.json, is a test helper or
-// fixture, when the diff fails or is empty, or when `ci.affectedTests` is false (a missing `ci` key means true).
+// fixture, when the diff fails or is empty, or when `ci.affectedTests` is anything but true (a missing `ci` or `ci.affectedTests` key means true).
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -15,7 +15,16 @@ import { listFiles, moduleOf } from "./modules.mjs";
 
 export const ALL = "ALL";
 
-const ALWAYS_ALL = /^(\.github\/|contracts\/|package\.json$|package-lock\.json$|lanes\.config\.json$)/;
+const ALWAYS_ALL = /^(\.github\/|contracts\/|lanes\.config\.json$)|(^|\/)package(-lock)?\.json$/;
+
+// Narrowing is on only when `ci` and `ci.affectedTests` are absent, or `affectedTests` is exactly true: any other
+// value ("false", 0, null) is a mistyped switch and fails safe to ALL.
+const narrowingOn = (config) => {
+  const ci = config?.ci;
+  if (ci === undefined) return true;
+  if (ci === null || typeof ci !== "object" || Array.isArray(ci)) return false;
+  return !("affectedTests" in ci) || ci.affectedTests === true;
+};
 const FIXTURE = /\.fixtures\.m?[jt]sx?$/;
 const TEST_DIR = /(^|\/)(__tests__|tests?)\//;
 const TEST_FILE = /\.test\.mjs$/;
@@ -29,7 +38,7 @@ const forcesAll = (path) =>
  */
 export function affectedTests({ changed, config, files }) {
   try {
-    if (config?.ci?.affectedTests === false) return ALL;
+    if (!narrowingOn(config)) return ALL;
     const map = config?.modules;
     const entries = map?.entries;
     if (!Array.isArray(entries) || !changed.length) return ALL;
@@ -56,8 +65,10 @@ export function affectedTests({ changed, config, files }) {
 }
 
 const readConfig = () => JSON.parse(readFileSync("lanes.config.json", "utf8"));
+// --no-renames lists a rename's old path too (an old .github/ path must still force ALL); -z gives raw NUL-separated
+// paths, unaffected by core.quotePath.
 const gitDiff = (base) =>
-  execFileSync("git", ["diff", "--name-only", `${base}...HEAD`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  execFileSync("git", ["diff", "--name-only", "--no-renames", "-z", `${base}...HEAD`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
 // Every file in the directories the map's path prefixes live in, where its tests are.
 function candidateFiles(config, list) {
@@ -74,8 +85,8 @@ export function main(argv, io = { diff: gitDiff, readConfig, listFiles }) {
   if (typeof base !== "string" || !base || base.startsWith("-")) return all;
   try {
     const config = io.readConfig();
-    if (config?.ci?.affectedTests === false) return all;
-    const changed = io.diff(base).split(/\r?\n/).filter(Boolean);
+    if (!narrowingOn(config)) return all;
+    const changed = io.diff(base).split("\0").filter(Boolean);
     const result = affectedTests({ changed, config, files: candidateFiles(config, io.listFiles) });
     return { code: 0, message: result === ALL ? ALL : result.join("\n") };
   } catch {

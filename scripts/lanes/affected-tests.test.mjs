@@ -23,7 +23,7 @@ const FILES = [
 const run = (changed, cfg = config, files = FILES) => affectedTests({ changed, config: cfg, files });
 
 const io = (over = {}) => ({
-  diff: () => "scripts/lanes/queue.mjs\n",
+  diff: () => "scripts/lanes/queue.mjs\0",
   readConfig: () => config,
   listFiles: () => FILES,
   ...over,
@@ -57,6 +57,19 @@ for (const path of [
 ]) {
   test(`ALL path class: ${path}`, () => {
     assert.equal(run(["scripts/other.mjs", path]), "ALL");
+  });
+}
+
+// The class tests above use unmapped paths, which are ALL anyway; here every path IS mapped, so only the class rule forces ALL.
+for (const path of [
+  ".github/workflows/verify.yml", "contracts/a.schema.json", "package.json", "package-lock.json", "lanes.config.json",
+  "scripts/a.fixtures.mjs", "scripts/test/helper.mjs", "scripts/__tests__/data.json", "scripts/tests/data.json",
+]) {
+  test(`ALL path class, even when mapped: ${path}`, () => {
+    const paths = [".github/", "contracts/", "package", "lanes.config.", "scripts/", "scripts/other."];
+    const cfg = { modules: { entries: [{ id: "all", paths, imports: [] }], allowCycles: [] } };
+    assert.notEqual(moduleOf(path, cfg.modules), null);
+    assert.equal(run([path], cfg, ["scripts/x.test.mjs"]), "ALL");
   });
 }
 
@@ -106,7 +119,7 @@ test("main prints one test file per line", () => {
 
 test("main passes the base ref to the diff", () => {
   let seen;
-  main(["origin/main"], io({ diff: (b) => { seen = b; return "scripts/other.mjs\n"; } }));
+  main(["origin/main"], io({ diff: (b) => { seen = b; return "scripts/other.mjs\0"; } }));
   assert.equal(seen, "origin/main");
 });
 
@@ -116,7 +129,7 @@ test("main: a failed diff is ALL", () => {
 });
 
 test("main: an empty diff is ALL", () => {
-  assert.deepEqual(main(["origin/main"], io({ diff: () => "\n" })), { code: 0, message: "ALL" });
+  assert.deepEqual(main(["origin/main"], io({ diff: () => "" })), { code: 0, message: "ALL" });
 });
 
 test("main: ci.affectedTests false is ALL", () => {
@@ -135,9 +148,27 @@ test("main: a missing or option-shaped base ref is ALL, and never reaches git", 
   assert.equal(called, false);
 });
 
-test("main: CRLF diff output and blank lines are tolerated", () => {
-  const r = main(["b"], io({ diff: () => "scripts/other.mjs\r\n\r\n" }));
-  assert.equal(r.message, "scripts/other.test.mjs");
+test("edge: main splits on NUL, so a path with a space or newline stays one path", () => {
+  assert.equal(main(["b"], io({ diff: () => "scripts/other.mjs\0\0" })).message, "scripts/other.test.mjs");
+  assert.equal(main(["b"], io({ diff: () => "scripts/a b\nc.mjs\0" })).message, "ALL");
+});
+
+test("edge: a rename's old path is seen (both paths in the diff), so an old .github/ path forces ALL", () => {
+  assert.equal(main(["b"], io({ diff: () => ".github/x.mjs\0scripts/other.mjs\0" })).message, "ALL");
+});
+
+test("edge: a mistyped ci.affectedTests switch fails safe to ALL", () => {
+  for (const bad of ["false", "true", 0, 1, null, "", []]) {
+    assert.equal(run(["scripts/other.mjs"], { ...config, ci: { affectedTests: bad } }), "ALL", JSON.stringify(bad));
+  }
+  for (const bad of [null, false, "x", 0, []]) {
+    assert.equal(run(["scripts/other.mjs"], { ...config, ci: bad }), "ALL", JSON.stringify(bad));
+  }
+});
+
+test("edge: a nested package.json forces ALL", () => {
+  assert.equal(run(["scripts/other.mjs", "scripts/lanes/package.json"]), "ALL");
+  assert.equal(run(["scripts/other.mjs", "sub/package-lock.json"]), "ALL");
 });
 
 test("lanes.config.json maps this script into the modules module", () => {
