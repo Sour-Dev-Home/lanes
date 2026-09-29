@@ -17,10 +17,11 @@ on:
       pr:
         description: PR number to re-evaluate (for example after an issue's tier label changed)
         required: true
-# issues: write is only for #82 (ADR 0004): gate.mjs comments on a PR when an owner approval lands on its head.
+# issues: write and pull-requests: write are only for #82 (ADR 0004): gate.mjs comments on a PR when an owner approval
+# lands on its head, and GitHub requires pull-request write access to comment on a pull request (#342).
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
   issues: write
   statuses: write
 concurrency:
