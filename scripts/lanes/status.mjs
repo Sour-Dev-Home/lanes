@@ -5,7 +5,7 @@ import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GATE_CONTEXT, parseIssueForm, parsePrBody, reviewContext } from "./lib.mjs";
+import { GATE_CONTEXT, laneIssueOf, parseIssueForm, parsePrBody, reviewContext } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { projectFolder } from "./lane-cost.mjs";
 import { claimedPaths } from "./pick.mjs";
@@ -115,13 +115,14 @@ function latestLaneAgents(agents, repoRoot) {
   const found = new Map();
   for (const a of agents) {
     if (a?.kind !== "background" || typeof a.id !== "string" || typeof a.cwd !== "string") continue;
+    // The root itself counts: a lane that entered its worktree by path still reports it, and its name says which issue.
     const cwd = normalPath(a.cwd);
-    if (!cwd.startsWith(root)) continue;
-    const number = cwd.slice(root.length).split("/").map((s) => /^issue-(\d+)(?:-.*)?$/.exec(s)?.[1]).find(Boolean);
+    if (!cwd.startsWith(root) && `${cwd}/` !== root) continue;
+    const number = laneIssueOf({ ...a, cwd: cwd.startsWith(root) ? cwd.slice(root.length) : "" });
     if (!number) continue;
-    const previous = found.get(Number(number));
+    const previous = found.get(number);
     if (previous && previous.startedAt > (a.startedAt ?? 0)) continue;
-    found.set(Number(number), { startedAt: a.startedAt ?? 0, agent: a });
+    found.set(number, { startedAt: a.startedAt ?? 0, agent: a });
   }
   return found;
 }

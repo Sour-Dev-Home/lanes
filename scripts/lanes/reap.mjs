@@ -11,6 +11,7 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SESSION_ID, cleanupMerged, loadCleanupInputs, pidRunning, sessionsFrom } from "./cleanup.mjs";
+import { laneIssueOf } from "./lib.mjs";
 
 // The ADR's defaults, which the owner may tune without another ADR.
 export const GIVE_UP_MS = 48 * 60 * 60 * 1000;
@@ -24,21 +25,10 @@ export const STARTUP_GRACE_MS = 30 * 60 * 1000;
 
 // The same patterns as cleanup.mjs: a lane's branch is `issue-<N>-<slug>`, its worktree folder `issue-<N>[-<slug>]`.
 const LANE_BRANCH = /^issue-(\d+)-./;
-const LANE_FOLDER = /^issue-(\d+)(?:-.*)?$/;
 
 // As in cleanup.mjs: `status` says whether a session is running now; `state` can keep saying "working" after it
 // stopped (#83), so it only counts when there is no status this script knows.
 const stillWorking = (s) => (s.status === "idle" ? false : s.status === "busy" ? true : s.state === "working");
-
-// The issue number of a session's lane folder, or null. The folder directly under the last `.claude/worktrees` in the
-// cwd is the lane's worktree, whatever lane-shaped folders sit above it (the repo's own parent folders) or below it
-// (the lane's own files); a cwd with no `.claude/worktrees` falls back to its first lane-shaped folder.
-function cwdIssue(cwd) {
-  const segs = cwd.split(/[\\/]+/);
-  const at = segs.findLastIndex((seg, i) => seg === "worktrees" && segs[i - 1] === ".claude");
-  const lane = (seg) => Number(LANE_FOLDER.exec(seg ?? "")?.[1]) || null;
-  return at >= 0 ? lane(segs[at + 1]) : (segs.map(lane).find(Boolean) ?? null);
-}
 
 const time = (v, name) => {
   const ms = v instanceof Date ? v.getTime() : v;
@@ -84,7 +74,9 @@ export function reapTick({ issue, session, issueState, prs, sessions, startedAt,
   if (!target) {
     return starting ? { action: "wait", reason: `session ${session} is not listed yet` } : { action: "give-up", reason: `session ${session} not found` };
   }
-  const at = typeof target.cwd === "string" ? cwdIssue(target.cwd) : null;
+  // The `lane-<N>` name counts as much as the worktree cwd (#341): a lane that entered its worktree by path can still
+  // report the repository root.
+  const at = laneIssueOf(target);
   if (at !== issue) {
     if (at === null && starting) return { action: "wait", reason: `session ${session} is not in an issue-${issue} worktree yet` };
     return { action: "give-up", reason: `session ${session}'s cwd is not an issue-${issue} worktree` };

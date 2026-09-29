@@ -7,9 +7,10 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync,
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { recordLaneCost } from "./lane-cost.mjs";
+import { laneIssueOf } from "./lib.mjs";
 const LANE_BRANCH = /^issue-(\d+)-./;
 // A lane's worktree folder: `issue-<N>-<slug>`, or bare `issue-<N>` when the lane skipped the slug (#134).
-const LANE_FOLDER = /^issue-(\d+)(?:-.*)?$/;
+const laneNamed = (s) => Boolean(s.issue) && s.name === `lane-${s.issue}`;
 const PR_LIMIT = 1000;
 
 const normalPath = (p) => {
@@ -112,6 +113,16 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
     if (!sessionOf.has(holder.w)) sessionOf.set(holder.w, []);
     sessionOf.get(holder.w).push(s);
   }
+  // A `lane-<N>` session belongs to issue N's worktree whatever cwd it reports (a lane that entered its worktree by
+  // path can still report the repository root, #341), so that worktree is never removed under it.
+  for (const s of sessions) {
+    if (placed.has(s) || !laneNamed(s)) continue;
+    const w = worktrees.find((x) => x.path && !x.main && Number(LANE_BRANCH.exec(x.branch ?? "")?.[1]) === s.issue);
+    if (!w) continue;
+    placed.add(s);
+    if (!sessionOf.has(w)) sessionOf.set(w, []);
+    sessionOf.get(w).push(s);
+  }
 
   const plan = [];
   for (const w of worktrees) {
@@ -159,7 +170,8 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
   for (const o of orphans) {
     const entry = { branch: null, issue: null, orphan: o.path };
     const dir = normalPath(o.path);
-    const user = sessions.find((s) => !removedIds.has(s.id) && inside(dir, normalPath(s.cwd)));
+    const orphanIssue = laneIssueOf({ kind: "background", cwd: o.path });
+    const user = sessions.find((s) => !removedIds.has(s.id) && (inside(dir, normalPath(s.cwd)) || (orphanIssue && laneNamed(s) && s.issue === orphanIssue)));
     if (!Number.isInteger(o.files)) plan.push({ ...entry, skip: "cannot count its files" });
     else if (o.files > 0) plan.push({ ...entry, files: o.files, skip: `has ${plural(o.files, "file")}; left in place` });
     else if (user) plan.push({ ...entry, skip: unreadableId(user) ? UNREADABLE_SKIP : `session ${user.id} is in it` });
@@ -474,9 +486,11 @@ export function sessionsFrom(agents, root) {
     const cwd = normalPath(a.cwd);
     // The root itself counts: a lane that has not entered its worktree yet sits there, with no issue.
     if (cwd !== normalPath(root) && !cwd.startsWith(top)) continue;
-    const issue = Number(cwd.slice(top.length).split("/").map((s) => LANE_FOLDER.exec(s)?.[1]).find(Boolean)) || null;
+    // The `lane-<N>` name wins over the cwd (#341); the cwd is read relative to the root, as its parents are not lanes.
+    const issue = laneIssueOf({ ...a, cwd: cwd.slice(top.length) });
     const readable = typeof a.id === "string" && SESSION_ID.test(a.id);
     const session = { ...(readable ? { id: a.id } : { unreadableId: true }), cwd: a.cwd, issue, status: a.status, state: a.state };
+    if (issue && a.name === `lane-${issue}`) session.name = a.name;
     // The transcript's name and the launch time, kept for lane-cost.mjs.
     if (typeof a.sessionId === "string") session.sessionId = a.sessionId;
     if (Number.isFinite(a.startedAt)) session.startedAt = a.startedAt;

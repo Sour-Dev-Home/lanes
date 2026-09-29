@@ -13,7 +13,7 @@ import { dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main as checkBlockers } from "./blockers.mjs";
 import { cleanupMerged } from "./cleanup.mjs";
-import { TIERS, parseIssueForm } from "./lib.mjs";
+import { TIERS, laneIssueOf, parseIssueForm } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { grantPath, grantRefusal, readGrant } from "./start-guard.mjs";
@@ -137,12 +137,13 @@ export function parseSessionId(output) {
 }
 
 const branchIssue = (name) => String(name ?? "").match(/^issue-(\d+)-/)?.[1];
-// A lane's worktree folder is `issue-<N>-<slug>`, or bare `issue-<N>` when the lane skipped the slug (#134).
-const sessionIssue = (s) => (s.kind === "background" ? String(s.cwd ?? "").match(/(?:^|[\\/])issue-(\d+)(?:-[^\\/]*)?(?:[\\/]|$)/)?.[1] : undefined);
+// A session's issue by its `lane-<N>` name, else its `issue-<N>[-<slug>]` worktree folder (lib.mjs's laneIssueOf, #341).
+// An entry with no `kind` is not a background session here, as before.
+const sessionIssue = (s) => (s?.kind === "background" ? (laneIssueOf(s) ?? undefined) : undefined);
 
 /**
- * The issues with a lane in flight: open PRs from `issue-<N>-` branches, plus background sessions whose cwd is
- * (inside) an `issue-<N>` or `issue-<N>-<slug>` worktree, except sessions of a `finished` issue (its PR merged or the issue closed), which
+ * The issues with a lane in flight: open PRs from `issue-<N>-` branches, plus background sessions named `lane-<N>` or
+ * whose cwd is (inside) an `issue-<N>` or `issue-<N>-<slug>` worktree, except sessions of a `finished` issue (its PR merged or the issue closed), which
  * are idle leftovers. Each issue counts once.
  * @param {{ prs: { headRefName: string }[], sessions: { kind: string, cwd: string }[], finished?: number[] }} input
  * @returns {number[]} ascending
@@ -231,7 +232,7 @@ function readInFlight(deps, fields) {
 // Throws when the merged PRs cannot be read. An issue that cannot be read is not finished, so it keeps its slot.
 function finishedIssues(deps, prs, sessions) {
   const open = new Set(prs.map((pr) => Number(branchIssue(pr.headRefName))));
-  const idle = [...new Set(sessions.map(sessionIssue).filter(Boolean).map(Number))].filter((n) => !open.has(n));
+  const idle = [...new Set(sessions.map(sessionIssue).filter(Boolean))].filter((n) => !open.has(n));
   if (!idle.length) return [];
   // A truncated list only misses merged PRs; the issue's own state is still checked below.
   const merged = JSON.parse(deps.gh(["pr", "list", "--state", "merged", "--limit", String(PR_LIMIT), "--json", "headRefName"]));
