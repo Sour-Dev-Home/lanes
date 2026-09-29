@@ -21,15 +21,43 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ matrix.node }}
+      # pull requests run only the tests the diff affects (ADR 0017); an empty answer is treated as ALL
+      - if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          files=$(node scripts/lanes/affected-tests.mjs "origin/$BASE_REF")
+          if [ -z "$files" ] || [ "$files" = "ALL" ]; then
+            npm test
+          else
+            node --test $files
+          fi
+      # the merge queue and main always run the full suite
+      - if: github.event_name != 'pull_request'
+        run: npm test
+  test-macos:
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
       - run: npm test
   verify:
-    needs: test
+    needs: [test, test-macos]
     if: always()
     runs-on: ubuntu-latest
     steps:
       # every matrix entry is required: a failure in any of them turns needs.test.result to failure.
       - if: needs.test.result != 'success'
+        run: exit 1
+      # macOS is skipped on pull_request, which is fine; anywhere else it must have succeeded.
+      - if: needs.test-macos.result != 'success' && (github.event_name != 'pull_request' || needs.test-macos.result != 'skipped')
         run: exit 1
