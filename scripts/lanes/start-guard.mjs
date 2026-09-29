@@ -23,6 +23,10 @@
 //     cannot be read is denied when it names start.mjs, queue.mjs or --bg. Raw-text checks drop quotes first, so a
 //     name split by quoting (st"art.mjs, --"bg") still reads whole. A jq program or gh --jq/--template value keeps its
 //     `$` literal. A node -e script that names a target still counts as a run (owner decision, 2026-09-28).
+//   Either tool (#316): a powershell/pwsh -EncodedCommand value (-e, -enc, -ec, any prefix) is decoded and decided as a
+//     PowerShell call of its own, and never allowed; a word ending in claude counts as claude (`CommandLine=claude`,
+//     a Windows path whose backslashes a nested script drops); and a WMI/CIM process creation (Win32_Process Create,
+//     wmic process call create) whose call holds anything expanded at run time is denied.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +40,8 @@ export const UNRESOLVED_DENY_REASON =
   "this command runs a program named only at run time ($VAR, $(…) or a backtick), which could be start.mjs or queue.mjs: queue.mjs runs only in the owner's own terminal, and lanes are launched only from /start <N> typed by the owner";
 export const PARSE_DENY_REASON =
   "this command could not be parsed (an unterminated quote or nesting too deep) and it names start.mjs or --bg, so start-guard denies it; rewrite it, for example a commit message with git commit -F <file>";
+export const WMI_DENY_REASON =
+  "this WMI/CIM process creation (Win32_Process Create, wmic process call create) builds its command line at run time (a variable, a hashtable or an expression), which could be claude --bg or a lane script, so start-guard denies it; run the program directly";
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const START_PROMPT_RE = /^\/start((?:\s+[1-9][0-9]{0,8})+)$/;
 // The only form that may be allowed: the plain command with plain issue numbers, nothing chained, wrapped or redirected.
@@ -46,7 +52,9 @@ const AUTO_FORMS = { dry: "--auto", go: "--auto --go" };
 const START_WORD_RE = /start\.mjs$/i;
 const QUEUE_WORD_RE = /queue\.mjs$/i;
 const NODE_RE =/^(node|nodejs|bun|deno)(\.exe)?$/i;
-const CLAUDE_RE = /^claude(-code)?(\.exe|\.cmd|\.ps1)?$/i;
+// Matched at a word's end (#316): `CommandLine=claude` in a WMI hashtable, or `C:toolsclaude.exe` once a nested script
+// has dropped a Windows path's backslashes. Not after a dot, so a `~/.claude` directory is no claude.
+const CLAUDE_RE = /(?<!\.)claude(-code)?(\.exe|\.cmd|\.ps1)?$/i;
 const BG_FLAG_RE = /^--(bg|background)(=.*)?$/;
 const MAX_DEPTH = 4;
 
@@ -748,6 +756,56 @@ function scanBgLaunches(command) {
   return { found: found || opaque, unparsed: !found && opaque };
 }
 
+const PS_SHELL_RE = /^(powershell|pwsh)(\.exe)?$/i;
+// powershell's -EncodedCommand, any prefix of it from -e, and -ec, led by -, -- or /; `-e:<value>` carries its value.
+const ENCODED_FLAG_RE = /^(?:--?|\/)([A-Za-z]+)(?::(.*))?$/s;
+
+/** The value an -EncodedCommand word `w` names: the next word, its own `:value`, or undefined when `w` is no such flag. */
+function encodedValue(w, next) {
+  const m = ENCODED_FLAG_RE.exec(w);
+  if (!m) return undefined;
+  const name = m[1].toLowerCase();
+  if (name !== "ec" && !"encodedcommand".startsWith(name)) return undefined;
+  return m[2] ?? next;
+}
+
+/**
+ * Every -EncodedCommand script a call hands powershell or pwsh (#316), decoded as powershell does (base64 of UTF-16LE),
+ * wherever the walk reaches: behind a wrapper, in `bash -c`, run by find or xargs. `unresolved` is true when a value
+ * still holds `$` or a backtick, a script known only at run time.
+ */
+function encodedScripts(cmd) {
+  const scripts = [];
+  let unresolved = false;
+  walk(
+    cmd,
+    0,
+    (words) => {
+      const at = words.findIndex((w) => PS_SHELL_RE.test(basename(w)));
+      if (at === -1) return;
+      for (let i = at + 1; i < words.length; i += 1) {
+        const value = encodedValue(words[i], words[i + 1]);
+        if (value === undefined) continue;
+        if (UNRESOLVED_RE.test(value)) unresolved = true;
+        // Node's decoder skips what is no base64, as powershell's rejects it: a value it cannot run decodes to noise.
+        else scripts.push(Buffer.from(value.replace(/\s/g, ""), "base64").toString("utf16le"));
+      }
+    },
+    () => {},
+    () => {},
+  );
+  return { scripts, unresolved };
+}
+
+/**
+ * True when a call creates a process through WMI or CIM (#316): it names Win32_Process, or runs wmic's `process`, with
+ * a `create`. Read on the text with quotes, `+`, whitespace and literal messages dropped, so 'Win32'+'_Process' reads whole.
+ */
+function wmiCreate(text) {
+  const flat = dequoted(withoutLiteralSubstitutions(text)).replace(/[\s+()]/g, "").toLowerCase();
+  return /create/.test(flat) && (/win32_process/.test(flat) || (/wmic/.test(flat) && /process/.test(flat)));
+}
+
 /** A grant names either issues or one auto form, never both. */
 function validGrant(grant) {
   if (grant === null || typeof grant !== "object" || typeof grant.sessionId !== "string") return false;
@@ -798,6 +856,11 @@ export function grantRefusal(grant, sessionId, run, now) {
  * @returns {null | { decision: "allow" | "deny", reason: string }}
  */
 export function decidePreToolUse(input, grant, now = Date.now()) {
+  return decide(input, grant, now, 0);
+}
+
+/** decidePreToolUse, `depth` -EncodedCommand scripts down. */
+function decide(input, grant, now, depth) {
   const tool = input?.tool_name;
   if (tool !== "Bash" && tool !== "PowerShell") return null;
   const typed = String(input.tool_input?.command ?? "");
@@ -813,6 +876,15 @@ export function decidePreToolUse(input, grant, now = Date.now()) {
       return e?.readerLimit || /start\.mjs|--(bg|background)/i.test(text) ? { decision: "deny", reason: PARSE_DENY_REASON } : null;
     }
   }
+  // An -EncodedCommand script is a PowerShell call of its own (#316). Whatever it decides becomes a deny: only the
+  // plain start.mjs command, typed as the whole call, is ever allowed.
+  const encoded = encodedScripts(command);
+  for (const script of encoded.scripts) {
+    if (depth >= MAX_DEPTH) return { decision: "deny", reason: PARSE_DENY_REASON };
+    const d = decide({ ...input, tool_name: "PowerShell", tool_input: { command: script } }, grant, now, depth + 1);
+    if (d !== null) return d.decision === "deny" ? d : { decision: "deny", reason: DENY_REASON };
+  }
+  if (encoded.unresolved) return { decision: "deny", reason: UNRESOLVED_DENY_REASON };
   const bg = scanBgLaunches(command);
   if (bg.found) return { decision: "deny", reason: bg.unparsed ? PARSE_DENY_REASON : BG_DENY_REASON };
   // Before any grant is read: no /start grant, of any form, reaches queue.mjs.
@@ -822,7 +894,9 @@ export function decidePreToolUse(input, grant, now = Date.now()) {
   // that names start.mjs keeps the start reason. Only the reason differs: both deny.
   if (queue.unresolved && !/start\.mjs/i.test(dequoted(withoutLiteralSubstitutions(command)))) return { decision: "deny", reason: UNRESOLVED_DENY_REASON };
   const found = startInvocations(command, typed);
-  if (found.length === 0) return null;
+  // A WMI/CIM process creation's literal command line was read above; one built at run time could be anything (#316).
+  // For the PowerShell tool a hashtable or expression reads as `$` in the Bash text, so that is where it is looked for.
+  if (found.length === 0) return wmiCreate(typed) && UNRESOLVED_RE.test(command) ? { decision: "deny", reason: WMI_DENY_REASON } : null;
   if (found.every((f) => f.unparsed)) return { decision: "deny", reason: PARSE_DENY_REASON };
   const deny = { decision: "deny", reason: DENY_REASON };
   if (found.length !== 1 || !found[0].standalone) return deny;
