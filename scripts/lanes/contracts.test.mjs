@@ -288,7 +288,7 @@ const snapshotInput = {
 };
 
 test("the snapshot schema defines every top-level and per-issue field, required ones listed, no other keys", () => {
-  assert.deepEqual([...snapshotSchema.required].sort(), ["edges", "generatedAt", "issues", "version"]);
+  assert.deepEqual([...snapshotSchema.required].sort(), ["edges", "generatedAt", "issues", "overlaps", "version"]);
   assert.deepEqual(Object.keys(snapshotSchema.properties).sort(), ["edges", "generatedAt", "issues", "overlaps", "version"]);
   const pair = snapshotSchema.properties.overlaps.items;
   assert.deepEqual([...pair.required].sort(), ["a", "b"]);
@@ -355,6 +355,7 @@ test("the snapshot schema and overlap check reject a bad overlaps list", () => {
     ["a zero issue number", (s) => (s.overlaps[0].a = 0)],
     ["a string issue number", (s) => (s.overlaps[0].b = "9")],
     ["overlaps that is not an array", (s) => (s.overlaps = {})],
+    ["a snapshot without overlaps", (s) => delete s.overlaps],
   ];
   for (const [name, fn] of bad) assert.equal(schemaAccepts(snapshotSchema, mutate(fn)), false, name);
   for (const [name, fn] of [["a >= b", (s) => ([s.overlaps[0].a, s.overlaps[0].b] = [s.overlaps[0].b, s.overlaps[0].a])], ["a == b", (s) => (s.overlaps[0].b = s.overlaps[0].a)]]) {

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { buildSnapshot, parseFromArg, parseInput, parseOutArg, verdictCriteria, writeSnapshot } from "./snapshot.mjs";
+import { DEFAULT_SOFT_PATHS, RUNNING_LABEL, buildSnapshot, parseFromArg, parseInput, parseOutArg, verdictCriteria, writeSnapshot } from "./snapshot.mjs";
 import { buildVerdictComment } from "./post-review.mjs";
 import { STATUS_QUERY } from "./status.mjs";
 
@@ -37,7 +37,7 @@ const build = (over = {}) => buildSnapshot({ prs: [], issues: [], mergeQueue: []
 const one = (over) => build(over).issues[0];
 
 test("an empty repository gives an empty snapshot with the time", () => {
-  assert.deepEqual(build(), { version: 0, generatedAt: NOW, issues: [], edges: [] });
+  assert.deepEqual(build(), { version: 0, generatedAt: NOW, issues: [], edges: [], overlaps: [] });
 });
 
 test("a ready issue with no blockers lists as ready with no blockedBy", () => {
@@ -306,4 +306,67 @@ test("snapshot.mjs uses status.mjs's GraphQL query rather than its own copy", ()
   assert.match(source, /import \{[^}]*\bSTATUS_QUERY\b[^}]*\} from "\.\/status\.mjs"/);
   assert.match(source, /`query=\$\{STATUS_QUERY\}`/);
   assert.doesNotMatch(source, /query\(\$owner/);
+});
+
+test("edge: the running label and default soft paths match start.mjs, which snapshot.mjs cannot import", async () => {
+  const start = await import("./start.mjs");
+  assert.equal(RUNNING_LABEL, start.RUNNING_LABEL);
+  assert.deepEqual([...DEFAULT_SOFT_PATHS], [...start.START_DEFAULTS.softPaths]);
+});
+
+const scoped = (number, paths, labels = ["ready", "tier:quick"], over = {}) =>
+  issue(number, { labels: labels.map((name) => ({ name })), body: body().replace("In: a.", `In: ${paths}.`), ...over });
+
+test("an open issue with lane:running and no PR has the running stage; with a PR the PR stage wins", () => {
+  const running = ["lane:running", "tier:quick"];
+  assert.equal(one({ issues: [scoped(1, "`a.mjs`", running)] }).stage, "running");
+  assert.deepEqual(one({ issues: [scoped(1, "`a.mjs`", running)] }).blockedBy, []);
+  const withPr = one({ issues: [scoped(1, "`a.mjs`", running)], prs: [pr(7)], gateDescriptions: new Map([[7, "waiting on owner (/approve)"]]) });
+  assert.notEqual(withPr.stage, "running");
+  assert.equal(withPr.pr.number, 7);
+});
+
+test("overlaps lists a real overlap once with a < b, and no path is published", () => {
+  const s = build({ issues: [scoped(9, "`src/x.mjs`"), scoped(4, "`src/x.mjs`")] });
+  assert.deepEqual(s.overlaps, [{ a: 4, b: 9 }]);
+  assert.ok(!JSON.stringify(s).includes("src/x.mjs"));
+});
+
+test("overlaps ignores a pair sharing only a soft path", () => {
+  assert.deepEqual(build({ issues: [scoped(1, "`README.md`"), scoped(2, "`README.md`")] }).overlaps, []);
+  assert.deepEqual(build({ issues: [scoped(1, "`a.mjs`"), scoped(2, "`a.mjs`")], softPaths: ["^a\\.mjs$"] }).overlaps, []);
+});
+
+test("edge: overlaps counts a directory claim and a running issue, and skips issues that are neither ready nor running", () => {
+  const s = build({
+    issues: [scoped(1, "`src/`"), scoped(2, "`src/x.mjs`", ["lane:running", "tier:quick"]), scoped(3, "`src/x.mjs`", ["tier:quick"]), scoped(4, "`src/y.mjs`", ["needs-owner", "tier:quick"])],
+  });
+  assert.deepEqual(s.overlaps, [{ a: 1, b: 2 }]);
+});
+
+test("edge: an issue with no Scope paths is never listed, and overlaps is empty rather than missing", () => {
+  assert.deepEqual(build({ issues: [scoped(1, "nothing"), scoped(2, "nothing")] }).overlaps, []);
+  assert.deepEqual(build().overlaps, []);
+});
+
+test("edge: the command reads start.softPaths from lanes.config.json in the working directory, and refuses a malformed one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "snapshot-cfg-"));
+  const script = join(process.cwd(), "scripts/lanes/snapshot.mjs");
+  const run = () => JSON.parse(execFileSync(process.execPath, [script, "--from", "in.json"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  try {
+    writeFileSync(join(dir, "in.json"), JSON.stringify({ prs: [], issues: [scoped(1, "`a.mjs`"), scoped(2, "`a.mjs`")], generatedAt: NOW }));
+    assert.deepEqual(run().overlaps, [{ a: 1, b: 2 }]);
+    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ start: { softPaths: ["^a\\.mjs$"] } }));
+    assert.deepEqual(run().overlaps, []);
+    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ start: { softPaths: [1] } }));
+    assert.throws(run, /softPaths must be an array of regex strings/);
+    writeFileSync(join(dir, "lanes.config.json"), "{}");
+    assert.deepEqual(run().overlaps, [{ a: 1, b: 2 }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("edge: an issue that already has a PR is not listed in overlaps", () => {
+  assert.deepEqual(build({ issues: [scoped(1, "`a.mjs`"), scoped(2, "`a.mjs`")], prs: [pr(7)] }).overlaps, []);
 });
