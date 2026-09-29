@@ -521,8 +521,8 @@ test("edge: waitingDigest prints nothing when nothing waits, and no /approve lin
   const { waitingDigest } = await import("./queue.mjs");
   assert.deepEqual(waitingDigest([], [], 5), []);
   const failing = { ...pr(5, 5, ["a"], [{ name: "test", conclusion: "FAILURE" }]), title: "t\u001b[31m" };
-  const lines = waitingDigest([failing], [{ number: 5, reason: "failing: test" }], 60_000, new Map([[5, 0]]));
-  assert.deepEqual(lines, ["waiting on you (1):", "  #5 t[31m — waiting 1m — failing: test"]);
+  const lines = waitingDigest([failing], [{ number: 5, reason: "failing: te\u001b[2Jst" }], 60_000, new Map([[5, 0]]));
+  assert.deepEqual(lines, ["waiting on you (1):", "  #5 t[31m — waiting 1m — failing: te[2Jst"]);
 });
 
 test("edge: a PR without a gate time is aged from when the queue first saw it", async () => {

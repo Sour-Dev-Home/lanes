@@ -110,11 +110,12 @@ export function waitingDigest(prs, waiting, now, seen = new Map()) {
   if (!rows.length) return [];
   rows.sort((a, b) => a.since - b.since || a.number - b.number);
   // PR text is untrusted: control characters (ANSI escapes) are dropped before it reaches the owner's terminal.
-  const title = (pr) => String(pr.title ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  const plain = (text) => String(text ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  const title = (pr) => plain(pr.title);
   const approvable = rows.filter((r) => prStage(r.pr, undefined, r.pr.gateDescription).stage === "owner").map((r) => r.number);
   return [
     `waiting on you (${rows.length}):`,
-    ...rows.map((r) => `  #${r.number} ${title(r.pr)} — waiting ${formatAge(r.since, now)} — ${r.reason}`),
+    ...rows.map((r) => `  #${r.number} ${title(r.pr)} — waiting ${formatAge(r.since, now)} — ${plain(r.reason)}`),
     ...(approvable.length ? [approveLine(approvable)] : []),
   ];
 }
