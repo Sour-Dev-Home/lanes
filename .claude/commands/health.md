@@ -13,6 +13,8 @@ Report, in at most 15 lines:
 4. PRs whose lanes/gate failed on the contract (stage `contract`): the fix is usually the PR body or the issue's tier.
 5. `node scripts/lanes/delivery-metrics.mjs --days 7`: report lead time (median, p90, mean), merge-queue bounce rate, and change-failure rate; compare to the previous week.
 6. `node scripts/lanes/review-metrics.mjs --days 7`: report, per tier, tokens per real finding and the share of runs with no real finding, plus how many runs had no metrics and how many verdict comments were unreadable.
+   Then `node scripts/lanes/lane-cost.mjs --days 7`: report the lane sessions' own tokens per tier (lanes, median and
+   total, and lanes with no transcript) on the line next to the reviewer tokens.
 7. `node scripts/lanes/cleanup.mjs`: report which lanes it removed (merged lanes, closed-issue lanes and empty orphan folders), which it skipped and why, and any failed step.
 8. `node scripts/lanes/structure-report.mjs --days 7 --jscpd`: report the module map's violation, cycle and unmapped
    counts, the top 3 lane hotspots, and the duplicate-code line (or `skipped`). Then, each weekly run, spawn the
