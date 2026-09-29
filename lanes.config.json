@@ -40,7 +40,7 @@
       },
       {
         "id": "install",
-        "paths": ["scripts/lanes/install.", "scripts/lanes/upgrade.", "scripts/lanes/new-project.", "scripts/lanes/setup-repo.", "scripts/lanes/notify-hook."],
+        "paths": ["scripts/lanes/install.", "scripts/lanes/upgrade.", "scripts/lanes/new-project.", "scripts/lanes/setup-repo.", "scripts/lanes/notify-hook.", "scripts/lanes/release."],
         "imports": ["lib", "preflight"]
       }
     ],
