@@ -279,6 +279,27 @@ export function startReaper(n, id, deps, root) {
   }
 }
 
+export const RUNNING_LABEL = "lane:running";
+
+// ADR 0014: marks issue n as having a running lane, from the owner's side (a lane never gets a write path). Adds
+// RUNNING_LABEL, creating the label once when the repository has none, and returns one line: `#n: lane:running set`,
+// or `#n: label not set: <reason>`. It never throws, so a label failure never changes a launch. `deps` needs `gh`.
+export function markRunning(n, deps) {
+  const add = () => deps.gh(["issue", "edit", String(n), "--add-label", RUNNING_LABEL]);
+  try {
+    try {
+      add();
+    } catch (err) {
+      if (!/not found/i.test(`${err?.stderr ?? ""}\n${err?.message ?? ""}`)) throw err;
+      deps.gh(["label", "create", RUNNING_LABEL, "--description", "A lane is running for this issue (set by /start and the queue)"]);
+      add();
+    }
+    return `#${n}: ${RUNNING_LABEL} set`;
+  } catch (err) {
+    return `#${n}: label not set: ${reason(err)}`;
+  }
+}
+
 // `.lanes/reap/<n>.log` under root, created as needed and opened for appending, as { fd, close }.
 export function reaperLog(root, n) {
   const dir = join(root, ".lanes", "reap");
@@ -310,7 +331,8 @@ function launchAll(numbers, deps, { tiers, models, labels }) {
     }
     if (id) {
       const reaperFailed = startReaper(n, id, deps, root);
-      lines.set(n, [...notes, `#${n} → ${id}`, ...(reaperFailed ? [reaperFailed] : [])]);
+      const marked = markRunning(n, deps);
+      lines.set(n, [...notes, `#${n} → ${id}`, ...(reaperFailed ? [reaperFailed] : []), ...(marked.includes(": label not set: ") ? [marked] : [])]);
     } else {
       lines.set(n, [...notes, `#${n}: launch failed: ${why}, not retried`]);
       failed = true;

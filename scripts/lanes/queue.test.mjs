@@ -314,7 +314,8 @@ const STAMP = /^\d\d:\d\d:\d\d /;
 
 // A fake GitHub and claude. `world.issues`, `world.prs` and `world.sessions` are read each tick; `onSleep(tickNo)`
 // changes them between ticks. A launch adds a background session in the issue's worktree.
-function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFails = () => false, ghFails = () => false, spawnChild = null } = {}) {
+function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFails = () => false, ghFails = () => false, spawnChild = null, labelFails = () => false } = {}) {
+  const labeled = [];
   const reapers = [];
   const logs = [];
   const out = [];
@@ -327,6 +328,11 @@ function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFai
     gh: (args) => {
       calls.push(["gh", ...args]);
       if (ghFails(ticks)) throw Object.assign(new Error("gh failed"), { stderr: "HTTP 502: Bad Gateway\nmore" });
+      if (args[0] === "issue" && args[1] === "edit") {
+        if (labelFails(Number(args[2]))) throw Object.assign(new Error("gh failed"), { stderr: "HTTP 403: Forbidden\nmore" });
+        labeled.push(Number(args[2]));
+        return "";
+      }
       if (args[0] === "issue") return JSON.stringify(world.issues);
       if (args[0] === "pr") return JSON.stringify(world.prs);
       if (args[0] === "api") return JSON.stringify({ data: { repository: { pullRequests: { nodes: [] } } } });
@@ -367,7 +373,7 @@ function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFai
     },
     print: (line) => out.push(line),
   };
-  return { deps, out, calls, launched, reapers, logs, ticks: () => ticks };
+  return { deps, out, calls, launched, reapers, logs, labeled, ticks: () => ticks };
 }
 
 test("CLI: any argument prints a usage line and exits 2 before reading anything", async () => {
@@ -707,4 +713,34 @@ test("edge: a reaper log that cannot be opened prints one line and the launch st
   assert.equal(await main([], run.deps), 0);
   assert.deepEqual(run.reapers, []);
   assert.equal(run.out.filter((l) => /#1: reaper not started: EACCES/.test(l)).length, 1, run.out.join("\n"));
+});
+
+// #361 (ADR 0014): the queue's launch marks the issue lane:running, only after a launch whose session id parsed.
+test("CLI: a good launch adds lane:running, a failed launch does not", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/b.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { launchFails: (n) => n === 1, onSleep: (t) => t === 2 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.labeled, [2]);
+});
+
+test("edge: a launch that printed no session id is not labelled", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  const claude = run.deps.claude;
+  run.deps.claude = (args, opts) => (args[0] === "agents" ? claude(args, opts) : (claude(args, opts), "started, no id\n"));
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.labeled, []);
+});
+
+test("CLI: a label failure is printed, keeps the launch and the reaper, and does not change the exit code", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { labelFails: () => true, onSleep: (t) => t === 1 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  assert.ok(run.out.some((l) => / #1 → sess-1$/.test(l)), run.out.join("\n"));
+  assert.ok(run.out.some((l) => / #1: label not set: HTTP 403: Forbidden$/.test(l)), run.out.join("\n"));
+  assert.equal(run.reapers.length, 1);
+  assert.deepEqual(run.launched.map((l) => l.n), [1]);
 });

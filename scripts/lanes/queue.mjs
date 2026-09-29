@@ -12,7 +12,7 @@ import { parseBlockedBy } from "./blockers.mjs";
 import { cleanupMerged } from "./cleanup.mjs";
 import { GATE_CONTEXT } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
-import { inFlightIssues, launchArgs, launchEnv, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
+import { inFlightIssues, launchArgs, launchEnv, markRunning, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
 import { gateDescriptions, prStage } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
@@ -207,6 +207,9 @@ export async function main(argv, deps = DEFAULT_DEPS) {
         // ADR 0010: the reaper cleans the lane up after it merges, even once the queue has exited.
         const reaperFailed = startReaper(n, id, deps, dir);
         if (reaperFailed) say(reaperFailed);
+        // ADR 0014: the owner-side label marks the running lane; a failure is said and changes nothing else.
+        const marked = markRunning(n, deps);
+        if (marked.includes(": label not set: ")) say(marked);
       } else {
         failedLaunches.add(n);
         say(`#${n}: launch failed: ${why}, not retried`);

@@ -575,7 +575,7 @@ test("edge: cleanupMerged's default sessionEnded consults the loaded sessions an
     ran.push(line);
   };
   const lines = cleanupMerged({ deps: { load: () => inputs, run, stillThere: () => true } });
-  assert.deepEqual(ran, ["claude rm x9", "claude rm s7", `git worktree remove ${path}`, "git branch -D issue-7-x"]);
+  assert.deepEqual(ran, ["claude rm x9", "claude rm s7", `git worktree remove ${path}`, "git branch -D issue-7-x", "gh issue edit 7 --remove-label lane:running"]);
   assert.match(lines[0], /^removed issue-7-x \(PR #90\)/);
 });
 
@@ -617,7 +617,7 @@ test("cleanupMerged removes one merged lane and returns one line per lane, as re
   const { deps, ran } = cleanupFakes({ inputs });
   const lines = cleanupMerged({ dryRun: false, deps });
   const path = `${ROOT}/.claude/worktrees/issue-7-x`;
-  assert.deepEqual(ran, ["claude rm s7", `git worktree remove ${path}`, "git branch -D issue-7-x"]);
+  assert.deepEqual(ran, ["claude rm s7", `git worktree remove ${path}`, "git branch -D issue-7-x", "gh issue edit 7 --remove-label lane:running"]);
   assert.deepEqual(lines, [
     `removed issue-7-x (PR #90): claude rm s7; git worktree remove ${path}; git branch -D issue-7-x`,
     "skipped issue-8-y: not merged",
@@ -649,7 +649,7 @@ test("edge: cleanupMerged skips a step whose target is already gone", async () =
   const path = `${ROOT}/.claude/worktrees/issue-7-x`;
   const { deps, ran } = cleanupFakes({ inputs: { worktrees: [main, wt("issue-7-x")], sessions: [], prs: [merged("issue-7-x")] }, gone: [path] });
   assert.deepEqual(cleanupMerged({ deps }), ["removed issue-7-x (PR #90): git branch -D issue-7-x"]);
-  assert.deepEqual(ran, ["git branch -D issue-7-x"]);
+  assert.deepEqual(ran, ["git branch -D issue-7-x", "gh issue edit 7 --remove-label lane:running"]);
 });
 
 test("cleanup.mjs's CLI calls cleanupMerged and keeps its output and exit code", () => {
@@ -916,7 +916,7 @@ test("edge: cleanupMerged saves each removed session's log under the loaded root
   const root = tempRoot(t);
   const inputs = { root, worktrees: [main], sessions: [session("s7", "issue-7-x", { status: "idle" })], prs: [merged("issue-7-x")] };
   const run = (cmd, args) => (args[0] === "logs" ? "\x1b[31mblocked\x1b[0m: waiting\n" : "");
-  const lines = cleanupMerged({ deps: { load: () => inputs, run, stillThere: () => true } });
+  const lines = cleanupMerged({ deps: { load: () => inputs, run, stillThere: () => true, unmark: () => {} } });
   assert.deepEqual(lines, ["removed #7 session (PR #90): log saved to .lanes/logs/issue-7-s7.txt; claude rm s7"]);
   assert.equal(readLog(root, "issue-7-s7.txt"), "blocked: waiting\n");
 });
@@ -1564,4 +1564,28 @@ test("cleanupMerged records a cost line for each removed session and still remov
   } finally {
     rmSync(f.dir, { recursive: true, force: true });
   }
+});
+
+// --- #361 (ADR 0014): the lane:running label comes off when the lane is removed. ---
+
+test("runCleanup removes lane:running from the issue of each removed lane, and not from a skipped one", () => {
+  const plan = planCleanup({ worktrees: [main, wt("issue-7-x"), wt("issue-8-y")], sessions: [], prs: [merged("issue-7-x"), { ...merged("issue-8-y"), state: "OPEN" }] });
+  const unmarked = [];
+  const results = runCleanup(plan, { run: () => {}, stillThere: () => true, unmark: (n) => unmarked.push(n) });
+  assert.deepEqual(unmarked, [7]);
+  assert.equal(results[0].status, "removed");
+});
+
+test("edge: a label removal that fails is reported and the lane is still removed", () => {
+  const plan = planCleanup({ worktrees: [main, wt("issue-7-x")], sessions: [], prs: [merged("issue-7-x")] });
+  const [r] = runCleanup(plan, { run: () => {}, stillThere: () => true, unmark: () => { throw Object.assign(new Error("x"), { stderr: "HTTP 502\nmore" }); } });
+  assert.equal(r.status, "removed");
+  assert.ok(r.ran.includes("lane:running not removed (HTTP 502)"), r.ran.join("; "));
+});
+
+test("edge: an orphan folder has no issue, so no label is touched", () => {
+  const plan = planCleanup({ worktrees: [main], sessions: [], prs: [], orphans: [{ path: `${ROOT}/.claude/worktrees/issue-9-z`, files: 0 }] });
+  const unmarked = [];
+  runCleanup(plan, { run: () => {}, stillThere: () => true, removeDir: () => {}, unmark: (n) => unmarked.push(n) });
+  assert.deepEqual(unmarked, []);
 });

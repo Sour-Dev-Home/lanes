@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { START_DEFAULTS, inFlightIssues, launchArgs, launchEnv, main as runStart, parseSessionId, planStart, startConfig } from "./start.mjs";
+import { START_DEFAULTS, inFlightIssues, launchArgs, launchEnv, main as runStart, markRunning, parseSessionId, planStart, startConfig } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
@@ -272,8 +272,10 @@ test("parseSessionId returns null when no id is printed", () => {
 const form = ({ scope = "In: `a.mjs`.", blockedBy = "none", contract = "none" } = {}) =>
   ["### Goal", "g", "### Acceptance criteria", "- [ ] a", "### Interface contract", contract, "### Scope", scope, "### Blocked by", blockedBy, "### Tier", "quick"].join("\n\n");
 
-function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config, cleanup = () => [], spawnChild } = {}) {
+function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config, cleanup = () => [], spawnChild, labelFail = null, labelMissing = false } = {}) {
   const launches = [];
+  const labeled = [];
+  let labelCreated = false;
   const calls = [];
   // Every reaper spawn and log open/close, in order; spawnChild(cmd, args, options) overrides the fake child.
   const reapers = [];
@@ -299,6 +301,17 @@ function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut
       if (!(n in issues)) throw new Error("gh: Could not resolve to an issue");
       return JSON.stringify(view(n));
     }
+    // #361: the lane:running label; `labelFail` is the error text of a failing edit, `labelMissing` a repository without the label.
+    if (args[0] === "issue" && args[1] === "edit") {
+      if (labelFail) throw new Error(labelFail);
+      if (labelMissing && !labelCreated) throw new Error("gh: 'lane:running' not found");
+      labeled.push(Number(args[2]));
+      return "";
+    }
+    if (args[0] === "label" && args[1] === "create") {
+      labelCreated = true;
+      return "";
+    }
     if (args[0] === "issue" && args[1] === "list") return JSON.stringify(Object.keys(issues).map(Number).map(view).filter((i) => i.state === "OPEN"));
     if (args[0] === "api") return JSON.stringify({ state: "closed" });
     if (args[0] === "pr" && args[1] === "list") return JSON.stringify(args[args.indexOf("--state") + 1] === "merged" ? mergedPrs : prs);
@@ -318,7 +331,7 @@ function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut
     calls.push(`cleanup ${JSON.stringify(options)}`);
     return cleanup(options);
   };
-  return { deps: { gh, claude, root: () => "/repo", config: () => config, cleanup: cleanupFake, spawn, reaperLog }, launches, calls, reapers, logs };
+  return { deps: { gh, claude, root: () => "/repo", config: () => config, cleanup: cleanupFake, spawn, reaperLog }, launches, calls, reapers, logs, labeled };
 }
 
 // #164: one detached reaper per launched lane (ADR 0010).
@@ -1748,4 +1761,44 @@ test("launch: the adjusted env goes to the background launch and the note is pri
   const { lines } = main(["1"], f.deps);
   assert.deepEqual(seen.filter(Boolean), [{ PATH: "adjusted" }]);
   assert.ok(lines.includes("#1: PATH not adjusted: because"), lines.join("|"));
+});
+
+// #361 (ADR 0014): lane:running is added by the owner-side launch, only after a launch whose session id parsed.
+test("markRunning adds lane:running and returns one line", () => {
+  const f = fakes({ issues: { 5: {} } });
+  assert.equal(markRunning(5, f.deps), "#5: lane:running set");
+  assert.deepEqual(f.labeled, [5]);
+});
+
+test("edge: markRunning creates the label once when the repository has none, then adds it", () => {
+  const f = fakes({ issues: { 5: {} }, labelMissing: true });
+  assert.equal(markRunning(5, f.deps), "#5: lane:running set");
+  assert.deepEqual(f.labeled, [5]);
+});
+
+test("markRunning returns `#N: label not set: <reason>` and never throws", () => {
+  const f = fakes({ issues: { 5: {} }, labelFail: "gh: rate limited\nmore" });
+  assert.equal(markRunning(5, f.deps), "#5: label not set: gh: rate limited");
+});
+
+test("main labels the issue after a good launch and prints nothing extra", () => {
+  const f = fakes({ issues: { 1: {} } });
+  const { code, lines } = main(["1"], f.deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1"]);
+  assert.deepEqual(f.labeled, [1]);
+});
+
+test("main does not label an issue whose launch failed or printed no session id", () => {
+  const f = fakes({ issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } }, launchFail: [1], launchOut: { 2: "no id here" } });
+  main(["1", "2"], f.deps);
+  assert.deepEqual(f.labeled, []);
+});
+
+test("a label failure leaves the launch and exit code intact and prints the failure line", () => {
+  const f = fakes({ issues: { 1: {} }, labelFail: "gh: rate limited" });
+  const { code, lines } = main(["1"], f.deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#1: label not set: gh: rate limited"]);
+  assert.equal(f.reapers.length, 1);
 });
