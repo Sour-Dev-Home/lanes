@@ -90,7 +90,7 @@
       }
     },
     "overlaps": {
-      "description": "Every pair of open ready or running issues whose Scope paths overlap (soft paths excluded), the check pick.mjs and status.mjs run (ADR 0014). a < b, so a pair appears once; contracts.test.mjs enforces the order, which a schema cannot. No file path is published. Always present, an empty list when nothing overlaps.",
+      "description": "Every pair of open ready or running issues without a pull request whose Scope paths overlap (soft paths excluded), the check pick.mjs and status.mjs run (ADR 0014). a < b, so a pair appears once; contracts.test.mjs enforces the order, which a schema cannot. No file path is published. Always present, an empty list when nothing overlaps.",
       "type": "array",
       "items": {
         "type": "object",
