@@ -31,6 +31,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isAutomatedInput, powershellAsBash } from "./approve-guard.mjs";
+import { HEREDOC_RE, heredocOperator, literalSubstitution, readHeredoc } from "./shell-lex.mjs";
 
 export const GRANT_TTL_MS = 15 * 60 * 1000;
 export const DENY_REASON = "lanes are launched only from /start <N> typed by the owner in this session";
@@ -92,9 +93,6 @@ export function onUserPromptSubmit(input, now = Date.now()) {
   return { action: "grant", sessionId, grant: { sessionId, issues, at } };
 }
 
-// `<<D`, `<<-D`, `<<'D'`, `<<"D"` or `<<\D`; a quoted delimiter makes the body literal. `<<<` is a here-string, not this.
-const HEREDOC_RE = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([^\s;&|()<>'"`$]+))/;
-// `$(cat <<D` and the end of its line: the start of a substitution whose output is only a heredoc's body.
 /** The index of the backtick closing the one at `i` (a backslash escapes the next character), or -1. */
 function backtickEnd(cmd, i) {
   for (let j = i + 1; j < cmd.length; j += 1) {
@@ -106,41 +104,15 @@ function backtickEnd(cmd, i) {
 
 // A redirection operator: `>`, `>>`, `>|`, `>&`, `<`, `<&`, `<>`, `&>` or `&>>` (#191).
 const REDIRECT_RE = /^(?:&>>?|>[>|&]?|<[&>]?)/;
-const CAT_HEREDOC_RE =/^\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z0-9_.-]+))[ \t]*\r?\n/;
+// Text in an unquoted heredoc body that bash could still expand: any `$`, backtick or backslash (#89), stricter than
+// approve-guard.mjs, which lets a plain `$VAR` stay text.
+const EXPANDS_RE = /[$`\\]/;
 
 /**
- * The body of a heredoc starting at `from`: every line up to the one that is exactly `delim` (after leading tabs,
- * for `<<-`). `end` is the index of the newline ending the delimiter line; an unterminated body runs to the end, as in
- * bash, with `terminated` false.
+ * `$(cat <<'D' … D)` at `i` (shell-lex.mjs): its output is the body, known and literal, so it reads as that text, as if
+ * single-quoted. Null for any other substitution, or an unquoted delimiter whose body could still expand.
  */
-function readHeredoc(cmd, from, delim, stripTabs) {
-  const lines = [];
-  for (let pos = from; pos < cmd.length; ) {
-    const nl = cmd.indexOf("\n", pos);
-    const lineEnd = nl === -1 ? cmd.length : nl;
-    let line = cmd.slice(pos, lineEnd).replace(/\r$/, "");
-    if (stripTabs) line = line.replace(/^\t+/, "");
-    if (line === delim) return { body: lines.join("\n"), end: lineEnd, terminated: true };
-    lines.push(line);
-    pos = lineEnd + 1;
-  }
-  return { body: lines.join("\n"), end: cmd.length, terminated: false };
-}
-
-/**
- * `$(cat <<'D' … D)` at `i`, as in `git commit -m "$(cat <<'EOF' … EOF)"`: its output is the body, known and literal,
- * so it reads as that text, as if single-quoted. Null for any other substitution, or an unquoted delimiter whose body
- * could still expand. `end` is the index of the closing `)`.
- */
-function literalSubstitution(cmd, i) {
-  const m = CAT_HEREDOC_RE.exec(cmd.slice(i));
-  if (!m) return null;
-  const quoted = m[4] === undefined;
-  const { body, end, terminated } = readHeredoc(cmd, i + m[0].length, m[2] ?? m[3] ?? m[4], m[1] === "-");
-  if (!terminated || (!quoted && /[$`\\]/.test(body))) return null;
-  const close = /^\s*\)/.exec(cmd.slice(end));
-  return close ? { body, end: end + close[0].length - 1 } : null;
-}
+const literalSub = (cmd, i) => literalSubstitution(cmd, i, EXPANDS_RE);
 
 // A `$` or backtick the shell takes literally (single-quoted, escaped, or in a literal heredoc message) is lexed as
 // one of these, so UNRESOLVED_RE sees only the ones that expand (#89). A quoted script is walked with them restored:
@@ -237,7 +209,7 @@ function lex(cmd) {
       let j = i + 1;
       let s = "";
       for (; j < cmd.length && cmd[j] !== '"'; j += 1) {
-        const lit = cmd[j] === "$" ? literalSubstitution(cmd, j) : null;
+        const lit = cmd[j] === "$" ? literalSub(cmd, j) : null;
         if (lit) {
           s += literal(lit.body);
           j = lit.end;
@@ -270,8 +242,8 @@ function lex(cmd) {
       if (j >= cmd.length) throw new Error('unterminated "');
       word = (word ?? "") + s;
       i = j;
-    } else if (c === "$" && literalSubstitution(cmd, i)) {
-      const lit = literalSubstitution(cmd, i);
+    } else if (c === "$" && literalSub(cmd, i)) {
+      const lit = literalSub(cmd, i);
       word = (word ?? "") + literal(lit.body);
       i = lit.end;
     } else if (c === "$" && arithmetic(cmd, i)) {
@@ -298,7 +270,7 @@ function lex(cmd) {
       let end = i;
       for (const h of pending.splice(0)) {
         const r = readHeredoc(cmd, end + 1, h.delim, h.stripTabs);
-        bodies.push({ text: r.body, literal: h.quoted || !/[$`\\]/.test(r.body), toShell: h.toShell, seg: h.seg, start: end + 1, end: r.end });
+        bodies.push({ text: r.body, literal: h.quoted || !EXPANDS_RE.test(r.body), toShell: h.toShell, seg: h.seg, start: end + 1, end: r.end });
         end = r.end;
       }
       i = end;
@@ -324,7 +296,7 @@ function lex(cmd) {
       endWord();
       // `toShell`: a shell reads the body as its script (`bash <<'EOF'`), so even a quoted body's backticks run.
       const program = segments.at(-1).find((w) => !ASSIGN_RE.test(w));
-      pending.push({ delim: m[2] ?? m[3] ?? m[4], stripTabs: m[1] === "-", quoted: m[4] === undefined, toShell: program !== undefined && SHELL_RE.test(basename(program)), seg: segments.length - 1 });
+      pending.push({ ...heredocOperator(m), toShell: program !== undefined && SHELL_RE.test(basename(program)), seg: segments.length - 1 });
       i += m[0].length - 1;
     } else if (c === "<" || /\s/.test(c)) {
       // A `<<` that HEREDOC_RE does not read ends the word, as before.
@@ -358,7 +330,7 @@ function feedsShell(segments, pipes, k) {
 function withoutLiteralSubstitutions(cmd) {
   let out = "";
   for (let i = 0; i < cmd.length; i += 1) {
-    const lit = cmd[i] === "$" ? literalSubstitution(cmd, i) : null;
+    const lit = cmd[i] === "$" ? literalSub(cmd, i) : null;
     if (lit) i = lit.end;
     else out += cmd[i];
   }
