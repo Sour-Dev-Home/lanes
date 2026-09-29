@@ -221,6 +221,37 @@ test("loadBudget sums costs.jsonl and running transcripts, and reports a lane ov
   assert.deepEqual(r, { spent24h: 1120, perNightTokens: 5000, over: false, lanesOver: [3] });
 });
 
+const tooBig = (size) => () => { throw Object.assign(new Error("transcript too large"), { code: "E2BIG", size }); };
+
+test("an oversized running transcript counts as over its lane cap and adds a size estimate", () => {
+  const r = loadBudget({
+    root: "/repo",
+    lanes: [{ issue: 8, sessionId: "s1" }],
+    perNightTokens: 1000,
+    perLaneTokens: 50,
+    now: BNOW,
+    readCosts: () => cost(2, 100),
+    read: tooBig(4000),
+  });
+  assert.deepEqual(r.lanesOver, [8]);
+  assert.equal(r.spent24h, 100 + 1000, "size / 4 bytes per token");
+  assert.equal(r.over, true);
+  assert.match(r.note, /1 running lane transcript over the read cap, estimated from its size/);
+  assert.doesNotMatch(r.note, /unreadable/);
+});
+
+test("edge: an oversized transcript with no size still counts as over the lane cap", () => {
+  const r = loadBudget({ root: "/repo", lanes: [{ issue: 8, sessionId: "s1" }], perNightTokens: 10, perLaneTokens: 5_000_000, now: BNOW, readCosts: () => "", read: tooBig(undefined) });
+  assert.deepEqual(r.lanesOver, [8]);
+  assert.ok(r.spent24h > 5_000_000);
+});
+
+test("edge: a tiny size estimate is raised to just past the lane cap", () => {
+  const r = loadBudget({ root: "/repo", lanes: [{ issue: 8, sessionId: "s1" }], perNightTokens: 1e9, perLaneTokens: 500, now: BNOW, readCosts: () => "", read: tooBig(8) });
+  assert.deepEqual(r.lanesOver, [8]);
+  assert.equal(r.spent24h, 501);
+});
+
 test("edge: a missing costs file counts as 0 with a note", () => {
   const r = loadBudget({ root: "/repo", perNightTokens: 10, perLaneTokens: 5, now: BNOW, readCosts: () => { throw enoent(); } });
   assert.equal(r.spent24h, 0);
