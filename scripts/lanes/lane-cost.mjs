@@ -8,10 +8,9 @@
 //   { issue, tier, sessionId, model, tokens: { input, output, cacheRead, cacheCreation, total } | null, reason?,
 //     launchedAt, removedAt }
 // No path and no prompt text is ever written: `reason` is one of the fixed strings below.
-import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DAY_MS = 24 * 3_600_000;
@@ -150,6 +149,24 @@ export function render(rows, days) {
   return [`lane cost, last ${days} days:`, ...lines].join("\n");
 }
 
+/**
+ * The main checkout that holds `.lanes/`, found from `dir` by walking up to a `.git`. A worktree's `.git` is a file
+ * naming `<main>/.git/worktrees/<name>`, so the main checkout is three levels above that; no `.git` at all gives `dir`.
+ */
+export function mainCheckout(dir, { read = (f) => readFileSync(f, "utf8"), isDir = (p) => statSync(p, { throwIfNoEntry: false })?.isDirectory() } = {}) {
+  for (let here = resolve(dir); ; here = dirname(here)) {
+    const git = join(here, ".git");
+    if (isDir(git)) return here;
+    try {
+      const target = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(read(git))?.[1];
+      if (target) return dirname(dirname(dirname(resolve(here, target))));
+    } catch {
+      // No `.git` here: keep walking up.
+    }
+    if (dirname(here) === here) return resolve(dir);
+  }
+}
+
 function main(argv = process.argv.slice(2)) {
   const i = argv.indexOf("--days");
   const days = i >= 0 ? Number(argv[i + 1]) : 7;
@@ -160,9 +177,7 @@ function main(argv = process.argv.slice(2)) {
   }
   let text = "";
   try {
-    // Lanes run in worktrees, so the file sits under the main checkout: the common git dir's parent.
-    const common = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", windowsHide: true }).trim();
-    text = readFileSync(join(dirname(common), ".lanes", "costs.jsonl"), "utf8");
+    text = readFileSync(join(mainCheckout(process.cwd()), ".lanes", "costs.jsonl"), "utf8");
   } catch (err) {
     if (err.code !== "ENOENT") throw err;
   }

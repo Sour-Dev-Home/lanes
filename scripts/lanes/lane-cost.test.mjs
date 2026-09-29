@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { REASONS, costLine, projectFolder, recordLaneCost, render, sessionUsage, summarize } from "./lane-cost.mjs";
+import { REASONS, costLine, mainCheckout, projectFolder, recordLaneCost, render, sessionUsage, summarize } from "./lane-cost.mjs";
 
 const msg = (id, usage, model = "claude-opus-5-5", role = "assistant") =>
   JSON.stringify({ message: { id, role, model, usage } });
@@ -95,6 +95,23 @@ test("edge: costLine with an unreadable, empty or id-less session", () => {
   assert.equal(none.reason, REASONS.noSession);
   assert.equal(none.sessionId, null);
   assert.equal(costLine({ ...lane, startedAt: undefined, tier: undefined, read: () => "" }).launchedAt, null);
+});
+
+test("mainCheckout finds the main checkout from a plain checkout, a worktree and a subfolder", () => {
+  const dirs = new Set([resolve("/m/.git")]);
+  const isDir = (p) => dirs.has(resolve(p));
+  const read = (f) => {
+    if (resolve(f) === resolve("/m/.claude/worktrees/w/.git")) return `gitdir: ${resolve("/m/.git/worktrees/w")}\n`;
+    throw Object.assign(new Error("nope"), { code: "ENOENT" });
+  };
+  assert.equal(mainCheckout("/m", { read, isDir }), resolve("/m"));
+  assert.equal(mainCheckout("/m/scripts/lanes", { read, isDir }), resolve("/m"));
+  assert.equal(mainCheckout("/m/.claude/worktrees/w", { read, isDir }), resolve("/m"));
+  assert.equal(mainCheckout("/m/.claude/worktrees/w/src", { read, isDir }), resolve("/m"));
+});
+
+test("edge: mainCheckout falls back to the folder itself outside any repository", () => {
+  assert.equal(mainCheckout("/nowhere/x", { read: () => { throw new Error("x"); }, isDir: () => false }), resolve("/nowhere/x"));
 });
 
 test("edge: costLine keeps only a known tier and caps the model string", () => {

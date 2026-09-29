@@ -77,6 +77,7 @@ export const MANIFEST = [
   "scripts/lanes/pick.mjs",
   "scripts/lanes/paths.mjs",
   "scripts/lanes/cleanup.mjs",
+  "scripts/lanes/lane-cost.mjs",
   "scripts/lanes/review-metrics.mjs",
   "scripts/lanes/modules.mjs",
   "scripts/lanes/structure-report.mjs",
