@@ -463,23 +463,73 @@ test("edge: a launch that prints no session id counts as failed and is not retri
 
 test("CLI: prints each owner wait once per state change, not every tick", async () => {
   const { main } = await import("./queue.mjs");
-  const waitingPr = (description) => pr(60, 6, ["src/x.mjs"], [gate("PENDING", description)]);
+  const waitingPr = (description) => ({ ...pr(60, 6, ["src/x.mjs"], [gate("PENDING", description)]), title: "Add x" });
   const world = { issues: [issue(6, ["src/x.mjs"], { labels: ["tier:quick"] })], prs: [waitingPr("waiting on owner: review/owner")], sessions: [] };
   const run = fakeRun(world, {
     onSleep: (t) => {
       if (t === 3) world.prs = [waitingPr("waiting on reviewers")];
       if (t === 4) world.prs = [waitingPr("waiting on owner: review/owner")];
-      if (t === 6) world.prs[0] = pr(60, 6, ["src/x.mjs"], [{ name: "test", conclusion: "FAILURE" }]);
+      if (t === 6) world.prs[0] = { ...pr(60, 6, ["src/x.mjs"], [{ name: "test", conclusion: "FAILURE" }]), title: "Add x" };
       if (t === 8) (world.prs = []), (world.issues = []);
     },
   });
   assert.equal(await main([], run.deps), 0);
-  const waits = run.out.filter((l) => l.includes("PR #60: needs the owner")).map((l) => l.replace(STAMP, ""));
+  const waits = run.out.filter((l) => l.includes("#60 ")).map((l) => l.replace(STAMP, ""));
   assert.deepEqual(waits, [
-    "PR #60: needs the owner: waiting on owner: review/owner",
-    "PR #60: needs the owner: waiting on owner: review/owner",
-    "PR #60: needs the owner: failing: test",
+    "  #60 Add x — waiting 0m — waiting on owner: review/owner",
+    "  #60 Add x — waiting 0m — waiting on owner: review/owner",
+    "  #60 Add x — waiting 6m — failing: test", // the age keeps running when the reason changes
   ]);
+});
+
+// #383: the digest is one block per changed tick, with ages from the gate's own time and one /approve line.
+test("CLI: prints one grouped digest, oldest first, with ages and a single /approve line, only when something changed", async () => {
+  const { main } = await import("./queue.mjs");
+  const now = Date.UTC(2026, 8, 28, 9, 0, 0);
+  const owner = (number, n, minutesAgo, title) => ({ ...pr(number, n, [`src/${n}.mjs`], [gate("PENDING", "waiting on owner: review/owner")]), title, gateSince: now - minutesAgo * 60_000 });
+  const failing = { ...pr(62, 8, ["src/8.mjs"], [{ name: "test", conclusion: "FAILURE" }]), title: "Fix y" };
+  const world = { issues: [], prs: [owner(61, 7, 30, "Newer"), owner(60, 6, 190, "Older"), failing], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 3 && (world.prs = []) });
+  const seen = run.deps.gh;
+  // The fake GitHub answers the gate query with each PR's gate time.
+  run.deps.gh = (args) =>
+    args[0] === "api"
+      ? JSON.stringify({ data: { repository: { pullRequests: { nodes: world.prs.filter((p) => p.gateSince).map((p) => ({ number: p.number, commits: { nodes: [{ commit: { status: { context: { description: "waiting on owner: review/owner", createdAt: new Date(p.gateSince).toISOString() } } } }] } })) } } } })
+      : seen(args);
+  assert.equal(await main([], run.deps), 0);
+  const block = run.out.map((l) => l.replace(STAMP, "")).filter((l) => /^(waiting on you|  #|\/approve)/.test(l));
+  assert.deepEqual(block, [
+    "waiting on you (3):",
+    "  #60 Older — waiting 3h 10m — waiting on owner: review/owner",
+    "  #61 Newer — waiting 30m — waiting on owner: review/owner",
+    "  #62 Fix y — waiting 0m — failing: test",
+    "/approve 60 61",
+  ]);
+});
+
+test("waitingDigest caps the /approve line at 10 numbers and lists only PRs waiting on /approve in it", async () => {
+  const { waitingDigest } = await import("./queue.mjs");
+  const prs = Array.from({ length: 12 }, (_, i) => ({ ...pr(i + 1, i + 1, ["a"], [gate("PENDING", "waiting on owner: review/owner")]), title: `t${i + 1}`, gateSince: 1000 + i }));
+  const waiting = prs.map((p) => ({ number: p.number, reason: "waiting on owner: review/owner" }));
+  const lines = waitingDigest(prs, waiting, 1000 + 60_000);
+  assert.equal(lines[0], "waiting on you (12):");
+  assert.equal(lines.length, 14);
+  assert.equal(lines.at(-1), "/approve 1 2 3 4 5 6 7 8 9 10");
+});
+
+test("edge: waitingDigest prints nothing when nothing waits, and no /approve line when no PR waits on /approve", async () => {
+  const { waitingDigest } = await import("./queue.mjs");
+  assert.deepEqual(waitingDigest([], [], 5), []);
+  const failing = { ...pr(5, 5, ["a"], [{ name: "test", conclusion: "FAILURE" }]), title: "t\u001b[31m" };
+  const lines = waitingDigest([failing], [{ number: 5, reason: "failing: test" }], 60_000, new Map([[5, 0]]));
+  assert.deepEqual(lines, ["waiting on you (1):", "  #5 t[31m — waiting 1m — failing: test"]);
+});
+
+test("edge: a PR without a gate time is aged from when the queue first saw it", async () => {
+  const { waitingDigest } = await import("./queue.mjs");
+  const p = { ...pr(5, 5, ["a"], [gate("PENDING", "waiting on owner: review/owner")]), title: "t" };
+  const lines = waitingDigest([p], [{ number: 5, reason: "r" }], 10 * 60_000, new Map([[5, 0]]));
+  assert.match(lines[1], /waiting 10m/);
 });
 
 test("CLI: a GitHub read failure is printed and retried next tick", async () => {

@@ -13,7 +13,7 @@ import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWork
 import { GATE_CONTEXT, laneIssueOf } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { inFlightIssues, launchArgs, localLaunchEnv, markRunning, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
-import { gateDescriptions, prStage, stalledLanes } from "./status.mjs";
+import { approveLine, formatAge, gateDescriptions, gateSince, prStage, stalledLanes } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
 // waiting on owner.
@@ -93,6 +93,33 @@ export function planTick({ issues = [], prs = [], sessions = [], maxLanes = STAR
 }
 
 /**
+ * #383: the owner's digest of the lane PRs waiting on them. Pure. One block: a header, a line per PR (oldest first) with
+ * its number, title, age since it began waiting and what the owner must decide, then one `/approve N M K` line
+ * (at most 10 numbers) for the PRs that wait on /approve. Empty when nothing waits. A PR's age runs from its gate
+ * status's time (`gateSince`), else from `seen` (PR number → ms it was first seen waiting), else from `now`.
+ * @param {{ number: number, title?: string, gateSince?: number }[]} prs the snapshot's open PRs
+ * @param {{ number: number, reason: string }[]} waiting planTick's `waiting`
+ * @returns {string[]} lines, without a time stamp
+ */
+export function waitingDigest(prs, waiting, now, seen = new Map()) {
+  const byNumber = new Map(prs.map((pr) => [pr.number, pr]));
+  const rows = waiting.map((w) => {
+    const pr = byNumber.get(w.number) ?? {};
+    return { ...w, pr, since: pr.gateSince ?? seen.get(w.number) ?? now };
+  });
+  if (!rows.length) return [];
+  rows.sort((a, b) => a.since - b.since || a.number - b.number);
+  // PR text is untrusted: control characters (ANSI escapes) are dropped before it reaches the owner's terminal.
+  const title = (pr) => String(pr.title ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  const approvable = rows.filter((r) => prStage(r.pr, undefined, r.pr.gateDescription).stage === "owner").map((r) => r.number);
+  return [
+    `waiting on you (${rows.length}):`,
+    ...rows.map((r) => `  #${r.number} ${title(r.pr)} — waiting ${formatAge(r.since, now)} — ${r.reason}`),
+    ...(approvable.length ? [approveLine(approvable)] : []),
+  ];
+}
+
+/**
  * #382: which lanes to recover this tick. Pure. A lane is a ready, open issue with no open PR whose newest background
  * session is stalled (`stalled`: issue → minutes silent, from status.mjs's stalledLanes) or idle with no prompt
  * pending (ended without a PR). An issue with a marker is `again` (reported, never retried), unless the marker names
@@ -134,7 +161,7 @@ const WAIT_LINE = /^PR #(\d+): needs the owner: /;
 // `gh pr list` leaves the gate's description out of `statusCheckRollup`; this reads it from each open PR's head.
 const GATE_QUERY =
   "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ " +
-  `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description } } } } } } } } }`;
+  `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description createdAt } } } } } } } } }`;
 
 const reason = (err) => String(err?.stderr || err?.message || err).trim().split("\n")[0];
 const stamp = (ms) => new Date(ms).toTimeString().slice(0, 8);
@@ -144,10 +171,15 @@ function readSnapshot(deps, root) {
   const issues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body"]));
   // A blocker missing from a truncated list would read as closed, and a lane's claim would be lost.
   if (issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to plan from`);
-  const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,headRefName,files,statusCheckRollup"]));
+  const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,title,headRefName,files,statusCheckRollup"]));
   if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to count lanes in flight`);
-  const descriptions = gateDescriptions(JSON.parse(deps.gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${GATE_QUERY}`])));
-  for (const pr of prs) if (descriptions.has(pr.number)) pr.gateDescription = descriptions.get(pr.number);
+  const gate = JSON.parse(deps.gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${GATE_QUERY}`]));
+  const descriptions = gateDescriptions(gate);
+  const since = gateSince(gate);
+  for (const pr of prs) {
+    if (descriptions.has(pr.number)) pr.gateDescription = descriptions.get(pr.number);
+    if (since.has(pr.number)) pr.gateSince = since.get(pr.number);
+  }
   const sessions = JSON.parse(deps.claude(["agents", "--json", "--cwd", root], { cwd: root }));
   if (!Array.isArray(sessions)) throw new Error("claude agents --json printed no list");
   return { issues, prs, sessions };
@@ -228,6 +260,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
   const { maxLanes, softPaths, models } = settings;
   const failedLaunches = new Set();
   const waits = new Map();
+  const firstWaiting = new Map();
   const attempted = new Set();
   const told = new Set();
   let idleTicks = 0;
@@ -260,12 +293,13 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     // An issue whose launch failed stays open (its blockers and ranking still count) but is no longer a candidate.
     const issues = snapshot.issues.map((i) => (failedLaunches.has(i.number) ? { ...i, labels: labelsOf(i).filter((l) => l !== "ready") } : i));
     const plan = planTick({ ...snapshot, issues, maxLanes, softPaths });
+    // #383: the waiting PRs print as one block, only in a tick where a PR started or stopped waiting or its reason changed.
     const current = new Map(plan.waiting.map((w) => [w.number, w.reason]));
-    for (const line of plan.lines) {
-      const number = Number(WAIT_LINE.exec(line)?.[1]);
-      if (Number.isInteger(number) && waits.get(number) === current.get(number)) continue;
-      say(line);
-    }
+    for (const line of plan.lines) if (!WAIT_LINE.test(line)) say(line);
+    const changed = current.size !== waits.size || [...current].some(([n, r]) => waits.get(n) !== r);
+    if (changed) for (const line of waitingDigest(snapshot.prs, plan.waiting, now(), firstWaiting)) say(line);
+    for (const n of [...firstWaiting.keys()]) if (!current.has(n)) firstWaiting.delete(n);
+    for (const n of current.keys()) if (!firstWaiting.has(n)) firstWaiting.set(n, now());
     waits.clear();
     for (const [n, r] of current) waits.set(n, r);
     const tierOf = new Map(issues.map((i) => [i.number, labelsOf(i).find((l) => l?.startsWith("tier:"))?.slice("tier:".length)]));
