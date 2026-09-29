@@ -32,7 +32,7 @@ export function main(argv, io = realIo) {
   const unknown = argv.find((a, i) => i > 0 || (typeof a === "string" && a.startsWith("--")));
   if (unknown !== undefined) return { code: 1, message: `unknown argument: ${unknown}\n${USAGE}` };
   const tag = argv[0];
-  const m =typeof tag === "string" ? TAG.exec(tag) : null;
+  const m = typeof tag === "string" ? TAG.exec(tag) : null;
   if (!m) return { code: 1, message: `release: malformed tag ${JSON.stringify(tag ?? "")}: expected v<major>.<minor>.<patch>` };
   const version = m[1];
 
