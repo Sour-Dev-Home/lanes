@@ -285,9 +285,39 @@ test("the real docs/lessons.d/ passes --check and holds the four general seed fr
 test("the CLI --paths prints the seed lessons for any path", () => {
   const r = spawnSync(process.execPath, ["scripts/lanes/lessons.mjs", "--paths", "scripts/lanes/gate.mjs"], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
-  // one line per distinct general pattern (fragments share a pattern across issues), so a new fragment cannot break this
-  const patterns = new Set(readdirSync("docs/lessons.d").filter((f) => f.startsWith("general-") && f.endsWith(".md"))
-    .map((f) => f.slice("general-".length).replace(/-\d+\.md$/, "")));
-  assert.equal(r.stdout.split("\n").filter(Boolean).length, patterns.size);
+  // the output is capped, so the printed lines are the highest-count general patterns that fit, not all of them
+  const counts = new Map();
+  for (const f of readdirSync("docs/lessons.d").filter((f) => f.startsWith("general-") && f.endsWith(".md"))) {
+    const pattern = f.slice("general-".length).replace(/-\d+\.md$/, "");
+    counts.set(pattern, (counts.get(pattern) ?? 0) + 1);
+  }
+  const printed = r.stdout.split("\n").filter(Boolean).map((l) => /^\(x(\d+)\) general\/([^:]+): /.exec(l));
+  assert.ok(printed.every(Boolean), "every printed line is (xN) general/pattern: lesson");
+  assert.ok(printed.length <= Math.min(counts.size, MAX_PATTERNS));
+  assert.ok(r.stdout.length <= MAX_CHARS, `printed ${r.stdout.length} characters`);
+  const shown = new Set(printed.map((m) => m[2]));
+  const lowestShown = Math.min(...printed.map((m) => Number(m[1])));
+  for (const [pattern, n] of counts) if (!shown.has(pattern)) assert.ok(n <= lowestShown, `${pattern} (x${n}) was dropped while (x${lowestShown}) printed`);
+  assert.ok(printed.length > 0);
   assert.match(r.stdout, /^\(x1\) general\//m);
+});
+
+test("the CLI --paths drops the lowest-count patterns and exits 0 when more general fragments exist than fit", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "lessons-cap-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "docs", "lessons.d"), { recursive: true });
+  const total = MAX_PATTERNS + 5;
+  for (let k = 0; k < total; k++) {
+    // pattern k has k + 1 fragments, so the five lowest-count patterns are p0..p4
+    for (let n = 0; n <= k; n++) {
+      writeFileSync(join(dir, "docs", "lessons.d", `general-p${k}-${n + 1}.md`), text({ pattern: `p${k}`, source: `"#${n + 1}"` }, `Lesson for p${k}.`));
+    }
+  }
+  const r = spawnSync(process.execPath, [join(process.cwd(), "scripts/lanes/lessons.mjs"), "--paths", "a.mjs"], { cwd: dir, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.split("\n").filter(Boolean);
+  assert.equal(lines.length, MAX_PATTERNS);
+  assert.match(lines[0], /^\(x25\) general\/p24: /);
+  assert.match(lines.at(-1), /^\(x6\) general\/p5: /);
+  assert.doesNotMatch(r.stdout, /general\/p[0-4]:/);
 });
