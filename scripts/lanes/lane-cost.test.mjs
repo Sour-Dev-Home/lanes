@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { REASONS, budgetReport, costLine, loadBudget, mainCheckout, projectFolder, recordLaneCost, render, sessionUsage, spentSince, summarize } from "./lane-cost.mjs";
 
 const msg = (id, usage, model = "claude-opus-5-5", role = "assistant") =>
@@ -241,4 +242,14 @@ test("edge: an unreadable costs file and unreadable transcripts count as 0 and s
   assert.match(r.note, /costs\.jsonl unreadable/);
   assert.match(r.note, /2 running lane transcripts unreadable/);
   assert.doesNotMatch(r.note, /\/repo|EACCES/);
+});
+
+test("edge: the installed status.mjs and lane-cost.mjs never import the launcher, which re-exports the same budgetConfig", async () => {
+  const here = fileURLToPath(new URL(".", import.meta.url));
+  const launcher = "./start" + ".mjs";
+  for (const file of ["status.mjs", "lane-cost.mjs"]) assert.equal(readFileSync(join(here, file), "utf8").includes(`from "${launcher}"`), false, file);
+  const start = await import(launcher);
+  const cost = await import("./lane-cost.mjs");
+  assert.equal(start.budgetConfig, cost.budgetConfig);
+  assert.equal(start.BUDGET_DEFAULTS, cost.BUDGET_DEFAULTS);
 });
