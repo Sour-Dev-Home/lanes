@@ -8,9 +8,12 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GATE_CONTEXT, parseIssueForm, parseVerdictComment } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
-import { RUNNING_LABEL, START_DEFAULTS, startConfig } from "./start.mjs";
 import { STATUS_QUERY, gateDescriptions, mergeQueueEntries, prStage } from "./status.mjs";
 
+// start.mjs is not part of the installed file set, so these two are copies of its RUNNING_LABEL and
+// START_DEFAULTS.softPaths; snapshot.test.mjs fails if they drift.
+export const RUNNING_LABEL = "lane:running";
+export const DEFAULT_SOFT_PATHS = Object.freeze(["^docs/USING\\.md$", "^README\\.md$"]);
 const ISSUE_LIMIT = 1000;
 const PR_LIMIT = 100; // also the GraphQL page size of STATUS_QUERY
 const TITLE_MAX = 200;
@@ -85,7 +88,7 @@ function prBlockers(stage, note) {
  * `issues` every open issue with body and labels; `mergeQueue` and `gateDescriptions` are the outputs of status.mjs's
  * mergeQueueEntries and gateDescriptions.
  */
-export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), softPaths = START_DEFAULTS.softPaths, generatedAt }) {
+export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), softPaths = DEFAULT_SOFT_PATHS, generatedAt }) {
   const queuePosition = new Map(mergeQueue.map((e) => [e.number, e.position]));
   const prOf = new Map();
   // A fork's PR is stranger-controlled (its check names are whatever its workflow calls them, and "Fixes #N" is free),
@@ -192,16 +195,19 @@ export function writeSnapshot(snapshot, file) {
 
 const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 }));
 
-// start.softPaths of the lanes.config.json in the working directory; the defaults when there is none.
+// start.softPaths of the lanes.config.json in the working directory; the defaults when there is none or the key is absent.
 function configuredSoftPaths() {
   let raw;
   try {
     raw = JSON.parse(readFileSync("lanes.config.json", "utf8"));
   } catch (err) {
-    if (err.code === "ENOENT") return startConfig(undefined).softPaths;
+    if (err.code === "ENOENT") return DEFAULT_SOFT_PATHS;
     throw err;
   }
-  return startConfig(raw).softPaths;
+  const soft = raw?.start?.softPaths;
+  if (soft === undefined) return DEFAULT_SOFT_PATHS;
+  if (!Array.isArray(soft) || soft.some((s) => typeof s !== "string")) throw new Error("lanes.config.json: start.softPaths must be an array of regex strings");
+  return soft;
 }
 
 function main(argv = process.argv.slice(2)) {

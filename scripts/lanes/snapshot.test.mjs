@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { buildSnapshot, parseFromArg, parseInput, parseOutArg, verdictCriteria, writeSnapshot } from "./snapshot.mjs";
+import { DEFAULT_SOFT_PATHS, RUNNING_LABEL, buildSnapshot, parseFromArg, parseInput, parseOutArg, verdictCriteria, writeSnapshot } from "./snapshot.mjs";
 import { buildVerdictComment } from "./post-review.mjs";
 import { STATUS_QUERY } from "./status.mjs";
 
@@ -306,6 +306,12 @@ test("snapshot.mjs uses status.mjs's GraphQL query rather than its own copy", ()
   assert.match(source, /import \{[^}]*\bSTATUS_QUERY\b[^}]*\} from "\.\/status\.mjs"/);
   assert.match(source, /`query=\$\{STATUS_QUERY\}`/);
   assert.doesNotMatch(source, /query\(\$owner/);
+});
+
+test("edge: the running label and default soft paths match start.mjs, which snapshot.mjs cannot import", async () => {
+  const start = await import("./start.mjs");
+  assert.equal(RUNNING_LABEL, start.RUNNING_LABEL);
+  assert.deepEqual([...DEFAULT_SOFT_PATHS], [...start.START_DEFAULTS.softPaths]);
 });
 
 const scoped = (number, paths, labels = ["ready", "tier:quick"], over = {}) =>
