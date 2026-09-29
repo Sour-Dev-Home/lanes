@@ -668,7 +668,12 @@ function ghReleaseTag(words, at) {
  * create (or new) naming a v* tag, one known only at run time, or none. Both guards deny it from any session; the
  * owner tags from their own terminal.
  */
-export function releaseTagCommand(words, depth = 0) {
+export function releaseTagCommand(words) {
+  return releaseTagAt(words, 0);
+}
+
+/** releaseTagCommand, `depth` -c aliases deep. */
+function releaseTagAt(words, depth) {
   const at = launcherAt(words);
   if (at >= words.length) return false;
   if (GH_RE.test(basename(words[at]))) return ghReleaseTag(words, at);
@@ -686,11 +691,12 @@ export function releaseTagCommand(words, depth = 0) {
   }
   const sub = words[i];
   const rest = words.slice(i + 1);
-  if (sub !== undefined && aliases.has(sub.toLowerCase())) {
+  // git ignores an alias that shadows a built-in command, so `-c alias.tag=log tag v1` still tags.
+  if (sub !== undefined && !["tag", "push", "update-ref"].includes(sub) && aliases.has(sub.toLowerCase())) {
     const value = aliases.get(sub.toLowerCase());
     if (value === null || LIVE_RE.test(value) || value.startsWith("!") || depth >= MAX_ALIAS_DEPTH) return true;
     // git keeps its own options, the other aliases among them, for what the alias expands to.
-    return releaseTagCommand([...words.slice(at, i), ...unmark(value).trim().split(/\s+/), ...rest], depth + 1);
+    return releaseTagAt([...words.slice(at, i), ...unmark(value).trim().split(/\s+/), ...rest], depth + 1);
   }
   if (sub === "update-ref") {
     if (rest.includes("--stdin")) return true;

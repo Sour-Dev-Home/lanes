@@ -649,6 +649,15 @@ test("#424 edge: alias case, glued --config-env, recursive aliases, gh with no t
   }
 });
 
+test("#424 hunt: an alias shadowing a built-in is ignored by git, so it hides nothing; the alias depth cap is a boundary", () => {
+  for (const cmd of ["git -c alias.tag=log tag v1", "git -c alias.push=status push origin v1", "git -c alias.update-ref=log update-ref refs/tags/v1 HEAD"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  const chain = (n) => `git ${Array.from({ length: n }, (_, k) => `-c alias.a${k}=${k + 1 < n ? `a${k + 1}` : "status"}`).join(" ")} a0`;
+  assert.equal(releaseTagCommand(lex(chain(7))[0]), false, "7 aliases deep, ending in status");
+  assert.equal(releaseTagCommand(lex(chain(9))[0]), true, "past the cap fails closed");
+});
+
 test("#424 criterion 4: a shell's -c skips --rcfile and --init-file with their value to reach the script", () => {
   for (const cmd of ['bash -c --rcfile x "$S"', 'bash -c --init-file x "$S"', 'bash --init-file x -c "$S"', 'bash -c --rcfile x -- "$S"']) {
     assert.deepEqual([...shellTextIndexes(lex(cmd)[0])], [lex(cmd)[0].length - 1], cmd);
