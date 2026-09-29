@@ -2366,7 +2366,7 @@ test("#378 criterion 4: commands that only print, pass or read such text get no 
 // --- #404: the run-time text, computed WMI method, glob and release tag gaps #378 left ----------------------------
 
 test("#404 criterion 1: a shell's -c script after --, -e, -x or +x is denied as run-time text", () => {
-  for (const cmd of ['bash -c -- "$X"', 'bash -c -e "$X"', 'bash -c -x "$X"', 'bash -c +x "$X"', 'sh -c -o errexit "$X"']) {
+  for (const cmd of ['bash -c -- "$X"', 'bash -c -e "$X"', 'bash -c -x "$X"', 'bash -c +x "$X"', 'sh -c -o errexit "$X"', 'bash -c --rcfile x "$X"']) {
     assert.deepEqual(decideFor(bash(cmd), grant()), deny(RUNTIME_TEXT_DENY_REASON), cmd);
   }
   // edge: the script after -- still runs its backticks and names.
@@ -2410,9 +2410,17 @@ test("#404 criterion 6: a POSIX class glob that could be node running start.mjs 
   }
 });
 
-test("#404 criterion 7: a bare glob argument of a command that only prints or reads is not node", () => {
-  for (const cmd of ["echo foo * scripts/lanes/start.mjs", "cat n* scripts/lanes/start.mjs", "ls n* scripts/lanes/queue.mjs", "grep -l x n* scripts/lanes/start.mjs"]) {
+test("#404 criterion 7: a bare glob argument of a command that only reads is not node", () => {
+  for (const cmd of ["cat n* scripts/lanes/start.mjs", "ls n* scripts/lanes/queue.mjs", "grep -l x n* scripts/lanes/start.mjs", "head -n 1 * scripts/lanes/start.mjs"]) {
     assert.equal(decideFor(bash(cmd)), null, cmd);
+  }
+  // echo and printf print their arguments for a shell to run (`bash <(echo …)`): their glob stays node, an accepted
+  // false positive (security review, #404: main denied every form below).
+  for (const cmd of [
+    "echo foo * scripts/lanes/start.mjs", 'bash <(echo "" n* scripts/lanes/start.mjs 1)', "source <(printf '%s ' '' n* scripts/lanes/start.mjs 1)",
+    "sh < <(echo '' n* scripts/lanes/start.mjs 1)", "bash <<< $(echo '' n* scripts/lanes/start.mjs 1)",
+  ]) {
+    assert.equal(decideFor(bash(cmd))?.decision, "deny", cmd);
   }
   // A glob as the program word, or behind a wrapper, is still node; and so is one whose output a shell runs.
   assert.deepEqual(decideFor(bash("n* scripts/lanes/start.mjs 1")), deny(DENY_REASON));

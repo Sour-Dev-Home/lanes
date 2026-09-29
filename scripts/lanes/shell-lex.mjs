@@ -442,8 +442,8 @@ export const mayBeNode = (w) => NODE_RE.test(basename(w)) || mayExpandTo(w, NODE
 const LIVE_RE = new RegExp(`[$\`${QUOTED_TICK}]`);
 const EVAL_WORDS = new Set(["eval", "source", "."]);
 const SHELL_C_RE = /^-[A-Za-z]*c[A-Za-z]*$/;
-// A shell's options that take the next word as their value (`-o errexit`, `+O extglob`).
-const SHELL_VALUED_RE = /^[-+][oO]$/;
+// A shell's options that take the next word as their value (`-o errexit`, `+O extglob`, `--rcfile x`).
+const SHELL_VALUED_RE = /^(?:[-+][oO]|--rcfile|--init-file)$/;
 // Programs that hand their -c (or --command) value to a shell as text (#404): su, runuser, script, flock and fish.
 const TEXT_C_RE = /^(su|runuser|script|flock|fish)(\.exe)?$/i;
 // A -c value glued to its flag (`-c"$X"`, `--command=$X`).
@@ -627,8 +627,9 @@ const TAG_READS_RE = /^(?:-[A-Za-z]*[ldv][A-Za-z]*|-n[0-9]*|--list|--delete|--ve
 // git push's options that take the next word as their value, and those that push every tag.
 const PUSH_VALUED = new Set(["-o", "--push-option", "--repo", "--receive-pack", "--exec"]);
 const PUSH_TAGS_RE = /^--(?:tags|follow-tags|mirror)$/;
-// A ref that is, or could be, a v* tag: `v1.2.3`, `refs/tags/v1`.
-const RELEASE_REF_RE = /^\+?(?:refs\/tags\/)?v/i;
+// A ref that is, or could be, a v* tag: `v1.2.3`, `refs/tags/v1`, or a pattern such as `refs/tags/*` that pushes
+// every tag (read on the word with quoted glob characters restored).
+const RELEASE_REF_RE = /^\+?(?:refs\/tags\/)?(?:v|[*?[])/i;
 
 /**
  * True when simple command `words` creates or pushes a `v*` tag (ADR 0017 decision 3): git, as the program behind any
@@ -656,11 +657,11 @@ export function releaseTagCommand(words) {
     if ((sub === "tag" && (TAG_VALUED.has(w) || /^-[A-Za-z]*[mFu]$/.test(w))) || (sub === "push" && PUSH_VALUED.has(w))) j += 1;
     else if (!w.startsWith("-")) args.push(w);
   }
-  if (sub === "tag") return !reads && args.length > 0 && RELEASE_REF_RE.test(args[0]);
+  if (sub === "tag") return !reads && args.length > 0 && RELEASE_REF_RE.test(unmark(args[0]));
   if (sub !== "push") return false;
   if (followTags) return true;
   // The first argument is the remote; each one after it is a refspec, or `tag` before a tag's name.
-  return args.slice(1).some((w, k, specs) => RELEASE_REF_RE.test(w.split(":").at(-1)) || (w === "tag" && k + 1 < specs.length));
+  return args.slice(1).some((w, k, specs) => RELEASE_REF_RE.test(unmark(w).split(":").at(-1)) || (w === "tag" && k + 1 < specs.length));
 }
 
 /**

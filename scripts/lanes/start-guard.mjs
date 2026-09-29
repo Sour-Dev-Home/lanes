@@ -35,7 +35,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isAutomatedInput, powershellAsBash, preToolUseOutput } from "./approve-guard.mjs";
 import {
-  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, NODE_RE, QUOTED_TICK, basename, dequoted, feedsShell, launchedCommands, lex, mayBeNode, mayExpandTo,
+  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, basename, dequoted, feedsShell, launchedCommands, lex, mayBeNode, mayExpandTo,
   readGrant, releaseTagCommand, runtimeTextWords, scriptSubcommand, shellTextIndexes, withoutLiteralSubstitutions, wmiProcessCreate,
 } from "./shell-lex.mjs";
 
@@ -185,37 +185,21 @@ function powershellText(w) {
 // Commands that only list, read or search, whose arguments are file names and patterns, never run and never printed
 // as given (#404): a quoted pattern that names a lanes script (`grep -n "node scripts/lanes/queue.mjs" f`), or a glob
 // among the arguments (`cat n* f`), is no run. rg counts only without --pre, which runs a program on every file it
-// searches. echo and printf are not among them: what they print may be run later (`f | sh` after `f() { echo …; }`).
+// searches. echo and printf are not among them: what they print may be run (`bash <(echo …)`, `f | sh`).
 const READS_ONLY_RE = /^(grep|egrep|fgrep|rg|ls|cat|head|tail|wc)(\.exe)?$/i;
-// Commands that print their arguments: the first one is the program word of what they print, so a glob there may be
-// node once run; a glob further on is not (`echo foo * scripts/lanes/start.mjs`, #404).
-const PRINTS_RE = /^(echo|printf)(\.exe)?$/i;
-
-/** The index of simple command `words`' command word when it matches `re`, or -1. */
-function commandAt(words, re) {
-  const at = words.findIndex((w) => !ASSIGN_RE.test(w));
-  return at !== -1 && re.test(basename(words[at])) ? at : -1;
-}
-
 /** True when simple command `words`' command word only lists, reads or searches (READS_ONLY_RE). */
-const readsOnly = (words) => commandAt(words, READS_ONLY_RE) !== -1 && !words.some((w) => /^--pre(=|$)/.test(w));
+function readsOnly(words) {
+  const at = words.findIndex((w) => !ASSIGN_RE.test(w));
+  return at !== -1 && READS_ONLY_RE.test(basename(words[at])) && !words.some((w) => /^--pre(=|$)/.test(w));
+}
 
 /**
  * The index of the word in `own` (a simple command's words without assignments) that is or may be node: none for a
- * command that only reads (readsOnly); for echo or printf, node itself anywhere or a glob as the first argument
- * (#404); otherwise node or a glob that could be node anywhere, since any other command word may run its arguments,
- * the false positive of `mv n* x` being accepted.
+ * command that only reads (readsOnly, #404); otherwise node or a glob that could be node anywhere, since any other
+ * command may run its arguments or print them for a shell to run, whether through a pipe, `<(…)` or `<<<` (security
+ * review, #404). The false positives of `echo foo * scripts/lanes/start.mjs` and `mv n* x` are accepted.
  */
-function nodeWordAt(own) {
-  if (readsOnly(own)) return -1;
-  const printer = commandAt(own, PRINTS_RE);
-  if (printer === -1) return own.findIndex(mayBeNode);
-  const first = own.findIndex((w, i) => i > printer && !/^-[neE]+$/.test(w));
-  const wrapped = (i) => own.slice(first, i).some((w) => PRINTED_WRAPPER_RE.test(basename(w)));
-  return own.findIndex((w, i) => NODE_RE.test(basename(w)) || ((i === first || (first !== -1 && i > first && wrapped(i))) && mayBeNode(w)));
-}
-// Wrappers that put a program after them in printed text too (`echo env n* x`).
-const PRINTED_WRAPPER_RE = /^(env|exec|command|builtin|nohup|time|timeout|nice|sudo|doas|setsid|stdbuf|xargs)(\.exe)?$/i;
+const nodeWordAt = (own) => (readsOnly(own) ? -1 : own.findIndex(mayBeNode));
 
 // Programs that write what they are given to a file, and never run it (#89); cd and mkdir may come alongside.
 const WRITE_COMMANDS = new Set(["cat", "echo", "printf"]);

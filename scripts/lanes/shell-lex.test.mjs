@@ -576,12 +576,26 @@ test("#404 criterion 11: releaseTagCommand reads creating and pushing a v* tag",
     "git tag v1.2.3", "git tag -a v1.2.3 -m x", "git tag -m x v1.2.3", "git -C . tag -s v2", "git push --tags", "git push --follow-tags",
     "git push origin v1.2.3", "git push origin refs/tags/v1.2.3", "git push origin HEAD:refs/tags/v1", "git push --mirror origin", "env git tag v1",
     "git push origin tag v1.2.3", "git -c push.followTags=true push",
+    // edge (test-hunter): a pattern refspec pushes every tag, v* among them, quoted or not.
+    "git push origin 'refs/tags/*'", "git push origin refs/tags/*:refs/tags/*",
   ]) {
     assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
   }
   for (const cmd of ["git tag -l", "git tag --list 'v*'", "git push origin main", "git tag", "git push -u origin issue-404-x", "git tag -d v1", "echo git tag v1", "git log v1..HEAD"]) {
     assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
   }
+});
+
+test("#404 criterion 11 (test-hunter): a branch named tag, a tag read or removal, and a config read are no tag creation", () => {
+  // Kills a `k + 1 < specs.length` off-by-one: `tag` as the last refspec names a branch, not the `tag` keyword.
+  for (const cmd of ["git push origin tag", "git tag -fl v1", "git tag --delete v1", "git config push.followTags", "git tag --sort=v:refname"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+  }
+  assert.equal(releaseTagCommand(lex("git push origin tag v1")[0]), true);
+});
+
+test("#404 criterion 13 (test-hunter): $ENV:Path is a PowerShell variable read whatever its case", () => {
+  assert.equal(runsRuntimeText(lex(`powershell -Command "($ENV:Path -split ';').Count"`)[0]), false);
 });
 
 test("#378 criterion 3: mayBeNode reads node, and a glob that could expand to it, as node", () => {
