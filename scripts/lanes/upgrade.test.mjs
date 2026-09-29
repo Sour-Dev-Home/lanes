@@ -185,6 +185,24 @@ test("a symlinked directory inside the target that points outside is never writt
   assert.equal(existsSync(path.join(outside, "f.txt")), false);
 });
 
+test("edge: a directory at a managed path exits 2 with one line, not a stack trace", () => {
+  const { source, target } = fixture({ lockFiles: { "dir.txt": sha("x") } });
+  put(target, "dir.txt/inner", "x"); // dir.txt is a directory here
+  const o = out();
+  assert.equal(main([target], {}, { source, manifest: ["dir.txt"], print: o.print }), 2);
+  assert.equal(o.lines.length, 1);
+  assert.match(o.lines[0], /^upgrade failed/);
+});
+
+test("edge: a source config key named like an inherited property is still added", () => {
+  const { source, target } = fixture();
+  put(source, "lanes.config.json", '{"toString":1,"constructor":2}');
+  main([target, "--apply"], {}, { source, manifest: [], print: () => {} });
+  const cfg = JSON.parse(get(target, "lanes.config.json"));
+  assert.equal(Object.hasOwn(cfg, "toString"), true);
+  assert.equal(Object.hasOwn(cfg, "constructor"), true);
+});
+
 test("readLock returns the parsed lock for a valid file", () => {
   const { target } = fixture();
   assert.equal(readLock(target).version, "0.1.0");

@@ -98,7 +98,7 @@ function missingConfigKeys(source, target) {
   };
   const [src, mine] = [read(source), read(target)];
   if (!src || !mine) return { mine, added: {} };
-  return { mine, added: Object.fromEntries(Object.entries(src).filter(([k]) => !(k in mine))) };
+  return { mine, added: Object.fromEntries(Object.entries(src).filter(([k]) => !Object.hasOwn(mine, k))) };
 }
 
 /**
@@ -126,7 +126,7 @@ export function applyUpgrade(source, target, plan) {
   return keys;
 }
 
-export function main(argv, env = process.env, { source = ".", manifest = MANIFEST, print = console.log } = {}) {
+export function main(argv, env = process.env, { source = path.join(HERE, "..", ".."), manifest = MANIFEST, print = console.log } = {}) {
   if (env.CLAUDECODE) {
     print("upgrade.mjs refuses to run inside Claude (CLAUDECODE is set): run it in your own terminal");
     return 2;
@@ -148,8 +148,8 @@ export function main(argv, env = process.env, { source = ".", manifest = MANIFES
     print(`Upgraded: ${LOCK} rewritten.`);
     return 0;
   } catch (e) {
-    if (!(e instanceof Refusal)) throw e;
-    print(e.message);
+    // Any other failure (a directory at a managed path, a dangling link, an unreadable file) is one line and exit 2 too.
+    print(e instanceof Refusal ? e.message : `upgrade failed: ${e.code ?? "error"} ${e.message.split("\n")[0]}; rerun to see the plan again`);
     return 2;
   }
 }
