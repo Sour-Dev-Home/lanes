@@ -1718,6 +1718,14 @@ test("launchEnv: Windows without Git found launches with the inherited env and s
     assert.equal(note, `PATH not adjusted: ${why}`);
   }
 });
+test("launchEnv: edge: trailing newline, MinGW64 casing, Git at a drive root, and a ';' in the root", () => {
+  assert.match(launchEnv({ Path: "x" }, "win32", `${GIT_EXEC}\r\n`).env.Path, /^C:\\Program Files\\Git\\usr\\bin;/);
+  assert.match(launchEnv({ Path: "x" }, "win32", "C:/Git/MinGW64/libexec/git-core").env.Path, /^C:\\Git\\usr\\bin;/);
+  assert.match(launchEnv({ Path: "x" }, "win32", "C:/mingw64/libexec/git-core").env.Path, /^C:\\usr\\bin;C:\\mingw64\\bin;x$/);
+  const semi = launchEnv({ Path: "x" }, "win32", "C:/a;b/Git/mingw64/libexec/git-core");
+  assert.equal(semi.env.Path, "x");
+  assert.match(semi.note, /^PATH not adjusted: unexpected git --exec-path/);
+});
 test("launchEnv: Linux and macOS pass the environment through unchanged", () => {
   const inherited = { PATH: "/usr/bin" };
   for (const platform of ["linux", "darwin"]) {

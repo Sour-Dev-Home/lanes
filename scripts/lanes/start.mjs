@@ -114,7 +114,9 @@ export function launchEnv(env, platform, gitExecPath) {
   if (n < 4 || parts[n - 1] !== "git-core" || parts[n - 2] !== "libexec" || parts[n - 3].toLowerCase() !== "mingw64" || !/^[a-z]:$/i.test(parts[0])) {
     return { env, note: `PATH not adjusted: unexpected git --exec-path: ${gitExecPath.trim()}` };
   }
-  const root = parts.slice(0, n - 3).join(win32.sep);
+  // A bare drive (`C:`) needs its separator back, or `C:usr\bin` would be drive-relative. A `;` would split the entry.
+  const root = parts.slice(0, n - 3).join(win32.sep) + (n === 4 ? win32.sep : "");
+  if (root.includes(";")) return { env, note: `PATH not adjusted: unexpected git --exec-path: ${gitExecPath.trim()}` };
   const tools = [win32.join(root, "usr", "bin"), win32.join(root, "mingw64", "bin")].join(";");
   const key = Object.keys(env).find((k) => k.toLowerCase() === "path") ?? "Path";
   return { env: { ...env, [key]: env[key] ? `${tools};${env[key]}` : tools }, note: null };
