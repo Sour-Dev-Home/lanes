@@ -122,7 +122,7 @@ const OWNER_SAMPLES = {
   "^scripts/lanes/workflow\\.test\\.mjs$": ["scripts/lanes/workflow.test.mjs", "scripts/lanes/workflow.mjs"],
   "^scripts/lanes/contracts\\.test\\.mjs$": ["scripts/lanes/contracts.test.mjs", "scripts/lanes/contracts.test.mjs.bak"],
   "^scripts/lanes/start-guard(\\.test)?\\.mjs$": ["scripts/lanes/start-guard.test.mjs", "scripts/lanes/start-guards.mjs"],
-  "^scripts/lanes/shell-lex(\\.test|\\.fixtures)?\\.mjs$": ["scripts/lanes/shell-lex.fixtures.mjs","scripts/lanes/shell-lexer.mjs"],
+  "^scripts/lanes/shell-lex(\\.test|\\.fixtures)?\\.mjs$": ["scripts/lanes/shell-lex.fixtures.mjs", "scripts/lanes/shell-lexer.mjs"],
   "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$": ["scripts/lanes/setup-repo.mjs", "scripts/lanes/new-project-x.mjs"],
   "^scripts/gate-workflow\\.test\\.mjs$": ["scripts/gate-workflow.test.mjs", "scripts/gate-workflow.test.mjs.bak"],
   "^\\.claude/settings\\.json$": [".claude/settings.json", ".claude/settings.local.json"],
