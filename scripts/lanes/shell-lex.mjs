@@ -648,8 +648,12 @@ const MAX_ALIAS_DEPTH = 8;
 
 /** True when gh release create at `words[at]` names a v* tag, one known only at run time, or none (gh then asks). */
 function ghReleaseTag(words, at) {
-  if (words[at + 1] !== "release" || !["create", "new"].includes(words[at + 2])) return false;
-  for (let j = at + 3; j < words.length; j += 1) {
+  if (words[at + 1] !== "release") return false;
+  // release's own -R/--repo may stand before its subcommand (`gh release --repo o/r create v1`, security review).
+  let sub = at + 2;
+  while (/^(?:-R|--repo)(?:=.*)?$/s.test(words[sub] ?? "") || /^-R./s.test(words[sub] ?? "")) sub += /^(?:-R|--repo)$/.test(words[sub]) ? 2 : 1;
+  if (!["create", "new"].includes(words[sub])) return false;
+  for (let j = sub + 1; j < words.length; j += 1) {
     if (GH_RELEASE_VALUED.has(words[j])) j += 1;
     else if (!words[j].startsWith("-")) return RELEASE_REF_RE.test(unmark(words[j])) || LIVE_RE.test(words[j]);
   }
@@ -682,8 +686,8 @@ function releaseTagAt(words, depth) {
   let followTags = false;
   const aliases = new Map();
   for (; i < words.length && words[i].startsWith("-"); i += 1) {
-    if (words[i] === "-c" && /^push\.followtags/i.test(words[i + 1] ?? "")) followTags = true;
     const env = /^--config-env=(.*)$/s.exec(words[i])?.[1] ?? (words[i] === "--config-env" ? words[i + 1] : undefined);
+    if (/^push\.followtags/i.test((words[i] === "-c" ? words[i + 1] : env) ?? "")) followTags = true;
     const alias = ALIAS_RE.exec((words[i] === "-c" ? words[i + 1] : env) ?? "");
     // A --config-env alias takes its value from the environment: nothing of it is known here.
     if (alias) aliases.set(alias[1].toLowerCase(), env === undefined ? alias[2] : null);
@@ -699,8 +703,10 @@ function releaseTagAt(words, depth) {
     return releaseTagAt([...words.slice(at, i), ...unmark(value).trim().split(/\s+/), ...rest], depth + 1);
   }
   if (sub === "update-ref") {
-    if (rest.includes("--stdin")) return true;
-    if (rest.includes("-d")) return false;
+    // Options only: a -m value of `-d` deletes nothing (security review).
+    const options = rest.filter((w, k) => w.startsWith("-") && !UPDATE_REF_VALUED.has(rest[k - 1]));
+    if (options.includes("--stdin")) return true;
+    if (options.includes("-d")) return false;
     const ref = rest.find((w, k) => !w.startsWith("-") && !UPDATE_REF_VALUED.has(rest[k - 1]));
     return ref !== undefined && (TAG_REF_RE.test(unmark(ref)) || runtimeRef(ref));
   }

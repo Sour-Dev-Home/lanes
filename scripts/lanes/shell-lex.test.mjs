@@ -658,6 +658,18 @@ test("#424 hunt: an alias shadowing a built-in is ignored by git, so it hides no
   assert.equal(releaseTagCommand(lex(chain(9))[0]), true, "past the cap fails closed");
 });
 
+test("#424 security review: gh release's own --repo before create, a -m value of -d, and --config-env push.followTags", () => {
+  for (const cmd of [
+    "gh release --repo o/r create v1", "gh release -R o/r create v1", "gh release -Ro/r create v1", "gh release --repo=o/r new v1",
+    "git update-ref -m -d refs/tags/v1 HEAD", "git --config-env=push.followTags=X push", "git --config-env push.followTags=X push origin main",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of ["gh release --repo o/r view v1", "gh release -R o/r list", "git update-ref -m x -d refs/tags/v1"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+  }
+});
+
 test("#424 criterion 4: a shell's -c skips --rcfile and --init-file with their value to reach the script", () => {
   for (const cmd of ['bash -c --rcfile x "$S"', 'bash -c --init-file x "$S"', 'bash --init-file x -c "$S"', 'bash -c --rcfile x -- "$S"']) {
     assert.deepEqual([...shellTextIndexes(lex(cmd)[0])], [lex(cmd)[0].length - 1], cmd);
