@@ -236,6 +236,26 @@ test("every command file has a description", () => {
   }
 });
 
+// #275: /approve <N> [<N>...] approves up to 10 PRs, each with its own view, diff, SHA, owner post and merge.
+test("approve.md loops over every PR number, each with its own view, diff, owner post on its own SHA, and merge", () => {
+  const md = readFileSync(".claude/commands/approve.md", "utf8").replace(/\r\n/g, "\n");
+  assert.match(md, /^argument-hint: <pr-number> \[<pr-number>\.\.\.\]$/m);
+  const flat = md.replace(/\s+/g, " ");
+  assert.match(flat, /[Ff]or each PR number <N> in `\$ARGUMENTS`, in order/);
+  assert.match(flat, /at most 10 distinct/);
+  assert.match(flat, /`gh pr view <N> --json title,body,headRefOid`/);
+  assert.match(flat, /"Needs the owner"/);
+  assert.match(flat, /"Contract changes"/);
+  assert.match(flat, /`gh pr diff <N> --name-only`/);
+  assert.match(flat, /`node scripts\/lanes\/post-review\.mjs owner success "approved by owner" --pr <N> --sha <that PR's headRefOid>`/);
+  assert.match(flat, /never another PR's/);
+  assert.match(flat, /`gh pr merge <N> --auto`/);
+  assert.match(flat, /[Oo]ne PR that fails does not stop the others/);
+  assert.match(flat, /report lists each PR's outcome/);
+  // No step uses the whole argument list where one PR number belongs.
+  assert.doesNotMatch(flat, /(pr view|pr diff|pr merge|--pr) \$ARGUMENTS/);
+});
+
 const VENDORED_SKILLS = ["test-driven-development", "incremental-implementation", "api-and-interface-design", "planning-and-task-breakdown", "debugging-and-error-recovery", "frontend-ui-engineering", "security-and-hardening", "code-review-and-quality"];
 
 test("the vendored agent-skills are pinned, licensed and complete", () => {
