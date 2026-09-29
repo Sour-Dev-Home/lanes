@@ -12,7 +12,7 @@ import { parseBlockedBy } from "./blockers.mjs";
 import { cleanupMerged } from "./cleanup.mjs";
 import { GATE_CONTEXT } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
-import { inFlightIssues, launchArgs, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
+import { inFlightIssues, launchArgs, launchEnv, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
 import { gateDescriptions, prStage } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
@@ -190,12 +190,15 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     waits.clear();
     for (const [n, r] of current) waits.set(n, r);
     const tierOf = new Map(issues.map((i) => [i.number, labelsOf(i).find((l) => l?.startsWith("tier:"))?.slice("tier:".length)]));
+    // #344: as /start does (#337), Windows lanes launch with Git's POSIX tools first on PATH; a note says when not.
+    const { env: launchEnvironment, note: envNote } = plan.launch.length && deps.launchEnv ? deps.launchEnv() : { env: undefined, note: null };
     for (const n of plan.launch) {
+      if (envNote) say(`#${n}: ${envNote}`);
       // One attempt only: a launch that printed no id may still have started, and a retry could start it twice.
       let id = null;
       let why = "no session id in output";
       try {
-        id = parseSessionId(claude(launchArgs(n, { tier: tierOf.get(n), models }), { cwd: dir }));
+        id = parseSessionId(claude(launchArgs(n, { tier: tierOf.get(n), models }), launchEnvironment ? { cwd: dir, env: launchEnvironment } : { cwd: dir }));
       } catch (err) {
         why = reason(err);
       }
@@ -220,10 +223,20 @@ export async function main(argv, deps = DEFAULT_DEPS) {
 
 // The main checkout, even when run from a worktree: the parent of the shared .git directory.
 const repoRoot = () => dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
-const run = (cmd) => (args, { cwd } = {}) => execFileSync(cmd, args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000, windowsHide: true });
+const run = (cmd) => (args, { cwd, env } = {}) => execFileSync(cmd, args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000, windowsHide: true });
+
+// The launch environment for this machine: asks git where it lives; a git that cannot run counts as not found.
+function localLaunchEnv() {
+  let out = "";
+  try {
+    out = execFileSync("git", ["--exec-path"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch {}
+  return launchEnv(process.env, process.platform, out);
+}
 
 const DEFAULT_DEPS = {
   env: process.env,
+  launchEnv: localLaunchEnv,
   gh: run("gh"),
   claude: run("claude"),
   root: repoRoot,
