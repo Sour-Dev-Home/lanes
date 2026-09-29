@@ -359,6 +359,25 @@ function unpushedCount(branch, sh) {
   }
 }
 
+// #382: why a lane's worktree still holds work only its owner may drop, or null when it is clean and fully pushed.
+// Uses the dirty and unpushed reads loadCleanupInputs uses; a read that fails counts as work left. `run` as in `sh`.
+export function laneWorkLeft(path, branch, run = sh) {
+  const dirty = porcelain(path, run);
+  if (dirty === null) return "cannot read worktree status";
+  if (dirty) return "uncommitted changes";
+  const unpushed = unpushedCount(branch, run);
+  if (!Number.isInteger(unpushed)) return "cannot read unpushed commits";
+  return unpushed > 0 ? `${plural(unpushed, "commit")} not on any remote` : null;
+}
+
+// #382: removes a stopped lane's session, worktree and branch, without any force flag: git refuses a dirty worktree
+// and `branch -D` is only safe once laneWorkLeft said null. Throws on the first failing step.
+export function removeLaneWorktree({ id, path, branch }, run = sh) {
+  run("claude", ["rm", id]);
+  run("git", ["worktree", "remove", path]);
+  run("git", ["branch", "-D", branch]);
+}
+
 // The inputs to planCleanup, read from git, gh, `claude agents --json` and the .claude/worktrees folder. Throws when
 // any of them cannot be read: cleaning without knowing the sessions could remove a worktree from under one.
 // `run(cmd, args)` returns stdout or throws, and defaults to `sh`; every read goes through it.

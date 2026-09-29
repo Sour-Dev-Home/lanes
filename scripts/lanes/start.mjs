@@ -123,7 +123,7 @@ export function launchEnv(env, platform, gitExecPath) {
 }
 
 // The launch environment for this machine: asks git where it lives; a git that cannot run counts as not found.
-function localLaunchEnv() {
+export function localLaunchEnv() {
   let out = "";
   try {
     out = execFileSync("git", ["--exec-path"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
