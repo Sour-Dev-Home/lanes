@@ -239,7 +239,7 @@ test("normalizeRichPr keeps paths, dates, states and counts, and no login, title
     { context: "other", state: "success", at: "2026-09-26T02:00:00Z" },
   ]);
   assert.deepEqual(rich.checkRunAttempts, [2, 1]);
-  assert.deepEqual(rich.closingIssue, { number: 295, criteria: 3, criteriaDone: 1, bodyChars: 86, editedAt: ["2026-09-24T00:00:00Z"] });
+  assert.deepEqual(rich.closingIssue, { number: 295, criteria: 3, criteriaDone: 1, bodyChars: 86, editedAt: ["2026-09-24T00:00:00Z"], scopePaths: [] });
   const text = JSON.stringify(rich);
   for (const marker of ["octo-person", "person@example.invalid", "Real Name", "private-title-marker", "private-message-marker", "private-body-marker", "private-branch-marker", "Alice"]) {
     assert.ok(!text.includes(marker), `${marker} survived normalizeRichPr`);
@@ -259,7 +259,30 @@ test("normalizeRichPr ignores malformed attempts, missing edit lists and a closi
     closingIssuesReferences: { nodes: [{ number: 9 }] },
   }));
   assert.deepEqual(rich.checkRunAttempts, []);
-  assert.deepEqual(rich.closingIssue, { number: 9, criteria: 0, criteriaDone: 0, bodyChars: 0, editedAt: [] });
+  assert.deepEqual(rich.closingIssue, { number: 9, criteria: 0, criteriaDone: 0, bodyChars: 0, editedAt: [], scopePaths: [] });
+});
+
+const formBody = (goal = "private-body-marker") => [
+  "### Goal", "", goal, "",
+  "### Acceptance criteria", "", "- [ ] one", "",
+  "### Interface contract", "", "`scripts/lanes/a.mjs` gains an export", "",
+  "### Scope", "", "In: `scripts/lanes/b.mjs`, `docs/c/`. Out: `d.mjs`", "",
+  "### Blocked by", "", "none", "",
+  "### Tier", "", "full", "",
+].join("\n");
+
+test("normalizeRichPr returns the closing issue's claimed paths, and no other body text", () => {
+  const rich = normalizeRichPr(richNode({ closingIssuesReferences: { nodes: [{ number: 5, body: formBody() }] } }));
+  assert.deepEqual(rich.closingIssue.scopePaths, ["scripts/lanes/a.mjs", "scripts/lanes/b.mjs", "docs/c/"]);
+  const text = JSON.stringify(rich);
+  for (const marker of ["private-body-marker", "gains an export", "Goal"]) assert.ok(!text.includes(marker), `${marker} survived`);
+});
+
+test("edge: scopePaths is [] for a non-form body and a missing body", () => {
+  for (const body of ["just prose about scripts/lanes/a.mjs", "", undefined]) {
+    const rich = normalizeRichPr(richNode({ closingIssuesReferences: { nodes: [{ number: 5, body }] } }));
+    assert.deepEqual(rich.closingIssue.scopePaths, [], String(body));
+  }
 });
 
 test("normalizeRichPr survives non-array node lists and null entries instead of throwing", () => {
@@ -269,7 +292,7 @@ test("normalizeRichPr survives non-array node lists and null entries instead of 
     closingIssuesReferences: { nodes: [{ number: 3, body: 5, userContentEdits: { nodes: {} } }] },
   }));
   assert.deepEqual([rich.files, rich.commitDates, rich.statuses, rich.checkRunAttempts], [[], [], [], []]);
-  assert.deepEqual(rich.closingIssue, { number: 3, criteria: 0, criteriaDone: 0, bodyChars: 0, editedAt: [] });
+  assert.deepEqual(rich.closingIssue, { number: 3, criteria: 0, criteriaDone: 0, bodyChars: 0, editedAt: [], scopePaths: [] });
   const nulls = normalizeRichPr(richNode({ lastCommit: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: [null, 1, "s"] } } } }] } }));
   assert.deepEqual([nulls.statuses, nulls.checkRunAttempts], [[], []]);
 });

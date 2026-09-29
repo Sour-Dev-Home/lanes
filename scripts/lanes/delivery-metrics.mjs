@@ -25,6 +25,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseIssueForm } from "./lib.mjs";
+import { issuePaths } from "./paths.mjs";
 
 export const SCHEMA_VERSION = 1;
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -238,11 +240,17 @@ function safeContext(context) {
   return typeof context === "string" && /^[A-Za-z0-9_./-]{1,64}$/.test(context) ? context : "other";
 }
 
+/** The paths an issue form claims in its Interface contract and Scope; [] when the body is not an issue form. */
+function scopePaths(body) {
+  const { contract, scope } = parseIssueForm(body).fields;
+  return issuePaths({ contract, scope });
+}
+
 /**
  * The rich counterpart of normalizePr: the same base fields plus changed file paths, commit dates, status contexts
  * (name, lowercase state, time), check-run attempt counts and the closing issue reduced to numbers and dates. Logins,
  * titles, commit messages and the issue body text never leave this function.
- * @returns {ReturnType<typeof normalizePr> & { number: number; files: string[]; commitDates: string[]; statuses: { context: string; state: string; at: string }[]; checkRunAttempts: number[]; closingIssue: { number: number; criteria: number; criteriaDone: number; bodyChars: number; editedAt: string[] } | null } | undefined}
+ * @returns {ReturnType<typeof normalizePr> & { number: number; files: string[]; commitDates: string[]; statuses: { context: string; state: string; at: string }[]; checkRunAttempts: number[]; closingIssue: { number: number; criteria: number; criteriaDone: number; bodyChars: number; editedAt: string[]; scopePaths: string[] } | null } | undefined}
  */
 export function normalizeRichPr(node) {
   const base = normalizePr(node);
@@ -268,7 +276,9 @@ export function normalizeRichPr(node) {
           number: Number(issue.number) || 0,
           criteria: (body.match(/^\s*- \[[ xX]\]/gm) ?? []).length,
           criteriaDone: (body.match(/^\s*- \[[xX]\]/gm) ?? []).length,
-          bodyChars: body.length,          editedAt: list(issue.userContentEdits?.nodes).map((edit) => isoDate(edit?.editedAt)).filter((date) => date !== undefined),
+          bodyChars: body.length,
+          editedAt: list(issue.userContentEdits?.nodes).map((edit) => isoDate(edit?.editedAt)).filter((date) => date !== undefined),
+          scopePaths: scopePaths(body),
         }
       : null,
   };
