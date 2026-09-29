@@ -108,9 +108,9 @@ button:hover, button:focus-visible { background: var(--accent); color: var(--bg)
 /* metrics panel */
 .metrics[hidden] { display: none; }
 .metrics h3 { font-size: 1rem; margin: var(--space) 0 8px; }
-.metrics-table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); font-size: 0.9rem; }
+.metrics-table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); font-size: 0.9rem; }
 .metrics-table th, .metrics-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
-.metrics-table thead th, .metrics-table tr:first-child th[scope="col"] { color: var(--muted); font-weight: 600; }
+.metrics-table thead th { color: var(--muted); font-weight: 600; }
 .metrics-table th[scope="row"] { font-weight: 400; color: var(--text); }
 @media (max-width: 600px) {
   body { font-size: 15px; }

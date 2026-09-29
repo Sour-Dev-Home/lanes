@@ -277,7 +277,7 @@ test("edge: markup in a tier name is text, never an element", () => {
 
 test("edge: validMetrics accepts a report and rejects junk, missing blocks and wrong types", () => {
   assert.equal(app.validMetrics(report()), true);
-  for (const bad of [null, undefined, 5, "x", [], {}, { ...report(), schemaVersion: 2 }, { ...report(), review: null }, { ...report(), split: "no" }, { ...report(), split: [{ date: "d" }] }]) {
+  for (const bad of [null, undefined, 5, "x", [], {}, { ...report(), schemaVersion: 2 }, { ...report(), review: null }, { ...report(), split: "no" }, { ...report(), split: [{ date: "d" }] }, { ...report(), public: undefined }, { ...report(), public: "true" }, { ...report(), split: [{ before: block(), after: block() }] }]) {
     assert.equal(app.validMetrics(bad), false, JSON.stringify(bad));
   }
   const r = report();
@@ -315,6 +315,16 @@ test("metrics: a missing file, a bad body and a JSON error hide the panel; a goo
   await run(good);
   assert.equal(good.section.hidden, false);
   assert.ok(good.box.children.length > 0);
+});
+
+test("edge: a non-ok response hides the panel even when its body is a valid report", async () => {
+  const section = { hidden: false };
+  const d = fakeDoc();
+  const box = d.createElement("div");
+  d.getElementById = (id) => (id === "metrics" ? section : box);
+  await app.loadMetrics(d, async () => ({ ok: false, status: 500, json: async () => report() }));
+  assert.equal(section.hidden, true);
+  assert.equal(box.children.length, 0);
 });
 
 test("metrics: app.js fetches lane-metrics.json, and index.html has the hidden panel", () => {

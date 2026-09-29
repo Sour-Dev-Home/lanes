@@ -306,11 +306,11 @@ function validAggregate(a) {
 
 // A shape check only: enough that rendering cannot throw. Anything else hides the panel.
 function validMetrics(report) {
-  if (!validAggregate(report) || report.schemaVersion !== 1) return false;
+  if (!validAggregate(report) || report.schemaVersion !== 1 || typeof report.public !== "boolean") return false;
   if (!Array.isArray(report.review.tiers)) return false;
   if (report.split === undefined) return true;
   return Array.isArray(report.split) && report.split.every(function (s) {
-    return isObject(s) && validAggregate(s.before) && validAggregate(s.after) && Array.isArray(s.before.review.tiers) && Array.isArray(s.after.review.tiers);
+    return isObject(s) && typeof s.date === "string" && validAggregate(s.before) && validAggregate(s.after) && Array.isArray(s.before.review.tiers) && Array.isArray(s.after.review.tiers);
   });
 }
 
@@ -342,15 +342,18 @@ function metricRows(a) {
   ];
 }
 
-function table(doc, headers, rows) {
+function table(doc, label, headers, rows) {
   var t = el(doc, "table", "metrics-table");
+  t.setAttribute("aria-label", label);
+  var thead = el(doc, "thead");
   var head = el(doc, "tr");
   headers.forEach(function (h) {
     var th = el(doc, "th", "", h);
     th.setAttribute("scope", "col");
     head.appendChild(th);
   });
-  t.appendChild(head);
+  thead.appendChild(head);
+  t.appendChild(thead);
   rows.forEach(function (r) {
     var tr = el(doc, "tr");
     r.forEach(function (cell, i) {
@@ -367,13 +370,14 @@ function table(doc, headers, rows) {
 function renderMetrics(doc, box, report) {
   if (!validMetrics(report)) return false;
   box.appendChild(el(doc, "p", "muted", "Last " + num((report.window || {}).days, 0) + " days: medians and counts, not causes."));
-  box.appendChild(table(doc, ["Metric", "Value"], metricRows(report)));
+  box.appendChild(table(doc, "Lane metrics", ["Metric", "Value"], metricRows(report)));
   var tiers = report.review.tiers.filter(isObject);
   if (tiers.length) {
     box.appendChild(el(doc, "h3", "", "Per tier"));
     box.appendChild(
       table(
         doc,
+        "Metrics per tier",
         ["Tier", "Review runs", "Real findings", "Runs with none"],
         tiers.map(function (t) {
           return [t.tier, num(t.runs, 0), num(t.realFindings, 0), pct(t.noRealFindingShare)];
@@ -387,6 +391,7 @@ function renderMetrics(doc, box, report) {
     box.appendChild(
       table(
         doc,
+        "Before and after " + s.date,
         ["Metric", "Before", "After"],
         metricRows(s.before).map(function (r, i) {
           return [r[0], r[1], after[i][1]];
@@ -401,6 +406,7 @@ function renderMetrics(doc, box, report) {
 function loadMetrics(doc, fetcher) {
   var section = doc.getElementById("metrics");
   var box = doc.getElementById("metrics-body");
+  if (!section || !box) return Promise.resolve();
   var hide = function () {
     section.hidden = true;
   };
