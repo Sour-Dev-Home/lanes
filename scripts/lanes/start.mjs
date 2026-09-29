@@ -456,7 +456,10 @@ function startIssues(args, deps, config) {
     }
     issues.push({ number: n, state: view.state, labels: (view.labels ?? []).map((l) => l.name), blockers: checkBlockers([String(n)], deps.gh) });
   }
-  const overlaps = (a, b) => pathsOf.has(a) && pathsOf.has(b) && pathsOverlap(pathsOf.get(a), pathsOf.get(b));
+  // Soft paths never count, as in pickStartable for --auto.
+  const soft = config.softPaths.map((s) => new RegExp(s));
+  const hard = (paths) => paths.filter((p) => !soft.some((re) => re.test(p)));
+  const overlaps = (a, b) => pathsOf.has(a) && pathsOf.has(b) && pathsOverlap(hard(pathsOf.get(a)), hard(pathsOf.get(b)));
 
   const { launch, refused } = planStart({ issues, inFlight, overlaps, running: (n) => runningOverlap.get(n) ?? null, maxLanes: config.maxLanes });
   const tiers = new Map(issues.filter((i) => i.labels).map((i) => [i.number, tierOf(i.labels)]));
