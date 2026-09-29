@@ -203,6 +203,27 @@ test("edge: a source config key named like an inherited property is still added"
   assert.equal(Object.hasOwn(cfg, "constructor"), true);
 });
 
+test("a managed file that is itself a link to a file outside the target is never written through", (t) => {
+  const { source, target } = fixture({ lockFiles: {} });
+  const outside = tmp();
+  put(outside, "victim.txt", "outside");
+  try {
+    symlinkSync(path.join(outside, "victim.txt"), path.join(target, "f.txt"), "file");
+  } catch {
+    return t.skip("cannot create a file symlink here");
+  }
+  put(source, "f.txt", "payload");
+  assert.equal(main([target, "--apply"], {}, { source, manifest: ["f.txt"], print: () => {} }), 2);
+  assert.equal(get(outside, "victim.txt"), "outside");
+});
+
+test("edge: a config key the source has and the target has as null is not re-added", () => {
+  const { source, target } = fixture();
+  put(target, "lanes.config.json", '{"keep":null,"added":null,"extra":null}');
+  main([target, "--apply"], {}, { source, manifest: [], print: () => {} });
+  assert.equal(get(target, "lanes.config.json"), '{"keep":null,"added":null,"extra":null}');
+});
+
 test("readLock returns the parsed lock for a valid file", () => {
   const { target } = fixture();
   assert.equal(readLock(target).version, "0.1.0");
