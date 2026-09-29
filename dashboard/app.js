@@ -307,9 +307,9 @@ function renderGraph(doc, issues, edges, overlaps) {
     svg.appendChild(head);
   });
   (overlaps || []).forEach(function (o) {
+    if (!Object.prototype.hasOwnProperty.call(pos, o.a) || !Object.prototype.hasOwnProperty.call(pos, o.b) || o.a === o.b) return;
     var a = pos[o.a];
     var b = pos[o.b];
-    if (!a || !b || o.a === o.b) return;
     var line = el(doc, "line", "overlap", null, SVG_NS);
     line.setAttribute("x1", a.x + NODE_W / 2);
     line.setAttribute("y1", a.y + NODE_H / 2);
@@ -319,7 +319,7 @@ function renderGraph(doc, issues, edges, overlaps) {
   });
   issues.forEach(function (i) {
     var p = pos[i.number];
-    var g =el(doc, "g", "node stage-" + slug(stageOf(i)) + (onPath[i.number] ? " critical" : ""), null, SVG_NS);
+    var g = el(doc, "g", "node stage-" + slug(stageOf(i)) + (onPath[i.number] ? " critical" : ""), null, SVG_NS);
     var rect = el(doc, "rect", "", null, SVG_NS);
     rect.setAttribute("x", p.x);
     rect.setAttribute("y", p.y);

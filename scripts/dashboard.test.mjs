@@ -427,3 +427,13 @@ test("metrics: style.css styles the panel with tokens only", () => {
   assert.match(css.slice(at), /\.metrics/);
   assert.doesNotMatch(css.slice(at), /#[0-9a-fA-F]{3,6}\b/);
 });
+
+test("boundary: age words flip exactly at 1 and 60 minutes; the waiting note and stale note at 5 and 20", () => {
+  assert.equal(app.ageText(ago(59999), NOW), "updated just now");
+  assert.equal(app.ageText(ago(60000), NOW), "updated 1 min ago");
+  assert.equal(app.ageText(ago(60 * 60000 - 1), NOW), "updated 59 min ago");
+  assert.equal(app.ageText(ago(60 * 60000), NOW), "updated over an hour ago");
+  assert.notEqual(app.waitingNote(ago(5 * 60000 + 1), NOW), "");
+  assert.equal(app.staleNote(ago(20 * 60000), NOW), "");
+  assert.notEqual(app.staleNote(ago(20 * 60000 + 1), NOW), "");
+});
