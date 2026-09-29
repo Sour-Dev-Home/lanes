@@ -1960,6 +1960,19 @@ test("#316 edge: every -EncodedCommand spelling and wrapper is decoded; other fl
   }
 });
 
+test("#316 hunt: a second -e after a harmless one, -e -e, a quoted value and an empty or huge value never throw and never hide a launch", () => {
+  const bg = encodedPs(`claude ${BG} x`);
+  const ok = encodedPs("Write-Host hi");
+  for (const c of [`pwsh -e ${ok} -e ${bg}`, `pwsh -e -e ${bg}`, `pwsh -e "${bg}"`, `pwsh -EncodedCommand:${bg}`]) {
+    assert.equal(decideFor(bash(c))?.decision, "deny", c);
+  }
+  for (const c of ["pwsh -e", 'pwsh -e ""', `pwsh -e ${"A".repeat(50000)}`, `pwsh -e ${ok}`]) assert.equal(decideFor(bash(c)), null, c);
+});
+
+test("#316 hunt: a .claude directory beside --bg is no claude launch (kills dropping the not-after-a-dot guard)", () => {
+  for (const c of ["ls ~/.claude --bg", "ls ./.claude --bg", "cp x ~/.claude --background"]) assert.equal(decideFor(bash(c)), null, c);
+});
+
 test("#316 edge: -EncodedCommand scripts nested past the depth limit are denied", () => {
   let script = "Get-Date";
   for (let i = 0; i < 6; i += 1) script = `pwsh -e ${encodedPs(script)}`;
