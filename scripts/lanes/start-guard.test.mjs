@@ -1557,7 +1557,6 @@ const NO_LAUNCH = [
   "gh pr merge 72 --auto",
   "gh pr view 72 --json statusCheckRollup --jq '[.statusCheckRollup[] | select(.status != \"COMPLETED\")] as $s | $s | length'",
   "node scripts/lanes/status.mjs",
-  `node --input-type=module -e 'import { readFileSync, writeFileSync } from "node:fs"; const f = ".lanes/body.md"; writeFileSync(f, readFileSync(f, "utf8").replace("old", "lanes are launched by start.mjs, never by claude ${BG} directly"));'`,
 ];
 
 test("#61 criterion 6: commands that launch nothing get no decision, alone and chained with ; or &&", () => {
@@ -1607,16 +1606,21 @@ test("#61 edge: jq programs, gh --jq/-q/--template values and their = forms keep
   assert.equal(decideFor(bash("gh pr view 1 --body 'x' | sh -c 'node $S'"), grant())?.decision, "deny");
 });
 
-test("#61 edge: a node -e script that names claude and --bg but cannot launch anything gets no decision", () => {
-  for (const c of [
-    `node -e 'console.log("claude ${BG}")'`,
-    `node -p '"use claude ${BG} never"'`,
-    `node --input-type=module -e 'import fs from "node:fs"; fs.writeFileSync("x", "claude ${BG}")'`,
-    `node -p '"see start.mjs and queue.mjs".length'`,
-    `node --input-type=module -e 'import { writeFileSync } from "node:fs"; writeFileSync("b.md", "node scripts/lanes/start.mjs 5 and queue.mjs")'`,
+test("#61 owner decision: a node -e script that names start.mjs, queue.mjs or claude --bg is denied, even one that only writes text", () => {
+  // Owner decision on #61 (2026-09-28, PR #317): no exemption; the owner session writes such scripts to a file instead.
+  for (const [c, reason] of [
+    [`node -e 'console.log("claude ${BG}")'`, BG_DENY_REASON],
+    [`node -p '"use claude ${BG} never"'`, BG_DENY_REASON],
+    [`node --input-type=module -e 'import { readFileSync, writeFileSync } from "node:fs"; const f = ".lanes/body.md"; writeFileSync(f, readFileSync(f, "utf8").replace("old", "never by claude ${BG} directly"));'`, BG_DENY_REASON],
+    [`node --eval='console.log("st" + "art.mjs")'`, DENY_REASON],
+    [`node --input-type=module -e 'import { writeFileSync } from "node:fs"; writeFileSync("b.md", "node scripts/lanes/start.mjs 5")'`, DENY_REASON],
+    [`node -p '"see queue.mjs".length'`, QUEUE_DENY_REASON],
   ]) {
-    assert.equal(decideFor(bash(c)), null, c);
+    assert.deepEqual(decideFor(bash(c), grant()), { decision: "deny", reason }, c);
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
   }
+  // A node -e script that names none of them still gets no decision.
+  assert.equal(decideFor(bash(`node -e 'console.log(1)'`)), null);
 });
 
 test("#61 edge: PowerShell strings, redirections and stop-parsing at the edges of a command", () => {
@@ -1686,8 +1690,6 @@ test("#61 edge (test-hunter): a comment between import and its paren or string d
   assert.deepEqual(decideFor(bash(`node -e "import/**/('child_pro'+'cess').then((m) => m.spawn('claude', ['${BG}']))"`), grant()), { decision: "deny", reason: BG_DENY_REASON });
   // A // inside a string does not make real code after it vanish.
   assert.deepEqual(decideFor(bash(`node -e 'const u = "http://x"; require("child_process").spawn("claude", ["${BG}"])'`), grant()), { decision: "deny", reason: BG_DENY_REASON });
-  // Comments alone still launch nothing.
-  assert.equal(decideFor(bash(`node -e '/* claude ${BG} */ console.log(1)'`)), null);
 });
 
 test("#61 edge (test-hunter): a PowerShell alias or COM object that hides node or claude fails closed", () => {
@@ -1772,7 +1774,7 @@ test("#61 edge (security review): a node -e script reaching process, global, thi
   }
 });
 
-test("#61 edge (security review round 2): a node -e script that builds API names from strings is not inert", () => {
+test("#61 edge (security review round 2): a node -e script that builds API names from strings is denied", () => {
   const reflect = `var G=Object.getOwnPropertyDescriptor; var F=G(Object.getPrototypeOf(()=>{}),"constr"+"uctor").value; var m=F("return proc"+"ess.getBuiltin"+"Module(\\"child_\\"+\\"proc\\"+\\"ess\\")")(); G(m,"spa"+"wnSync").value`;
   for (const [target, reason] of [["scripts/lanes/start.mjs", DENY_REASON], ["scripts/lanes/queue.mjs", QUEUE_DENY_REASON]]) {
     const c = `node -e '${reflect}("node",["${target}"])'`;
@@ -1799,17 +1801,6 @@ test("#61 edge (security review round 2): a node -e script that builds API names
   }
 });
 
-test("#61 edge (security review round 2): inert node -e scripts that name a target still get no decision", () => {
-  for (const js of [
-    `import { readFileSync, writeFileSync } from "node:fs"; const f = "b.md"; writeFileSync(f, readFileSync(f, "utf8").replace(/old \\/ x/g, "claude ${BG}").trim())`,
-    `import path from "node:path"; console.log(path.join("scripts", "lanes", "start.mjs"), JSON.stringify({ a: [1, 2], b: "claude ${BG}" }))`,
-    `const lines = ["queue.mjs", "start.mjs"].map((l) => l.toUpperCase()); console.log(lines.length / 2, lines)`,
-    `// claude ${BG}\nconsole.log(Math.max(1, 2) > 1 ? "start.mjs" : "queue.mjs")`,
-  ]) {
-    assert.equal(decideFor(bash(`node --input-type=module -e '${js}'`)), null, js);
-  }
-});
-
 test("#61 edge (test-hunter round 2): only an alias command word fails closed, not the word sal in text", () => {
   for (const c of ["git commit -m 'add sal column'", "Get-Content sal.txt", "Write-Output nal"]) assert.equal(decideFor(ps(c)), null, c);
   for (const c of ["sal n node; n scripts/lanes/start.mjs 5", "& 'Set-Alias' c claude; c --bg", "Set-Item alias:n node; n scripts/lanes/start.mjs 5", "nal c claude"]) {
@@ -1817,7 +1808,7 @@ test("#61 edge (test-hunter round 2): only an alias command word fails closed, n
   }
 });
 
-test("#61 edge (security review round 3): node -e's bare builtin modules and destructuring are not inert", () => {
+test("#61 edge (security review round 3): node -e's bare builtin modules and destructuring are denied", () => {
   for (const js of [
     `const {execSync} = child_process; execSync("node scripts/lanes/start.mjs 5")`,
     `const c = child_process; "scripts/lanes/start.mjs"`,
@@ -1837,37 +1828,16 @@ test("#61 edge (security review round 3): node -e's bare builtin modules and des
   assert.equal(decideFor(ps(`node -e 'const {execSync} = child_process; execSync("node scripts/lanes/start.mjs 5")'`), grant())?.decision, "deny");
 });
 
-test("#61 edge (security review round 3): scripts that bind their own names, parameters and object keys stay inert", () => {
-  for (const js of [
-    `import fs from "node:fs"; let n = 0; n = 1; function f(a, b) { return a + b } fs.writeFileSync("x", "start.mjs " + f(n, 2))`,
-    `const o = { a: 1, b: "claude ${BG}" }; console.log(JSON.stringify(o), [1, 2].map((x, i) => x * i), ((y) => y)(3))`,
-    `for (const line of ["start.mjs"]) console.log(line)`,
-  ]) {
-    assert.equal(decideFor(bash(`node --input-type=module -e '${js}'`)), null, js);
-  }
-});
-
 test("#61 edge (security review round 3): Import-Alias fails closed like the other alias commands", () => {
   for (const c of ["Import-Alias aliases.csv; n scripts/lanes/start.mjs 5", "ipal aliases.csv"]) assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
 });
 
-test("#61 edge (security review round 4): a bindable name before a slash does not start a regex literal", () => {
+test("#61 edge (security review round 4): a slash after a bound name, and a case expression, are denied", () => {
   for (const js of [
     `const of = 4; of / 1, require("fs") / 1; "scripts/lanes/start.mjs"`,
-    `let of = 2; const n = of / 2 / 1; "scripts/lanes/start.mjs"`,
+    `switch (1) { case 1, child_process: break } "scripts/lanes/start.mjs"`,
   ]) {
     assert.deepEqual(decideFor(bash(`node -e '${js}'`), grant()), { decision: "deny", reason: DENY_REASON }, js);
     assert.equal(decideFor(ps(`node -e '${js}'`), grant())?.decision, "deny", js);
-  }
-  // A regex after a reserved word, and a division, still read as they should.
-  for (const js of [`const f = (s) => { return /start/.test(s) }; console.log(f("start.mjs"), 4 / 2 / 1)`, `for (const x of ["start.mjs"]) console.log(x)`]) {
-    assert.equal(decideFor(bash(`node -e '${js}'`)), null, js);
-  }
-});
-
-test("#61 edge (security review round 4): only an object literal's key is exempt, not a case expression", () => {
-  assert.equal(decideFor(bash(`node -e 'switch (1) { case 1, child_process: break } "scripts/lanes/start.mjs"'`), grant())?.decision, "deny");
-  for (const js of [`const o = { a: 1, b: [{ c: "start.mjs" }] }; console.log(o)`, `console.log(1 ? { k: "start.mjs" } : null)`]) {
-    assert.equal(decideFor(bash(`node -e '${js}'`)), null, js);
   }
 });

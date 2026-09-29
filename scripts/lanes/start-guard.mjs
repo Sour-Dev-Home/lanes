@@ -22,9 +22,8 @@
 //     approve-guard.mjs) and scanned as the Bash command with the same words, under the same grant rules; one that
 //     cannot be read is denied when it names start.mjs, queue.mjs or --bg. Raw-text checks drop quotes first, so a
 //     name split by quoting (st"art.mjs, --"bg") still reads whole. A jq program or gh --jq/--template value keeps its
-//     `$` literal, and a node -e script that names a target counts as a run unless it is provably inert (inertScript).
+//     `$` literal. A node -e script that names a target still counts as a run (owner decision, 2026-09-28).
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { builtinModules } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isAutomatedInput, powershellAsBash } from "./approve-guard.mjs";
@@ -439,168 +438,9 @@ function programWords(words) {
   return at;
 }
 
-// A node -e script that names start.mjs, queue.mjs or claude --bg is a run unless it is provably inert (#61): an
-// allowlist, since any list of dangerous names is beaten by building them from strings ("constr" + "uctor", "proc" +
-// "ess", #61 security review round 2). Inert means: outside its string, template and regex literals and comments, every
-// name follows namesInert (a listed keyword or safe global, or the script's own safe binding); every member read after
-// `.` is one below; and there is no destructuring, computed member or key (`x[k]`, `{[k]: v}`), template substitution,
-// backslash, non-ASCII character, dynamic import, or import of anything but a file-system, path, URL, OS or util
-// builtin. Such a script can only compute and read or write text.
-const SAFE_IMPORT_RE = /^(node:)?(fs|fs\/promises|path|url|os|util)$/;
-const SAFE_JS_KEYWORDS = new Set(["const", "let", "var", "of", "in", "for", "if", "else", "return", "true", "false", "null", "typeof", "function", "while", "break", "continue", "do", "switch", "case", "default", "import", "from", "as"]);
-// Keywords after which a `/` starts a regex literal rather than a division. `of` is no reserved word: a script that
-// binds it could hide code between two slashes as a "regex", so namesInert refuses any binding of it (#61 security
-// review round 4).
-const JS_EXPRESSION_KEYWORDS = new Set(["return", "typeof", "case", "in", "of", "else", "do"]);
-const SAFE_JS_GLOBALS = new Set(["console", "JSON", "String", "Number", "Math", "parseInt", "undefined", "NaN"]);
-// Names that are no property of globalThis but still reach code: module-scope variables, and keywords not listed above.
-const UNSAFE_JS_NAMES = new Set(["require", "module", "exports", "__filename", "__dirname", "arguments", "this", "self", "super", "new", "class", "extends", "delete", "void", "yield", "async", "await", "with", "debugger", "export", "eval"]);
-const BUILTIN_MODULES = new Set(builtinModules);
-const SAFE_JS_MEMBERS = new Set([
-  "log", "error", "warn", "info", "parse", "stringify", "readFileSync", "writeFileSync", "appendFileSync", "existsSync", "mkdirSync",
-  "readdirSync", "replace", "replaceAll", "split", "join", "trim", "trimEnd", "trimStart", "includes", "startsWith", "endsWith",
-  "slice", "substring", "indexOf", "lastIndexOf", "length", "map", "filter", "forEach", "find", "findIndex", "some", "every", "push",
-  "pop", "concat", "reverse", "sort", "toUpperCase", "toLowerCase", "match", "test", "padStart", "padEnd", "repeat", "at", "keys",
-  "values", "entries", "max", "min", "floor", "ceil", "round", "abs", "toFixed", "resolve", "dirname", "basename", "extname",
-  "relative", "normalize", "sep",
-]);
-
-/** True when a node -e script is inert as described above; false for anything it cannot read. */
-function inertScript(js) {
-  const src = js.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, "`").replaceAll(QUOTED_TICK, "`");
-  // The last token's kind ("id", "num", "str" or a punctuation character), the last name, and whether a `.` came before.
-  let prev = "";
-  let prevWord = "";
-  let afterDot = false;
-  const tokens = [];
-  const operandBefore =() => ["num", "str", ")", "]", "}"].includes(prev) || (prev === "id" && !JS_EXPRESSION_KEYWORDS.has(prevWord));
-  for (let i = 0; i < src.length; ) {
-    const c = src[i];
-    if (c.charCodeAt(0) > 126) return false;
-    if (/\s/.test(c)) {
-      i += 1;
-    } else if (src.startsWith("//", i)) {
-      const e = src.indexOf("\n", i);
-      i = e === -1 ? src.length : e;
-    } else if (src.startsWith("/*", i)) {
-      const e = src.indexOf("*/", i + 2);
-      if (e === -1) return false;
-      i = e + 2;
-    } else if ((afterDot && !/[A-Za-z_$]/.test(c)) || (prev === "id" && prevWord === "import" && (c === "(" || c === "."))) {
-      // A member that is no name (`x.#p`, `x?.[k]`), or a dynamic import or import.meta, comments between or not.
-      return false;
-    } else if (c === '"' || c === "'" || c === "`") {
-      let j = i + 1;
-      for (; j < src.length && src[j] !== c; j += 1) {
-        if (src[j] === "\\") j += 1;
-        else if (c === "`" && src[j] === "$" && src[j + 1] === "{") return false;
-      }
-      if (j >= src.length) return false;
-      if (prev === "id" && (prevWord === "from" || prevWord === "import") && !SAFE_IMPORT_RE.test(src.slice(i + 1, j))) return false;
-      tokens.push({ k: "lit" });
-      prev = "str";
-      i = j + 1;
-    } else if (c === "/" && !operandBefore()) {
-      // A regex literal: data, like a string.
-      let j = i + 1;
-      for (let inClass = false; j < src.length && (src[j] !== "/" || inClass); j += 1) {
-        if (src[j] === "\n") return false;
-        if (src[j] === "\\") j += 1;
-        else if (src[j] === "[") inClass = true;
-        else if (src[j] === "]") inClass = false;
-      }
-      if (j >= src.length) return false;
-      i = j + 1;
-      while (i < src.length && /\w/.test(src[i])) i += 1;
-      tokens.push({ k: "lit" });
-      prev = "str";
-    } else if (/[A-Za-z_$]/.test(c)) {
-      let j = i;
-      while (j < src.length && /[\w$]/.test(src[j])) j += 1;
-      const word = src.slice(i, j);
-      if (afterDot && !SAFE_JS_MEMBERS.has(word)) return false;
-      tokens.push({ k: "id", v: word, dot: afterDot });
-      prev = "id";
-      prevWord = word;
-      afterDot = false;
-      i = j;
-    } else if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(src[i + 1] ?? ""))) {
-      while (i < src.length && /[\w.]/.test(src[i])) i += 1;
-      tokens.push({ k: "lit" });
-      prev = "num";
-    } else if (c === "." && src.startsWith("...", i)) {
-      tokens.push({ k: "p", v: "..." });
-      prev = "...";
-      i += 3;
-    } else if (c === "." || (c === "?" && src[i + 1] === ".")) {
-      afterDot = true;
-      i += c === "." ? 1 : 2;
-    } else if (c === "\\" || (c === "[" && operandBefore())) {
-      // A backslash could spell a name; `x[k]` reads a member no name shows.
-      return false;
-    } else if (c === "]" && /^\s*:/.test(src.slice(i + 1))) {
-      // `{[k]: v}`: a computed key.
-      return false;
-    } else {
-      tokens.push({ k: "p", v: c });
-      prev = c;
-      i += 1;
-    }
-  }
-  return !afterDot && namesInert(tokens);
-}
-
-/**
- * The name rule of inertScript over its tokens (#61 security review round 3). A bare name is safe only when it is a
- * listed keyword or safe global, or a name the script binds itself (const, let, var, function, a parameter, an import
- * binding, an assignment target) that is no global, module variable or builtin module other than a safe one: node -e
- * has `child_process` and the other builtin modules as bare names that the guard's own globalThis lacks. A destructuring
- * pattern reads members by name with no `.` to check (`const {execSync} = child_process`), so none is allowed.
- */
-function namesInert(t) {
-  const isP = (k, v) => t[k]?.k === "p" && t[k].v === v;
-  const assignAt = (k) => isP(k, "=") && !isP(k + 1, "=") && !isP(k + 1, ">");
-  const arrowAt = (k) => isP(k, "=") && isP(k + 1, ">");
-  const declared = new Set();
-  const parens = [];
-  // The open brackets around each token, to tell an object literal's `key:` from a bare name.
-  const brackets = [];
-  const keyAt = new Set();
-  for (let k = 0; k < t.length; k += 1) {
-    const x = t[k];
-    if (x.k === "id" && !x.dot) {
-      if (["const", "let", "var"].includes(x.v) && (isP(k + 1, "{") || isP(k + 1, "["))) return false;
-      if (["const", "let", "var", "function"].includes(x.v) && t[k + 1]?.k === "id") declared.add(t[k + 1].v);
-      if (assignAt(k + 1) || arrowAt(k + 1)) declared.add(x.v);
-      if (x.v === "import") for (let m = k + 1; m < t.length && !(t[m].k === "id" && t[m].v === "from"); m += 1) if (t[m].k === "id") declared.add(t[m].v);
-      if ((isP(k - 1, "{") || isP(k - 1, ",")) && isP(k + 1, ":") && brackets.at(-1) === "{o") keyAt.add(k);
-    }
-    if (x.k !== "p") continue;
-    if ((x.v === "}" || x.v === "]") && (assignAt(k + 1) || (t[k + 1]?.k === "id" && ["of", "in"].includes(t[k + 1].v)))) return false;
-    // A `{` after `=`, `(`, `,`, `:`, `[`, `?` or return opens an object literal ("{o"), whose `key:` is no expression;
-    // any other `{` (a block, a switch body with `case a, b:`) is not one (#61 security review round 4).
-    const literalOpener = isP(k - 1, "=") || isP(k - 1, "(") || isP(k - 1, ",") || isP(k - 1, ":") || isP(k - 1, "[") || isP(k - 1, "?") || (t[k - 1]?.k === "id" && t[k - 1].v === "return");
-    if (x.v === "{") brackets.push(literalOpener ? "{o" : "{");
-    else if (x.v === "(" || x.v === "[") brackets.push(x.v);
-    else if (x.v === ")" || x.v === "}" || x.v === "]") brackets.pop();
-    if (x.v === "(") parens.push({ at: k, pattern: false, params: t[k - 1]?.v === "function" || t[k - 2]?.v === "function" });
-    else if ((x.v === "{" || x.v === "[") && parens.length > 0) parens.at(-1).pattern = true;
-    else if (x.v === ")") {
-      const g = parens.pop();
-      if (!g) return false;
-      if (g.params || arrowAt(k + 1)) {
-        if (g.pattern) return false;
-        for (let m = g.at + 1; m < k; m += 1) if (t[m].k === "id" && !t[m].dot) declared.add(t[m].v);
-      }
-    }
-  }
-  // A bound `of` changes how the tokenizer reads a `/` after it (see JS_EXPRESSION_KEYWORDS).
-  if (declared.has("of")) return false;
-  const unsafe = (w) => UNSAFE_JS_NAMES.has(w) || w in globalThis || (BUILTIN_MODULES.has(w) && !SAFE_IMPORT_RE.test(w));
-  return t.every((x, k) => x.k !== "id" || x.dot || keyAt.has(k) || SAFE_JS_KEYWORDS.has(x.v) || SAFE_JS_GLOBALS.has(x.v) || (declared.has(x.v) && !unsafe(x.v)));
-}
-
-const mayLaunch = (js) => !inertScript(js);
+// A node -e script that names start.mjs, queue.mjs or claude --bg counts as a run, whatever else it does (owner
+// decision on #61, 2026-09-28: no exemption for scripts that only write text; four review rounds each found a way to
+// launch through one). The owner session writes such scripts to a file instead.
 // A node -e script's text as names are looked for in it: quotes, `+` and whitespace dropped, so "st" + "art.mjs" reads whole.
 const jsNames = (js) => js.replace(new RegExp(`["'\`+\\s${LIT_TICK}]`, "g"), "");
 
@@ -806,10 +646,9 @@ function startInvocations(cmd, typed) {
     (text) => {
       if (/start\.mjs/i.test(dequoted(text))) out.push({ issues: undefined, standalone: false, unparsed: true });
     },
-    // A node -e script that names start.mjs and can load or launch code could import or spawn it (#61); one the shell
-    // expands could be anything.
+    // A node -e script that names start.mjs could import or spawn it; one the shell expands could be anything.
     (js) => {
-      if ((/start\.mjs/i.test(jsNames(js)) && mayLaunch(js)) || UNRESOLVED_RE.test(js)) out.push({ issues: undefined, standalone: false });
+      if (/start\.mjs/i.test(jsNames(js)) || UNRESOLVED_RE.test(js)) out.push({ issues: undefined, standalone: false });
     },
   );
   // No raw-text fallback: `node $(echo …start.mjs)` and backticks leave `$` or a backtick in the script word, which
@@ -861,7 +700,7 @@ function scanQueueInvocations(command) {
       if (/queue\.mjs/i.test(dequoted(text))) found = true;
     },
     (js) => {
-      if (/queue\.mjs/i.test(jsNames(js)) && mayLaunch(js)) found = true;
+      if (/queue\.mjs/i.test(jsNames(js))) found = true;
       else if (UNRESOLVED_RE.test(js)) unresolved = true;
     },
   );
@@ -892,10 +731,10 @@ function scanBgLaunches(command) {
     (text) => {
       if (/--(bg|background)/.test(dequoted(text))) opaque = true;
     },
-    // A node -e script that names claude and --bg could spawn it, when it can launch anything at all (#61).
+    // A node -e script that names claude and --bg could spawn it.
     (js) => {
       const names = jsNames(js);
-      if (/claude/i.test(names) && /--(bg|background)/.test(names) && mayLaunch(js)) found = true;
+      if (/claude/i.test(names) && /--(bg|background)/.test(names)) found = true;
     },
   );
   // `$(which claude) --bg`: the lexer splits the substitution off, so claude and its flag land in different simple
