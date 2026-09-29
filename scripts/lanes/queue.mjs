@@ -12,8 +12,9 @@ import { parseBlockedBy } from "./blockers.mjs";
 import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWorktree, waitForStop } from "./cleanup.mjs";
 import { GATE_CONTEXT, laneIssueOf } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
-import { inFlightIssues, launchArgs, localLaunchEnv, markRunning, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
-import { approveLine, formatAge, gateDescriptions, gateSince, prStage, stalledLanes } from "./status.mjs";
+import { loadBudget } from "./lane-cost.mjs";
+import { budgetConfig, inFlightIssues, launchArgs, localLaunchEnv, markRunning, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
+import { approveLine, formatAge, gateDescriptions, gateSince, liveLanes, prStage, stalledLanes } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
 // waiting on owner.
@@ -54,7 +55,7 @@ function refusal(issue, openNumbers) {
  * @returns {{ launch: number[], waiting: { number: number, reason: string }[], idle: boolean, lines: string[] }}
  *   `launch` in priority order; `waiting` by PR number, for lane PRs only
  */
-export function planTick({ issues = [], prs = [], sessions = [], maxLanes = START_DEFAULTS.maxLanes, softPaths = START_DEFAULTS.softPaths }) {
+export function planTick({ issues = [], prs = [], sessions = [], maxLanes = START_DEFAULTS.maxLanes, softPaths = START_DEFAULTS.softPaths, budgetOver = false }) {
   const openIssues = issues.filter(isOpen);
   const openNumbers = new Set(openIssues.map((i) => i.number));
   const lanePrs = prs.filter((pr) => Number.isInteger(branchIssue(pr)));
@@ -75,13 +76,15 @@ export function planTick({ issues = [], prs = [], sessions = [], maxLanes = STAR
   }
 
   const claimed = claimedPaths({ openPrs: prs, runningIssues: openIssues.filter((i) => busy.has(i.number)) });
-  const { start: launch, skipped: notPicked } = pickStartable({ candidates, claimed, openIssues, maxLanes, inFlightCount: busy.size, softPaths });
+  const { start: picked, skipped: notPicked } = pickStartable({ candidates, claimed, openIssues, maxLanes, inFlightCount: busy.size, softPaths });
+  // #390: over the token budget nothing launches, yet the picks still count as work left, so the queue waits instead of going idle.
+  const launch = budgetOver ? [] : picked;
 
   const waiting = lanePrs
     .map((pr) => ({ number: pr.number, reason: waitReason(pr) }))
     .filter((w) => w.reason !== null)
     .sort((a, b) => a.number - b.number);
-  const idle = busy.size === 0 && launch.length === 0;
+  const idle = busy.size === 0 && picked.length === 0;
 
   const lines = [
     ...launch.map((n) => `#${n}: launch`),
@@ -258,7 +261,17 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     print(`cannot read lanes.config.json: ${reason(err)}`);
     return 2;
   }
+  let caps;
+  try {
+    caps = budgetConfig(config());
+  } catch (err) {
+    print(`cannot read lanes.config.json: ${reason(err)}`);
+    return 2;
+  }
   const { maxLanes, softPaths, models } = settings;
+  let budgetOver = false;
+  let budgetFailed = false;
+  let overLane = new Set();
   const failedLaunches = new Set();
   const waits = new Map();
   const firstWaiting = new Map();
@@ -293,7 +306,25 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     if (deps.recovery) recoverLanes(snapshot, { deps, dir, say, attempted, told });
     // An issue whose launch failed stays open (its blockers and ranking still count) but is no longer a candidate.
     const issues = snapshot.issues.map((i) => (failedLaunches.has(i.number) ? { ...i, labels: labelsOf(i).filter((l) => l !== "ready") } : i));
-    const plan = planTick({ ...snapshot, issues, maxLanes, softPaths });
+    // #390: a budget that cannot be read never stops the queue; it says so once and launches as before.
+    let budget = null;
+    if (deps.budget) {
+      try {
+        budget = deps.budget(snapshot.sessions, dir, caps);
+      } catch (err) {
+        if (!budgetFailed) say(`budget: cannot be read (${reason(err)}), not enforced`);
+        budgetFailed = true;
+      }
+      if (budget) budgetFailed = false;
+    }
+    if (budget) {
+      if (budget.over !== budgetOver) say(budget.over ? `budget: ${budget.spent24h} of ${budget.perNightTokens} tokens in 24 h, not launching` : `budget: ${budget.spent24h} of ${budget.perNightTokens} tokens in 24 h, launching again`);
+      budgetOver = budget.over;
+      // A lane over its own cap is said once and left running.
+      for (const n of budget.lanesOver) if (!overLane.has(n)) say(`#${n}: over its ${caps.perLaneTokens} token budget, left running`);
+      overLane = new Set(budget.lanesOver);
+    }
+    const plan = planTick({ ...snapshot, issues, maxLanes, softPaths, budgetOver });
     // #383: the waiting PRs print as one block, only in a tick where a PR started or stopped waiting or its reason changed.
     const current = new Map(plan.waiting.map((w) => [w.number, w.reason]));
     for (const line of plan.lines) if (!WAIT_LINE.test(line)) say(line);
@@ -386,6 +417,7 @@ const DEFAULT_DEPS = {
   recovery: DEFAULT_RECOVERY,
   gh: run("gh"),
   claude: run("claude"),
+  budget: (agents, root, caps) => loadBudget({ root, lanes: liveLanes(agents, root), ...caps }),
   root: repoRoot,
   spawn,
   reaperLog,

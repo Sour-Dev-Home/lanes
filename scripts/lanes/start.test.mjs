@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { START_DEFAULTS, inFlightIssues, launchArgs, launchEnv, main as runStart, markRunning, parseSessionId, planStart, startConfig } from "./start.mjs";
+import { START_DEFAULTS, budgetConfig, inFlightIssues, launchArgs, launchEnv, main as runStart, markRunning, parseSessionId, planStart, startConfig } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
@@ -1860,4 +1860,27 @@ test("edge: launchEnv reports a PATH of 61 entries but not one of exactly 60", (
 test("edge: launchEnv counts unique entries after dropping duplicates in a long PATH", () => {
   const path = Array.from({ length: 80 }, (_, i) => `C:\d${i % 65}`).join(";");
   assert.equal(launchEnv({ Path: path }, "win32", GIT_EXEC).note, "PATH has 67 entries (67 unique)");
+});
+
+// #390 criterion 1
+test("budgetConfig returns the defaults when the block or a key is absent", () => {
+  const defaults = { perNightTokens: 100_000_000, perLaneTokens: 15_000_000 };
+  assert.deepEqual(budgetConfig(undefined), defaults);
+  assert.deepEqual(budgetConfig({}), defaults);
+  assert.deepEqual(budgetConfig({ budget: { perLaneTokens: 5 } }), { ...defaults, perLaneTokens: 5 });
+  assert.deepEqual(budgetConfig({ budget: { perNightTokens: 7, perLaneTokens: 3 } }), { perNightTokens: 7, perLaneTokens: 3 });
+});
+
+test("edge: budgetConfig names the key for a non-positive, non-integer or non-number value, and a non-object block", () => {
+  for (const bad of [0, -5, 1.5, "10", null, NaN]) {
+    assert.throws(() => budgetConfig({ budget: { perNightTokens: bad } }), /budget\.perNightTokens must be a positive whole number/);
+    assert.throws(() => budgetConfig({ budget: { perLaneTokens: bad } }), /budget\.perLaneTokens must be a positive whole number/);
+  }
+  for (const bad of [null, [], "x", 3]) assert.throws(() => budgetConfig({ budget: bad }), /budget must be an object/);
+});
+
+test("the repo's own lanes.config.json carries the default budget", () => {
+  const raw = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
+  assert.deepEqual(raw.budget, { perNightTokens: 100000000, perLaneTokens: 15000000 });
+  assert.deepEqual(budgetConfig(raw), raw.budget);
 });

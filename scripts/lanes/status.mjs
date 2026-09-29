@@ -1,13 +1,14 @@
 // /status and the nightly digest: what waits on the owner, what is in flight, what is ready, what merged.
 // Usage: node scripts/lanes/status.mjs [--since 24h] [--json] [--waiting]
 import { execFileSync } from "node:child_process";
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GATE_CONTEXT, laneIssueOf, parseIssueForm, parsePrBody, reviewContext } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
-import { projectFolder } from "./lane-cost.mjs";
+import { loadBudget, projectFolder } from "./lane-cost.mjs";
+import { BUDGET_DEFAULTS, budgetConfig } from "./start.mjs";
 import { claimedPaths } from "./pick.mjs";
 
 const ISSUE_LIMIT = 1000;
@@ -130,6 +131,11 @@ const normalPath = (p) => {
 // named `issue-<N>-…`, or bare `issue-<N>` (#134). Two sessions on one issue: the most recently started wins.
 export function laneSessions(agents, repoRoot) {
   return new Map([...latestLaneAgents(agents, repoRoot)].map(([n, { agent: a }]) => [n, { id: a.id, state: a.state, waiting: a.state === PROMPT_STATE && a.waitingFor === PROMPT_WAITING_FOR }]));
+}
+
+// #390: the running lane sessions as `{ issue, sessionId, cwd }`, for lane-cost.mjs's loadBudget.
+export function liveLanes(agents, repoRoot) {
+  return [...latestLaneAgents(agents, repoRoot)].map(([issue, { agent: a }]) => ({ issue, sessionId: a.sessionId, cwd: a.cwd }));
 }
 
 // Issue N → `{ startedAt, agent }`, the raw `claude agents --json` entry of the lane session on that issue.
@@ -386,6 +392,34 @@ export const STATUS_QUERY =
   "mergeQueue { entries(first:100){ nodes { state position pullRequest { number } } } } " +
   `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description createdAt } } } } } } } } }`;
 
+// #390: the token budget for `--json`. A bad or unreadable lanes.config.json gives the defaults and says so in `note`;
+// unreadable agents or costs count as 0 (loadBudget notes the latter). Never throws.
+export function readBudget(repoRoot, rawAgents, { readConfig = () => readFileSync(join(repoRoot, "lanes.config.json"), "utf8"), load = loadBudget } = {}) {
+  const notes = [];
+  let caps = { ...BUDGET_DEFAULTS };
+  try {
+    let text;
+    try {
+      text = readConfig();
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+    if (text !== undefined) caps = budgetConfig(JSON.parse(text));
+  } catch (err) {
+    notes.push(`lanes.config.json budget not read (${String(err.message).split("\n")[0]}), defaults used`);
+  }
+  let lanes = [];
+  try {
+    lanes = liveLanes(JSON.parse(rawAgents), repoRoot);
+  } catch {
+    notes.push("running lanes unreadable, counted as 0");
+  }
+  const report = load({ root: repoRoot, lanes, ...caps });
+  const note = [...notes, report.note].filter(Boolean).join("; ");
+  const { note: _, ...rest } = report;
+  return note ? { ...rest, note } : rest;
+}
+
 async function main(argv = process.argv.slice(2)) {
   const sinceIdx = argv.indexOf("--since");
   const sinceLabel = sinceIdx >= 0 ? argv[sinceIdx + 1] : "24h";
@@ -408,6 +442,7 @@ async function main(argv = process.argv.slice(2)) {
   try {
     data.stalled = stalledLanes(JSON.parse(rawAgents), repoRoot);
   } catch {}
+  const budget = readBudget(repoRoot, rawAgents);
   // A blocker missing from a truncated list would read as closed, so refuse rather than list a blocked issue as ready.
   if (data.issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
   const summary = summarize(data);
@@ -420,7 +455,7 @@ async function main(argv = process.argv.slice(2)) {
     const { cleanableCount, loadCleanupInputs, planCleanup } = await import("./cleanup.mjs");
     summary.toCleanUp = cleanableCount(planCleanup(loadCleanupInputs()));
   } catch {}
-  console.log(argv.includes("--json") ? JSON.stringify({ version: 0, generatedAt: new Date().toISOString(), since: sinceLabel, ...summary }, null, 2) : render(summary, sinceLabel));
+  console.log(argv.includes("--json") ? JSON.stringify({ version: 0, generatedAt: new Date().toISOString(), since: sinceLabel, ...summary, budget }, null, 2) : render(summary, sinceLabel));
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main();

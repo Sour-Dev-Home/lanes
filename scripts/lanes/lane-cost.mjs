@@ -143,6 +143,65 @@ export function summarize(jsonlText, { days, now = Date.now() }) {
   });
 }
 
+/**
+ * #390: tokens of the lanes removed in the last `hours` (24 by default), from costs.jsonl text. A line that does not
+ * parse, lies outside the window, or has no token total adds nothing.
+ * @param {string} jsonlText
+ */
+export function spentSince(jsonlText, { hours = 24, now = Date.now() } = {}) {
+  const from = now - hours * 3_600_000;
+  let total = 0;
+  for (const text of String(jsonlText ?? "").split(/\r?\n/)) {
+    let line;
+    try {
+      line = JSON.parse(text);
+    } catch {
+      continue;
+    }
+    const removed = Date.parse(line?.removedAt);
+    if (Number.isFinite(removed) && removed >= from && removed <= now && Number.isFinite(line.tokens?.total)) total += line.tokens.total;
+  }
+  return total;
+}
+
+/**
+ * #390: the token budget. `spent24h` is `removedSpent` (costs.jsonl, last 24 h) plus every running lane's live total;
+ * `over` is true once it passes `perNightTokens`; `lanesOver` lists running lanes past `perLaneTokens`, ascending.
+ * @param {{ removedSpent: number, live: Map<number, number>, perNightTokens: number, perLaneTokens: number, note?: string }} input
+ * @returns {{ spent24h: number, perNightTokens: number, over: boolean, lanesOver: number[], note?: string }}
+ */
+export function budgetReport({ removedSpent, live, perNightTokens, perLaneTokens, note }) {
+  const spent24h = removedSpent + [...live.values()].reduce((a, b) => a + b, 0);
+  const lanesOver = [...live].filter(([, tokens]) => tokens > perLaneTokens).map(([n]) => n).sort((a, b) => a - b);
+  return { spent24h, perNightTokens, over: spent24h > perNightTokens, lanesOver, ...(note ? { note } : {}) };
+}
+
+/**
+ * #390: reads the budget's inputs and reports it. `lanes` are the running lane sessions (`{ issue, sessionId, cwd }`);
+ * each one's live total comes from its transcript. A missing or unreadable costs file counts as 0 and says so in
+ * `note`, as does a lane whose transcript cannot be read. Never throws.
+ * @param {{ root: string, lanes?: { issue: number, sessionId?: string, cwd?: string }[], perNightTokens: number, perLaneTokens: number,
+ *   now?: number, home?: string, read?: (file: string) => string, readCosts?: (file: string) => string }} input
+ */
+export function loadBudget({ root, lanes = [], perNightTokens, perLaneTokens, now = Date.now(), home = homedir(), read = readTranscript, readCosts = (f) => readFileSync(f, "utf8") }) {
+  const notes = [];
+  let removedSpent = 0;
+  try {
+    removedSpent = spentSince(readCosts(join(root, ".lanes", "costs.jsonl")), { now });
+  } catch (err) {
+    notes.push(err?.code === "ENOENT" ? "no .lanes/costs.jsonl yet, counted as 0" : "costs.jsonl unreadable, counted as 0");
+  }
+  const live = new Map();
+  let unread = 0;
+  for (const lane of lanes) {
+    const { tokens } = costLine({ issue: lane.issue, sessionId: lane.sessionId, cwd: lane.cwd, root, now: () => now, home, read });
+    if (tokens) live.set(lane.issue, tokens.total);
+    else unread += 1;
+  }
+  if (unread) notes.push(`${unread} running lane transcript${unread === 1 ? "" : "s"} unreadable, counted as 0`);
+  return budgetReport({ removedSpent, live, perNightTokens, perLaneTokens, note: notes.join("; ") });
+}
+
 export function render(rows, days) {
   if (rows.length === 0) return `lane cost, last ${days} days: no lanes recorded`;
   const lines = rows.map((r) => `${r.tier}: ${r.lanes} lanes, median ${r.medianTokens ?? "n/a"} tokens, total ${r.totalTokens} tokens, ${r.noTranscript} without a transcript`);

@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { REASONS, costLine, mainCheckout, projectFolder, recordLaneCost, render, sessionUsage, summarize } from "./lane-cost.mjs";
+import { REASONS, budgetReport, costLine, loadBudget, mainCheckout, projectFolder, recordLaneCost, render, sessionUsage, spentSince, summarize } from "./lane-cost.mjs";
 
 const msg = (id, usage, model = "claude-opus-5-5", role = "assistant") =>
   JSON.stringify({ message: { id, role, model, usage } });
@@ -163,4 +163,69 @@ test("render prints one line per tier, and a line for an empty window", () => {
   const text = render(summarize([row("full", 100, 1), row("full", null, 1)].join("\n"), { days: 7, now: NOW }), 7);
   assert.match(text, /full: 2 lanes, median 100 tokens, total 100 tokens, 1 without a transcript/);
   assert.match(render([], 7), /no lanes recorded/);
+});
+
+// #390
+const BNOW = Date.parse("2026-09-29T12:00:00Z");
+const cost = (hoursAgo, total) => JSON.stringify({ issue: 1, removedAt: new Date(BNOW - hoursAgo * 3_600_000).toISOString(), tokens: total === null ? null : { total } });
+const enoent = () => Object.assign(new Error("x"), { code: "ENOENT" });
+
+test("spentSince sums the lanes removed in the last 24 hours only", () => {
+  const text = [cost(1, 100), cost(23, 200), cost(25, 400), cost(-1, 800)].join("\n");
+  assert.equal(spentSince(text, { now: BNOW }), 300);
+});
+
+test("edge: spentSince skips bad lines, null tokens and empty text", () => {
+  assert.equal(spentSince([cost(1, null), "not json", "", cost(2, 50)].join("\n"), { now: BNOW }), 50);
+  assert.equal(spentSince("", { now: BNOW }), 0);
+  assert.equal(spentSince(undefined, { now: BNOW }), 0);
+});
+
+test("budgetReport adds live totals, is over only past the cap, and lists lanes past their own cap", () => {
+  const args = { perNightTokens: 1000, perLaneTokens: 300 };
+  const under = budgetReport({ ...args, removedSpent: 400, live: new Map([[7, 300], [5, 200]]) });
+  assert.deepEqual(under, { spent24h: 900, perNightTokens: 1000, over: false, lanesOver: [] });
+  const at = budgetReport({ ...args, removedSpent: 500, live: new Map([[7, 300], [5, 200]]) });
+  assert.equal(at.over, false, "exactly at the cap is not over");
+  const over = budgetReport({ ...args, removedSpent: 500, live: new Map([[9, 301], [4, 400], [5, 200]]) });
+  assert.equal(over.over, true);
+  assert.deepEqual(over.lanesOver, [4, 9]);
+});
+
+test("loadBudget sums costs.jsonl and running transcripts, and reports a lane over its cap", () => {
+  const files = { s1: msg("a", u(50, 50)), s2: msg("b", u(10, 10)) };
+  const r = loadBudget({
+    root: "/repo",
+    lanes: [{ issue: 3, sessionId: "s1", cwd: "/repo/wt" }, { issue: 4, sessionId: "s2", cwd: "/repo/wt2" }],
+    perNightTokens: 5000,
+    perLaneTokens: 50,
+    now: BNOW,
+    home: "/home",
+    readCosts: () => cost(2, 1000),
+    read: (f) => files[/([^/\\]+)\.jsonl$/.exec(f)[1]],
+  });
+  assert.deepEqual(r, { spent24h: 1120, perNightTokens: 5000, over: false, lanesOver: [3] });
+});
+
+test("edge: a missing costs file counts as 0 with a note", () => {
+  const r = loadBudget({ root: "/repo", perNightTokens: 10, perLaneTokens: 5, now: BNOW, readCosts: () => { throw enoent(); } });
+  assert.equal(r.spent24h, 0);
+  assert.equal(r.over, false);
+  assert.match(r.note, /no \.lanes\/costs\.jsonl yet/);
+});
+
+test("edge: an unreadable costs file and unreadable transcripts count as 0 and say so, without a path", () => {
+  const r = loadBudget({
+    root: "/repo",
+    lanes: [{ issue: 3, sessionId: "s1" }, { issue: 4 }],
+    perNightTokens: 10,
+    perLaneTokens: 5,
+    now: BNOW,
+    readCosts: () => { throw Object.assign(new Error("x"), { code: "EACCES" }); },
+    read: () => { throw enoent(); },
+  });
+  assert.equal(r.spent24h, 0);
+  assert.match(r.note, /costs\.jsonl unreadable/);
+  assert.match(r.note, /2 running lane transcripts unreadable/);
+  assert.doesNotMatch(r.note, /\/repo|EACCES/);
 });

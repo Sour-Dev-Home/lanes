@@ -989,3 +989,57 @@ test("edge: an UNKNOWN mergeable state is not an owner wait", () => {
   const out = tick({ prs: [{ ...pr(50, 7, ["a.mjs"]), mergeable: "UNKNOWN" }] });
   assert.deepEqual(out.waiting, []);
 });
+
+// #390
+const report = (spent24h, over, lanesOver = []) => ({ spent24h, perNightTokens: 100, over, lanesOver });
+
+test("planTick launches nothing while budgetOver, and does not read the queue as idle", () => {
+  const out = tick({ issues: [issue(1, ["src/a.mjs"])], budgetOver: true });
+  assert.deepEqual(out.launch, []);
+  assert.equal(out.idle, false);
+  assert.equal(tick({ issues: [issue(1, ["src/a.mjs"])] }).launch.length, 1);
+  assert.equal(tick({ budgetOver: true }).idle, true);
+});
+
+test("the queue stops launching over the budget, says so once, and resumes when it drops", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const states = [report(150, true), report(160, true), report(40, false)];
+  let tickNo = 0;
+  const run = fakeRun(world, { onSleep: (t) => t === 3 && (world.issues = []) });
+  run.deps.budget = () => states[Math.min(tickNo++, 2)];
+  assert.equal(await main([], run.deps), 0);
+  assert.equal(run.out.filter((l) => /not launching/.test(l)).length, 1, "said once per state change, not per tick");
+  assert.ok(run.out.some((l) => /budget: 150 of 100 tokens in 24 h, not launching/.test(l)));
+  assert.ok(run.out.some((l) => /budget: 40 of 100 tokens in 24 h, launching again/.test(l)));
+  assert.deepEqual(run.launched.map((l) => l.tick), [2], "launched only once the budget dropped");
+});
+
+test("a running lane over its own cap is printed once and never stopped", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [session(1)] };
+  const run = fakeRun(world, { onSleep: (t) => t === 2 && (world.issues = []) });
+  run.deps.budget = () => report(10, false, [1]);
+  await main([], run.deps);
+  assert.equal(run.out.filter((l) => /#1: over its 15000000 token budget, left running/.test(l)).length, 1);
+  assert.ok(!run.calls.some((c) => c[0] === "claude" && c[1] === "stop"));
+});
+
+test("edge: a budget that cannot be read is said once and launches continue", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 2 && (world.issues = []) });
+  run.deps.budget = () => { throw new Error("boom"); };
+  await main([], run.deps);
+  assert.equal(run.out.filter((l) => /budget: cannot be read \(boom\), not enforced/.test(l)).length, 1);
+  assert.equal(run.launched.length, 1);
+});
+
+test("edge: a bad budget in lanes.config.json exits 2 before any tick", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] });
+  run.deps.config = () => ({ budget: { perLaneTokens: -1 } });
+  assert.equal(await main([], run.deps), 2);
+  assert.match(run.out[0], /perLaneTokens/);
+  assert.equal(run.calls.length, 0);
+});
