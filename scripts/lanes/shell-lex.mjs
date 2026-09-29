@@ -174,7 +174,6 @@ export function feedsShell(segments, pipes, k) {
 // --- Globs, launchers and WMI process creation (#308) ------------------------------------------------------------
 
 const GLOB_RE = /[*?[{]/;
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
 // Brace sequences: {1..9} and {a..z}, each with an optional ..step (which only thins the range, so it is ignored).
 const INT_SEQ_RE = /^[+-]?[0-9]+\.\.[+-]?[0-9]+(\.\.[+-]?[0-9]+)?$/;
 const CHAR_SEQ_RE = /^([A-Za-z])\.\.([A-Za-z])(\.\.[+-]?[0-9]+)?$/;
@@ -244,44 +243,74 @@ function braceExpand(s) {
 }
 
 /**
- * A regex source matching everything a glob pattern (with no brace left to expand) can match, as bash reads it. A
+ * The steps of a glob pattern (with no brace left to expand), as bash reads it: `*` any run, `?` and a closed `[…]`
+ * one character, an integer sequence's DIGITS an optional `-` and one or more digits, and anything else itself. A
  * closed brace is literal text. An unclosed `{` is literal to bash too (#123), but it is read as optional, so a word
  * such as post-review{.mjs that names the script once the stray brace is dropped still fails closed.
  */
-function patternRe(s) {
-  let re = "";
+function globSteps(s) {
+  const steps = [];
   for (let i = 0; i < s.length; i += 1) {
     const c = s[i];
-    if (c === "*") re += ".*";
-    else if (c === "?") re += ".";
-    else if (c === DIGITS) re += "-?[0-9]+";
-    else if (c === "[") {
-      const end = s.indexOf("]", i + 2);
-      if (end === -1) re += "\\[";
-      else {
-        re += ".";
-        i = end;
-      }
-    } else if (c === "{" && closingBrace(s, i) === -1) re += "\\{?";
-    else re += escapeRe(ORIGINAL[c] ?? c);
+    if (c === "*") {
+      if (steps.at(-1)?.kind !== "any") steps.push({ kind: "any" });
+    } else if (c === "?") steps.push({ kind: "one" });
+    else if (c === DIGITS) steps.push({ kind: "digits" });
+    else if (c === "[" && s.indexOf("]", i + 2) !== -1) {
+      steps.push({ kind: "one" });
+      i = s.indexOf("]", i + 2);
+    } else if (c === "{" && closingBrace(s, i) === -1) steps.push({ kind: "optional", ch: "{" });
+    else steps.push({ kind: "char", ch: (ORIGINAL[c] ?? c).toLowerCase() });
   }
-  return re;
+  return steps;
 }
+
+/**
+ * Whether the glob `steps` match all of `name` (lower case), walked as a set of positions in the name: linear in the
+ * steps for each position, with no backtracking regex, so a run of `*` cannot take exponential time (#308 security
+ * review round 2).
+ */
+function globMatches(steps, name) {
+  let at = new Set([0]);
+  for (const step of steps) {
+    const next = new Set();
+    for (const p of at) {
+      if (step.kind === "any") for (let q = p; q <= name.length; q += 1) next.add(q);
+      else if (step.kind === "one") {
+        if (p < name.length) next.add(p + 1);
+      } else if (step.kind === "optional") {
+        next.add(p);
+        if (name[p] === step.ch) next.add(p + 1);
+      } else if (step.kind === "digits") {
+        const from = name[p] === "-" ? [p, p + 1] : [p];
+        for (let q of from) while (q < name.length && /[0-9]/.test(name[q])) next.add((q += 1));
+      } else if (name[p] === step.ch) next.add(p + 1);
+    }
+    if (next.size === 0) return false;
+    at = next;
+  }
+  return at.has(name.length);
+}
+
+// A glob word longer than this, or with more braces, is not expanded: it counts as a match (bounded work, #308).
+const MAX_GLOB_WORD = 1024;
+const MAX_GLOB_BRACES = 64;
 
 /**
  * Whether a word a shell (or PowerShell, for a program name) would glob- or brace-expand could expand to one of
  * `names`: the last path component (after `/` or `\`) of one of its brace expansions, as a pattern, matches a name,
  * ignoring case as Windows does. A marked (quoted) glob character is plain text. A word with too many expansions to
- * check counts as a match. Shared by approve-guard.mjs (post-review.mjs) and start-guard.mjs (start.mjs, queue.mjs,
- * claude), #308.
+ * check, longer than MAX_GLOB_WORD or with more than MAX_GLOB_BRACES braces counts as a match. Shared by
+ * approve-guard.mjs (post-review.mjs) and start-guard.mjs (start.mjs, queue.mjs, claude), #308.
  */
 export function mayExpandTo(w, names) {
   if (!GLOB_RE.test(w)) return false;
+  if (w.length > MAX_GLOB_WORD || w.split("{").length - 1 > MAX_GLOB_BRACES) return true;
   const words = braceExpand(w);
   if (words === null) return true;
   return words.some((x) => {
-    const pattern = new RegExp(`^${patternRe(basename(x))}$`, "i");
-    return names.some((n) => pattern.test(n));
+    const steps = globSteps(basename(x));
+    return names.some((n) => globMatches(steps, n.toLowerCase()));
   });
 }
 

@@ -289,6 +289,26 @@ test("#308 criterion 6: mayExpandTo reads a glob or brace word's last path compo
   assert.equal(mayExpandTo("cl*.exe", ["claude", "claude.exe"]), true);
 });
 
+test("#308 edge: mayExpandTo takes bounded time on runs of stars and huge or brace-heavy words (security review round 2)", () => {
+  const started = Date.now();
+  assert.equal(mayExpandTo(`${"*".repeat(40)}.mjs`, ["start.mjs"]), true);
+  assert.equal(mayExpandTo(`${"*".repeat(40)}.xyz`, ["start.mjs"]), false);
+  assert.equal(mayExpandTo(`${"*a".repeat(200)}`, ["start.mjs"]), false);
+  assert.equal(mayExpandTo(`${"?".repeat(100000)}`, ["start.mjs"]), true);
+  assert.equal(mayExpandTo(`${"{".repeat(10000)}a${"}".repeat(10000)}`, ["start.mjs"]), true);
+  assert.equal(mayExpandTo("{a,b}".repeat(20000), ["start.mjs"]), true);
+  assert.ok(Date.now() - started < 1000, `took ${Date.now() - started} ms`);
+  // At the limits: exactly MAX_GLOB_WORD characters is still checked, one more counts as a match.
+  assert.equal(mayExpandTo(`${"x".repeat(1023)}*`, ["start.mjs"]), false);
+  assert.equal(mayExpandTo(`${"x".repeat(1024)}*`, ["start.mjs"]), true);
+  // Integer sequences, an unclosed brace and a class still read as before.
+  assert.equal(mayExpandTo("start{1..3}.mjs", ["start-2.mjs"]), true);
+  assert.equal(mayExpandTo("start{1..3}.mjs", ["start.mjs"]), false);
+  assert.equal(mayExpandTo("post-review{.mjs", ["post-review.mjs"]), true);
+  assert.equal(mayExpandTo("[s]tart.mjs", ["start.mjs"]), true);
+  assert.equal(mayExpandTo("[s.mjs", ["start.mjs"]), false);
+});
+
 test("#308 criterion 6: launchedCommands reads cmd /c, start, schtasks /tr and the scheduled-task cmdlets", () => {
   assert.deepEqual(launchedCommands(["cmd", "/c", "start", "x.mjs", "1"]), ["start x.mjs 1"]);
   assert.deepEqual(launchedCommands(["cmd.exe", "/S", "/K", "dir"]), ["dir"]);

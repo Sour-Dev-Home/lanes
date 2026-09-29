@@ -2211,6 +2211,15 @@ test("#308 edge: a WMI method named at run time, a class wildcard behind a cast 
   assert.equal(decideFor(ps("Invoke-CimMethod -ClassName Win32_Process -MethodName GetOwner")), null);
 });
 
+test("#308 edge: a run of stars decides in bounded time, through the script word and the WMI reader (security review round 2)", () => {
+  const started = Date.now();
+  assert.deepEqual(decideFor(bash(`${"*".repeat(40)}.mjs`)), deny(QUEUE_DENY_REASON));
+  assert.equal(decideFor(ps(`create ${"*".repeat(40)}]a`)), null);
+  // cmd expands %…% at run time: a program it names that way fails closed, quickly.
+  assert.equal(decideFor(bash(`cmd /c ${"%".repeat(10000)}`))?.decision, "deny");
+  assert.ok(Date.now() - started < 1000, `took ${Date.now() - started} ms`);
+});
+
 test("#308 edge: malformed launchers and a brace expansion too large to check", () => {
   for (const c of ["cmd /c", "cmd", "start", "schtasks /create /tr", "deno eval", "New-ScheduledTaskAction", "cmd /c start"]) {
     assert.equal(decideFor(bash(c)), null, c);
