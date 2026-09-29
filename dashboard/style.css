@@ -6,6 +6,10 @@
   --border: #d5dae1;
   --accent: #0b5fd6;
   --critical: #c2410c;
+  --stage-ready: #0f766e;
+  --stage-not-ready: #5f6672;
+  --stage-already-met: #4d7c0f;
+  --stage-running: #1d4ed8;
   --stage-writing: #2563eb;
   --stage-test-review: #7c3aed;
   --stage-security-review: #b45309;
@@ -29,6 +33,10 @@
     --border: #2f3641;
     --accent: #6ea8ff;
     --critical: #fb923c;
+    --stage-ready: #2dd4bf;
+    --stage-not-ready: #9ca3af;
+    --stage-already-met: #a3e635;
+    --stage-running: #93c5fd;
     --stage-writing: #60a5fa;
     --stage-test-review: #a78bfa;
     --stage-security-review: #fbbf24;
@@ -71,9 +79,18 @@ h2 { font-size: 1.1rem; margin: calc(var(--space) * 1.5) 0 8px; }
   padding: 10px 12px;
   transition: border-color var(--ease), box-shadow var(--ease);
 }
+.task { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
 .task:hover { box-shadow: 0 2px 8px rgb(0 0 0 / 0.15); }
-.task .num { font-weight: 600; margin-right: 6px; }
-.task .why { margin: 4px 0 0; color: var(--muted); font-size: 0.9rem; }
+.task .num { font-weight: 600; flex: none; }
+.task .title { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; }
+.task .chip { flex: none; white-space: nowrap; }
+.task .why { flex: 1 0 100%; margin: 0; color: var(--muted); font-size: 0.9rem; overflow-wrap: anywhere; }
+.age { font-size: 0.85rem; font-weight: 400; color: var(--muted); margin-left: 8px; }
+.card .num, .card .title { margin-right: 8px; overflow-wrap: anywhere; }
+.stage-ready { --stage-color: var(--stage-ready); color: var(--stage-ready); }
+.stage-not-ready { --stage-color: var(--stage-not-ready); color: var(--stage-not-ready); }
+.stage-already-met { --stage-color: var(--stage-already-met); color: var(--stage-already-met); }
+.stage-running { --stage-color: var(--stage-running); color: var(--stage-running); }
 .stage-writing { --stage-color: var(--stage-writing); color: var(--stage-writing); }
 .stage-test-review { --stage-color: var(--stage-test-review); color: var(--stage-test-review); }
 .stage-security-review { --stage-color: var(--stage-security-review); color: var(--stage-security-review); }
@@ -103,6 +120,7 @@ button:hover, button:focus-visible { background: var(--accent); color: var(--bg)
 .graph .node rect { fill: var(--surface); stroke: var(--stage-color, var(--border)); stroke-width: 2; }
 .graph .edge { stroke: var(--muted); stroke-width: 1.5; fill: none; }
 .graph .edge.critical, .graph .node.critical rect { stroke: var(--critical); stroke-width: 3; }
+.graph .overlap { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 5 4; fill: none; }
 .graph .arrow { fill: var(--muted); }
 .graph .arrow.critical { fill: var(--critical); }
 /* metrics panel */

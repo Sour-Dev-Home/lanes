@@ -9,13 +9,14 @@
 </head>
 <body>
 <header class="top">
-  <h1>Lanes</h1>
+  <h1>Lanes <span id="age" class="age"></span></h1>
   <p id="generated" class="muted">Loading snapshot…</p>
   <p id="stale" class="stale" role="status" hidden></p>
 </header>
 <main>
   <section aria-labelledby="waiting-h">
-    <h2 id="waiting-h">Waiting on you</h2>
+    <h2 id="waiting-h">Waiting on you <span id="waiting-age" class="age"></span></h2>
+    <p id="waiting-note" class="stale" role="status" hidden></p>
     <div id="waiting"></div>
   </section>
   <section aria-labelledby="legend-h">
@@ -32,7 +33,8 @@
   </section>
   <section aria-labelledby="graph-h">
     <h2 id="graph-h">Dependency graph</h2>
-    <p class="muted">An arrow runs from the blocking task to the one it blocks. The critical path is outlined.</p>
+    <p class="muted">An arrow runs from the blocking task to the one it blocks. A dashed line joins two tasks that touch the same files, so they run one at a time. The critical path is outlined.</p>
+    <p id="graph-note" class="muted" hidden></p>
     <div id="graph" class="graph"></div>
   </section>
 </main>

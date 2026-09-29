@@ -81,10 +81,19 @@ test("stageOf maps snapshot stages onto the nine display stages", () => {
   assert.equal(app.stageOf(gate("architecture-advisor")), "architecture review");
   assert.equal(app.stageOf(issue(1, "owner")), "waiting on owner");
   assert.equal(app.stageOf(issue(1, "contract")), "waiting on owner");
-  assert.equal(app.stageOf(issue(1, "ready")), "queued");
   assert.equal(app.stageOf(issue(1, "queued")), "merge queue");
   assert.equal(app.stageOf(issue(1, "blocked")), "blocked");
-  assert.deepEqual(JSON.parse(JSON.stringify(app.STAGES)), ["writing", "test review", "security review", "architecture review", "waiting on owner", "queued", "merge queue", "merged", "blocked"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.STAGES)), ["ready", "not ready", "already met", "running", "writing", "test review", "security review", "architecture review", "waiting on owner", "queued", "merge queue", "merged", "blocked"]);
+});
+
+test("stageOf has explicit cases for ready, not-ready, already met and running; only an unknown stage is queued", () => {
+  assert.equal(app.stageOf(issue(1, "ready")), "ready");
+  assert.equal(app.stageOf(issue(1, "not-ready")), "not ready");
+  assert.equal(app.stageOf(issue(1, "already met")), "already met");
+  assert.equal(app.stageOf(issue(1, "running")), "running");
+  assert.equal(app.stageOf(issue(1, "brand-new")), "queued");
+  const snapshotStages = JSON.parse(readFileSync("contracts/snapshot.schema.json", "utf8")).properties.issues.items.properties.stage.enum;
+  for (const s of snapshotStages) assert.notEqual(app.stageOf(issue(1, s)), "queued", s);
 });
 
 test("edge: an unknown stage or a gate wait with no reviewer name still maps to a stage", () => {
@@ -178,6 +187,84 @@ test("renderGraph draws a node per issue, an edge per link, and marks the critic
 
 test("edge: renderGraph with no issues still returns an svg", () => {
   assert.equal(app.renderGraph(fakeDoc(), [], []).tag, "svg");
+});
+
+test("renderGraph draws each overlap as a dashed undirected line with no arrowhead, beside the solid arrows", () => {
+  const svg = app.renderGraph(fakeDoc(), [issue(1, "ready"), issue(2, "ready"), issue(3, "blocked")], [{ from: 1, to: 3 }], [{ a: 1, b: 2 }]);
+  let overlaps = 0, edges = 0, arrows = 0;
+  walk(svg, (n) => {
+    if (/\boverlap\b/.test(n.className)) overlaps++;
+    if (/\bedge\b/.test(n.className)) edges++;
+    if (/\barrow\b/.test(n.className)) arrows++;
+  });
+  assert.equal(overlaps, 1);
+  assert.equal(edges, 1);
+  assert.equal(arrows, 1);
+  assert.match(readFileSync("dashboard/style.css", "utf8"), /\.overlap[^}]*stroke-dasharray/);
+});
+
+test("edge: an overlap naming an unlisted issue or itself is not drawn", () => {
+  const svg = app.renderGraph(fakeDoc(), [issue(1, "ready")], [], [{ a: 1, b: 9 }, { a: 1, b: 1 }]);
+  let overlaps = 0;
+  walk(svg, (n) => { if (/\boverlap\b/.test(n.className)) overlaps++; });
+  assert.equal(overlaps, 0);
+});
+
+test("graphNote is one line when there are no blockers and no overlaps, and empty otherwise", () => {
+  assert.match(app.graphNote([], []), /no blockers or overlaps/i);
+  assert.match(app.graphNote(undefined, undefined), /no blockers or overlaps/i);
+  assert.equal(app.graphNote([{ from: 1, to: 2 }], []), "");
+  assert.equal(app.graphNote([], [{ a: 1, b: 2 }]), "");
+});
+
+const NOW = Date.parse("2026-09-29T12:00:00Z");
+const ago = (ms) => new Date(NOW - ms).toISOString();
+
+test("ageText says just now, minutes, and over an hour", () => {
+  assert.equal(app.ageText(ago(20000), NOW), "updated just now");
+  assert.equal(app.ageText(ago(3 * 60000), NOW), "updated 3 min ago");
+  assert.equal(app.ageText(ago(59 * 60000), NOW), "updated 59 min ago");
+  assert.equal(app.ageText(ago(61 * 60000), NOW), "updated over an hour ago");
+});
+
+test("edge: ageText for an unreadable time is empty, and a future time reads as just now", () => {
+  assert.equal(app.ageText("nope", NOW), "");
+  assert.equal(app.ageText(ago(-5 * 60000), NOW), "updated just now");
+});
+
+test("waitingNote warns that entries may already be approved only past 5 minutes", () => {
+  assert.equal(app.waitingNote(ago(5 * 60000), NOW), "");
+  assert.match(app.waitingNote(ago(6 * 60000), NOW), /may already be approved/);
+  assert.equal(app.waitingNote("nope", NOW), "");
+});
+
+test("renderAge fills the heading age, the waiting age and the note from generatedAt without a fetch", () => {
+  const els = {};
+  const d = { getElementById: (id) => (els[id] ??= { textContent: "", hidden: false }) };
+  app.renderAge(d, ago(7 * 60000), NOW);
+  assert.equal(els.age.textContent, "updated 7 min ago");
+  assert.equal(els["waiting-age"].textContent, "updated 7 min ago");
+  assert.match(els["waiting-note"].textContent, /may already be approved/);
+  assert.equal(els["waiting-note"].hidden, false);
+  assert.equal(els.stale.hidden, true);
+  app.renderAge(d, ago(30 * 60000), NOW);
+  assert.equal(els.stale.hidden, false);
+  app.renderAge(d, ago(60000), NOW);
+  assert.equal(els["waiting-note"].hidden, true);
+});
+
+test("layout: the task row keeps the tag apart from the number and title, and lets a long title wrap", () => {
+  const css = readFileSync("dashboard/style.css", "utf8");
+  assert.match(css, /\.task\s*\{[^}]*display:\s*flex/);
+  assert.match(css, /\.task\s*\{[^}]*gap:\s*8px/);
+  assert.match(css, /\.task \.title\s*\{[^}]*min-width:\s*0/);
+  assert.match(css, /\.task \.title\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  assert.match(css, /\.task \.chip\s*\{[^}]*flex:\s*none/);
+});
+
+test("index.html has the age, waiting note and graph note elements", () => {
+  const html = readFileSync("dashboard/index.html", "utf8");
+  for (const id of ["age", "waiting-age", "waiting-note", "graph-note"]) assert.match(html, new RegExp(`id="${id}"`), id);
 });
 
 test("formatGenerated shows the timestamp, and flags an unreadable one", () => {
@@ -339,4 +426,14 @@ test("metrics: style.css styles the panel with tokens only", () => {
   assert.ok(at > 0);
   assert.match(css.slice(at), /\.metrics/);
   assert.doesNotMatch(css.slice(at), /#[0-9a-fA-F]{3,6}\b/);
+});
+
+test("boundary: age words flip exactly at 1 and 60 minutes; the waiting note and stale note at 5 and 20", () => {
+  assert.equal(app.ageText(ago(59999), NOW), "updated just now");
+  assert.equal(app.ageText(ago(60000), NOW), "updated 1 min ago");
+  assert.equal(app.ageText(ago(60 * 60000 - 1), NOW), "updated 59 min ago");
+  assert.equal(app.ageText(ago(60 * 60000), NOW), "updated over an hour ago");
+  assert.notEqual(app.waitingNote(ago(5 * 60000 + 1), NOW), "");
+  assert.equal(app.staleNote(ago(20 * 60000), NOW), "");
+  assert.notEqual(app.staleNote(ago(20 * 60000 + 1), NOW), "");
 });

@@ -6,7 +6,8 @@
 var POLL_MS = 60000;
 var STALE_MS = 20 * 60000;
 var SVG_NS = "http://www.w3.org/2000/svg";
-var STAGES = ["writing", "test review", "security review", "architecture review", "waiting on owner", "queued", "merge queue", "merged", "blocked"];
+var WAITING_NOTE_MS = 5 * 60000;
+var STAGES = ["ready", "not ready", "already met", "running", "writing", "test review", "security review", "architecture review", "waiting on owner", "queued", "merge queue", "merged", "blocked"];
 
 var slug = function (stage) {
   return stage.replace(/ /g, "-");
@@ -31,9 +32,48 @@ function staleNote(generatedAt, now) {
   return "Stale: this snapshot is " + Math.round(age / 60000) + " min old, so the page may be behind GitHub.";
 }
 
-// The snapshot's stage vocabulary onto the nine display stages.
+// The snapshot's age in plain words; empty when the time cannot be read.
+function ageText(generatedAt, now) {
+  var age = now - Date.parse(generatedAt);
+  if (Number.isNaN(age)) return "";
+  var minutes = Math.floor(age / 60000);
+  if (minutes < 1) return "updated just now";
+  if (minutes < 60) return "updated " + minutes + " min ago";
+  return "updated over an hour ago";
+}
+
+function waitingNote(generatedAt, now) {
+  var age = now - Date.parse(generatedAt);
+  if (Number.isNaN(age) || age <= WAITING_NOTE_MS) return "";
+  return "This snapshot is more than 5 minutes old, so these entries may already be approved.";
+}
+
+// Refreshes everything that depends on the clock; runs every minute without refetching.
+function renderAge(doc, generatedAt, now) {
+  var text = ageText(generatedAt, now);
+  doc.getElementById("age").textContent = text;
+  doc.getElementById("waiting-age").textContent = text;
+  var note = waitingNote(generatedAt, now);
+  var waiting = doc.getElementById("waiting-note");
+  waiting.textContent = note;
+  waiting.hidden = !note;
+  var stale = doc.getElementById("stale");
+  var staleText = staleNote(generatedAt, now);
+  stale.textContent = staleText;
+  stale.hidden = !staleText;
+}
+
+// The snapshot's stage vocabulary onto the display stages.
 function stageOf(issue) {
   switch (issue.stage) {
+    case "ready":
+      return "ready";
+    case "not-ready":
+      return "not ready";
+    case "already met":
+      return "already met";
+    case "running":
+      return "running";
     case "starting":
     case "failing":
       return "writing";
@@ -192,7 +232,11 @@ var NODE_H = 46;
 var GAP_X = 60;
 var GAP_Y = 16;
 
-function renderGraph(doc, issues, edges) {
+function graphNote(edges, overlaps) {
+  return (edges || []).length || (overlaps || []).length ? "" : "No blockers or overlaps between open tasks.";
+}
+
+function renderGraph(doc, issues, edges, overlaps) {
   var numbers = issues.map(function (i) {
     return i.number;
   });
@@ -259,8 +303,19 @@ function renderGraph(doc, issues, edges) {
     line.setAttribute("d", "M" + x1 + " " + y1 + " C" + mid + " " + y1 + " " + mid + " " + y2 + " " + x2 + " " + y2);
     svg.appendChild(line);
     var head = el(doc, "polygon", "arrow" + (crit ? " critical" : ""), null, SVG_NS);
-    head.setAttribute("points", x2 + "," + y2 + " " + (x2 - 8) + "," + (y2 - 4) + " " + (x2 - 8) + "," + (y2 + 4));
+    head.setAttribute("points", x2 + "," + y2 + " " + (x2 - 10) + "," + (y2 - 5) + " " + (x2 - 10) + "," + (y2 + 5));
     svg.appendChild(head);
+  });
+  (overlaps || []).forEach(function (o) {
+    if (!Object.prototype.hasOwnProperty.call(pos, o.a) || !Object.prototype.hasOwnProperty.call(pos, o.b) || o.a === o.b) return;
+    var a = pos[o.a];
+    var b = pos[o.b];
+    var line = el(doc, "line", "overlap", null, SVG_NS);
+    line.setAttribute("x1", a.x + NODE_W / 2);
+    line.setAttribute("y1", a.y + NODE_H / 2);
+    line.setAttribute("x2", b.x + NODE_W / 2);
+    line.setAttribute("y2", b.y + NODE_H / 2);
+    svg.appendChild(line);
   });
   issues.forEach(function (i) {
     var p = pos[i.number];
@@ -429,10 +484,8 @@ function loadMetrics(doc, fetcher) {
 function render(doc, snapshot, now) {
   var issues = snapshot.issues || [];
   doc.getElementById("generated").textContent = formatGenerated(snapshot.generatedAt);
-  var stale = doc.getElementById("stale");
-  var note = staleNote(snapshot.generatedAt, now);
-  stale.textContent = note;
-  stale.hidden = !note;
+  lastGenerated = snapshot.generatedAt;
+  renderAge(doc, snapshot.generatedAt, now);
   var waiting = doc.getElementById("waiting");
   clear(waiting);
   renderWaiting(doc, waiting, issues);
@@ -443,8 +496,14 @@ function render(doc, snapshot, now) {
   });
   var graph = doc.getElementById("graph");
   clear(graph);
-  graph.appendChild(renderGraph(doc, issues, snapshot.edges || []));
+  graph.appendChild(renderGraph(doc, issues, snapshot.edges || [], snapshot.overlaps || []));
+  var note = doc.getElementById("graph-note");
+  var noteText = graphNote(snapshot.edges, snapshot.overlaps);
+  note.textContent = noteText;
+  note.hidden = !noteText;
 }
+
+var lastGenerated = null;
 
 function load(doc) {
   fetch("snapshot.json", { cache: "no-store" })
@@ -467,8 +526,12 @@ if (typeof document !== "undefined") {
   setInterval(function () {
     load(document);
   }, POLL_MS);
+  // The age words move on every minute from the last generatedAt, with no refetch.
+  setInterval(function () {
+    if (lastGenerated !== null) renderAge(document, lastGenerated, Date.now());
+  }, 60000);
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { POLL_MS: POLL_MS, STALE_MS: STALE_MS, STAGES: STAGES, formatGenerated: formatGenerated, staleNote: staleNote, stageOf: stageOf, renderLegend: renderLegend, renderTask: renderTask, approveLine: approveLine, renderWaiting: renderWaiting, criticalPath: criticalPath, renderGraph: renderGraph, validMetrics: validMetrics, renderMetrics: renderMetrics, loadMetrics: loadMetrics };
+  module.exports = { POLL_MS: POLL_MS, STALE_MS: STALE_MS, STAGES: STAGES, formatGenerated: formatGenerated, staleNote: staleNote, ageText: ageText, waitingNote: waitingNote, renderAge: renderAge, graphNote: graphNote, stageOf: stageOf, renderLegend: renderLegend, renderTask: renderTask, approveLine: approveLine, renderWaiting: renderWaiting, criticalPath: criticalPath, renderGraph: renderGraph, validMetrics: validMetrics, renderMetrics: renderMetrics, loadMetrics: loadMetrics };
 }
