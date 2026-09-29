@@ -19,6 +19,8 @@ export const REASONS = { noSession: "no session id", missing: "transcript not fo
 const MAX_MODEL_CHARS = 100;
 // A transcript larger than this is not read into memory; the lane gets `tokens: null` instead.
 export const MAX_TRANSCRIPT_BYTES = 256 * 1024 * 1024;
+// A rough size-to-tokens rate for a transcript too big to read (JSON overhead makes real tokens fewer per byte).
+const BYTES_PER_TOKEN = 4;
 
 const count = (n) => (Number.isFinite(n) && n > 0 ? n : 0);
 
@@ -62,7 +64,8 @@ export function sessionUsage(jsonlText) {
 export const projectFolder = (root) => String(root).replace(/[^A-Za-z0-9]/g, "-");
 
 function readTranscript(file) {
-  if (statSync(file).size > MAX_TRANSCRIPT_BYTES) throw Object.assign(new Error("transcript too large"), { code: "E2BIG" });
+  const { size } = statSync(file);
+  if (size > MAX_TRANSCRIPT_BYTES) throw Object.assign(new Error("transcript too large"), { code: "E2BIG", size });
   return readFileSync(file, "utf8");
 }
 
@@ -214,11 +217,27 @@ export function loadBudget({ root, lanes = [], perNightTokens, perLaneTokens, no
   }
   const live = new Map();
   let unread = 0;
+  let oversized = 0;
   for (const lane of lanes) {
-    const { tokens } = costLine({ issue: lane.issue, sessionId: lane.sessionId, cwd: lane.cwd, root, now: () => now, home, read });
+    // A transcript over the read cap is the biggest runaway lane, so it must not count as 0: estimate it from its size,
+    // and never below just past the lane cap.
+    let bytes = null;
+    const sized = (file) => {
+      try {
+        return read(file);
+      } catch (err) {
+        if (err?.code === "E2BIG") bytes = Number.isFinite(err.size) ? err.size : MAX_TRANSCRIPT_BYTES;
+        throw err;
+      }
+    };
+    const { tokens } = costLine({ issue: lane.issue, sessionId: lane.sessionId, cwd: lane.cwd, root, now: () => now, home, read: sized });
     if (tokens) live.set(lane.issue, tokens.total);
-    else unread += 1;
+    else if (bytes !== null) {
+      live.set(lane.issue, Math.max(Math.ceil(bytes / BYTES_PER_TOKEN), perLaneTokens + 1));
+      oversized += 1;
+    } else unread += 1;
   }
+  if (oversized) notes.push(`${oversized} running lane transcript${oversized === 1 ? "" : "s"} over the read cap, estimated from its size`);
   if (unread) notes.push(`${unread} running lane transcript${unread === 1 ? "" : "s"} unreadable, counted as 0`);
   return budgetReport({ removedSpent, live, perNightTokens, perLaneTokens, note: notes.join("; ") });
 }
