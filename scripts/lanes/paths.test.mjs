@@ -44,6 +44,20 @@ test("edge: no arguments, URLs, flags and repeated paths", () => {
   assert.deepEqual(issuePaths({ scope: "In: `.claude/commands/*`" }), [".claude/commands/"]);
 });
 
+test("issuePaths drops an email, a backslash path, a drive letter, a leading / and a .. segment", () => {
+  const dropped = ["me@example.com", "docs/me@example.com", "src\\a.mjs", "C:/work/a.mjs", "c:a.mjs", "/etc/passwd", "/srv/a.mjs", "../a.mjs", "a/../b.mjs", "a/../", "file:///C:/work/a.mjs", "file://x/y", "~/a.mjs", "%USERPROFILE%/a.mjs", "$HOME/a.mjs"];
+  for (const token of dropped) {
+    assert.deepEqual(issuePaths({ contract: `\`${token}\``, scope: `In: ${token}` }), [], token);
+  }
+});
+
+test("issuePaths keeps repo-relative paths, in order, beside dropped ones", () => {
+  assert.deepEqual(
+    issuePaths({ contract: "`scripts/lanes/a.mjs` `/abs/x.mjs`", scope: "In: docs/c/, me@example.com, README.md, ..hidden/x.md, a..b/c.mjs" }),
+    ["scripts/lanes/a.mjs", "docs/c/", "README.md", "..hidden/x.md", "a..b/c.mjs"],
+  );
+});
+
 test("paths overlap when equal or when one is a directory containing the other", () => {
   assert.equal(pathsOverlap(["a/b.mjs"], ["a/b.mjs"]), true);
   assert.equal(pathsOverlap(["a/"], ["a/b/c.mjs"]), true);

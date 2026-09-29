@@ -6,7 +6,10 @@ const cleanPath = (token) =>
     .replace(/^[("'[]+|[)"'\].,;:]+$/g, "")
     .replace(/^\.\//, "")
     .replace(/\*+$/, "");
-const looksLikePath = (p) => p && !/\s/.test(p) && !/^(-|https?:)/.test(p) && (p.includes("/") || /\.[a-z][a-z0-9]{0,5}$/i.test(p));
+// Only repo-relative paths are claimed: an email, a backslash path, a URI scheme or drive letter (`file:///C:/x`, `C:`),
+// a leading `/`, `~`, `%` or `$` (an absolute or home path) or a `..` segment never is.
+const notRepoRelative = (p) => /[@\\]/.test(p) || /^([a-z][a-z0-9+.-]*:|[/~%$])/i.test(p) || p.split("/").includes("..");
+const looksLikePath = (p) => p && !/\s/.test(p) && !/^(-|https?:)/.test(p) && !notRepoRelative(p) && (p.includes("/") || /\.[a-z][a-z0-9]{0,5}$/i.test(p));
 
 // The file paths an issue names: backticked or bare tokens with a `/` or a file extension, read from its Interface
 // contract and the "In:" part of its Scope (anything after "Out:" is ignored). A trailing `*` glob reads as its directory.
