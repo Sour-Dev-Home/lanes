@@ -127,35 +127,59 @@ function workflowChange(before, after) {
   const { tokens, error, topLevelAt } = scan(after, before.length);
   if (error) return `${WORKFLOW} cannot be read safely: ${error}`;
   if (!topLevelAt) return `${WORKFLOW} additions do not start at the top level`;
+  // A script reads these as comments and a module does not, so the parser check below could disagree with the file.
+  if (/<!--|-->/.test(after.slice(before.length))) return `${WORKFLOW} additions hold an HTML-like comment marker`;
   const added = tokens.filter((t) => t.start >= before.length && t.type !== "comment");
   if (added.length === 0) return `${WORKFLOW} adds no test block`;
   let i = 0;
   while (i < added.length) {
-    const end = testBlockEnd(added, i);
-    if (end === null) return `${WORKFLOW} adds something other than whole top-level test() blocks`;
-    i = end;
+    const block = testBlock(added, i);
+    if (block === null) return `${WORKFLOW} adds something other than whole top-level test() blocks`;
+    const why = bodyParseError(after.slice(block.bodyStart, block.bodyEnd), block);
+    if (why) return `${WORKFLOW} adds a test body that does not parse on its own: ${why}`;
+    i = block.end;
   }
   return null;
+}
+
+/**
+ * Security review #381, defence in depth: JavaScript's own parser must accept `body`, exactly as the tokenizer cut it,
+ * as a whole strict-mode arrow function body. If the tokenizer misread a `/` or a quote and cut the body in the wrong
+ * place, the cut text holds an unmatched `}` or a stray fragment and does not parse. `new Function` only compiles the
+ * text; nothing in it runs. Returns the parser's message, or null.
+ */
+function bodyParseError(body, { isAsync, param }) {
+  try {
+    new Function(`"use strict"; return (${isAsync ? "async " : ""}(${param ?? ""}) => {\n${body}\n});`);
+    return null;
+  } catch (e) {
+    return String(e?.message ?? e);
+  }
 }
 
 const isPunct = (t, value) => t?.type === "punct" && t.value === value;
 const isIdent = (t, value) => t?.type === "ident" && (value === undefined || t.value === value);
 
-/** The index after the test block starting at `tokens[i]`, or null when no whole block starts there. */
-function testBlockEnd(tokens, i) {
+/**
+ * The test block starting at `tokens[i]` as `{ end, bodyStart, bodyEnd, isAsync, param }` (`end` the token index after
+ * it, the body as text offsets between its braces), or null when no whole block starts there.
+ */
+function testBlock(tokens, i) {
   if (!isIdent(tokens[i], "test") || !isPunct(tokens[i + 1], "(")) return null;
   const open = tokens[i + 1];
   if (tokens[i + 2]?.type !== "string" || !isPunct(tokens[i + 3], ",")) return null;
   let j = i + 4;
-  if (isIdent(tokens[j], "async") && isPunct(tokens[j + 1], "(")) j++;
+  const isAsync = isIdent(tokens[j], "async") && isPunct(tokens[j + 1], "(");
+  if (isAsync) j++;
   if (!isPunct(tokens[j], "(")) return null;
   j++;
-  if (isIdent(tokens[j]) && !RESERVED.has(tokens[j].value)) j++;
+  let param = null;
+  if (isIdent(tokens[j]) && !RESERVED.has(tokens[j].value)) param = tokens[j++].value;
   if (!isPunct(tokens[j], ")") || !isPunct(tokens[j + 1], "=>") || !isPunct(tokens[j + 2], "{")) return null;
   const body = tokens[j + 2];
   const close = tokens.indexOf(body.match, j + 2);
   if (close < 0 || tokens[close + 1] !== open.match || !isPunct(tokens[close + 2], ";")) return null;
-  return close + 3;
+  return { end: close + 3, bodyStart: body.end, bodyEnd: body.match.start, isAsync, param };
 }
 
 // ---- tokenizer ---------------------------------------------------------------------------------------------------
@@ -201,9 +225,11 @@ export function scan(text, cut = -1) {
     tokens.push(t);
     return t;
   };
+  // The last two tokens that are not comments: `a./**/return` must still read `return` as a member name.
   const lastSignificant = () => {
-    for (let k = tokens.length - 1; k >= 0; k--) if (tokens[k].type !== "comment") return { t: tokens[k], before: tokens[k - 1] };
-    return { t: undefined };
+    const found = [];
+    for (let k = tokens.length - 1; k >= 0 && found.length < 2; k--) if (tokens[k].type !== "comment") found.push(tokens[k]);
+    return { t: found[0], before: found[1] };
   };
   // Scans a template chunk from just after "`" or "}" to its closing "`" or "${".
   const templateChunk = (start) => {

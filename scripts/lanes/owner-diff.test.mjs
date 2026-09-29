@@ -277,6 +277,28 @@ test("edge: a '/' after a value word or a plain name is a division", () => {
   additive(appended('test("b", () => {\n  const x = 4, y = [this / 2, true / 1, null / 1, x / 2, undefined / 1];\n});\n'));
 });
 
+// Security review round 3: a comment between "." and a keyword hid the member context, so `a./**/return / 2` was
+// read as a regex where JavaScript divides.
+test("edge: a comment between '.', '?.' or '#' and a keyword still makes it a name", () => {
+  needsOwner(appended('test("t", () => { a./**/return / 2; }); globalThis.evil = 1; test("u", () => { x / 3; });\n'));
+  needsOwner(appended('test("t", () => { a?./**/return / 2; }); globalThis.evil = 1; test("u", () => { x / 3; });\n'));
+  needsOwner(appended('test("t", () => { class A { #return = 1; m() { return this.#/**/return / 2; } } }); globalThis.evil = 1; test("u", () => { x / 3; });\n'));
+  additive(appended('test("t", () => {\n  const a = { return: 4 };\n  const n = a./* note */return / 2;\n});\n'));
+});
+
+// Whatever the tokenizer misreads, JavaScript's own parser must accept each body exactly as the tokenizer cut it.
+test("edge: a body the tokenizer cut where JavaScript would not needs the owner", () => {
+  needsOwner(appended('test("t", () => {\n  const s = 1;\n  s = ;\n});\n'), /does not parse/);
+  needsOwner(appended('test("t", () => {\n  await Promise.resolve();\n});\n'), /does not parse/);
+  additive(appended('test("t", async () => {\n  await Promise.resolve();\n});\n'));
+  additive(appended('test("t", (t) => {\n  t.diagnostic("x");\n});\n'));
+});
+
+test("edge: an HTML-like comment marker, which a module does not treat as a comment, needs the owner", () => {
+  needsOwner(appended('test("t", () => {\n  const a = 1;\n  a <!-- 2;\n});\n'), /HTML-like comment/);
+  needsOwner(appended('test("t", () => {\n  let a = 3;\n  a-->0;\n});\n'), /HTML-like comment/);
+});
+
 test("edge: a '/' after a keyword used as a private or member name is a division", () => {
   needsOwner(appended('test("b", () => { class A { #return = 1; m() { return this.#return / 2 ; } } ); globalThis.evil = 1; // } } );\n'));
   additive(appended('test("b", () => {\n  class A { #return = 4; m() { return this.#return / 2; } }\n  const o = { typeof: 4 };\n  const n = o.typeof / 2;\n});\n'));
