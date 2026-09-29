@@ -648,7 +648,7 @@ test("edge: cleanupMerged skips a step whose target is already gone", async () =
   const { cleanupMerged } = await import("./cleanup.mjs");
   const path = `${ROOT}/.claude/worktrees/issue-7-x`;
   const { deps, ran } = cleanupFakes({ inputs: { worktrees: [main, wt("issue-7-x")], sessions: [], prs: [merged("issue-7-x")] }, gone: [path] });
-  assert.deepEqual(cleanupMerged({ deps }), ["removed issue-7-x (PR #90): git branch -D issue-7-x"]);
+  assert.deepEqual(cleanupMerged({ deps }), ["removed issue-7-x (PR #90): git branch -D issue-7-x; worktree already removed"]);
   assert.deepEqual(ran, ["git branch -D issue-7-x", "gh issue edit 7 --remove-label lane:running"]);
 });
 
@@ -1636,4 +1636,78 @@ test("#382: edge: removeLaneWorktree stops at the first failing step", async () 
   const run = (cmd, args) => { log.push(args[0]); if (args[0] === "worktree") throw new Error("busy"); };
   assert.throws(() => removeLaneWorktree({ id: "s1", path: "/w", branch: "b" }, run), /busy/);
   assert.deepEqual(log, ["rm", "worktree"]);
+});
+
+const noJob = (id) => Object.assign(new Error("Command failed"), { stderr: `No job matching '${id}'\n` });
+const stopPlan = () => planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { alive: true })], prs: [merged("issue-7-x")] });
+
+test("#399: a session gone between plan and stop counts as already stopped and the lane's later steps run", () => {
+  const ran = [];
+  const run = (cmd, args) => {
+    ran.push(`${cmd} ${args[0]}`);
+    if (cmd === "claude") throw noJob("s7");
+  };
+  const [r] = runCleanup(stopPlan(), { run, stillThere: () => true });
+  assert.equal(r.status, "removed");
+  assert.ok(ran.includes("git worktree") && ran.includes("git branch"));
+  assert.deepEqual(r.already, ["session"]);
+  assert.match(render([r]), /removed issue-7-x \(PR #90\): .*session already removed/);
+});
+
+test("#399: a worktree folder gone before removal is already removed, not a failure", () => {
+  const plan = planCleanup({ worktrees: [wt("issue-7-x", { gone: true })], sessions: [], prs: [merged("issue-7-x")] });
+  assert.ok(plan[0].steps, "a vanished folder is not skipped as unreadable");
+  const ran = [];
+  const [r] = runCleanup(plan, { run: (cmd, args) => ran.push(`${cmd} ${args.join(" ")}`), stillThere: (o) => !o.path });
+  assert.equal(r.status, "removed");
+  assert.deepEqual(ran, ["git worktree prune", "git branch -D issue-7-x"]);
+  assert.deepEqual(r.already, ["worktree"]);
+});
+
+test("#399: a branch already deleted is already removed", () => {
+  const plan = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [], prs: [merged("issue-7-x")] });
+  const [r] = runCleanup(plan, { run: () => {}, stillThere: (o) => !o.branch });
+  assert.equal(r.status, "removed");
+  assert.deepEqual(r.already, ["branch"]);
+});
+
+test("#399: session, worktree and branch all gone reads as done by someone else", () => {
+  const run = (cmd) => {
+    if (cmd === "claude") throw noJob("s7");
+  };
+  const [r] = runCleanup(stopPlan(), { run, stillThere: () => false });
+  assert.equal(render([r]), "removed issue-7-x (PR #90): session, worktree and branch already removed");
+});
+
+test("#399: a real claude stop failure is still reported and stops the lane", () => {
+  const run = (cmd) => {
+    if (cmd === "claude") throw Object.assign(new Error("x"), { stderr: "permission denied\n" });
+    assert.fail("later steps must not run");
+  };
+  const [r] = runCleanup(stopPlan(), { run, stillThere: () => true });
+  assert.equal(r.status, "failed");
+  assert.match(render([r]), /^failed issue-7-x \(PR #90\) at claude stop s7: permission denied/);
+});
+
+test("edge: a gone worktree with unpushed work on a closed issue is still skipped, and a dirty one stays dirty", () => {
+  const closed = { number: 7, state: "CLOSED" };
+  const [a] = planCleanup({ worktrees: [wt("issue-7-x", { gone: true, unpushed: 2 })], issues: [closed] });
+  assert.match(a.skip, /not on any remote/);
+  const [b] = planCleanup({ worktrees: [wt("issue-7-x", { dirty: true })], prs: [merged("issue-7-x")] });
+  assert.equal(b.skip, "dirty worktree");
+});
+
+test("edge: parseWorktrees marks a prunable entry gone, and loadCleanupInputs reads a missing unreadable folder as gone", () => {
+  const list = `worktree ${ROOT}\nHEAD ${HEAD}\nbranch refs/heads/main\n\nworktree ${ROOT}/.claude/worktrees/issue-7-x\nHEAD ${HEAD}\nbranch refs/heads/issue-7-x\nprunable gone\n`;
+  assert.equal(parseWorktrees(list)[1].gone, true);
+  const run = (cmd, args) => {
+    if (cmd === "git" && args[0] === "worktree") return list;
+    if (cmd === "git" && args[0] === "-C") throw new Error("cannot chdir");
+    if (cmd === "git" && args[0] === "for-each-ref") return "";
+    if (cmd === "git") return "0";
+    return "[]";
+  };
+  const lane = loadCleanupInputs(ROOT, run).worktrees.find((w) => w.branch === "issue-7-x");
+  assert.equal(lane.gone, true);
+  assert.equal(lane.dirty, false);
 });
