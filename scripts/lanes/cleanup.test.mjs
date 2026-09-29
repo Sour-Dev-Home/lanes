@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   SESSION_ID, cleanableCount, cleanupMerged, findOrphans, formatStep, loadCleanupInputs, parseWorktrees, pidRunning, planCleanup, removeEmptyDir, render, runCleanup,
-  saveSessionLog, sessionEnded, sessionsFrom, shOptions, waitForStop,
+  recordSessionCost, saveSessionLog, sessionEnded, sessionsFrom, shOptions, waitForStop,
 } from "./cleanup.mjs";
 
 const ROOT = "C:/repo";
@@ -1418,4 +1418,104 @@ test("cleanupMerged with only a run injected reads every input through it", () =
 
 test("edge: loadCleanupInputs lets an injected run's failure through", () => {
   assert.throws(() => loadCleanupInputs(ROOT, () => { throw new Error("gh down"); }), /gh down/);
+});
+
+// Lane cost (#243): each removed session's token usage is recorded before it is stopped or removed.
+const costTranscript = (id, out) => JSON.stringify({ message: { id, role: "assistant", model: "claude-opus-5-5", usage: { input_tokens: 1, output_tokens: out, cache_read_input_tokens: 2, cache_creation_input_tokens: 3 } } });
+
+test("recordCost runs once per session, after its log and before it is stopped or removed", () => {
+  const plan = planCleanup({ worktrees: [main, wt("issue-7-x", aliveLock)], sessions: [aliveIdle()], prs: [merged("issue-7-x")] });
+  const order = [];
+  runCleanup(plan, {
+    run: (cmd, args) => order.push(`${cmd} ${args.join(" ")}`),
+    stillThere: () => true,
+    saveLog: (id) => (order.push(`save ${id}`), ".lanes/logs/x.txt"),
+    recordCost: (id, issue) => order.push(`cost ${id} ${issue}`),
+  });
+  assert.deepEqual(order.slice(0, 4), ["save s7", "cost s7 7", "claude stop s7", "claude rm s7"]);
+  assert.equal(order.filter((o) => o.startsWith("cost")).length, 1);
+});
+
+test("edge: a cost that cannot be recorded is reported and the session is still removed", () => {
+  const plan = planCleanup({ worktrees: [main], sessions: [session("s7", "issue-7-x", { status: "idle" })], prs: [merged("issue-7-x")] });
+  const ran = [];
+  const recordCost = () => {
+    throw new Error("EACCES: permission denied");
+  };
+  const results = runCleanup(plan, { run: (cmd, args) => ran.push(`${cmd} ${args.join(" ")}`), stillThere: () => true, recordCost });
+  assert.deepEqual(ran, ["claude rm s7"]);
+  assert.equal(render(results), "removed #7 session (PR #90): cost not recorded (EACCES: permission denied); claude rm s7");
+});
+
+test("edge: a claimant session removed to clear a claim has its cost recorded too", () => {
+  const { run } = claimedRun("x9");
+  const recorded = [];
+  const [result] = runCleanup(claimedPlan(), { run, stillThere: () => true, sessionEnded: () => true, recordCost: (id) => recorded.push(id) });
+  assert.equal(result.status, "removed");
+  assert.deepEqual(recorded, ["s7", "x9"]);
+});
+
+test("sessionsFrom keeps a session's transcript id and launch time", () => {
+  const [s] = sessionsFrom([{ id: "s7", kind: "background", cwd: `${ROOT}/.claude/worktrees/issue-7-x`, sessionId: "uuid-1", startedAt: 1000 }], ROOT);
+  assert.equal(s.sessionId, "uuid-1");
+  assert.equal(s.startedAt, 1000);
+  const [bare] = sessionsFrom([{ id: "s8", kind: "background", cwd: `${ROOT}/.claude/worktrees/issue-8-x`, sessionId: 5, startedAt: "x" }], ROOT);
+  assert.equal("sessionId" in bare || "startedAt" in bare, false);
+});
+
+const costFixture = () => {
+  const dir = mkdtempSync(join(tmpdir(), "cleanup-cost-"));
+  const home = join(dir, "home");
+  const root = join(dir, "repo");
+  const folder = join(home, ".claude", "projects", root.replace(/[^A-Za-z0-9]/g, "-"));
+  mkdirSync(folder, { recursive: true });
+  mkdirSync(root, { recursive: true });
+  const inputs = { root, sessions: [{ id: "s7", sessionId: "uuid-7", startedAt: Date.UTC(2026, 8, 1) }, { id: "s8", sessionId: "uuid-8" }], issues: [{ number: 7, state: "CLOSED", labels: [{ name: "ready" }, { name: "tier:full" }] }] };
+  return { dir, home, root, folder, inputs };
+};
+const costLines = (root) => readFileSync(join(root, ".lanes", "costs.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+
+test("recordSessionCost appends the lane's tokens, tier and times to .lanes/costs.jsonl, with no path or text", () => {
+  const f = costFixture();
+  try {
+    writeFileSync(join(f.folder, "uuid-7.jsonl"), [costTranscript("a", 10), costTranscript("a", 12), "not json"].join("\n"));
+    recordSessionCost("s7", 7, f.inputs, { home: f.home, now: () => Date.UTC(2026, 8, 2) });
+    const [line] = costLines(f.root);
+    assert.deepEqual(line, {
+      issue: 7, tier: "full", sessionId: "uuid-7", model: "claude-opus-5-5",
+      launchedAt: "2026-09-01T00:00:00.000Z", removedAt: "2026-09-02T00:00:00.000Z",
+      tokens: { input: 1, output: 12, cacheRead: 2, cacheCreation: 3, total: 18 },
+    });
+    assert.ok(!JSON.stringify(line).includes("cleanup-cost-"));
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("recordSessionCost with a missing transcript writes tokens null and a reason, and does not throw", () => {
+  const f = costFixture();
+  try {
+    recordSessionCost("s8", 8, f.inputs, { home: f.home });
+    const [line] = costLines(f.root);
+    assert.equal(line.tokens, null);
+    assert.equal(line.reason, "transcript not found");
+    assert.equal(line.tier, null);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("cleanupMerged records a cost line for each removed session and still removes the lane", () => {
+  const f = costFixture();
+  try {
+    const inputs = { ...f.inputs, worktrees: [main, wt("issue-7-x")], prs: [merged("issue-7-x")], sessions: [session("s7", "issue-7-x", { status: "idle", sessionId: "no-such-uuid" })] };
+    const lines = cleanupMerged({ deps: { load: () => inputs, run: () => "", stillThere: () => true, saveLog: () => ".lanes/logs/x.txt" } });
+    assert.match(lines[0], /^removed issue-7-x/);
+    const [line] = costLines(f.root);
+    assert.equal(line.issue, 7);
+    assert.equal(line.tier, "full");
+    assert.equal(line.reason, "transcript not found");
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
 });

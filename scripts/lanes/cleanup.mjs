@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { recordLaneCost } from "./lane-cost.mjs";
 const LANE_BRANCH = /^issue-(\d+)-./;
 // A lane's worktree folder: `issue-<N>-<slug>`, or bare `issue-<N>` when the lane skipped the slug (#134).
 const LANE_FOLDER = /^issue-(\d+)(?:-.*)?$/;
@@ -191,7 +192,9 @@ const isSessionStep = (step) => step.cmd === "claude" && (step.args[0] === "rm" 
 // a throw is reported in the result and the session is still removed. `removeDir(path)` runs an orphan's `rmdir`.
 // `waitStopped(id)`, when given, runs after each successful `claude stop`, so the `claude rm` that follows finds the
 // session gone; `sleep(ms)`, when given, lets a failed `claude rm` be retried once after RM_RETRY_MS (#179).
-export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, removeDir, waitStopped, sleep, dryRun = false }) {
+// `recordCost(id, issue)`, when given, records the session's token usage (lane-cost.mjs) right after its log is saved;
+// a throw is reported and never stops the removal.
+export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, recordCost, removeDir, waitStopped, sleep, dryRun = false }) {
   return plan.map((entry) => {
     const base = { branch: entry.branch, issue: entry.issue, pr: entry.pr, closed: entry.closed, orphan: entry.orphan, files: entry.files };
     if (entry.skip) return { ...base, status: "skipped", skip: entry.skip };
@@ -199,12 +202,21 @@ export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, remov
     const ran = [];
     const logged = new Set();
     const logFirst = (id) => {
-      if (!saveLog || logged.has(id)) return;
+      if ((!saveLog && !recordCost) || logged.has(id)) return;
       logged.add(id);
-      try {
-        ran.push(`log saved to ${saveLog(id, entry.issue)}`);
-      } catch (err) {
-        ran.push(`log not saved (${String(err.message).split(/\r?\n/)[0]})`);
+      if (saveLog) {
+        try {
+          ran.push(`log saved to ${saveLog(id, entry.issue)}`);
+        } catch (err) {
+          ran.push(`log not saved (${String(err.message).split(/\r?\n/)[0]})`);
+        }
+      }
+      if (recordCost) {
+        try {
+          recordCost(id, entry.issue);
+        } catch (err) {
+          ran.push(`cost not recorded (${errorText(err, { args: [] })})`);
+        }
       }
     };
     const exec = (step) => {
@@ -339,7 +351,7 @@ export function loadCleanupInputs(rootArg, run = sh) {
     if (LANE_BRANCH.test(branch ?? "") && !onBranch.has(branch)) worktrees.push({ path: null, branch, head, dirty: false, main: false, unpushed: unpushedCount(branch, sh) });
   }
   const prs = JSON.parse(sh("gh", ["pr", "list", "--state", "all", "--limit", String(PR_LIMIT), "--json", "number,state,headRefName,headRefOid"]));
-  const issues = JSON.parse(sh("gh", ["issue", "list", "--state", "all", "--limit", String(PR_LIMIT), "--json", "number,state"]));
+  const issues = JSON.parse(sh("gh", ["issue", "list", "--state", "all", "--limit", String(PR_LIMIT), "--json", "number,state,labels"]));
   const sessions = sessionsFrom(JSON.parse(sh("claude", ["agents", "--json"])), root).map((s) => (s.pid ? { ...s, alive: pidRunning(s.pid) } : s));
   return { root, worktrees, sessions, prs, issues, orphans: findOrphans(root, trees.map((t) => t.path)) };
 }
@@ -465,6 +477,9 @@ export function sessionsFrom(agents, root) {
     const issue = Number(cwd.slice(top.length).split("/").map((s) => LANE_FOLDER.exec(s)?.[1]).find(Boolean)) || null;
     const readable = typeof a.id === "string" && SESSION_ID.test(a.id);
     const session = { ...(readable ? { id: a.id } : { unreadableId: true }), cwd: a.cwd, issue, status: a.status, state: a.state };
+    // The transcript's name and the launch time, kept for lane-cost.mjs.
+    if (typeof a.sessionId === "string") session.sessionId = a.sessionId;
+    if (Number.isFinite(a.startedAt)) session.startedAt = a.startedAt;
     sessions.push(Number.isInteger(a.pid) ? { ...session, pid: a.pid } : session);
   }
   return sessions;
@@ -518,6 +533,15 @@ export function waitForStop(id, { run, sleep }) {
   }
 }
 
+// Appends the lane cost line (lane-cost.mjs) for background session `id` of `issue`: its transcript comes from the
+// Claude Code projects folder for the repository root, and the tier from the issue's `tier:*` label when it has one.
+// `costDeps` (home, read, now) are lane-cost's, for tests.
+export function recordSessionCost(id, issue, inputs, costDeps = {}) {
+  const session = inputs.sessions?.find((s) => s.id === id);
+  const label = inputs.issues?.find((i) => i.number === issue)?.labels?.map((l) => /^tier:(.+)$/.exec(l?.name ?? "")?.[1]).find(Boolean);
+  return recordLaneCost({ issue, tier: label ?? null, sessionId: session?.sessionId, startedAt: session?.startedAt }, { root: inputs.root, ...costDeps });
+}
+
 const branchExists = (branch) => {
   try {
     sh("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
@@ -545,12 +569,13 @@ const DEFAULT_DEPS = {
  * @returns {string[]}
  */
 export function cleanupMerged({ dryRun = false, deps = {} } = {}) {
-  const { load, run, stillThere, sessionEnded: ended, saveLog, removeDir, waitStopped: waited, sleep } = { ...DEFAULT_DEPS, ...deps };
+  const { load, run, stillThere, sessionEnded: ended, saveLog, recordCost: costed, removeDir, waitStopped: waited, sleep } = { ...DEFAULT_DEPS, ...deps };
   const inputs = load ? load() : loadCleanupInputs(undefined, run);
   const isEnded = ended ?? ((id) => sessionEnded(id, { sessions: inputs.sessions, run }));
   const save = saveLog ?? (inputs.root ? (id, issue) => saveSessionLog(id, issue, { run, root: inputs.root }) : undefined);
+  const record = costed ?? (inputs.root ? (id, issue) => recordSessionCost(id, issue, inputs) : undefined);
   const waitStopped = waited ?? ((id) => waitForStop(id, { run, sleep }));
-  return render(runCleanup(planCleanup(inputs), { dryRun, run, stillThere, sessionEnded: isEnded, saveLog: save, removeDir, waitStopped, sleep })).split("\n");
+  return render(runCleanup(planCleanup(inputs), { dryRun, run, stillThere, sessionEnded: isEnded, saveLog: save, recordCost: record, removeDir, waitStopped, sleep })).split("\n");
 }
 
 function main(argv = process.argv.slice(2)) {
