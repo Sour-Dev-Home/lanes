@@ -630,38 +630,93 @@ const PUSH_TAGS_RE = /^--(?:tags|follow-tags|mirror)$/;
 // A ref that is, or could be, a v* tag: `v1.2.3`, `refs/tags/v1`, or a pattern such as `refs/tags/*` that pushes
 // every tag (read on the word with quoted glob characters restored).
 const RELEASE_REF_RE = /^\+?(?:refs\/tags\/)?(?:v|[*?[])/i;
+// A ref name known only at run time (#424): `$` or a backtick in a refspec's destination, or a braced or command
+// substitution anywhere in it, since that may itself hold the `:` that splits source from destination (`${V:-v1}`).
+const BRACED_OR_COMMAND_RE = new RegExp(`\\$[({]|[\`${QUOTED_TICK}]`);
+const runtimeRef = (w) => BRACED_OR_COMMAND_RE.test(w) || LIVE_RE.test(w.split(":").at(-1));
+// A tag's ref as update-ref names it in full (#424).
+const TAG_REF_RE = /^refs\/tags\/(?:v|[*?[])/i;
+const UPDATE_REF_VALUED = new Set(["-m"]);
+// `-c alias.NAME=VALUE` and `--config-env[=]alias.NAME=ENV`: an alias given on the command line (#424).
+const ALIAS_RE = /^alias\.([^=]+)=(.*)$/is;
+// gh release create (or its alias new) makes the tag on the remote when it does not exist yet (#424); these options of
+// its take the next word as their value.
+const GH_RE = /^gh(\.exe)?$/i;
+const GH_RELEASE_VALUED = new Set(["-t", "--title", "-n", "--notes", "-F", "--notes-file", "--target", "--discussion-category", "--notes-start-tag", "-R", "--repo"]);
+// How many -c aliases deep releaseTagCommand follows before failing closed.
+const MAX_ALIAS_DEPTH = 8;
+
+/** True when gh release create at `words[at]` names a v* tag, one known only at run time, or none (gh then asks). */
+function ghReleaseTag(words, at) {
+  if (words[at + 1] !== "release" || !["create", "new"].includes(words[at + 2])) return false;
+  for (let j = at + 3; j < words.length; j += 1) {
+    if (GH_RELEASE_VALUED.has(words[j])) j += 1;
+    else if (!words[j].startsWith("-")) return RELEASE_REF_RE.test(unmark(words[j])) || LIVE_RE.test(words[j]);
+  }
+  return true;
+}
 
 /**
  * True when simple command `words` creates or pushes a `v*` tag (ADR 0017 decision 3): git, as the program behind any
  * wrappers, running `tag` with a name starting with v and no list, delete or verify option, or `push` with --tags,
  * --follow-tags or --mirror, `-c push.followTags=…`, or a refspec whose destination is a v* ref (`v1.2.3`,
  * `refs/tags/v1`, `HEAD:refs/tags/v1`, `tag v1`). A branch starting with v counts too: git alone knows which it is.
- * Both guards deny it from any session; the owner tags from their own terminal.
+ * Since #424 also: a tag name or refspec destination known only at run time (`"$V"`, `$(cat VERSION)`, `${V:-v1}`);
+ * with --repo given, every positional word as a refspec; `update-ref` of a `refs/tags/v*` ref (or one named at run
+ * time, or `--stdin`); a `-c alias.NAME=…` alias used as the subcommand, read as what it expands to (one that runs a
+ * shell with `!`, or whose value is known only at run time or through --config-env, fails closed); and gh release
+ * create (or new) naming a v* tag, one known only at run time, or none. Both guards deny it from any session; the
+ * owner tags from their own terminal.
  */
-export function releaseTagCommand(words) {
+export function releaseTagCommand(words, depth = 0) {
   const at = launcherAt(words);
-  if (at >= words.length || !GIT_RE.test(basename(words[at]))) return false;
+  if (at >= words.length) return false;
+  if (GH_RE.test(basename(words[at]))) return ghReleaseTag(words, at);
+  if (!GIT_RE.test(basename(words[at]))) return false;
   let i = at + 1;
   let followTags = false;
+  const aliases = new Map();
   for (; i < words.length && words[i].startsWith("-"); i += 1) {
     if (words[i] === "-c" && /^push\.followtags/i.test(words[i + 1] ?? "")) followTags = true;
+    const env = /^--config-env=(.*)$/s.exec(words[i])?.[1] ?? (words[i] === "--config-env" ? words[i + 1] : undefined);
+    const alias = ALIAS_RE.exec((words[i] === "-c" ? words[i + 1] : env) ?? "");
+    // A --config-env alias takes its value from the environment: nothing of it is known here.
+    if (alias) aliases.set(alias[1].toLowerCase(), env === undefined ? alias[2] : null);
     if (GIT_VALUED.has(words[i])) i += 1;
   }
   const sub = words[i];
+  const rest = words.slice(i + 1);
+  if (sub !== undefined && aliases.has(sub.toLowerCase())) {
+    const value = aliases.get(sub.toLowerCase());
+    if (value === null || LIVE_RE.test(value) || value.startsWith("!") || depth >= MAX_ALIAS_DEPTH) return true;
+    // git keeps its own options, the other aliases among them, for what the alias expands to.
+    return releaseTagCommand([...words.slice(at, i), ...unmark(value).trim().split(/\s+/), ...rest], depth + 1);
+  }
+  if (sub === "update-ref") {
+    if (rest.includes("--stdin")) return true;
+    if (rest.includes("-d")) return false;
+    const ref = rest.find((w, k) => !w.startsWith("-") && !UPDATE_REF_VALUED.has(rest[k - 1]));
+    return ref !== undefined && (TAG_REF_RE.test(unmark(ref)) || runtimeRef(ref));
+  }
   const args = [];
   let reads = false;
+  let repoGiven = false;
   for (let j = i + 1; j < words.length; j += 1) {
     const w = words[j];
     if (sub === "tag" && TAG_READS_RE.test(w)) reads = true;
     if (sub === "push" && PUSH_TAGS_RE.test(w)) return true;
+    if (sub === "push" && (w === "--repo" || w.startsWith("--repo="))) repoGiven = true;
     if ((sub === "tag" && (TAG_VALUED.has(w) || /^-[A-Za-z]*[mFu]$/.test(w))) || (sub === "push" && PUSH_VALUED.has(w))) j += 1;
     else if (!w.startsWith("-")) args.push(w);
   }
-  if (sub === "tag") return !reads && args.length > 0 && RELEASE_REF_RE.test(unmark(args[0]));
+  if (sub === "tag") return !reads && args.length > 0 && (RELEASE_REF_RE.test(unmark(args[0])) || LIVE_RE.test(args[0]));
   if (sub !== "push") return false;
   if (followTags) return true;
-  // The first argument is the remote; each one after it is a refspec, or `tag` before a tag's name.
-  return args.slice(1).some((w, k, specs) => RELEASE_REF_RE.test(unmark(w).split(":").at(-1)) || (w === "tag" && k + 1 < specs.length));
+  // The first argument is the remote, unless --repo named it (#424); each one after it is a refspec, or `tag` before a
+  // tag's name.
+  return args
+    .slice(repoGiven ? 0 : 1)
+    .some((w, k, specs) => RELEASE_REF_RE.test(unmark(w).split(":").at(-1)) || runtimeRef(w) || (w === "tag" && k + 1 < specs.length));
 }
 
 /**
