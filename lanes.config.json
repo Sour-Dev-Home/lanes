@@ -9,7 +9,7 @@
   "modules": {
     "entries": [
       { "id": "preflight", "paths": ["scripts/preflight.", "scripts/security-workflow."], "imports": [] },
-      { "id": "modules", "paths": ["scripts/lanes/modules."], "imports": [] },
+      { "id": "modules", "paths": ["scripts/lanes/modules.", "scripts/lanes/affected-tests."], "imports": [] },
       { "id": "structure", "paths": ["scripts/lanes/structure-report."], "imports": ["modules"] },
       { "id": "lessons", "paths": ["scripts/lanes/lessons."], "imports": ["modules"] },
       { "id": "lib", "paths": ["scripts/lanes/lib.", "scripts/lanes/validate."], "imports": [] },
