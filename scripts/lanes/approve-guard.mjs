@@ -16,7 +16,7 @@
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { lex, mark, ORIGINAL, readGrant, RUNS_ON_EXPANSION_RE, unmark } from "./shell-lex.mjs";
+import { launchedCommands, lex, mayExpandTo, readGrant, RUNS_ON_EXPANSION_RE, scriptSubcommand, unmark, wmiProcessCreate } from "./shell-lex.mjs";
 
 // post-review.mjs reads the grant with the guard's own reader.
 export { readGrant } from "./shell-lex.mjs";
@@ -25,6 +25,8 @@ export const GRANT_TTL_MS = 15 * 60 * 1000;
 export const DENY_REASON = "owner approval only from /approve <N> in this session";
 // A command that names post-review but cannot be parsed (an unterminated quote) fails closed with this reason (#100).
 export const UNPARSED_REASON = `the command could not be parsed and names post-review.mjs: ${DENY_REASON}`;
+// A WMI/CIM process creation whose command line is built at run time (#308).
+export const WMI_REASON = `this WMI/CIM process creation builds its command line at run time, which could be post-review.mjs owner: ${DENY_REASON}`;
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const APPROVE_RE = /^\/approve ([1-9][0-9]{0,8})$/;
 // `/approve <N> [<N>...]`: numbers separated by one space, so the match is linear (#275).
@@ -146,9 +148,9 @@ const VAR_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
 // What is left of a word after substitution that could still expand to anything.
 const UNRESOLVED_RE = /[$`]/;
 // bun and deno run a script too (start-guard.mjs already counts them for the analogous concern); each takes a
-// `run` subcommand ahead of its options and script, which is not itself an option or the script.
+// `run` subcommand ahead of its options and script, and deno an `eval` ahead of its code (shell-lex.mjs's
+// scriptSubcommand, #308), which is not itself an option or the script.
 const NODE_RE = /^(node|nodejs|bun|deno)(\.exe)?$/i;
-const RUNS_VIA_RUN_RE = /^(bun|deno)(\.exe)?$/i;
 // Commands that run their arguments as shell text: eval and source always, a shell after a -c flag.
 const EVAL_RE = /^(eval|source|\.)$/;
 const SHELL_RE = /^(sh|bash|zsh|dash|ksh|ash|busybox)(\.exe)?$/i;
@@ -277,114 +279,11 @@ function resolveVars(words, assignments) {
   );
 }
 
-const GLOB_RE = /[*?[{]/;
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
-// Brace sequences: {1..9} and {a..z}, each with an optional ..step (which only thins the range, so it is ignored).
-const INT_SEQ_RE = /^[+-]?[0-9]+\.\.[+-]?[0-9]+(\.\.[+-]?[0-9]+)?$/;
-const CHAR_SEQ_RE = /^([A-Za-z])\.\.([A-Za-z])(\.\.[+-]?[0-9]+)?$/;
-
-/** The index of the `}` closing the `{` at `open`, or -1. */
-function closingBrace(s, open) {
-  let depth = 0;
-  for (let i = open; i < s.length; i += 1) {
-    if (s[i] === "{") depth += 1;
-    else if (s[i] === "}" && (depth -= 1) === 0) return i;
-  }
-  return -1;
-}
-
-/** `s` split at the commas outside any nested brace. */
-function topLevelCommas(s) {
-  const parts = [""];
-  let depth = 0;
-  for (const c of s) {
-    if (c === "," && depth === 0) parts.push("");
-    else {
-      if (c === "{") depth += 1;
-      else if (c === "}") depth -= 1;
-      parts[parts.length - 1] += c;
-    }
-  }
-  return parts;
-}
-
-// Stands for the numbers an integer sequence {1..9} expands to, which no name needs spelled out.
-const DIGITS = "";
-// How many words a brace expansion may produce before the guard stops expanding and fails closed.
-const MAX_EXPANSIONS = 1024;
-
 /**
- * The words bash's brace expansion makes of `s`, as bash reads it (#142, #167): the leftmost list `{a,b}` or sequence
- * `{a..c}`/`{1..3}` expands, each result is expanded again from that brace on, and any other brace is literal text.
- * A marked (quoted or escaped) brace or comma is plain text, so it neither opens, closes nor splits a group. Null when
- * the expansion would make more than MAX_EXPANSIONS words.
+ * Whether a word bash would glob- or brace-expand could expand to post-review.mjs (shell-lex.mjs's mayExpandTo, shared
+ * with start-guard.mjs since #308). A word with too many expansions to check counts as a match.
  */
-function braceExpand(s) {
-  const out = [];
-  const walk = (str, from) => {
-    if (out.length > MAX_EXPANSIONS) return;
-    for (let i = str.indexOf("{", from); i !== -1; i = str.indexOf("{", i + 1)) {
-      const end = closingBrace(str, i);
-      if (end === -1) continue;
-      const inner = str.slice(i + 1, end);
-      const parts = topLevelCommas(inner);
-      let alts = null;
-      let seq;
-      if (parts.length > 1) alts = parts;
-      else if (INT_SEQ_RE.test(inner)) alts = [DIGITS];
-      else if ((seq = CHAR_SEQ_RE.exec(inner))) {
-        const [lo, hi] = [seq[1].charCodeAt(0), seq[2].charCodeAt(0)].sort((a, b) => a - b);
-        alts = [];
-        for (let code = lo; code <= hi; code += 1) alts.push(mark(String.fromCharCode(code)));
-      }
-      if (alts === null) continue;
-      for (const alt of alts) walk(str.slice(0, i) + alt + str.slice(end + 1), i);
-      return;
-    }
-    out.push(str);
-  };
-  walk(s, 0);
-  return out.length > MAX_EXPANSIONS ? null : out;
-}
-
-/**
- * A regex source matching everything a glob pattern (with no brace left to expand) can match, as bash reads it. A
- * closed brace is literal text. An unclosed `{` is literal to bash too (#123), but it is read as optional, so a word
- * such as post-review{.mjs that names the script once the stray brace is dropped still fails closed.
- */
-function patternRe(s) {
-  let re = "";
-  for (let i = 0; i < s.length; i += 1) {
-    const c = s[i];
-    if (c === "*") re += ".*";
-    else if (c === "?") re += ".";
-    else if (c === DIGITS) re += "-?[0-9]+";
-    else if (c === "[") {
-      const end = s.indexOf("]", i + 2);
-      if (end === -1) re += "\\[";
-      else {
-        re += ".";
-        i = end;
-      }
-    } else if (c === "{" && closingBrace(s, i) === -1) re += "\\{?";
-    else re += escapeRe(ORIGINAL[c] ?? c);
-  }
-  return re;
-}
-
-/**
- * Whether a word bash would glob- or brace-expand could expand to post-review.mjs: the last path component of one of
- * its brace expansions, as a pattern, matches the name. A word with too many expansions to check counts as a match.
- */
-function mayExpandToPostReview(w) {
-  if (!GLOB_RE.test(w)) return false;
-  const words = braceExpand(w);
-  if (words === null) return true;
-  return words.some((x) => {
-    const pattern = new RegExp(`^${patternRe(x.slice(x.lastIndexOf("/") + 1))}$`, "i");
-    return pattern.test("post-review.mjs") || pattern.test("post-review");
-  });
-}
+const mayExpandToPostReview = (w) => mayExpandTo(w, ["post-review.mjs", "post-review"]);
 
 /** Text with every quote and backslash dropped, so a name split by quoting (pos"t-review) reads whole. */
 const unquoted = (s) => s.replace(/['"\\]/g, "");
@@ -464,8 +363,8 @@ function scan(cmd, depth, out) {
     }
     plain.forEach((p, at) => {
       if ((at > 0 && !runsArgs) || !NODE_RE.test(p.split(/[\\/]/).at(-1))) return;
-      // bun/deno's own `run` subcommand sits ahead of the options and script; skip over it before scanning those.
-      const start = RUNS_VIA_RUN_RE.test(p.split(/[\\/]/).at(-1)) && plain[at + 1] === "run" ? at + 1 : at;
+      // bun/deno's own `run` (or deno's `eval`) sits ahead of the options and script; skip over it before scanning those.
+      const start = scriptSubcommand(plain, at) ? at + 1 : at;
       for (let j = start + 1; j <= nodeScriptEnd(plain, start); j += 1) nodeRange.add(j);
     });
     // Words that eval, source or a shell's -c runs as shell text: one still holding `$` or a backtick could be any
@@ -495,6 +394,8 @@ function scan(cmd, depth, out) {
       if (bashText === null && POWERSHELL_SPLICE_RE.test(line)) out.push({ pr: undefined, standalone: false });
       else scanScript(bashText ?? line, depth, out);
     }
+    // What cmd /c, start, schtasks /tr or a scheduled-task cmdlet starts, as a command line of its own (#308).
+    for (const line of launchedCommands(plain)) scanScript(unmark(line), depth, out);
     // Every argument is shell text when the output feeds a shell, or goes to a file a later command may run (#219).
     const argsRun = feedsRunner(k) || (writesFile && laterRuns());
     // An assigned value may be run later by eval or sh -c "$CMD", and an ambiguous one is never substituted: scan
@@ -597,7 +498,8 @@ const PS_SHELL_RE = /^(powershell|pwsh)$/i;
 const PS_LAUNCH_RE = /^(start-process|saps|start|invoke-item|ii)$/i;
 // .NET, COM, script-block and alias-drive routes to running code or a program that no word shows: a command using any
 // of them fails closed as a whole.
-const PS_OPAQUE_RE = /scriptblock|invokescript|invokecommand|add-type|process\]?::start|processstartinfo|diagnostics\.process|activator\]|comobject|alias:/i;
+// A [powershell]::Create() instance's AddCommand or AddScript runs whatever it is given (#308).
+const PS_OPAQUE_RE = /scriptblock|invokescript|invokecommand|add-type|process\]?::start|processstartinfo|diagnostics\.process|activator\]|comobject|alias:|powershell\]::create|\.add(?:command|script)\b/i;
 // Commands that rename a program (an alias for node or claude): as a command word, their statement fails closed. Only
 // the command word counts, so a word such as "sal" in a message or file name does not (#61 test-hunter round 2).
 const PS_ALIAS_RE = /^(set-alias|new-alias|import-alias|sal|nal|ipal)$/i;
@@ -708,6 +610,7 @@ function hereStringEnd(src, from, quotes) {
  */
 function psWord(src, start, ctx) {
   const parts = [];
+  let joined = false;
   let i = start;
   for (; i < src.length; i += 1) {
     const c = src[i];
@@ -770,12 +673,14 @@ function psWord(src, start, ctx) {
       // A wildcard stays live: PowerShell 7 expands it in a native command's arguments outside Windows.
       parts.push({ raw: c, glob: true });
     } else {
+      // A `+` against a quote ('cla'+'ude') joins strings when PowerShell reads the word as an expression (#308).
+      if (c === "+" && (PS_SINGLE + PS_DOUBLE).split("").some((q) => src[i - 1] === q || src[i + 1] === q)) joined = true;
       addLiteral(parts, c);
     }
   }
   if (i === start && parts.length === 0) throw new Error(`unexpected ${src[i]}`);
   const value = parts.map((p) => (p.lit !== undefined ? p.lit : p.glob ? p.raw : PS_VAR)).join("");
-  return { parts, end: i, value, literal: parts.every((p) => p.lit !== undefined || p.glob), expression: PS_EXPRESSION_START.includes(src[start]) };
+  return { parts, end: i, value, literal: parts.every((p) => p.lit !== undefined || p.glob), expression: PS_EXPRESSION_START.includes(src[start]), joined };
 }
 
 /** A PowerShell command name as the guards compare it: its last path component, lower case, without .exe. */
@@ -809,8 +714,10 @@ function psStatementText(stmt, extra, depth) {
   if (runner || launch) {
     const args = words.slice(1);
     // What a runner runs, or a launcher starts, is only known at run time when any argument (or, for a runner,
-    // anything piped into it) expands (#61 security review: Start-Process node -ArgumentList $a).
-    if (args.some((w) => !w.literal) || (runner && stmt.pipedInto && stmt.pipedLive)) extra.push(PS_VAR);
+    // anything piped into it) expands (#61 security review: Start-Process node -ArgumentList $a), or joins strings
+    // with `+`, with or without spaces around it, as the parenthesised form does (#308: iex 'cla'+'ude --b'+'g').
+    const spliced = (w) => !w.literal || w.joined || w.value === "+";
+    if (args.some(spliced) || (runner && stmt.pipedInto && stmt.pipedLive)) extra.push(PS_VAR);
     if (runner && args.length > 0) extra.push(psShadow(args.map((w) => w.value).join(" "), depth));
     // An -EncodedCommand value, given to powershell directly or through Start-Process, is read decoded.
     for (const [k, w] of args.entries()) {
@@ -992,7 +899,11 @@ export function decidePreToolUse(input, grantOrLookup, now = Date.now()) {
       return e?.readerLimit || /post-review/i.test(unquotedPowerShell(command)) ? { decision: "deny", reason: UNPARSED_REASON } : null;
     }
     found = ownerInvocations(bashText, command, PS_META_RE);
+    // A WMI/CIM process creation whose command line is built at run time could be post-review.mjs owner (#308), as
+    // start-guard.mjs denies it for a lane launch (#316); a hashtable or expression reads as `$` in the Bash text.
+    if (wmiProcessCreate(command) && UNRESOLVED_RE.test(bashText)) return { decision: "deny", reason: WMI_REASON };
   } else {
+    if (wmiProcessCreate(command) && UNRESOLVED_RE.test(command)) return { decision: "deny", reason: WMI_REASON };
     found = findOwnerInvocations(command);
   }
   if (found.length === 0) return null;

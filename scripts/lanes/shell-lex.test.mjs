@@ -5,8 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  CAT_HEREDOC_RE, HEREDOC_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, heredocOperator, lex, literalSubstitution, plainLiteralSubstitution, readGrant, readHeredoc,
-  skipRedirectTarget, unmark,
+  CAT_HEREDOC_RE, HEREDOC_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, heredocOperator, launchedCommands, lex, literalSubstitution, mark, mayExpandTo,
+  plainLiteralSubstitution, readGrant, readHeredoc, skipRedirectTarget, unmark, wmiProcessCreate,
 } from "./shell-lex.mjs";
 
 const source = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
@@ -272,4 +272,60 @@ test("#351 edge: the two shapes read pipes as each guard did", () => {
   assert.equal(lex("(echo x) | sh")[0].pipedOut, true);
   assert.deepEqual(lex("(echo x) | sh", { bodies: true }).pipes, [false, false]);
   assert.deepEqual(lex("a | b || c |& d", { bodies: true }).pipes, [true, false, true, false]);
+});
+
+// --- #308: the glob, launcher and WMI readers both guards share ---------------------------------------------------
+
+test("#308 criterion 6: mayExpandTo reads a glob or brace word's last path component against the names", () => {
+  for (const w of ["scripts/lanes/st*.mjs", "scripts/lanes/[s]tart.mjs", "star?.mjs", "{x,s}tart.mjs", "scripts\\lanes\\st*.mjs", "*", "ST*.MJS"]) {
+    assert.equal(mayExpandTo(w, ["start.mjs"]), true, w);
+  }
+  for (const w of ["scripts/lanes/start.mjs", "*.test.mjs", "re*.mjs", "st*.js", "", "st*/x.mjs"]) {
+    assert.equal(mayExpandTo(w, ["start.mjs"]), false, w);
+  }
+  // A marked (quoted) glob character is plain text, and too many expansions count as a match.
+  assert.equal(mayExpandTo(`st${mark("*")}.mjs`, ["start.mjs"]), false);
+  assert.equal(mayExpandTo("{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}", ["start.mjs"]), true);
+  assert.equal(mayExpandTo("cl*.exe", ["claude", "claude.exe"]), true);
+});
+
+test("#308 criterion 6: launchedCommands reads cmd /c, start, schtasks /tr and the scheduled-task cmdlets", () => {
+  assert.deepEqual(launchedCommands(["cmd", "/c", "start", "x.mjs", "1"]), ["start x.mjs 1"]);
+  assert.deepEqual(launchedCommands(["cmd.exe", "/S", "/K", "dir"]), ["dir"]);
+  assert.deepEqual(launchedCommands(["cmd", "/c", "echo", "%X%"]), ["echo ${LANES_CMD_VAR}"]);
+  assert.deepEqual(launchedCommands(["start", "/b", "", "x.mjs", "1"]), [" x.mjs 1", "x.mjs 1"]);
+  assert.deepEqual(launchedCommands(["start", "x.mjs"]), ["x.mjs", ""]);
+  assert.deepEqual(launchedCommands(["schtasks", "/create", "/tn", "x", "/TR", "node a.mjs"]), ["node a.mjs"]);
+  assert.deepEqual(launchedCommands(["New-ScheduledTaskAction", "-Execute", "node", "-Argument", "a.mjs 1"]), ["node a.mjs 1", "node", "a.mjs 1"]);
+  assert.deepEqual(launchedCommands(["Register-ScheduledTask", "-TaskName", "x", "-Action", "$1"]), ["x $1", "x", "$1"]);
+  // Behind an assignment or a wrapper too.
+  assert.deepEqual(launchedCommands(["A=1", "env", "timeout", "5", "cmd", "/c", "x"]), ["x"]);
+});
+
+test("#308 edge: launchedCommands on empty, flag-only and non-launcher words", () => {
+  for (const words of [[], ["A=1"], ["cmd"], ["cmd", "/c"], ["schtasks", "/tr"], ["schtasks", "/query"], ["echo", "cmd", "/c", "x"], ["npm", "start"], ["git", "commit", "-m", "start x.mjs"]]) {
+    const texts = launchedCommands(words);
+    assert.ok(texts.every((t) => t.trim() === ""), JSON.stringify(words));
+  }
+});
+
+test("#308 criterion 6: wmiProcessCreate reads Win32_Process Create, wmic process call create and a class wildcard", () => {
+  for (const t of [
+    "Invoke-CimMethod -ClassName Win32_Process -MethodName Create",
+    "Invoke-CimMethod -ClassName ('Win32'+'_Process') -MethodName Create",
+    "wmic process call create x",
+    "(Get-WmiObject -List Win32_Pro*).Create($c)",
+    "(Get-CimClass -ClassName Win32_[P]rocess).Create($c)",
+  ]) {
+    assert.equal(wmiProcessCreate(t), true, t);
+  }
+  for (const t of [
+    "Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine",
+    "Get-WmiObject -List Win32_Pro*",
+    "Get-ChildItem *.md; gh pr create --title x",
+    "git commit -m \"$(cat <<'EOF'\nWin32_Process Create\nEOF\n)\"",
+    "",
+  ]) {
+    assert.equal(wmiProcessCreate(t), false, t);
+  }
 });

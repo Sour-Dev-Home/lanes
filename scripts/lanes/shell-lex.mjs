@@ -171,6 +171,223 @@ export function feedsShell(segments, pipes, k) {
   return false;
 }
 
+// --- Globs, launchers and WMI process creation (#308) ------------------------------------------------------------
+
+const GLOB_RE = /[*?[{]/;
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
+// Brace sequences: {1..9} and {a..z}, each with an optional ..step (which only thins the range, so it is ignored).
+const INT_SEQ_RE = /^[+-]?[0-9]+\.\.[+-]?[0-9]+(\.\.[+-]?[0-9]+)?$/;
+const CHAR_SEQ_RE = /^([A-Za-z])\.\.([A-Za-z])(\.\.[+-]?[0-9]+)?$/;
+
+/** The index of the `}` closing the `{` at `open`, or -1. */
+function closingBrace(s, open) {
+  let depth = 0;
+  for (let i = open; i < s.length; i += 1) {
+    if (s[i] === "{") depth += 1;
+    else if (s[i] === "}" && (depth -= 1) === 0) return i;
+  }
+  return -1;
+}
+
+/** `s` split at the commas outside any nested brace. */
+function topLevelCommas(s) {
+  const parts = [""];
+  let depth = 0;
+  for (const c of s) {
+    if (c === "," && depth === 0) parts.push("");
+    else {
+      if (c === "{") depth += 1;
+      else if (c === "}") depth -= 1;
+      parts[parts.length - 1] += c;
+    }
+  }
+  return parts;
+}
+
+// Stands for the numbers an integer sequence {1..9} expands to, which no name needs spelled out.
+const DIGITS = String.fromCharCode(0xe00f);
+// How many words a brace expansion may produce before the guard stops expanding and fails closed.
+const MAX_EXPANSIONS = 1024;
+
+/**
+ * The words bash's brace expansion makes of `s`, as bash reads it (#142, #167): the leftmost list `{a,b}` or sequence
+ * `{a..c}`/`{1..3}` expands, each result is expanded again from that brace on, and any other brace is literal text.
+ * A marked (quoted or escaped) brace or comma is plain text, so it neither opens, closes nor splits a group. Null when
+ * the expansion would make more than MAX_EXPANSIONS words.
+ */
+function braceExpand(s) {
+  const out = [];
+  const walk = (str, from) => {
+    if (out.length > MAX_EXPANSIONS) return;
+    for (let i = str.indexOf("{", from); i !== -1; i = str.indexOf("{", i + 1)) {
+      const end = closingBrace(str, i);
+      if (end === -1) continue;
+      const inner = str.slice(i + 1, end);
+      const parts = topLevelCommas(inner);
+      let alts = null;
+      let seq;
+      if (parts.length > 1) alts = parts;
+      else if (INT_SEQ_RE.test(inner)) alts = [DIGITS];
+      else if ((seq = CHAR_SEQ_RE.exec(inner))) {
+        const [lo, hi] = [seq[1].charCodeAt(0), seq[2].charCodeAt(0)].sort((a, b) => a - b);
+        alts = [];
+        for (let code = lo; code <= hi; code += 1) alts.push(mark(String.fromCharCode(code)));
+      }
+      if (alts === null) continue;
+      for (const alt of alts) walk(str.slice(0, i) + alt + str.slice(end + 1), i);
+      return;
+    }
+    out.push(str);
+  };
+  walk(s, 0);
+  return out.length > MAX_EXPANSIONS ? null : out;
+}
+
+/**
+ * A regex source matching everything a glob pattern (with no brace left to expand) can match, as bash reads it. A
+ * closed brace is literal text. An unclosed `{` is literal to bash too (#123), but it is read as optional, so a word
+ * such as post-review{.mjs that names the script once the stray brace is dropped still fails closed.
+ */
+function patternRe(s) {
+  let re = "";
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+    if (c === "*") re += ".*";
+    else if (c === "?") re += ".";
+    else if (c === DIGITS) re += "-?[0-9]+";
+    else if (c === "[") {
+      const end = s.indexOf("]", i + 2);
+      if (end === -1) re += "\\[";
+      else {
+        re += ".";
+        i = end;
+      }
+    } else if (c === "{" && closingBrace(s, i) === -1) re += "\\{?";
+    else re += escapeRe(ORIGINAL[c] ?? c);
+  }
+  return re;
+}
+
+/**
+ * Whether a word a shell (or PowerShell, for a program name) would glob- or brace-expand could expand to one of
+ * `names`: the last path component (after `/` or `\`) of one of its brace expansions, as a pattern, matches a name,
+ * ignoring case as Windows does. A marked (quoted) glob character is plain text. A word with too many expansions to
+ * check counts as a match. Shared by approve-guard.mjs (post-review.mjs) and start-guard.mjs (start.mjs, queue.mjs,
+ * claude), #308.
+ */
+export function mayExpandTo(w, names) {
+  if (!GLOB_RE.test(w)) return false;
+  const words = braceExpand(w);
+  if (words === null) return true;
+  return words.some((x) => {
+    const pattern = new RegExp(`^${patternRe(basename(x))}$`, "i");
+    return names.some((n) => pattern.test(n));
+  });
+}
+
+// Programs that start another program from their arguments with no `node` or shell `-c` in sight (#308).
+const CMD_RE = /^cmd(\.exe)?$/i;
+const START_RE = /^start(\.exe)?$/i;
+const SCHTASKS_RE = /^schtasks(\.exe)?$/i;
+const TASK_CMDLET_RE = /^(new-scheduledtaskaction|register-scheduledtask|set-scheduledtask)$/i;
+// cmd's start options; /node, /affinity and /machine take a value. Any other `/word` may be a program's path.
+const START_FLAG_RE = /^\/(d|i|b|min|max|wait|separate|shared|low|normal|high|realtime|abovenormal|belownormal|elevate)$/i;
+const START_VALUED_FLAG_RE = /^\/(d|node|affinity|machine)$/i;
+// Wrappers that run the command after them, and their options or a duration (timeout 5).
+const WRAPPER_RE = /^(env|exec|command|nohup|time|timeout|nice|sudo)(\.exe)?$/i;
+// A PowerShell parameter name (`-Execute`, `-TaskName:`): anything else is a value.
+const PS_PARAMETER_RE = /^-[A-Za-z][A-Za-z0-9]*:?$/;
+// What cmd expands at run time (%X%, !X!): unresolved in the text handed on.
+const CMD_VAR = "${LANES_CMD_VAR}";
+
+/** The index of a simple command's program, past assignments and wrappers (env, timeout 5, nohup, …). */
+function launcherAt(words) {
+  let wrapped = false;
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i];
+    if (ASSIGN_RE.test(w)) continue;
+    if (WRAPPER_RE.test(basename(w))) wrapped = true;
+    else if (!(wrapped && (w.startsWith("-") || /^[0-9.]+[smhd]?$/.test(w)))) return i;
+  }
+  return words.length;
+}
+
+/**
+ * The command lines a simple command's words start through a launcher that names no program with node or a shell
+ * (#308), for both guards to read as commands of their own: what `cmd /c` or `/k` runs (with %X% and !X! unresolved);
+ * the program cmd's or Git Bash's `start` opens by its file association, from the first word after its options and,
+ * as that word may be a window title, from the second too; schtasks' `/tr` value; and the values given to
+ * New-ScheduledTaskAction, Register-ScheduledTask or Set-ScheduledTask, joined and each alone, since any of them could
+ * be the program. Empty for any other command.
+ * @param {string[]} words
+ * @returns {string[]}
+ */
+export function launchedCommands(words) {
+  const at = launcherAt(words);
+  if (at >= words.length) return [];
+  const name = basename(words[at]);
+  const args = words.slice(at + 1);
+  if (CMD_RE.test(name)) {
+    const c = args.findIndex((w) => /^\/[ck]$/i.test(w));
+    return c === -1 ? [] : [args.slice(c + 1).join(" ").replace(/%[^%\s]*%|![^!\s]*!/g, CMD_VAR)];
+  }
+  if (START_RE.test(name)) {
+    let i = 0;
+    for (; i < args.length && START_FLAG_RE.test(args[i]); i += START_VALUED_FLAG_RE.test(args[i]) ? 2 : 1);
+    const rest = args.slice(i);
+    return [rest.join(" "), rest.slice(1).join(" ")];
+  }
+  if (SCHTASKS_RE.test(name)) {
+    const t = args.findIndex((w) => /^[-/]tr$/i.test(w));
+    return t === -1 ? [] : [args[t + 1] ?? ""];
+  }
+  if (TASK_CMDLET_RE.test(name)) {
+    const values = args.filter((w) => !PS_PARAMETER_RE.test(w));
+    return [values.join(" "), ...values];
+  }
+  return [];
+}
+
+/**
+ * The subcommand bun or deno at `words[at]` takes ahead of its options and script: `run` runs a file, and deno's
+ * `eval` runs its code argument as JavaScript, the way node -e does (#308). Null for any other word.
+ */
+export function scriptSubcommand(words, at) {
+  const name = basename(words[at] ?? "");
+  if (/^(bun|deno)(\.exe)?$/i.test(name) && words[at + 1] === "run") return "run";
+  if (/^deno(\.exe)?$/i.test(name) && words[at + 1] === "eval") return "eval";
+  return null;
+}
+
+/** `cmd` without its literal `$(cat <<'D' … D)` substitutions, for the raw-text checks: their text is only data. */
+export function withoutLiteralSubstitutions(cmd) {
+  let out = "";
+  for (let i = 0; i < cmd.length; i += 1) {
+    const lit = cmd[i] === "$" ? plainLiteralSubstitution(cmd, i) : null;
+    if (lit) i = lit.end;
+    else out += cmd[i];
+  }
+  return out;
+}
+
+// Text with every quote, backslash and backtick dropped (PowerShell's curly quotes too), for the checks that read raw
+// text: a name split by quoting, as in st"art.mjs or --"bg", reads whole (#61, like #62 in approve-guard.mjs).
+const DEQUOTE_RE = new RegExp(`['"\\\\\`${String.fromCharCode(0x2018)}-${String.fromCharCode(0x201e)}${LIT_TICK}${QUOTED_TICK}]`, "g");
+export const dequoted = (s) => s.replace(DEQUOTE_RE, "");
+
+/**
+ * True when a call creates a process through WMI or CIM (#316): it names Win32_Process, or runs wmic's `process`, with
+ * a `create`. Read on the text with quotes, `+`, whitespace and literal messages dropped, so 'Win32'+'_Process' reads
+ * whole. A class named by a wildcard that could match Win32_Process (Win32_Pro*, Win32_[P]rocess) counts too (#308).
+ */
+export function wmiProcessCreate(text) {
+  const plain = dequoted(withoutLiteralSubstitutions(String(text ?? ""))).replace(/\+/g, "");
+  const flat = plain.replace(/[\s()]/g, "").toLowerCase();
+  if (!/create/.test(flat)) return false;
+  if (/win32_process/.test(flat) || (/wmic/.test(flat) && /process/.test(flat))) return true;
+  return plain.split(/[^\w.*?[\]]+/).some((t) => /[*?[]/.test(t) && mayExpandTo(t, ["win32_process"]));
+}
+
 /** A grant file, parsed: null when it does not exist, { unreadable: true } when it cannot be read or parsed. */
 export function readGrant(file) {
   let text;
