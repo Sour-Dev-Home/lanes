@@ -142,15 +142,22 @@ function workflowChange(before, after) {
   return null;
 }
 
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+
 /**
  * Security review #381, defence in depth: JavaScript's own parser must accept `body`, exactly as the tokenizer cut it,
- * as a whole strict-mode arrow function body. If the tokenizer misread a `/` or a quote and cut the body in the wrong
- * place, the cut text holds an unmatched `}` or a stray fragment and does not parse. `new Function` only compiles the
- * text; nothing in it runs. Returns the parser's message, or null.
+ * as a whole strict function body on its own. The Function constructors parse the body text alone and refuse any that
+ * closes the function early ("Single function literal required"), so no wrapper around it can absorb a stray `}`. If
+ * that parse succeeds, JavaScript reading the file closes the body at the same `}`: only that `}`, `)`, `;`, spaces and
+ * comments follow, which both read alike. The constructors only compile; nothing in the body runs. Returns the parser's
+ * message, or null.
  */
 function bodyParseError(body, { isAsync, param }) {
   try {
-    new Function(`"use strict"; return (${isAsync ? "async " : ""}(${param ?? ""}) => {\n${body}\n});`);
+    const Ctor = isAsync ? AsyncFunction : Function;
+    const strictBody = `"use strict";\n${body}`;
+    if (param === null) new Ctor(strictBody);
+    else new Ctor(param, strictBody);
     return null;
   } catch (e) {
     return String(e?.message ?? e);
@@ -320,7 +327,10 @@ export function scan(text, cut = -1) {
       while (i < text.length && IDENT_PART.test(text[i])) i++;
       push("ident", start);
     } else if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(text[i + 1] ?? ""))) {
-      while (i < text.length && (IDENT_PART.test(text[i]) || text[i] === "." || ((text[i] === "+" || text[i] === "-") && /[eE]/.test(text[i - 1])))) i++;
+      // Only a decimal literal has a signed exponent: `0x1e+1` is 0x1e plus 1 (security review #381).
+      const decimal = !/^0[xXoObB]/.test(text.slice(start, start + 2));
+      const sign = (k) => decimal && (text[k] === "+" || text[k] === "-") && /[eE]/.test(text[k - 1]);
+      while (i < text.length && (IDENT_PART.test(text[i]) || text[i] === "." || sign(i))) i++;
       push("number", start);
     } else if (c === "\\") {
       return fail("backslash outside a literal");

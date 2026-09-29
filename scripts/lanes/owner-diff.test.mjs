@@ -294,6 +294,13 @@ test("edge: a body the tokenizer cut where JavaScript would not needs the owner"
   additive(appended('test("t", (t) => {\n  t.diagnostic("x");\n});\n'));
 });
 
+// Security review round 4: `0x1e+/'/` is 0x1e plus a regex, not one number, and a wrapper around the body let the
+// wrongly cut text parse as a comma expression. The body must now parse alone, as the Function constructor parses it.
+test("edge: a hex literal before '+' does not swallow the sign, and a body that escapes its function needs the owner", () => {
+  needsOwner(appended('test("a", () => { 0x1e+/\'/; }, globalThis.MARK = 1, () => { void \'a\'; // \'\n});\n'));
+  additive(appended('test("a", () => {\n  const n = 0x1e+1, m = 1e+3, k = 0b1+0o7, big = 10n;\n  const r = 0x1e + /x/.source.length;\n});\n'));
+});
+
 test("edge: an HTML-like comment marker, which a module does not treat as a comment, needs the owner", () => {
   needsOwner(appended('test("t", () => {\n  const a = 1;\n  a <!-- 2;\n});\n'), /HTML-like comment/);
   needsOwner(appended('test("t", () => {\n  let a = 3;\n  a-->0;\n});\n'), /HTML-like comment/);
