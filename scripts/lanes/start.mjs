@@ -154,6 +154,22 @@ const branchIssue = (name) => String(name ?? "").match(/^issue-(\d+)-/)?.[1];
 const sessionIssue = (s) => (s?.kind === "background" ? (laneIssueOf(s) ?? undefined) : undefined);
 
 /**
+ * #444: whether issue `n`'s lane session is dead: none is listed, or the newest one is idle with no prompt pending
+ * (the same test recovery uses for a lane that ended). A busy or blocked session is alive. Pure.
+ * @param {{ kind?: string, id?: string, startedAt?: number, status?: string, state?: string }[]} sessions
+ * @param {number} n
+ * @returns {{ dead: boolean, session: object | null }} `session` is the newest one, or null when none is listed
+ */
+export function deadLaneSession(sessions, n) {
+  let newest = null;
+  for (const s of sessions) {
+    if (Number(laneIssueOf(s)) !== n || (newest && (newest.startedAt ?? 0) > (s.startedAt ?? 0))) continue;
+    newest = s;
+  }
+  return { dead: !newest || (newest.status === "idle" && newest.state !== "blocked"), session: newest };
+}
+
+/**
  * The issues with a lane in flight: open PRs from `issue-<N>-` branches, plus background sessions named `lane-<N>` or
  * whose cwd is (inside) an `issue-<N>` or `issue-<N>-<slug>` worktree, except sessions of a `finished` issue (its PR merged or the issue closed), which
  * are idle leftovers. Each issue counts once.
@@ -237,7 +253,14 @@ function readInFlight(deps, fields) {
   // A truncated list could hide a lane in flight and let the cap be passed, so refuse instead.
   if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to count lanes in flight`);
   const sessions = JSON.parse(deps.claude(["agents", "--json", "--cwd", root], { cwd: root }));
-  return { prs, inFlight: inFlightIssues({ prs, sessions, finished: finishedIssues(deps, prs, sessions) }) };
+  return { prs, sessions, inFlight: inFlightIssues({ prs, sessions, finished: finishedIssues(deps, prs, sessions) }) };
+}
+
+// #444: "already in flight" for an issue whose only lane is an open PR with no live session says so, and how to resume it.
+function inFlightReason(n, prs, sessions) {
+  const pr = prs.find((p) => Number(branchIssue(p.headRefName)) === n);
+  if (!pr || !deadLaneSession(sessions, n).dead) return "already in flight";
+  return `already in flight: dead lane with open PR #${pr.number} and no live session; run the queue (node scripts/lanes/queue.mjs) in your terminal to resume it in its worktree once, if its checks or reviews are still owed and nothing there is unsaved`;
 }
 
 // The issues of sessions with no open PR whose lane is finished: a merged `issue-<N>-` PR, or the issue closed.
@@ -486,9 +509,9 @@ function cleanupLines(deps, dryRun) {
 // <N...>: checks each requested issue the way /lane does and launches what passes.
 function startIssues(args, deps, config) {
   const numbers = [...new Set(args.map(Number))];
-  let prs, inFlight;
+  let prs, inFlight, sessions;
   try {
-    ({ prs, inFlight } = readInFlight(deps, "number,headRefName,files"));
+    ({ prs, inFlight, sessions } = readInFlight(deps, "number,headRefName,files"));
   } catch (err) {
     return { code: 2, lines: [`cannot count lanes in flight, nothing launched: ${reason(err)}`] };
   }
@@ -533,7 +556,8 @@ function startIssues(args, deps, config) {
   const tiers = new Map(issues.filter((i) => i.labels).map((i) => [i.number, tierOf(i.labels)]));
   const labels = new Map(issues.filter((i) => i.labels).map((i) => [i.number, i.labels]));
   const launched = launchAll(launch, deps, { tiers, models: config.models, labels });
-  const lines = new Map([...refused.map((r) => [r.number, [`#${r.number}: refused: ${r.reason}`]]), ...launched.lines]);
+  const why = (r) => (r.reason === "already in flight" ? inFlightReason(r.number, prs, sessions) : r.reason);
+  const lines = new Map([...refused.map((r) => [r.number, [`#${r.number}: refused: ${why(r)}`]]), ...launched.lines]);
   return { code: refused.length || launched.failed ? 1 : 0, lines: numbers.flatMap((n) => lines.get(n)) };
 }
 

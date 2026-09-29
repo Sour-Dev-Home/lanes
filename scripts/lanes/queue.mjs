@@ -13,12 +13,15 @@ import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWork
 import { GATE_CONTEXT, laneIssueOf } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
-import { budgetConfig, inFlightIssues, launchArgs, localLaunchEnv, markRunning, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
+import { budgetConfig, inFlightIssues, deadLaneSession, launchArgs, localLaunchEnv, markRunning, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
 import { approveLine, formatAge, gateDescriptions, gateSince, liveLanes, prStage, stalledLanes } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
 // waiting on owner.
 const WAITING_STAGES = new Set(["failing", "contract", "owner", "conflict"]);
+// #444: the stages in which a lane owes the PR something, so a dead lane is worth resuming: a failing check, no
+// lanes/gate yet, or a gate waiting for a reviewer's status.
+const RESUMABLE_STAGES = new Set(["failing", "starting", "gate"]);
 const labelsOf = (issue) => (issue.labels ?? []).map((l) => (typeof l === "string" ? l : l?.name));
 const isOpen = (issue) => (issue.state ?? "OPEN") === "OPEN";
 const branchIssue = (pr) => Number(String(pr.headRefName ?? "").match(/^issue-(\d+)-/)?.[1] ?? NaN);
@@ -127,7 +130,9 @@ export function waitingDigest(prs, waiting, now, seen = new Map()) {
  * #382: which lanes to recover this tick. Pure. A lane is a ready, open issue with no open PR whose newest background
  * session is stalled (`stalled`: issue → minutes silent, from status.mjs's stalledLanes) or idle with no prompt
  * pending (ended without a PR). An issue with a marker is `again` (reported, never retried), unless the marker names
- * this very session, which was already handled (its work was left for the owner).
+ * this very session, which was already handled (its work was left for the owner). #444: a ready issue whose open PR
+ * still owes a check or review (stage failing, starting or gate) and whose newest session is gone or idle also
+ * comes back, with `resume: true` and the PR's `branch`, to be relaunched in its own worktree rather than removed.
  * @param {{ issues: object[], prs: object[], sessions: object[], stalled?: Map<number, number>, marker?: (n: number) => { session?: string } | null }} input
  * @returns {{ number: number, id: string, reason: string, again: boolean }[]} by issue number
  */
@@ -152,6 +157,21 @@ export function planRecovery({ issues = [], prs = [], sessions = [], stalled = n
     if (marked?.session === s.id) continue;
     out.push({ number: n, id: s.id, cwd: s.cwd, reason, again: Boolean(marked) });
   }
+  // #444: a ready issue whose lane session is dead but whose open PR still owes a check or review is resumed in place.
+  const resumed = new Set();
+  for (const pr of prs) {
+    const n = branchIssue(pr);
+    // A fork's PR may reuse a lane's branch name; only the repo's own PR names a lane's worktree.
+    if (!ready.has(n) || resumed.has(n) || pr.isCrossRepository === true) continue;
+    const { dead, session } = deadLaneSession(sessions, n);
+    if (!dead) continue;
+    const { stage, note } = prStage(pr, undefined, pr.gateDescription);
+    if (!RESUMABLE_STAGES.has(stage)) continue;
+    resumed.add(n);
+    const marked = marker(n);
+    if (session && marked?.session === session.id) continue;
+    out.push({ number: n, id: session?.id ?? null, cwd: session?.cwd, branch: pr.headRefName, reason: `dead lane with open PR #${pr.number} (${note})`, again: Boolean(marked), resume: true });
+  }
   return out.sort((a, b) => a.number - b.number);
 }
 
@@ -175,7 +195,7 @@ function readSnapshot(deps, root) {
   const issues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body"]));
   // A blocker missing from a truncated list would read as closed, and a lane's claim would be lost.
   if (issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to plan from`);
-  const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,title,headRefName,files,mergeable,statusCheckRollup"]));
+  const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,title,headRefName,files,mergeable,statusCheckRollup,isCrossRepository"]));
   if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to count lanes in flight`);
   const gate = JSON.parse(deps.gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${GATE_QUERY}`]));
   const descriptions = gateDescriptions(gate);
@@ -193,22 +213,39 @@ function readSnapshot(deps, root) {
 // normal launch path relaunches the issue (the removed session leaves `snapshot.sessions`). Unpushed or uncommitted
 // work is left and said. Each issue gets one attempt per run (`attempted`) and a stalled-again line once (`told`);
 // a marker is written before anything is removed, so a crash cannot allow a second relaunch.
+// #444: a dead lane with an open PR is not removed: it is returned as `{ number, cwd, id, reason }` to be relaunched in
+// its own worktree, unless that worktree holds work that is not pushed, which is left and said.
 function recoverLanes(snapshot, { deps, dir, say, attempted, told }) {
   const { recovery, claude } = deps;
+  const resumes = [];
   let stalled;
   try {
     stalled = recovery.stalled(snapshot.sessions, dir);
   } catch (err) {
     say(`stall check failed: ${reason(err)}`);
-    return;
+    return resumes;
   }
-  for (const { number: n, id, cwd, reason: why, again } of planRecovery({ ...snapshot, stalled, marker: recovery.marker.read })) {
+  for (const { number: n, id, cwd, branch, reason: why, again, resume } of planRecovery({ ...snapshot, stalled, marker: recovery.marker.read })) {
     if (again) {
       if (!told.has(n)) say(`#${n}: stalled again after recovery: ${why}`);
       told.add(n);
       continue;
     }
     if (attempted.has(n)) continue;
+    if (resume) {
+      try {
+        const tree = recovery.worktree(n, cwd, branch);
+        const left = tree ? recovery.workLeft(tree) : "worktree not found";
+        if (left) {
+          attempted.add(n);
+          say(tree ? `#${n}: not recovered: unsaved work in ${tree.path}` : `#${n}: dead lane with open PR, worktree not found, left for the owner`);
+        } else resumes.push({ number: n, cwd: tree.path, id, reason: why });
+      } catch (err) {
+        attempted.add(n);
+        say(`#${n}: recovery failed: ${reason(err)}`);
+      }
+      continue;
+    }
     attempted.add(n);
     try {
       claude(["stop", id], { cwd: dir });
@@ -231,6 +268,7 @@ function recoverLanes(snapshot, { deps, dir, say, attempted, told }) {
       say(`#${n}: recovery failed: ${reason(err)}`);
     }
   }
+  return resumes;
 }
 
 /**
@@ -281,7 +319,8 @@ export async function main(argv, deps = DEFAULT_DEPS) {
   let readFailures = 0;
   for (;;) {
     const at = stamp(now());
-    const say = (line) => print(`${at} ${line}`);
+    // #444: check names and gate text in a line are external, so control characters (ANSI escapes) never reach the terminal.
+    const say = (line) => print(`${at} ${String(line).replace(/[\u0000-\u001f\u007f-\u009f]/g, "")}`);
     try {
       for (const line of cleanup()) if (line.trim()) say(line);
     } catch (err) {
@@ -303,7 +342,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       await sleep(TICK_MS);
       continue;
     }
-    if (deps.recovery) recoverLanes(snapshot, { deps, dir, say, attempted, told });
+    const resumes = deps.recovery ? recoverLanes(snapshot, { deps, dir, say, attempted, told }) : [];
     // An issue whose launch failed stays open (its blockers and ranking still count) but is no longer a candidate.
     const issues = snapshot.issues.map((i) => (failedLaunches.has(i.number) ? { ...i, labels: labelsOf(i).filter((l) => l !== "ready") } : i));
     // #390: a budget that cannot be read never stops the queue; it says so once and launches as before.
@@ -336,14 +375,29 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     for (const [n, r] of current) waits.set(n, r);
     const tierOf = new Map(issues.map((i) => [i.number, labelsOf(i).find((l) => l?.startsWith("tier:"))?.slice("tier:".length)]));
     // #344: as /start does (#337), Windows lanes launch with Git's POSIX tools first on PATH; a note says when not.
-    const { env: launchEnvironment, note: envNote } = plan.launch.length && deps.launchEnv ? deps.launchEnv() : { env: undefined, note: null };
-    for (const n of plan.launch) {
+    // #444: over the token budget a dead lane waits too. Its marker is written before it launches, so a crash cannot
+    // allow a second relaunch, and the launch runs in the lane's own worktree, where /lane continues its PR.
+    const resuming = budgetOver ? [] : resumes;
+    const launches = [...resuming.map((r) => ({ n: r.number, cwd: r.cwd })), ...plan.launch.map((n) => ({ n, cwd: dir }))];
+    const { env: launchEnvironment, note: envNote } = launches.length && deps.launchEnv ? deps.launchEnv() : { env: undefined, note: null };
+    for (const { n, cwd } of launches) {
+      const resume = resuming.find((r) => r.number === n);
+      if (resume) {
+        attempted.add(n);
+        try {
+          deps.recovery.marker.write(n, { issue: n, session: resume.id, reason: resume.reason, time: new Date(now()).toISOString(), outcome: "resume" });
+        } catch (err) {
+          say(`#${n}: recovery failed: ${reason(err)}`);
+          continue;
+        }
+        say(`#${n}: ${resume.reason}; resuming once`);
+      }
       if (envNote) say(`#${n}: ${envNote}`);
       // One attempt only: a launch that printed no id may still have started, and a retry could start it twice.
       let id = null;
       let why = "no session id in output";
       try {
-        id = parseSessionId(claude(launchArgs(n, { tier: tierOf.get(n), models }), launchEnvironment ? { cwd: dir, env: launchEnvironment } : { cwd: dir }));
+        id = parseSessionId(claude(launchArgs(n, { tier: tierOf.get(n), models }), launchEnvironment ? { cwd, env: launchEnvironment } : { cwd }));
       } catch (err) {
         why = reason(err);
       }
@@ -379,9 +433,10 @@ const markerFile = (n) => join(repoRoot(), ".lanes", "queue-recover", `${n}.json
 const DEFAULT_RECOVERY = {
   stalled: (agents, root) => stalledLanes(agents, root),
   // The lane's own worktree: the one at the session's cwd, on an issue-N-* branch. Anything else is not found.
-  worktree: (n, cwd) => {
+  // #444: a dead lane's session may be gone, so its PR's branch names the worktree too.
+  worktree: (n, cwd, branch) => {
     const same = (a, b) => String(a).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() === String(b).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-    const tree = parseWorktrees(run("git")(["worktree", "list", "--porcelain"])).find((t) => !t.main && same(t.path, cwd) && Number(/^issue-(\d+)-./.exec(t.branch ?? "")?.[1]) === n);
+    const tree = parseWorktrees(run("git")(["worktree", "list", "--porcelain"])).find((t) => !t.main && ((cwd && same(t.path, cwd)) || (branch && t.branch === branch)) && Number(/^issue-(\d+)-./.exec(t.branch ?? "")?.[1]) === n);
     return tree ? { path: tree.path, branch: tree.branch } : null;
   },
   workLeft: (tree) => laneWorkLeft(tree.path, tree.branch),

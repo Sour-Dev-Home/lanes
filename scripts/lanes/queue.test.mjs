@@ -802,7 +802,7 @@ const lane = (n, over = {}) => ({ kind: "background", id: `old-${n}`, cwd: `/rep
 // A queue run with recovery deps over `world`; `opts.workLeft` is the reason work is left (or null), `opts.stalledIssues`
 // the issues stalledLanes reports, `opts.markers` a Map of issue → marker. Removing a lane drops its session.
 function recoveryRun(world, { workLeft = null, stalledIssues = [], markers = new Map(), stopWorks = true } = {}) {
-  const run = fakeRun(world, { onSleep: (t) => t === 3 && (world.issues = []) });
+  const run = fakeRun(world, { onSleep: (t) => t === 3 && ((world.issues = []), (world.prs = [])) });
   const stopped = [];
   const removed = [];
   const claude = run.deps.claude;
@@ -1042,4 +1042,141 @@ test("edge: a bad budget in lanes.config.json exits 2 before any tick", async ()
   assert.equal(await main([], run.deps), 2);
   assert.match(run.out[0], /perLaneTokens/);
   assert.equal(run.calls.length, 0);
+});
+
+// --- #444: a lane whose session died after it opened its PR is resumed in its own worktree, never over unsaved work. ---
+
+const idleLane = (n) => lane(n, { status: "idle" });
+const gatePr = (number, n, description) => pr(number, n, ["src/a.mjs"], [gate("PENDING", description)]);
+const launchDirs = (run) => run.calls.filter((c) => c[0] === "claude" && /^\/lane \d+$/.test(c.at(-2) ?? "")).map((c) => c.at(-1));
+
+test("#444: planRecovery names a dead lane whose open PR waits on a missing review, and no other", async () => {
+  const { planRecovery } = await import("./queue.mjs");
+  const issues = [issue(7, ["src/a.mjs"]), issue(8, ["src/b.mjs"]), issue(9, ["src/c.mjs"]), issue(10, ["src/d.mjs"])];
+  const prs = [gatePr(70, 7, "waiting for review/security-reviewer"), gatePr(80, 8, "waiting on owner (/approve)"), gatePr(90, 9, "waiting for review/test-hunter"), pr(100, 10, ["src/d.mjs"], [gate("SUCCESS")])];
+  const sessions = [idleLane(7), idleLane(8), lane(9), idleLane(10)];
+  const out = planRecovery({ issues, prs, sessions });
+  assert.deepEqual(out.map((r) => [r.number, r.resume, r.id]), [[7, true, "old-7"]]);
+  assert.match(out[0].reason, /dead lane with open PR #70/);
+});
+
+test("#444: planRecovery also names a dead lane whose PR has a failing check, and one with no session left", async () => {
+  const { planRecovery } = await import("./queue.mjs");
+  const issues = [issue(7, ["src/a.mjs"]), issue(8, ["src/b.mjs"])];
+  const failing = pr(70, 7, ["src/a.mjs"], [{ name: "verify", conclusion: "FAILURE" }, gate("PENDING", "x")]);
+  const out = planRecovery({ issues, prs: [failing, gatePr(80, 8, "waiting for review/test-hunter")], sessions: [idleLane(7)] });
+  assert.deepEqual(out.map((r) => [r.number, r.id, r.branch]), [[7, "old-7", "issue-7-work"], [8, null, "issue-8-work"]]);
+});
+
+test("#444: planRecovery leaves an issue with a marker for this session alone and reports another as again", async () => {
+  const { planRecovery } = await import("./queue.mjs");
+  const input = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/test-hunter")], sessions: [idleLane(7)] };
+  assert.deepEqual(planRecovery({ ...input, marker: () => ({ session: "old-7" }) }), []);
+  assert.deepEqual(planRecovery({ ...input, marker: () => ({ session: "other" }) }).map((r) => r.again), [true]);
+});
+
+test("#444: a dead lane with an open PR is relaunched once, in its own worktree", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/security-reviewer")], sessions: [idleLane(7)] };
+  const run = recoveryRun(world);
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [7]);
+  assert.deepEqual(launchDirs(run), ["/repo/.claude/worktrees/issue-7-work"]);
+  assert.deepEqual(run.stopped, []);
+  assert.deepEqual(run.removed, []);
+  assert.equal(run.markers.get(7).outcome, "resume");
+  assert.ok(run.out.some((l) => / #7: dead lane with open PR #70.*resuming once$/.test(l)), run.out.join("\n"));
+});
+
+test("#444: a dead lane whose worktree has unsaved work is not relaunched, and says so", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/security-reviewer")], sessions: [idleLane(7)] };
+  const run = recoveryRun(world, { workLeft: "uncommitted changes" });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+  assert.deepEqual(run.removed, []);
+  assert.equal(run.out.filter((l) => l.endsWith(" #7: not recovered: unsaved work in /repo/.claude/worktrees/issue-7-work")).length, 1, run.out.join("\n"));
+});
+
+test("#444: a live lane session, or a PR waiting only on /approve, is left alone", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const [sessions, description] of [[[lane(7)], "waiting for review/security-reviewer"], [[idleLane(7)], "waiting on owner (/approve)"]]) {
+    const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, description)], sessions };
+    const run = recoveryRun(world);
+    assert.equal(await main([], run.deps), 0);
+    assert.deepEqual([run.launched, run.stopped, run.removed], [[], [], []], description);
+  }
+});
+
+test("#444: edge: a dead lane with no worktree found is left for the owner", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/security-reviewer")], sessions: [] };
+  const run = recoveryRun(world);
+  run.deps.recovery.worktree = () => null;
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+  assert.ok(run.out.some((l) => / #7: dead lane with open PR, worktree not found, left for the owner$/.test(l)), run.out.join("\n"));
+});
+
+test("#444: edge: the worktree is looked up by the PR's branch when the session is gone", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/security-reviewer")], sessions: [] };
+  const run = recoveryRun(world);
+  const seen = [];
+  const worktree = run.deps.recovery.worktree;
+  run.deps.recovery.worktree = (n, cwd, branch) => (seen.push([n, cwd, branch]), worktree(n, cwd, branch));
+  await main([], run.deps);
+  assert.deepEqual(seen[0], [7, undefined, "issue-7-work"]);
+  assert.deepEqual(run.launched.map((l) => l.n), [7]);
+});
+
+test("#444: edge: a fork PR reusing a lane's branch name is not resumed", async () => {
+  const { planRecovery } = await import("./queue.mjs");
+  const fork = { ...gatePr(70, 7, "waiting for review/test-hunter"), isCrossRepository: true };
+  assert.deepEqual(planRecovery({ issues: [issue(7, ["src/a.mjs"])], prs: [fork], sessions: [] }), []);
+});
+
+test("#444: edge: control characters in a check name never reach the printed line", async () => {
+  const { main } = await import("./queue.mjs");
+  const bad = pr(70, 7, ["src/a.mjs"], [{ name: "ver\u001b[31mify", conclusion: "FAILURE" }, gate("PENDING", "x")]);
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [bad], sessions: [idleLane(7)] };
+  const run = recoveryRun(world);
+  await main([], run.deps);
+  const line = run.out.find((l) => l.includes("resuming once"));
+  assert.ok(line, run.out.join("\n"));
+  assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(line));
+});
+
+test("#444: edge: over the token budget a dead lane is not relaunched and keeps no marker", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/security-reviewer")], sessions: [idleLane(7)] };
+  const run = recoveryRun(world);
+  run.deps.budget = () => ({ over: true, spent24h: 9, perNightTokens: 5, lanesOver: [] });
+  await main([], run.deps);
+  assert.deepEqual(run.launched, []);
+  assert.equal(run.markers.size, 0);
+});
+
+test("#444: edge: a worktree lookup that throws is reported once and nothing is relaunched", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/security-reviewer")], sessions: [idleLane(7)] };
+  const run = recoveryRun(world);
+  run.deps.recovery.worktree = () => {
+    throw new Error("git broke");
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+  assert.equal(run.out.filter((l) => / #7: recovery failed: git broke$/.test(l)).length, 1, run.out.join("\n"));
+});
+
+test("#444: edge: a marker that cannot be written stops the resume before any launch", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/security-reviewer")], sessions: [idleLane(7)] };
+  const run = recoveryRun(world);
+  run.deps.recovery.marker.write = () => {
+    throw new Error("disk full");
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+  assert.ok(run.out.some((l) => / #7: recovery failed: disk full$/.test(l)), run.out.join("\n"));
 });
