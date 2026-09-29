@@ -29,7 +29,7 @@
         "paths": [
           "scripts/lanes/pick.", "scripts/lanes/status.", "scripts/lanes/paths.", "scripts/lanes/start.", "scripts/lanes/start-guard.",
           "scripts/lanes/queue.", "scripts/lanes/cleanup.", "scripts/lanes/reap.", "scripts/lanes/lifecycle.",
-          "scripts/lanes/snapshot.", "scripts/lanes/lane-cost."
+          "scripts/lanes/snapshot.", "scripts/lanes/lane-cost.", "scripts/lanes/consolidate."
         ],
         "imports": ["lib", "gate"]
       },
@@ -40,7 +40,7 @@
       },
       {
         "id": "install",
-        "paths": ["scripts/lanes/install.", "scripts/lanes/upgrade.", "scripts/lanes/new-project.", "scripts/lanes/setup-repo.", "scripts/lanes/notify-hook."],
+        "paths": ["scripts/lanes/install.", "scripts/lanes/upgrade.", "scripts/lanes/new-project.", "scripts/lanes/setup-repo.", "scripts/lanes/notify-hook.", "scripts/lanes/release."],
         "imports": ["lib", "preflight"]
       }
     ],

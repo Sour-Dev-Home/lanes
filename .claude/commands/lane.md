@@ -113,7 +113,10 @@ files with Edit, not Write.
    `### Acceptance criteria`, `### Interface contract`, `### Scope`, `### Blocked by`, `### Tier`, every field
    filled), then `gh issue create --title "<title>" --label lane-filed --body-file <file>` (not `--template`, which
    cannot take scripted answers). The `lane-filed` label means the owner must remove it before the issue can become
-   `ready`. Never leave follow-ups only in the PR text.
+   `ready`. Never leave follow-ups only in the PR text. Consolidate first: before filing, run
+   `node scripts/lanes/consolidate.mjs` with the follow-up's paths in mind. If an open issue already covers the same
+   files for a related goal, add a comment to that issue with the new criteria (Task form checkbox lines, written to a
+   file and passed with `--body-file`) instead of filing a new one, and name that issue in the PR's "Not done".
 9. If CI fails twice on the same cause, stop: comment the cause on the PR, file an issue, and notify
    `lanes #<PR>: CI failed twice: <cause>, see #<PR>`. Do not loop.
 10. End with the PR URL, the lanes/gate state and a two-sentence summary.
