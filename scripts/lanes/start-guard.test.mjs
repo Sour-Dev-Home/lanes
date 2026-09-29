@@ -2021,3 +2021,13 @@ test("#318 edge: -p before --eval, a flag between, a script starting with -, -p 
     assert.equal(decideFor(ps(c)), null, c);
   }
 });
+
+// Through shell-lex.mjs a backslash-led delimiter (`<<\EOF`) is literal, as in bash and approve-guard.mjs (#140);
+// start-guard.mjs read it as unquoted before #194, so a plain `$HOME` in such a commit message was denied.
+test("#194 edge: <<\\EOF reads like <<'EOF', and a live body is still walked", () => {
+  for (const delim of ["\\EOF", "'EOF'"]) {
+    assert.equal(decideFor(bash(`git commit -m "$(cat <<${delim}\nplain $HOME text\nEOF\n)"`)), null, delim);
+  }
+  assert.equal(decideFor(bash('git commit -m "$(cat <<EOF\nplain $HOME text\nEOF\n)"')).decision, "deny");
+  assert.equal(decideFor(bash("bash <<\\EOF\nnode scripts/lanes/start.mjs 12\nEOF")).decision, "deny");
+});

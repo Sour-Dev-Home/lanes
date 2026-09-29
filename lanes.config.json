@@ -17,7 +17,7 @@
       {
         "id": "gate",
         "paths": [
-          "scripts/lanes/gate.", "scripts/lanes/gate-decision.", "scripts/lanes/blockers.", "scripts/lanes/approve-guard.",
+          "scripts/lanes/gate.", "scripts/lanes/gate-decision.", "scripts/lanes/blockers.", "scripts/lanes/approve-guard.", "scripts/lanes/shell-lex.",
           "scripts/lanes/post-review.", "scripts/lanes/issue-contract.", "scripts/lanes/reviewers.", "scripts/lanes/contracts.",
           "scripts/lanes/workflow.", "scripts/gate-workflow.", "scripts/dashboard-workflow.", "scripts/dashboard."
         ],
@@ -74,6 +74,7 @@
       "^scripts/gate-workflow\\.test\\.mjs$",
       "^scripts/lanes/contracts\\.test\\.mjs$",
       "^scripts/lanes/start-guard(\\.test)?\\.mjs$",
+      "^scripts/lanes/shell-lex(\\.test)?\\.mjs$",
       "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$",
       "^\\.claude/settings\\.json$",
       "^\\.github/",
