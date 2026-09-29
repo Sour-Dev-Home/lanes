@@ -116,3 +116,13 @@ test("#194 edge: segments, pipes and literal marking", () => {
   assert.equal(unmark(seg[1]), "$x");
   assert.equal(seg[2], "$y");
 });
+
+test("#194 edge: a bare literal substitution word, a backslash in a redirect target, and CRLF heredocs", () => {
+  const [seg] = lex("echo $(cat <<'EOF'\nhi $HOME\nEOF\n) tail");
+  assert.deepEqual(words(seg), ["echo", "hi $HOME", "tail"]);
+  assert.ok(seg.literal.has(1));
+  assert.equal(skipRedirectTarget("> a\\ b c", 1), 6);
+  const r = readHeredoc("a\r\nEOF\r\n", 0, "EOF", false);
+  assert.deepEqual([r.body, r.terminated], ["a", true]);
+  assert.equal(literalSubstitution("$(cat <<-\\EOF\r\n\t$(x)\r\n\tEOF\r\n)", 0)?.body, "$(x)");
+});
