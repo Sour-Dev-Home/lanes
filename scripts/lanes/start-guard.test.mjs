@@ -528,6 +528,25 @@ test("edge: heredoc forms that still run start.mjs are start runs, never standal
   }
 });
 
+test("a cat-heredoc message whose delimiter bash unquotes differently is not literal text, so a later run is denied (#269)", () => {
+  // bash closes the message at `real`; the guard, reading `open` as written, looks for `guardEnd` and so takes the second
+  // heredoc and the run after it for message text.
+  const hide = (open, real, guardEnd, run) => `git commit -m "$(cat <<${open}\nx\n${real}\n)" && cat <<'Z'\nz\nZ\n${run}\n${guardEnd}\n)`;
+  for (const [open, real, guardEnd] of [[`"E\\$F"`, "E$F", "E\\$F"], [`'E F'`, "E F", "E F"], [`"E\\\\F"`, "E\\F", "E\\\\F"]]) {
+    assert.deepEqual(decidePreToolUse(bash(hide(open, real, guardEnd, "node scripts/lanes/start.mjs 12")), grant(), NOW), { decision: "deny", reason: DENY_REASON }, open);
+    assert.deepEqual(decidePreToolUse(bash(hide(open, real, guardEnd, "node scripts/lanes/queue.mjs 12")), grant(), NOW), { decision: "deny", reason: QUEUE_DENY_REASON }, open);
+  }
+  for (const open of [`\\EOF`, `"E$F"`]) {
+    assert.notEqual(decidePreToolUse(bash(`git commit -m "$(cat <<${open}\nx\nEOF\n)" && node scripts/lanes/queue.mjs 12`), grant(), NOW), null, open);
+  }
+});
+
+test("edge: a cat-heredoc message with a plain bare or quoted delimiter still gets no decision (#269)", () => {
+  for (const cmd of [`git commit -m "$(cat <<'EOF'\nFix it\nEOF\n)"`, `git commit -m "$(cat <<"E-1.x_y"\nFix it\nE-1.x_y\n)"`, `git commit -m "$(cat <<MSG\nFix it\nMSG\n)"`, `git commit -m "$(cat <<-'EOF'\n\tFix it\n\tEOF\n)"`]) {
+    assert.equal(decidePreToolUse(bash(cmd), null, NOW), null, JSON.stringify(cmd));
+  }
+});
+
 test("edge: bit-shift arithmetic (`$((1<<2))`) is not mistaken for a heredoc, and never hides a real start.mjs or claude --bg run on the next line", () => {
   // Found by the test-hunter: `1<<2` inside `$((...))` matches the heredoc opener regex (delimiter "2"), so the
   // lexer treats the rest of the line as a bogus heredoc body. On a single line that body is simply never closed
