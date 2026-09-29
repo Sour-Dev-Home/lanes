@@ -10,8 +10,9 @@ const block = (name) => {
   return match[1];
 };
 
-test("lanes-gate may write issue comments, and its other permissions are unchanged", () => {
-  assert.equal(block("permissions"), "  contents: read\n  pull-requests: read\n  issues: write\n  statuses: write\n");
+// #342: commenting on a pull request needs pull-requests: write; issues: write alone returned HTTP 403.
+test("lanes-gate may comment on pull requests, and its other permissions are unchanged", () => {
+  assert.equal(block("permissions"), "  contents: read\n  pull-requests: write\n  issues: write\n  statuses: write\n");
 });
 
 test("lanes-gate passes the status event's state to gate.mjs", () => {
