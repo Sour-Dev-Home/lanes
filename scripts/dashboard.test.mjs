@@ -206,3 +206,127 @@ test("lanes.config.json marks dashboard/ as ui and sensitive", () => {
   const cfg = JSON.parse(readFileSync("lanes.config.json", "utf8"));
   for (const k of ["ui", "sensitive"]) assert.ok(cfg.paths[k].some((p) => new RegExp(p).test("dashboard/app.js")), k);
 });
+
+// --- metrics panel (#298) ---
+const stat = (median, count = 3) => ({ count, median });
+const block = () => ({
+  rework: { prs: 10, prsWithGateFailure: 2, gateFailuresByStage: [], pushesAfterOpen: stat(1) },
+  scopeDrift: { prs: 10, prsWithDrift: 3, driftRate: 0.3, filesOutsideScope: stat(2) },
+  ownerTime: { prsWaited: 4, waitHours: stat(5.5, 4), interventions: stat(1) },
+  concurrency: { maxOpenPrs: 3, medianOpenPrs: 2 },
+  friction: { prsWithRerun: 1, ciReruns: 2, stuckQueueMinutes: stat(7) },
+  delivery: { mergedPrs: 10, perDay: 1, leadTimeHoursMedian: 12.5, medianLinesChanged: 80, bounceRate: 0.1, failureRate: 0, revertRate: 0 },
+  review: { runs: 5, runsWithoutMetrics: 0, realFindings: 2, minorFindings: 1, tiers: [{ tier: "full", runs: 3, realFindings: 2, noRealFindingShare: 0.33 }, { tier: "quick", runs: 2, realFindings: 0, noRealFindingShare: 1 }] },
+});
+const report = (extra = {}) => ({ schemaVersion: 1, generatedAt: "2026-09-28T12:00:00Z", public: true, window: { days: 30, from: "2026-08-29T00:00:00Z", to: "2026-09-28T00:00:00Z" }, ...block(), ...extra });
+const panelBox = () => {
+  const d = fakeDoc();
+  return { d, box: d.createElement("div") };
+};
+
+test("metrics: renderMetrics shows the medians, tiers and the caveat, and returns true", () => {
+  const { d, box } = panelBox();
+  assert.equal(app.renderMetrics(d, box, report()), true);
+  const t = textOf(box);
+  assert.match(t, /medians and counts, not causes/);
+  assert.match(t, /12\.5/);
+  assert.match(t, /5\.5/);
+  assert.match(t, /30%/);
+  assert.match(t, /full/);
+  assert.match(t, /quick/);
+  assert.match(t, /lead time/i);
+  assert.match(t, /rework/i);
+  assert.match(t, /scope drift/i);
+  assert.match(t, /owner wait/i);
+  assert.match(t, /friction/i);
+});
+
+test("metrics: no before/after table without split, one with it", () => {
+  const a = panelBox();
+  app.renderMetrics(a.d, a.box, report());
+  assert.doesNotMatch(textOf(a.box), /before/i);
+  const after = block();
+  after.delivery.leadTimeHoursMedian = 6;
+  const b = panelBox();
+  app.renderMetrics(b.d, b.box, report({ split: [{ date: "2026-09-15", before: block(), after }] }));
+  const t = textOf(b.box);
+  assert.match(t, /2026-09-15/);
+  assert.match(t, /before/i);
+  assert.match(t, /after/i);
+  assert.match(t, /6\b/);
+});
+
+test("edge: null medians and rates show a dash, never NaN or null", () => {
+  const r = report();
+  r.delivery.leadTimeHoursMedian = null;
+  r.scopeDrift.driftRate = null;
+  r.ownerTime.waitHours = stat(null, 0);
+  const { d, box } = panelBox();
+  assert.equal(app.renderMetrics(d, box, r), true);
+  assert.doesNotMatch(textOf(box), /NaN|null|undefined/);
+});
+
+test("edge: markup in a tier name is text, never an element", () => {
+  const r = report();
+  r.review.tiers = [{ tier: "<img src=x onerror=alert(1)>", runs: 1, realFindings: 0, noRealFindingShare: 1 }];
+  const { d, box } = panelBox();
+  assert.equal(app.renderMetrics(d, box, r), true);
+  assert.ok(textOf(box).includes("<img src=x onerror=alert(1)>"));
+  walk(box, (n) => assert.notEqual(n.tag, "img"));
+});
+
+test("edge: validMetrics accepts a report and rejects junk, missing blocks and wrong types", () => {
+  assert.equal(app.validMetrics(report()), true);
+  for (const bad of [null, undefined, 5, "x", [], {}, { ...report(), schemaVersion: 2 }, { ...report(), review: null }, { ...report(), split: "no" }, { ...report(), split: [{ date: "d" }] }]) {
+    assert.equal(app.validMetrics(bad), false, JSON.stringify(bad));
+  }
+  const r = report();
+  delete r.rework;
+  assert.equal(app.validMetrics(r), false);
+});
+
+test("edge: renderMetrics on an invalid report renders nothing and returns false", () => {
+  const { d, box } = panelBox();
+  assert.equal(app.renderMetrics(d, box, { schemaVersion: 1 }), false);
+  assert.equal(box.children.length, 0);
+});
+
+test("metrics: a missing file, a bad body and a JSON error hide the panel; a good one shows it", async () => {
+  const mk = (res) => {
+    const section = { hidden: false };
+    const box = fakeDoc().createElement("div");
+    const d = fakeDoc();
+    d.getElementById = (id) => (id === "metrics" ? section : box);
+    return { d, section, box, res };
+  };
+  const run = async (m) => {
+    await app.loadMetrics(m.d, async () => m.res);
+  };
+  const missing = mk({ ok: false, status: 404, json: async () => ({}) });
+  await run(missing);
+  assert.equal(missing.section.hidden, true);
+  const bad = mk({ ok: true, json: async () => ({ nope: 1 }) });
+  await run(bad);
+  assert.equal(bad.section.hidden, true);
+  const thrown = mk({ ok: true, json: async () => { throw new SyntaxError("bad json"); } });
+  await run(thrown);
+  assert.equal(thrown.section.hidden, true);
+  const good = mk({ ok: true, json: async () => report() });
+  await run(good);
+  assert.equal(good.section.hidden, false);
+  assert.ok(good.box.children.length > 0);
+});
+
+test("metrics: app.js fetches lane-metrics.json, and index.html has the hidden panel", () => {
+  assert.match(src, /["']lane-metrics\.json["']/);
+  const html = readFileSync("dashboard/index.html", "utf8");
+  assert.match(html, /id="metrics"[^>]*hidden/);
+});
+
+test("metrics: style.css styles the panel with tokens only", () => {
+  const css = readFileSync("dashboard/style.css", "utf8");
+  const at = css.indexOf("/* metrics panel */");
+  assert.ok(at > 0);
+  assert.match(css.slice(at), /\.metrics/);
+  assert.doesNotMatch(css.slice(at), /#[0-9a-fA-F]{3,6}\b/);
+});
