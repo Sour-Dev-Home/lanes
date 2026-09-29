@@ -6,8 +6,9 @@ reviewer: security-reviewer
 source: "#404"
 ---
 
-A guard that stops reading a command's arguments as runnable because the command "only prints" (echo, printf) fails
-open: what it prints reaches a shell through a pipe, and also through `bash <(echo …)`, `sh < <(echo …)`,
-`bash <<< $(echo …)` or a function piped to `sh`, shapes a pipe-only check never sees. Exempt only commands whose
-arguments are file names or patterns that are never printed as given (grep, cat, ls), and test every shape that feeds
-output to a shell against the base branch before calling a false-positive fix done.
+A guard that stops reading a command's arguments as runnable because the command "only prints" or "only reads" fails
+open: echo and printf print their arguments, ls and `grep -l` print the names they are given, and cat, head, tail and
+grep print a here-string, and any of that output reaches a shell through `bash <(…)`, `sh < <(…)`, `bash <<< $(…)`, a
+file run later or `tee`, shapes a pipe-only check never sees. Exempt the narrowest word that is never printed as given
+(a search pattern, not the whole command), and test every shape that feeds output to a shell against the base branch
+before calling a false-positive fix done.

@@ -182,24 +182,65 @@ function powershellText(w) {
   }
 }
 
-// Commands that only list, read or search, whose arguments are file names and patterns, never run and never printed
-// as given (#404): a quoted pattern that names a lanes script (`grep -n "node scripts/lanes/queue.mjs" f`), or a glob
-// among the arguments (`cat n* f`), is no run. rg counts only without --pre, which runs a program on every file it
-// searches. echo and printf are not among them: what they print may be run (`bash <(echo …)`, `f | sh`).
-const READS_ONLY_RE = /^(grep|egrep|fgrep|rg|ls|cat|head|tail|wc)(\.exe)?$/i;
-/** True when simple command `words`' command word only lists, reads or searches (READS_ONLY_RE). */
-function readsOnly(words) {
-  const at = words.findIndex((w) => !ASSIGN_RE.test(w));
-  return at !== -1 && READS_ONLY_RE.test(basename(words[at])) && !words.some((w) => /^--pre(=|$)/.test(w));
+// A search's pattern (#404): grep's and rg's first operand, or each -e/--regexp value, is matched against text and
+// never run nor printed as given, so a quoted pattern that names a lanes script (`grep -n "node scripts/lanes/queue.mjs"
+// f`, `rg start.mjs docs`) is no run. Only the pattern: a file operand may be printed (`grep -l`, `ls`), and cat, head
+// or tail print their here-string (`bash <(cat <<< "…")`), so any other word of any command is read as before
+// (security review rounds 1 and 2), the false positives of `cat n* f` and `echo foo * f` being accepted. rg counts only
+// without --pre, which runs a program on every file it searches.
+const SEARCH_RE = /^(grep|egrep|fgrep|rg)(\.exe)?$/i;
+// The options a search may have for its pattern to be exempt, an allowlist: none of them prints the pattern or a value
+// given to it (security review round 3: -o, -x, rg's -r/--replace and the --*-separator options do), and none runs a
+// program (rg's --pre). Short flags may be combined (-rn); -A, -B, -C and -m take a number, -g/--glob and -t/--type a
+// word that is a file filter. Any other option leaves every word read as before.
+const SEARCH_FLAGS_RE = /^-[nrRiIlLcqswvHEFPS]+$/;
+// rg's -r is --replace, which prints its value: rg's short flags leave r and R out.
+const RG_FLAGS_RE = /^-[niIlLcqswvHEFPS]+$/;
+const SEARCH_LONG = new Set([
+  "--line-number", "--recursive", "--ignore-case", "--files-with-matches", "--files-without-match", "--count", "--quiet", "--word-regexp",
+  "--invert-match", "--with-filename", "--no-messages", "--fixed-strings", "--extended-regexp", "--smart-case", "--hidden",
+]);
+const SEARCH_NUMBER_RE = /^-[ABCm]$/;
+const SEARCH_FILTER = new Set(["-g", "--glob", "-t", "--type"]);
+
+/**
+ * The indexes of simple command `words` that are a grep or rg pattern (SEARCH_RE): the first operand, or each -e or
+ * --regexp value, when every option is on the allowlist above. None for any other command or option.
+ */
+function searchPatterns(words) {
+  const at = new Set();
+  const cmd = words.findIndex((w) => !ASSIGN_RE.test(w));
+  if (cmd === -1 || !SEARCH_RE.test(basename(words[cmd]))) return at;
+  const flags = /^rg/i.test(basename(words[cmd])) ? RG_FLAGS_RE : SEARCH_FLAGS_RE;
+  const found = new Set();
+  let operand = -1;
+  let options = true;
+  for (let i = cmd + 1; i < words.length; i += 1) {
+    const w = words[i];
+    if (!options || !w.startsWith("-") || w === "-") {
+      if (operand === -1) operand = i;
+      continue;
+    }
+    if (w === "--") options = false;
+    else if (w === "-e" || w === "--regexp") found.add((i += 1));
+    else if (SEARCH_NUMBER_RE.test(w) && /^[0-9]+$/.test(words[i + 1] ?? "")) i += 1;
+    else if (/^-[ABCm][0-9]+$/.test(w)) continue;
+    else if (SEARCH_FILTER.has(w)) i += 1;
+    else if (!flags.test(w) && !SEARCH_LONG.has(w)) return at;
+  }
+  if (found.size === 0 && operand !== -1) found.add(operand);
+  return found;
 }
 
 /**
- * The index of the word in `own` (a simple command's words without assignments) that is or may be node: none for a
- * command that only reads (readsOnly, #404); otherwise node or a glob that could be node anywhere, since any other
- * command may run its arguments or print them for a shell to run, whether through a pipe, `<(…)` or `<<<` (security
- * review, #404). The false positives of `echo foo * scripts/lanes/start.mjs` and `mv n* x` are accepted.
+ * The index of the word in `own` (a simple command's words without assignments) that is or may be node: node or a
+ * glob that could be node anywhere but a search pattern (#404), since any other command may run its arguments or print
+ * them for a shell to run, whether through a pipe, `<(…)` or `<<<` (security review, #404).
  */
-const nodeWordAt = (own) => (readsOnly(own) ? -1 : own.findIndex(mayBeNode));
+function nodeWordAt(own) {
+  const patterns = searchPatterns(own);
+  return own.findIndex((w, i) => !patterns.has(i) && mayBeNode(w));
+}
 
 // Programs that write what they are given to a file, and never run it (#89); cd and mkdir may come alongside.
 const WRITE_COMMANDS = new Set(["cat", "echo", "printf"]);
@@ -304,12 +345,13 @@ function walk(cmd, depth, visit, onOpaque, onEval) {
     if (!dataOnly) visit(words, stdin);
     const scripts = dataOnly ? new Map() : evalScripts(words);
     const programs = programWords(words);
-    // A command that only prints or searches runs no quoted argument, unless a shell reads its output (#404).
-    const readOnly = !piped && readsOnly(words);
+    // A search's pattern is no script (#404), unless a shell reads the output or a here-string in the call could be
+    // mistaken for the pattern (`grep <<< "…" x`, whose here-string grep reads as its input and prints).
+    const patterns = piped || cmd.includes("<<<") ? new Set() : searchPatterns(words);
     const powershellAt = words.findIndex((w) => PS_SHELL_RE.test(basename(w)));
     words.forEach((w, i) => {
       if (scripts.has(i)) onEval(scripts.get(i));
-      else if (isNestedScript(w) && !((dataOnly || readOnly) && !UNRESOLVED_RE.test(w))) {
+      else if (isNestedScript(w) && !((dataOnly || patterns.has(i)) && !UNRESOLVED_RE.test(w))) {
         // A jq program or Go template keeps its quoted `$` literal: `$s` there is its own variable (#61). PowerShell's
         // text is read with its own rules (#404).
         if (powershellAt !== -1 && i > powershellAt && !piped) nested(powershellText(w));

@@ -2410,15 +2410,25 @@ test("#404 criterion 6: a POSIX class glob that could be node running start.mjs 
   }
 });
 
-test("#404 criterion 7: a bare glob argument of a command that only reads is not node", () => {
-  for (const cmd of ["cat n* scripts/lanes/start.mjs", "ls n* scripts/lanes/queue.mjs", "grep -l x n* scripts/lanes/start.mjs", "head -n 1 * scripts/lanes/start.mjs"]) {
+test("#404 criterion 7: a glob as a search pattern is not node; a glob argument of any other command is, as accepted", () => {
+  for (const cmd of ["grep -l 'n*' scripts/lanes/start.mjs", "rg -e n* scripts/lanes/start.mjs", "grep -rn [n]ode scripts/lanes/queue.mjs"]) {
     assert.equal(decideFor(bash(cmd)), null, cmd);
   }
-  // echo and printf print their arguments for a shell to run (`bash <(echo …)`): their glob stays node, an accepted
-  // false positive (security review, #404: main denied every form below).
+  // Any other command may print its arguments (echo, ls, grep -l's files) or its here-string (cat, head, tail) for a
+  // shell to run (`bash <(…)`, `sh < <(…)`, `bash <<< $(…)`, a file run later): its glob stays node, an accepted false
+  // positive (security review rounds 1 and 2, #404: main denied every form below).
   for (const cmd of [
-    "echo foo * scripts/lanes/start.mjs", 'bash <(echo "" n* scripts/lanes/start.mjs 1)', "source <(printf '%s ' '' n* scripts/lanes/start.mjs 1)",
-    "sh < <(echo '' n* scripts/lanes/start.mjs 1)", "bash <<< $(echo '' n* scripts/lanes/start.mjs 1)",
+    "echo foo * scripts/lanes/start.mjs", "cat n* scripts/lanes/start.mjs", "ls n* scripts/lanes/queue.mjs", 'bash <(echo "" n* scripts/lanes/start.mjs 1)',
+    "source <(printf '%s ' '' n* scripts/lanes/start.mjs 1)", "sh < <(echo '' n* scripts/lanes/start.mjs 1)", "bash <<< $(echo '' n* scripts/lanes/start.mjs 1)",
+    'bash <(cat <<< "node scripts/lanes/start.mjs 1")', 'source <(head <<< "node scripts/lanes/start.mjs 1")', 'sh < <(tail <<< "node scripts/lanes/start.mjs 1")',
+    'bash <<< $(cat <<< "node scripts/lanes/start.mjs 1")', 'cat <<< "node scripts/lanes/start.mjs 1" > a.sh; bash a.sh', 'bash <(grep "" <<< "node scripts/lanes/start.mjs 1")',
+    'bash <(grep <<< "node scripts/lanes/start.mjs 1" node)', 'bash <(cat -- "node scripts/lanes/start.mjs 1")', 'bash <(ls -d "node scripts/lanes/start.mjs 1")',
+    'bash <(grep -l x "node scripts/lanes/start.mjs 1")',
+    // Round 3: an option that prints the pattern or a value given to it, or one off the allowlist, leaves no exemption.
+    'bash <(grep -o "node scripts/lanes/start.mjs 1" f)', 'bash <(grep -x "node scripts/lanes/start.mjs 1" f) ', 'bash <(rg -o "node scripts/lanes/start.mjs 1" f)',
+    'bash <(rg -r "node scripts/lanes/start.mjs 1" x f)', 'bash <(rg --replace "node scripts/lanes/start.mjs 1" x f)', 'sh < <(rg -nr "node scripts/lanes/queue.mjs" x f)',
+    'bash <(grep --group-separator "node scripts/lanes/start.mjs 1" -C1 x f)', 'bash <(rg --context-separator "node scripts/lanes/start.mjs 1" -C1 x f)',
+    'grep -oF "node scripts/lanes/start.mjs 1" f > o.sh; sh o.sh', 'bash <(grep --color=never "node scripts/lanes/start.mjs 1" f)',
   ]) {
     assert.equal(decideFor(bash(cmd))?.decision, "deny", cmd);
   }
