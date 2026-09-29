@@ -261,6 +261,22 @@ test("edge: a '/' after `of` is ambiguous and needs the owner", () => {
   needsOwner(appended('test("b", () => { const of = 10; const y = of / 2 ; } ); globalThis.evil = 1; // } );\n'), /ambiguous/);
 });
 
+// Security review round 2: `class A extends /'/ {}` is valid, so a regex can follow `extends`; read as a division, its
+// quote opened a string JavaScript never sees and hid the block's close.
+test("edge: a '/' after extends needs the owner", () => {
+  needsOwner(appended('test("b", () => { class A extends /\'/ {} } ); globalThis.evil = 1; test("c", () => { // \'\n} );\n'), /ambiguous/);
+});
+
+test("edge: a '/' after any other reserved or contextual word needs the owner", () => {
+  for (const word of ["debugger", "break", "continue", "default", "extends", "let", "static", "get", "set", "async", "as", "from", "enum", "import", "export", "class", "function"]) {
+    needsOwner(appended(`test("b", () => {\n  ${word}\n  /x/.test("");\n});\n`), /ambiguous/);
+  }
+});
+
+test("edge: a '/' after a value word or a plain name is a division", () => {
+  additive(appended('test("b", () => {\n  const x = 4, y = [this / 2, true / 1, null / 1, x / 2, undefined / 1];\n});\n'));
+});
+
 test("edge: a '/' after a keyword used as a private or member name is a division", () => {
   needsOwner(appended('test("b", () => { class A { #return = 1; m() { return this.#return / 2 ; } } ); globalThis.evil = 1; // } } );\n'));
   additive(appended('test("b", () => {\n  class A { #return = 4; m() { return this.#return / 2; } }\n  const o = { typeof: 4 };\n  const n = o.typeof / 2;\n});\n'));

@@ -163,7 +163,14 @@ function testBlockEnd(tokens, i) {
 // Words after which `/` starts a regular expression rather than a division. All are reserved in a module, so none can
 // be a variable. `of` is not reserved (`const of = 1` is legal), so a `/` after it is ambiguous and refused.
 const REGEX_AFTER_WORD = new Set(["return", "typeof", "instanceof", "in", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await"]);
-const AMBIGUOUS_BEFORE_SLASH = new Set(["of"]);
+// Security review #381: every reserved word is in REGEX_AFTER_WORD, in this list, or is a value word (this, super,
+// true, false, null) after which `/` divides, as it does after a plain name. After any word listed here (`extends`,
+// `debugger`, `of`, `get`, ...) the reading depends on grammar, so a `/` is refused.
+const AMBIGUOUS_BEFORE_SLASH = new Set([
+  "break", "catch", "class", "const", "continue", "debugger", "default", "enum", "export", "extends", "finally", "for",
+  "function", "if", "import", "let", "static", "switch", "try", "var", "while", "with", "implements", "interface",
+  "package", "private", "protected", "public", "of", "get", "set", "async", "as", "from", "target", "meta", "accessor",
+]);
 const RESERVED = new Set([...REGEX_AFTER_WORD, "async", "function", "class", "const", "let", "var", "this", "super", "import", "export", "if", "for", "while", "switch", "try", "catch", "finally", "with", "debugger", "default", "break", "continue", "extends", "true", "false", "null"]);
 const OPEN = { "(": ")", "[": "]", "{": "}" };
 const CLOSE = new Set([")", "]", "}"]);
