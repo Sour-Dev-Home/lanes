@@ -453,6 +453,26 @@ test("main reports a launch with no id as failed and does not retry it", () => {
   assert.match(lines[1], /^#2: launch failed: claude: spawn failed/);
 });
 
+test("main launches two issues whose only shared path is a soft path", () => {
+  const scope = "In: `docs/USING.md`.";
+  const { deps, launches } = fakes({ issues: { 1: { body: form({ scope: "In: `a.mjs`, `docs/USING.md`." }) }, 2: { body: form({ scope: "In: `b.mjs`, `docs/USING.md`." }) }, 3: { body: form({ scope }) } } });
+  const { code, lines } = main(["1", "2", "3"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#2 → id2", "#3 → id3"]);
+  assert.equal(launches.length, 3);
+});
+
+test("main still refuses a pair sharing a hard path alongside a soft one", () => {
+  const { deps, launches } = fakes({ issues: { 1: { body: form({ scope: "In: `a.mjs`, `docs/USING.md`." }) }, 2: { body: form({ scope: "In: `a.mjs`, `docs/USING.md`." }) } } });
+  assert.deepEqual(main(["1", "2"], deps).lines, ["#1: refused: overlaps #2", "#2: refused: overlaps #1"]);
+  assert.equal(launches.length, 0);
+});
+
+test("edge: an issue whose only path is soft does not overlap and a custom softPaths applies", () => {
+  const { deps } = fakes({ issues: { 1: { body: form({ scope: "In: `x/notes.md`." }) }, 2: { body: form({ scope: "In: `x/notes.md`." }) } }, config: { start: { softPaths: ["notes\\.md$"] } } });
+  assert.equal(main(["1", "2"], deps).code, 0);
+});
+
 test("main refuses overlapping issues using the /status overlap check", () => {
   const { deps, launches } = fakes({ issues: { 1: {}, 2: {} } });
   const { lines } = main(["1", "2"], deps);
