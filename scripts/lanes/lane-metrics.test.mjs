@@ -39,7 +39,7 @@ function accepts(s, value, root = schema) {
 const issueBody = (scope, contract = "none") => `### Goal\n\nDo it\n\n### Acceptance criteria\n\n- [ ] one\n\n### Interface contract\n\n${contract}\n\n### Scope\n\n${scope}\n\n### Blocked by\n\nnone\n\n### Tier\n\nfull\n`;
 
 // A rich GraphQL node as the API returns it, with the personal fields a careless script could copy through.
-const richNode = ({ number, createdAt, mergedAt, files = [], commits = [], statuses = [], attempts = [], scope, edits = [], queue = false, extra = {} }) => ({
+const richNode = ({ number, createdAt, mergedAt, files = [], commits = [], statuses = [], attempts = [], scope, edits = [], queue = [], tier, extra = {} }) => ({
   number,
   createdAt,
   mergedAt,
@@ -48,7 +48,8 @@ const richNode = ({ number, createdAt, mergedAt, files = [], commits = [], statu
   deletions: 5,
   title: "feat: private-title-marker",
   author: { login: "octo-person" },
-  timelineItems: { nodes: queue ? [{ __typename: "AddedToMergeQueueEvent" }, { __typename: "RemovedFromMergeQueueEvent", reason: "merged" }] : [] },
+  // queue: [["added" | "removed", time], ...], the merge-queue events with their own times
+  timelineItems: { nodes: queue.map(([kind, createdAt]) => (kind === "added" ? { __typename: "AddedToMergeQueueEvent", createdAt } : { __typename: "RemovedFromMergeQueueEvent", reason: "merged", createdAt })) },
   files: { nodes: files.map((path) => ({ path })) },
   commits: { nodes: commits.map((committedDate) => ({ commit: { committedDate } })) },
   lastCommit: {
@@ -65,7 +66,7 @@ const richNode = ({ number, createdAt, mergedAt, files = [], commits = [], statu
       },
     }],
   },
-  closingIssuesReferences: scope === undefined ? { nodes: [] } : { nodes: [{ number: number + 100, body: issueBody(scope), userContentEdits: { nodes: edits.map((editedAt) => ({ editedAt })) } }] },
+  closingIssuesReferences: scope === undefined ? { nodes: [] } : { nodes: [{ number: number + 100, body: issueBody(scope), labels: { nodes: tier === undefined ? [] : [{ name: `tier:${tier}` }] }, userContentEdits: { nodes: edits.map((editedAt) => ({ editedAt })) } }] },
   ...extra,
 });
 
@@ -85,7 +86,8 @@ const PR1 = richNode({
   attempts: [2, 1],
   scope: "In: `scripts/lanes/a.mjs`. Out: nothing.",
   edits: ["2026-09-09T00:00:00Z", "2026-09-10T05:00:00Z"],
-  queue: true,
+  queue: [["added", "2026-09-10T09:35:00Z"], ["removed", "2026-09-10T09:50:00Z"]],
+  tier: "full",
 });
 const PR2 = richNode({
   number: 2,
@@ -94,6 +96,7 @@ const PR2 = richNode({
   files: ["scripts/lanes/b.mjs"],
   commits: ["2026-09-10T05:00:00Z"],
   scope: "In: `scripts/lanes/`. Out: nothing.",
+  tier: "quick",
 });
 const PR3 = richNode({
   number: 3,
@@ -129,7 +132,7 @@ test("rework counts gate failures by stage and pushes after the PR opened", () =
   assert.equal(rework.prs, 3);
   assert.equal(rework.prsWithGateFailure, 2);
   assert.deepEqual(rework.gateFailuresByStage, [{ stage: "gate", count: 1 }, { stage: "review", count: 1 }]);
-  assert.deepEqual(rework.pushesAfterOpen, { count: 3, median: 0 }); // 2, 0 and 0 pushes
+  assert.deepEqual(rework.pushesAfterOpen, { count: 3, median: 0, p90: 1.6 }); // 2, 0 and 0 pushes
 });
 
 test("scope drift counts changed files outside the closing issue's Scope, for PRs that have one", () => {
@@ -137,30 +140,76 @@ test("scope drift counts changed files outside the closing issue's Scope, for PR
   assert.equal(scopeDrift.prs, 2); // PR 3 closes no issue, so it is not measured
   assert.equal(scopeDrift.prsWithDrift, 1);
   assert.equal(scopeDrift.driftRate, 0.5);
-  assert.deepEqual(scopeDrift.filesOutsideScope, { count: 2, median: 0.5 });
+  assert.deepEqual(scopeDrift.filesOutsideScope, { count: 2, median: 0.5, p90: 0.9 });
 });
 
 test("owner time is the wait from the last reviewer success to review/owner success, plus issue edits after open", () => {
   const { ownerTime } = build();
   assert.equal(ownerTime.prsWaited, 1); // PR 3 has no reviewer success
-  assert.deepEqual(ownerTime.waitHours, { count: 1, median: 2 }); // 05:00 to 07:00
-  assert.deepEqual(ownerTime.interventions, { count: 3, median: 0 }); // 1 edit after open on PR 1; the earlier one does not count
+  assert.deepEqual(ownerTime.waitHours, { count: 1, median: 2, p90: 2 }); // 05:00 to 07:00
+  assert.deepEqual(ownerTime.interventions, { count: 3, median: 0, p90: 0.8 }); // 1 edit after open on PR 1; the earlier one does not count
 });
 
 test("concurrency counts the lane PRs open when each one opened", () => {
   assert.deepEqual(build().concurrency, { maxOpenPrs: 2, medianOpenPrs: 1 });
 });
 
-test("friction counts CI reruns and the minutes from the last status to the merge for PRs through the queue", () => {
+test("friction counts CI reruns and the minutes in the merge queue from the queue events' own times", () => {
   const { friction } = build();
-  assert.deepEqual(friction, { prsWithRerun: 1, ciReruns: 1, stuckQueueMinutes: { count: 1, median: 30 } });
+  assert.deepEqual(friction, { prsWithRerun: 1, ciReruns: 1, stuckQueueMinutes: { count: 1, median: 15, p90: 15 } }); // 09:35 to 09:50, not the last status (09:30) to the merge (10:00)
+});
+
+test("edge: queue minutes run to the merge when nothing removed the PR, sum re-queues, and skip PRs never queued", () => {
+  const at = (h, m = 0) => `2026-09-12T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00Z`;
+  const open = (number, queue) => richNode({ number, createdAt: at(0), mergedAt: at(10), queue });
+  const prs = rich(
+    open(11, [["added", at(9)]]), // merged with no removal event: 60 minutes
+    open(12, [["added", at(2)], ["removed", at(2, 10)], ["added", at(3)], ["removed", at(3, 20)]]), // bounced once: 10 + 20
+    open(13, []), // never queued
+    open(14, [["removed", at(4)]]), // a removal with no add is not a queue stay
+  );
+  const { friction } = build({ prs });
+  assert.deepEqual(friction.stuckQueueMinutes, { count: 2, median: 45, p90: 57 });
+});
+
+test("byTier splits rework, scope drift, owner time and friction by the closing issue's tier, and conforms", () => {
+  const r = build();
+  assert.equal(accepts(schema, r), true);
+  assert.deepEqual(r.byTier.map((t) => t.tier), ["full", "quick", "unknown"]); // PR 3 closes no issue
+  const [full, quick, unknown] = r.byTier;
+  assert.deepEqual(full.rework.pushesAfterOpen, { count: 1, median: 2, p90: 2 });
+  assert.equal(full.rework.prsWithGateFailure, 1);
+  assert.deepEqual(full.scopeDrift.filesOutsideScope, { count: 1, median: 1, p90: 1 });
+  assert.deepEqual(full.ownerTime.waitHours, { count: 1, median: 2, p90: 2 });
+  assert.deepEqual(full.friction.stuckQueueMinutes, { count: 1, median: 15, p90: 15 });
+  assert.equal(quick.rework.prs, 1);
+  assert.deepEqual(quick.friction.stuckQueueMinutes, { count: 0, median: null, p90: null });
+  assert.equal(unknown.scopeDrift.prs, 0);
+  assert.equal(unknown.rework.prsWithGateFailure, 1);
+  assert.deepEqual(Object.keys(full).sort(), ["friction", "ownerTime", "rework", "scopeDrift", "tier"]);
+});
+
+test("edge: an empty window has no byTier rows, and split sides carry their own", () => {
+  assert.deepEqual(build({ prs: [] }).byTier, []);
+  const r = build({ split: "2026-09-15" });
+  assert.equal(accepts(schema, r), true);
+  assert.deepEqual(r.split[0].before.byTier.map((t) => t.tier), ["full", "quick"]);
+  assert.deepEqual(r.split[0].after.byTier.map((t) => t.tier), ["unknown"]);
+});
+
+test("the markdown shows p90 and a by-tier table, and stays aggregate-only", () => {
+  const md = renderMarkdown(build());
+  assert.match(md, /median 0, p90 1\.6 over 3/);
+  assert.match(md, /## By tier/);
+  assert.match(md, /\| full \| 1 \|/);
+  assert.doesNotMatch(md, /octo-person|private-title-marker/);
 });
 
 test("an empty window gives zero counts and null medians, and still conforms", () => {
   const r = build({ prs: [] });
   assert.equal(accepts(schema, r), true);
   assert.deepEqual(r.concurrency, { maxOpenPrs: 0, medianOpenPrs: null });
-  assert.deepEqual(r.scopeDrift, { prs: 0, prsWithDrift: 0, driftRate: null, filesOutsideScope: { count: 0, median: null } });
+  assert.deepEqual(r.scopeDrift, { prs: 0, prsWithDrift: 0, driftRate: null, filesOutsideScope: { count: 0, median: null, p90: null } });
   assert.deepEqual(r.rework.gateFailuresByStage, []);
 });
 
@@ -228,7 +277,7 @@ test("costs.jsonl adds tokens per tier and model, relaunches and lane-hours", ()
     { tier: "quick", model: "haiku", tokens: 50 },
   ]);
   assert.equal(r.relaunches, 1); // issue 7 had two sessions
-  assert.deepEqual(r.laneHours, { count: 4, median: 2 });
+  assert.deepEqual(r.laneHours, { count: 4, median: 2, p90: 3.4 });
 });
 
 test("a lane whose transcript mixed model families is reported as unknown, not guessed", () => {
@@ -260,14 +309,14 @@ test("a malformed costs file skips the bad lines, counts them, and still reports
   assert.equal(accepts(schema, r), true);
   assert.deepEqual(r.tokensByTierAndModel, []);
   assert.equal(r.relaunches, 0);
-  assert.deepEqual(r.laneHours, { count: 0, median: null });
+  assert.deepEqual(r.laneHours, { count: 0, median: null, p90: null });
 });
 
 test("edge: negative and non-numeric token totals count as zero, and a removal before the launch is skipped for lane-hours", () => {
   const text = [cost({ tokens: { total: -5 } }), cost({ issue: 3, tokens: { total: "9" }, removedAt: "2026-09-09T00:00:00.000Z" })].join("\n");
   const r = build({ costsText: text });
   assert.deepEqual(r.tokensByTierAndModel, [{ tier: "full", model: "sonnet", tokens: 0 }]);
-  assert.deepEqual(r.laneHours, { count: 1, median: 2 });
+  assert.deepEqual(r.laneHours, { count: 1, median: 2, p90: 2 });
 });
 
 test("--public leaves the local fields out entirely, even with a costs file, and sets public: true", () => {

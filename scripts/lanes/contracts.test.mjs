@@ -388,7 +388,10 @@ test("the lane metrics schema defines the envelope, the aggregate blocks and the
   assert.equal(laneSchema.additionalProperties, false);
   const blocks = ["rework", "scopeDrift", "ownerTime", "concurrency", "friction", "delivery", "review"];
   assert.deepEqual([...laneSchema.required].sort(), ["generatedAt", "public", "schemaVersion", "window", ...blocks].sort());
-  assert.deepEqual(Object.keys(laneSchema.properties).sort(), ["generatedAt", "public", "schemaVersion", "split", "window", ...blocks, ...LOCAL_ONLY].sort());
+  assert.deepEqual(Object.keys(laneSchema.properties).sort(), ["byTier", "generatedAt", "public", "schemaVersion", "split", "window", ...blocks, ...LOCAL_ONLY].sort());
+  assert.ok(!laneSchema.required.includes("byTier"), "byTier is optional");
+  assert.ok(!laneSchema.$defs.aggregate.required.includes("byTier"), "byTier is optional in a split side");
+  assert.ok(!laneSchema.$defs.stat.required.includes("p90"), "p90 is optional");
   for (const k of LOCAL_ONLY) assert.ok(!laneSchema.required.includes(k), `${k} is optional`);
   assert.deepEqual([...laneSchema.$defs.aggregate.required].sort(), [...blocks].sort());
   assert.deepEqual(Object.keys(laneSchema.properties.split.items.properties).sort(), ["after", "before", "date"]);
@@ -440,6 +443,31 @@ test("the lane metrics schema rejects a bad report, field by field", () => {
     ["a string relaunches", { relaunches: "1" }],
   ];
   for (const [name, over] of cases) assert.equal(schemaAccepts(laneSchema, JSON.parse(JSON.stringify(laneReport(over)))), false, name);
+});
+
+test("the lane metrics schema takes an optional p90 on a stat and an optional per-tier breakdown", () => {
+  const b = laneBlocks();
+  const row = (over = {}) => ({ tier: "full", rework: b.rework, scopeDrift: b.scopeDrift, ownerTime: b.ownerTime, friction: b.friction, ...over });
+  const withP90 = (p90) => laneReport({ friction: { ...b.friction, stuckQueueMinutes: { count: 4, median: 2, p90 } } });
+  assert.equal(laneConforms(withP90(7.5)), true);
+  assert.equal(laneConforms(withP90(null)), true);
+  assert.equal(laneConforms(laneReport({ byTier: [row(), row({ tier: "unknown" })] })), true);
+  assert.equal(laneConforms(laneReport({ byTier: [] })), true);
+  const split = [{ date: "2026-09-01", before: { ...b, byTier: [row()] }, after: b }];
+  assert.equal(laneConforms(laneReport({ split })), true);
+  const cases = [
+    ["a string p90", withP90("7")],
+    ["a negative p90", withP90(-1)],
+    ["an unknown stat key", laneReport({ friction: { ...b.friction, stuckQueueMinutes: { count: 4, median: 2, p95: 3 } } })],
+    ["an unknown tier", laneReport({ byTier: [row({ tier: "huge" })] })],
+    ["a tier row with no tier", laneReport({ byTier: [row({ tier: undefined })] })],
+    ["a tier row missing a block", laneReport({ byTier: [row({ friction: undefined })] })],
+    ["a tier row with the delivery block", laneReport({ byTier: [row({ delivery: b.delivery })] })],
+    ["a tier row with a login", laneReport({ byTier: [row({ author: "someone" })] })],
+    ["a byTier that is not a list", laneReport({ byTier: row() })],
+    ["a split side with a bad byTier", laneReport({ split: [{ date: "2026-09-01", before: { ...b, byTier: [row({ tier: "x" })] }, after: b }] })],
+  ];
+  for (const [name, doc] of cases) assert.equal(schemaAccepts(laneSchema, JSON.parse(JSON.stringify(doc))), false, name);
 });
 
 test("a public: true report carrying a local-only field fails, at the top level and in a split side", () => {
