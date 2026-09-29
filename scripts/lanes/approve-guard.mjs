@@ -103,7 +103,12 @@ function clearSessionGrants(dir, sessionId) {
   const prefix = `${sessionId}.`;
   for (const name of names) {
     if (name === `${sessionId}.json` || (name.startsWith(prefix) && name.endsWith(".json") && PR_RE.test(name.slice(prefix.length, -".json".length)))) {
-      rmSync(join(dir, name), { force: true });
+      // One file that cannot be deleted must not stop the rest, nor the new grants written after the clear.
+      try {
+        rmSync(join(dir, name), { force: true });
+      } catch {
+        // It still lapses after GRANT_TTL_MS and is spent by its one run.
+      }
     }
   }
 }
