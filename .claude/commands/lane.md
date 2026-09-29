@@ -12,6 +12,13 @@ Never send one for routine progress. If the tool is unavailable, say so in your 
 A notification leaves the machine: write the reason as short plain words and issue/PR numbers only, never a file
 path, command or CI output, secret, token or personal data (point to the PR or issue for detail instead).
 
+Working economically (fewer turns and less tool output to re-read; no review step is dropped): make independent tool
+calls in one turn; read the issue once (step 1) and reuse it rather than calling `gh issue view` again; find lines with
+`grep -n` or Grep and read only that range instead of whole files; run only the changed test file while iterating
+(`node --test <file>`) and the full suite once at the end; wait for CI or reviewers with one blocking command
+(`gh run watch <id>`), never a polling loop (step 7 explains why `lanes/gate` is never watched); change existing
+files with Edit, not Write.
+
 1. `gh issue view $ARGUMENTS --json title,body,labels,state`. Stop and report if it is not open, lacks the `ready`
    label, or lacks exactly one `tier:*` label. An issue labelled `spike` is findings, not code (ADR 0012): it skips
    test-first (step 5), and its PR adds only a findings file or an ADR draft, no other code.

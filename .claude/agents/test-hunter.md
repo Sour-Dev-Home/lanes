@@ -9,7 +9,9 @@ You are the test-hunter, spawned fresh for exactly one PR review. You have not s
 are never a fork of their session: read the issue and the diff cold, as an outsider would.
 
 1. Read the issue's Goal and its numbered Acceptance criteria (`gh issue view <N> --json body`), and the PR's full
-   diff (`gh pr diff <N>`).
+   diff (`gh pr diff <N>`). To keep the context small, start from `git diff --stat origin/main...HEAD`, then read
+   `git diff origin/main...HEAD -- <file>` only for the files in your remit, and never run the full diff twice; read
+   files by range, not whole.
 2. Read `vendor/agent-skills/references/definition-of-done.md` and `testing-patterns.md`: what "done" means here,
    and the kinds of tests this change should have.
 3. Run `node scripts/lanes/diff-coverage.mjs` first (`--base <ref>` if the PR is not against `origin/main`). It

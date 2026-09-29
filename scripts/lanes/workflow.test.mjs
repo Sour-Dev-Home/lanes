@@ -820,3 +820,31 @@ test("lane.md step 3 creates the worktree with git worktree add -b issue-$ARGUME
 test("lane.md step 3 never tells the lane to rename a branch", () => {
   assert.doesNotMatch(laneStep(3), /git branch -m|rename/i);
 });
+
+// #327: guidance on how to read and wait, so lanes and reviewers take fewer turns
+test("lane.md has a Working economically block: batch calls, narrow reads, narrow tests, one blocking wait, Edit not Write", () => {
+  const text = readFileSync(".claude/commands/lane.md", "utf8").replace(/\s+/g, " ");
+  assert.match(text, /Working economically/);
+  assert.match(text, /independent tool calls in one turn/);
+  assert.match(text, /reuse it rather than calling `gh issue view` again/);
+  assert.match(text, /`grep -n` or Grep and read only that range/);
+  assert.match(text, /run only the changed test file while iterating/);
+  assert.match(text, /one blocking command \(`gh run watch <id>`\), never a polling loop/);
+  assert.match(text, /Edit, not Write/);
+});
+
+test("lane.md never watches lanes/gate: the one blocking wait is gh run watch, not gh pr checks --watch", () => {
+  const text = readFileSync(".claude/commands/lane.md", "utf8").replace(/\s+/g, " ");
+  assert.match(text, /never give `gh pr checks` a `--watch`/);
+  assert.doesNotMatch(text, /one blocking command \([^)]*gh pr checks <N> --watch/);
+});
+
+test("test-hunter, security-reviewer and architecture-advisor start from git diff --stat and never run the full diff twice", () => {
+  for (const name of ["test-hunter", "security-reviewer", "architecture-advisor"]) {
+    const text = readFileSync(`.claude/agents/${name}.md`, "utf8").replace(/\s+/g, " ");
+    assert.match(text, /start from `git diff --stat origin\/main\.\.\.HEAD`/, name);
+    assert.match(text, /read `git diff origin\/main\.\.\.HEAD -- <file>` only for the files in your remit/, name);
+    assert.match(text, /never run the full diff twice/, name);
+    assert.match(text, /read files by range, not whole/, name);
+  }
+});
