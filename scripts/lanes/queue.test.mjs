@@ -626,6 +626,32 @@ test("#344: edge: with no launchEnv (other platforms) claude gets no env option 
   assert.ok(!("env" in seen[0]), "no env key");
 });
 
+test("#344: edge: an adjusted env with no note prints exactly what no launchEnv prints", async () => {
+  const plain = await launchOptions(null);
+  const adjusted = await launchOptions(() => ({ env: { PATH: "adjusted" }, note: null }));
+  assert.deepEqual(adjusted.out, plain.out);
+});
+
+test("#344: edge: launchEnv is not asked when nothing launches, and a two-lane tick notes and passes env for each", async () => {
+  const { main } = await import("./queue.mjs");
+  const idle = fakeRun({ issues: [], prs: [], sessions: [] }, {});
+  let asked = 0;
+  idle.deps.launchEnv = () => (asked++, { env: { PATH: "x" }, note: null });
+  await main([], idle.deps);
+  assert.equal(asked, 0);
+
+  const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/b.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  const seen = [];
+  const claude = run.deps.claude;
+  run.deps.claude = (args, opts) => (args[0] !== "agents" && seen.push(opts), claude(args, opts));
+  run.deps.launchEnv = () => ({ env: { PATH: "p" }, note: "PATH not adjusted: git not found" });
+  await main([], run.deps);
+  assert.equal(seen.length, 2);
+  assert.ok(seen.every((o) => o.env?.PATH === "p"));
+  for (const n of [1, 2]) assert.equal(run.out.filter((l) => l.endsWith(` #${n}: PATH not adjusted: git not found`)).length, 1, run.out.join("\n"));
+});
+
 // --- #251: queue-launched lanes get the reaper /start starts (ADR 0010). ---
 
 const reapScript = join("/repo", "scripts", "lanes", "reap.mjs");
