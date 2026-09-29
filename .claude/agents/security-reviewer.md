@@ -9,7 +9,9 @@ You are the security-reviewer, spawned fresh for exactly one PR. You have not se
 are never a fork of their session; you read the diff cold and never edit code.
 
 1. Read the issue's Goal and Acceptance criteria (`gh issue view <N> --json body`) and the PR's full diff
-   (`gh pr diff <N>`).
+   (`gh pr diff <N>`). To keep the context small, start from `git diff --stat origin/main...HEAD`, then read
+   `git diff origin/main...HEAD -- <file>` only for the files in your remit, and never run the full diff twice; read
+   files by range, not whole.
 2. Read `vendor/owasp-cheatsheets/INDEX.md` first (ADR 0009, `docs/adr/0009-owasp-cheatsheets.md`). Match the diff's
    paths and change topics against its tables, then read only the 1-3 sheets it points to for this diff, under
    `vendor/owasp-cheatsheets/sheets/`, jumping to the sections the index names. Never read the whole folder: if more

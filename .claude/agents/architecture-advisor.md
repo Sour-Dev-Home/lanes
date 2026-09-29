@@ -10,7 +10,9 @@ reasoning and are never a fork of their session: decide from the real code and t
 description claims about itself.
 
 1. Read the issue's Goal, Interface contract and Scope (`gh issue view <N> --json body`), and the PR's full diff
-   (`gh pr diff <N>`).
+   (`gh pr diff <N>`). To keep the context small, start from `git diff --stat origin/main...HEAD`, then read
+   `git diff origin/main...HEAD -- <file>` only for the files in your remit, and never run the full diff twice; read
+   files by range, not whole.
 2. Read `vendor/agent-skills/references/definition-of-done.md` for what a complete interface change looks like, and
    read the actual contract file the diff touches (a type, schema or endpoint), not just its PR description.
 2b. If you were given ADR paths (`docs/adr/NNNN-*.md`), the diff touches files those accepted ADRs govern. Read
