@@ -13,7 +13,7 @@ import { STATUS_QUERY, gateDescriptions, mergeQueueEntries, prStage } from "./st
 // start.mjs is not part of the installed file set, so these two are copies of its RUNNING_LABEL and
 // START_DEFAULTS.softPaths; snapshot.test.mjs fails if they drift.
 export const RUNNING_LABEL = "lane:running";
-export const DEFAULT_SOFT_PATHS = Object.freeze(["^docs/USING\\.md$", "^README\\.md$"]);
+export const DEFAULT_SOFT_PATHS = Object.freeze(["^docs/USING\\.md$", "^README\\.md$", "^lanes\\.config\\.json$"]);
 const ISSUE_LIMIT = 1000;
 const PR_LIMIT = 100; // also the GraphQL page size of STATUS_QUERY
 const TITLE_MAX = 200;
@@ -74,6 +74,8 @@ function prBlockers(stage, note) {
       return note.replace(/^failing: /, "").split(", ").map((name) => ({ kind: "check", ref: clean(name), reason }));
     case "owner":
       return [{ kind: "owner", ref: "review/owner", reason }];
+    case "conflict":
+      return [{ kind: "owner", ref: "merge conflict", reason }];
     case "gate":
       return [{ kind: "review", ref: clean(/^waiting for review\/(\S+)/.exec(note)?.[1]), reason }];
     case "ready":
@@ -111,7 +113,8 @@ export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: 
     const pr = prOf.get(issue.number);
     if (pr) {
       const { stage, note } = prStage(pr, queuePosition.get(pr.number), gates.get(pr.number));
-      item.stage = stage;
+      // The dashboard knows no "conflict" stage: a conflicted PR waits on the owner there.
+      item.stage = stage === "conflict" ? "owner" : stage;
       item.blockedBy = prBlockers(stage, note);
       item.pr = { number: pr.number, headSha: String(pr.headRefOid ?? "").toLowerCase(), checks: checksOf(pr) };
       const criteria = verdictCriteria(currentVerdicts(pr.comments, item.pr.headSha), item.pr.headSha);
@@ -223,7 +226,7 @@ function main(argv = process.argv.slice(2)) {
   const issues = gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,title,labels,body"]);
   // A blocker missing from a truncated list would read as closed, so refuse rather than publish a wrong "ready".
   if (issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
-  const prs = gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,isCrossRepository,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefOid,comments"]);
+  const prs = gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,isCrossRepository,mergeable,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefOid,comments"]);
   // Same reason as issues: a PR cut off the list would leave its issue showing a wrong stage.
   if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to list every issue's real stage`);
   const snapshot = buildSnapshot({ prs, issues, mergeQueue: mergeQueueEntries(reply), gateDescriptions: gateDescriptions(reply), softPaths: configuredSoftPaths(), generatedAt: new Date().toISOString() });

@@ -753,12 +753,12 @@ test("docs/USING.md describes /start", () => {
 test("lanes.config.json has the start block with maxLanes 8 and the two soft paths", () => {
   const raw = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
   assert.equal(raw.start.maxLanes, 8);
-  assert.deepEqual(raw.start.softPaths, ["^docs/USING\\.md$", "^README\\.md$"]);
+  assert.deepEqual(raw.start.softPaths, ["^docs/USING\\.md$", "^README\\.md$", "^lanes\\.config\\.json$"]);
   assert.deepEqual(startConfig(raw), raw.start);
 });
 
 test("startConfig falls back to the defaults when the start block or a key is missing", () => {
-  const defaults = { maxLanes: 8, softPaths: ["^docs/USING\\.md$", "^README\\.md$"], models: {} };
+  const defaults = { maxLanes: 8, softPaths: ["^docs/USING\\.md$", "^README\\.md$", "^lanes\\.config\\.json$"], models: {} };
   assert.deepEqual(START_DEFAULTS, defaults);
   assert.deepEqual(startConfig(undefined), defaults);
   assert.deepEqual(startConfig({}), defaults);
@@ -1819,4 +1819,45 @@ test("edge: markRunning reports a failed label creation and does not create for 
   };
   assert.equal(markRunning(5, { gh: gh2 }), "#5: label not set: HTTP 502");
   assert.deepEqual(other, ["issue"]);
+});
+
+// #416: issues that each add a line to lanes.config.json run together.
+test("main launches two issues whose only shared path is lanes.config.json", () => {
+  const { deps, launches } = fakes({ issues: { 1: { body: form({ scope: "In: `a.mjs`, `lanes.config.json`." }) }, 2: { body: form({ scope: "In: `b.mjs`, `lanes.config.json`." }) } } });
+  const { code, lines } = main(["1", "2"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#2 → id2"]);
+  assert.equal(launches.length, 2);
+});
+
+// #416: a lane PATH is deduplicated (first kept, order kept) and a long one is reported.
+test("launchEnv: exact duplicate PATH entries are dropped case-insensitively, first kept, order kept", () => {
+  const { env, note } = launchEnv({ Path: "C:\\Windows;c:\\windows;C:\\Tools;C:\\Program Files\\Git\\usr\\bin;C:\\Windows" }, "win32", GIT_EXEC);
+  assert.equal(env.Path, "C:\\Program Files\\Git\\usr\\bin;C:\\Program Files\\Git\\mingw64\\bin;C:\\Windows;C:\\Tools");
+  assert.equal(note, null);
+});
+test("launchEnv: a PATH over 60 entries is reported with its entry and unique counts", () => {
+  const many = Array.from({ length: 70 }, (_, i) => `C:\\d${i}`).join(";");
+  const { env, note } = launchEnv({ Path: many }, "win32", GIT_EXEC);
+  assert.equal(env.Path.split(";").length, 72);
+  assert.equal(note, "PATH has 72 entries (72 unique)");
+});
+test("launchEnv: a normal PATH gets no note and only the Git tools in front", () => {
+  const { env, note } = launchEnv({ Path: "C:\\a;C:\\b" }, "win32", GIT_EXEC);
+  assert.equal(env.Path, "C:\\Program Files\\Git\\usr\\bin;C:\\Program Files\\Git\\mingw64\\bin;C:\\a;C:\\b");
+  assert.equal(note, null);
+});
+test("edge: empty PATH entries survive deduplication", () => {
+  assert.equal(launchEnv({ Path: "C:\\a;;C:\\a;" }, "win32", GIT_EXEC).env.Path, "C:\\Program Files\\Git\\usr\\bin;C:\\Program Files\\Git\\mingw64\\bin;C:\\a;;");
+});
+
+// #416: the note threshold is exactly 60 entries (the two Git tool entries count).
+test("edge: launchEnv reports a PATH of 61 entries but not one of exactly 60", () => {
+  const path = (n) => Array.from({ length: n }, (_, i) => `C:\d${i}`).join(";");
+  assert.equal(launchEnv({ Path: path(58) }, "win32", GIT_EXEC).note, null);
+  assert.equal(launchEnv({ Path: path(59) }, "win32", GIT_EXEC).note, "PATH has 61 entries (61 unique)");
+});
+test("edge: launchEnv counts unique entries after dropping duplicates in a long PATH", () => {
+  const path = Array.from({ length: 80 }, (_, i) => `C:\d${i % 65}`).join(";");
+  assert.equal(launchEnv({ Path: path }, "win32", GIT_EXEC).note, "PATH has 67 entries (67 unique)");
 });

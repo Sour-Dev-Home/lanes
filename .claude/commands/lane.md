@@ -33,7 +33,9 @@ files with Edit, not Write.
    `git worktree add -b issue-$ARGUMENTS-<short-slug> .claude/worktrees/issue-$ARGUMENTS-<short-slug> origin/main`
    and `cd` into it. Run `npm run setup` in it.
    Then run `command -v head ls wc grep` as its own command. If any is missing, write the PATH shape (the number of PATH
-   entries and whether `/usr/bin` and `/mingw64/bin` are present, never the full PATH) to `.lanes/logs/path-$ARGUMENTS.txt`,
+   entries and whether `/usr/bin` and `/mingw64/bin` are present, never the full PATH) and the first three raw PATH entries as the shell sees them (shell built-ins only, e.g.
+   `IFS=:; set -- $PATH; echo "$1" "$2" "$3"`; this tells a Windows-form `C:\...;C:\...` PATH that bash did not convert
+   from a missing entry; the file is gitignored and its entries never go into a PR, issue or commit) to `.lanes/logs/path-$ARGUMENTS.txt`,
    notify `lanes #$ARGUMENTS: shell PATH broken`, report that line and stop. Never prefix commands with `export PATH=…` or
    change PATH to work around missing tools.
 4. Read the issue's Interface contract and Scope. Touch nothing out of scope. If the contract is wrong or missing,

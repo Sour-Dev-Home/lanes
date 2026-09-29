@@ -20,10 +20,12 @@ import { grantPath, grantRefusal, readGrant } from "./start-guard.mjs";
 
 export const START_DEFAULTS = Object.freeze({
   maxLanes: 8,
-  softPaths: Object.freeze(["^docs/USING\\.md$", "^README\\.md$"]),
+  softPaths: Object.freeze(["^docs/USING\\.md$", "^README\\.md$", "^lanes\\.config\\.json$"]),
   models: Object.freeze({}),
 });
 const MAX_LANES_LIMIT = 10;
+// A lane PATH with more entries than this is reported at launch (#416).
+const PATH_NOTE_ABOVE = 60;
 // A model name is one word that cannot start with `-`, so claude never reads it as a flag.
 const MODEL_NAME = /^[^\s-]\S*$/;
 const PR_LIMIT = 1000;
@@ -119,7 +121,15 @@ export function launchEnv(env, platform, gitExecPath) {
   if (root.includes(";")) return { env, note: `PATH not adjusted: unexpected git --exec-path: ${gitExecPath.trim()}` };
   const tools = [win32.join(root, "usr", "bin"), win32.join(root, "mingw64", "bin")].join(";");
   const key = Object.keys(env).find((k) => k.toLowerCase() === "path") ?? "Path";
-  return { env: { ...env, [key]: env[key] ? `${tools};${env[key]}` : tools }, note: null };
+  // #416: exact duplicate entries (case-insensitive, as on Windows) are dropped, the first kept and the order too.
+  const seen = new Set();
+  const entries = (env[key] ? `${tools};${env[key]}` : tools).split(";").filter((e) => {
+    if (e === "") return true;
+    const id = e.toLowerCase();
+    return seen.has(id) ? false : (seen.add(id), true);
+  });
+  const note = entries.length > PATH_NOTE_ABOVE ? `PATH has ${entries.length} entries (${seen.size} unique)` : null;
+  return { env: { ...env, [key]: entries.join(";") }, note };
 }
 
 // The launch environment for this machine: asks git where it lives; a git that cannot run counts as not found.

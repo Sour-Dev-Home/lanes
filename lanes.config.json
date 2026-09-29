@@ -3,7 +3,7 @@
   "metrics": { "mainWorkflow": "verify.yml", "fragmentsDir": null },
   "start": {
     "maxLanes": 8,
-    "softPaths": ["^docs/USING\\.md$", "^README\\.md$"],
+    "softPaths": ["^docs/USING\\.md$", "^README\\.md$", "^lanes\\.config\\.json$"],
     "models": { "skip": "sonnet", "quick": "sonnet", "full": "sonnet" }
   },
   "modules": {

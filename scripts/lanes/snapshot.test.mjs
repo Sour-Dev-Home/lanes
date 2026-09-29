@@ -370,3 +370,18 @@ test("edge: the command reads start.softPaths from lanes.config.json in the work
 test("edge: an issue that already has a PR is not listed in overlaps", () => {
   assert.deepEqual(build({ issues: [scoped(1, "`a.mjs`"), scoped(2, "`a.mjs`")], prs: [pr(7)] }).overlaps, []);
 });
+
+// #416: a conflicted PR waits on the owner; UNKNOWN changes nothing.
+test("a CONFLICTING PR is stage owner with the reason conflict: rebase needed", () => {
+  const i = one({ issues: [issue(1)], prs: [pr(5, { mergeable: "CONFLICTING" })] });
+  assert.equal(i.stage, "owner");
+  assert.deepEqual(i.blockedBy, [{ kind: "owner", ref: "merge conflict", reason: "conflict: rebase needed" }]);
+});
+test("an UNKNOWN mergeable state changes nothing", () => {
+  const i = one({ issues: [issue(1)], prs: [pr(5, { mergeable: "UNKNOWN", statusCheckRollup: [gate("PENDING", "waiting on owner (/approve)")] })] });
+  assert.equal(i.stage, "owner");
+  assert.equal(i.blockedBy[0].ref, "review/owner");
+});
+test("the default soft paths include lanes.config.json", () => {
+  assert.ok(DEFAULT_SOFT_PATHS.includes("^lanes\\.config\\.json$"));
+});
