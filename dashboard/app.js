@@ -132,7 +132,11 @@ function renderWaiting(doc, box, issues) {
       function () {
         button.textContent = "Copy failed";
       }
-    );
+    ).then(function () {
+      setTimeout(function () {
+        button.textContent = "Copy";
+      }, 2000);
+    });
   });
   row.appendChild(button);
   box.appendChild(row);

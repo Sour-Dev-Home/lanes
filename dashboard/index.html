@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'">
 <title>Lanes dashboard</title>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -10,7 +11,7 @@
 <header class="top">
   <h1>Lanes</h1>
   <p id="generated" class="muted">Loading snapshot…</p>
-  <p id="stale" class="stale" hidden></p>
+  <p id="stale" class="stale" role="status" hidden></p>
 </header>
 <main>
   <section aria-labelledby="waiting-h">

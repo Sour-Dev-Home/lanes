@@ -45,6 +45,29 @@ test("staleNote is empty within 20 minutes and names the age past it", () => {
   assert.match(app.staleNote("2026-09-28T11:30:00Z", now), /stale.*30 min/i);
 });
 
+test("edge: staleNote is empty at exactly 20 minutes and stale one minute later", () => {
+  const now = Date.parse("2026-09-28T12:00:00Z");
+  assert.equal(app.staleNote("2026-09-28T11:40:00Z", now), "");
+  assert.match(app.staleNote("2026-09-28T11:39:00Z", now), /stale/i);
+});
+
+test("renderGraph highlights only the edges on the critical path", () => {
+  const svg = app.renderGraph(fakeDoc(), [1, 2, 3, 4].map((n) => issue(n, "blocked")), [{ from: 1, to: 2 }, { from: 2, to: 3 }, { from: 1, to: 4 }]);
+  const cls = [];
+  walk(svg, (n) => { if (/\bedge\b/.test(n.className)) cls.push(n.className); });
+  assert.equal(cls.length, 3);
+  assert.equal(cls.filter((c) => /\bcritical\b/.test(c)).length, 2);
+});
+
+test("edge: renderWaiting puts a hostile title and reason in text only", () => {
+  const evil = `<img src=x onerror=alert(1)>`;
+  const d = fakeDoc();
+  const box = d.createElement("div");
+  app.renderWaiting(d, box, [issue(1, "owner", { title: evil, pr: pr(3), blockedBy: [{ kind: "owner", ref: "r", reason: evil }] })]);
+  assert.ok(textOf(box).includes(evil));
+  walk(box, (n) => assert.ok(!/^(img|script)$/.test(n.tag), n.tag));
+});
+
 test("edge: staleNote treats an unreadable time as stale", () => {
   assert.match(app.staleNote("garbage", Date.now()), /stale/i);
 });

@@ -104,6 +104,7 @@ button:hover, button:focus-visible { background: var(--accent); color: var(--bg)
 .graph .edge { stroke: var(--muted); stroke-width: 1.5; fill: none; }
 .graph .edge.critical, .graph .node.critical rect { stroke: var(--critical); stroke-width: 3; }
 .graph .arrow { fill: var(--muted); }
+.graph .arrow.critical { fill: var(--critical); }
 @media (max-width: 600px) {
   body { font-size: 15px; }
   .approve { flex-direction: column; align-items: stretch; }
