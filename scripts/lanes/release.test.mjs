@@ -105,6 +105,7 @@ test("release.yml fetches origin/main, runs release.mjs and creates the release 
   assert.match(workflow, /git fetch origin main:refs\/remotes\/origin\/main/);
   assert.match(workflow, /node scripts\/lanes\/release\.mjs "\$TAG" > "\$NOTES"/);
   assert.match(workflow, /gh release create "\$TAG" .*--notes-file "\$NOTES"/);
+  assert.match(workflow, /case "\$TAG" in \*-\*\) PRE=--prerelease ;; esac/, "a hyphenated tag is a pre-release");
   assert.doesNotMatch(workflow, /run:[^\n]*\$\{\{/, "no expression interpolated into a shell command");
 });
 

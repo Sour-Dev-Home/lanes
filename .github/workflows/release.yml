@@ -25,4 +25,7 @@ jobs:
         run: |
           NOTES=$(mktemp)
           node scripts/lanes/release.mjs "$TAG" > "$NOTES"
-          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES"
+          # A tag with a hyphen (v1.0.0-rc.1) is a pre-release, so it is not shown as the latest release.
+          PRE=
+          case "$TAG" in *-*) PRE=--prerelease ;; esac
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES" $PRE
