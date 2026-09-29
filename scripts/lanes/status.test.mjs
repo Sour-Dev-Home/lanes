@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
-import { approveLine, formatAge, gateDescriptions, gateSince, laneBranches, laneSessions, loadLaneBranches, loadSessions, mergeQueueEntries, render, renderWaiting, stalledItems, stalledLanes, summarize, waitingApprovals } from "./status.mjs";
+import { approveLine, formatAge, gateDescriptions, gateSince, laneBranches, laneSessions, liveLanes, loadLaneBranches, loadSessions, mergeQueueEntries, readBudget, render, renderWaiting, stalledItems, stalledLanes, summarize, waitingApprovals } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -913,4 +913,45 @@ test("edge: a conflicted PR stays on the owner's list even after review/owner pa
   const approved = { __typename: "StatusContext", context: "review/owner", state: "SUCCESS" };
   const s = summarize({ prs: [pr(1, [gate("PENDING", "waiting on owner (/approve)"), approved], { mergeable: "CONFLICTING" })], issues: [], merged: [], mergeQueue: [] });
   assert.deepEqual(s.waitingOnOwner.map((i) => i.number), [1]);
+});
+
+// #390
+const laneAgent = (n, sessionId) => ({ kind: "background", id: `id-${n}`, cwd: `/repo/.claude/worktrees/issue-${n}-x`, sessionId, startedAt: 1 });
+const okLoad = (over = {}) => (input) => ({ spent24h: 5, perNightTokens: input.perNightTokens, over: false, lanesOver: [], ...over });
+const noConfig = () => { throw Object.assign(new Error("x"), { code: "ENOENT" }); };
+
+test("liveLanes lists each running lane's issue, session and cwd", () => {
+  assert.deepEqual(liveLanes([laneAgent(4, "s4"), { kind: "interactive", cwd: "/repo/.claude/worktrees/issue-9-x" }], "/repo"), [{ issue: 4, sessionId: "s4", cwd: "/repo/.claude/worktrees/issue-4-x" }]);
+});
+
+test("readBudget passes the config's caps and the running lanes to loadBudget", () => {
+  let seen;
+  const r = readBudget("/repo", JSON.stringify([laneAgent(4, "s4")]), {
+    readConfig: () => JSON.stringify({ budget: { perNightTokens: 9, perLaneTokens: 3 } }),
+    load: (input) => ((seen = input), okLoad({ over: true, lanesOver: [4] })(input)),
+  });
+  assert.deepEqual(r, { spent24h: 5, perNightTokens: 9, over: true, lanesOver: [4] });
+  assert.equal(seen.perLaneTokens, 3);
+  assert.deepEqual(seen.lanes.map((l) => l.issue), [4]);
+});
+
+test("edge: readBudget uses the defaults for a missing config and says so for a bad one or unreadable agents", () => {
+  const missing = readBudget("/repo", "[]", { readConfig: noConfig, load: okLoad() });
+  assert.equal(missing.perNightTokens, 100_000_000);
+  assert.equal(missing.note, undefined);
+  const bad = readBudget("/repo", "not json", { readConfig: () => JSON.stringify({ budget: { perNightTokens: 0 } }), load: okLoad() });
+  assert.equal(bad.perNightTokens, 100_000_000);
+  assert.match(bad.note, /budget not read .*perNightTokens/);
+  assert.match(bad.note, /running lanes unreadable/);
+});
+
+test("edge: readBudget never puts a file system error's path in its note", () => {
+  const r = readBudget("/repo", "[]", { readConfig: () => { throw Object.assign(new Error("EACCES: permission denied, open '/secret/lanes.config.json'"), { code: "EACCES" }); }, load: okLoad() });
+  assert.equal(r.note, "lanes.config.json unreadable, budget defaults used");
+  assert.equal(r.perNightTokens, 100_000_000);
+});
+
+test("edge: readBudget keeps loadBudget's own note", () => {
+  const r = readBudget("/repo", "[]", { readConfig: () => "{}", load: okLoad({ note: "no .lanes/costs.jsonl yet, counted as 0" }) });
+  assert.equal(r.note, "no .lanes/costs.jsonl yet, counted as 0");
 });

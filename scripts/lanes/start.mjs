@@ -23,6 +23,8 @@ export const START_DEFAULTS = Object.freeze({
   softPaths: Object.freeze(["^docs/USING\\.md$", "^README\\.md$", "^lanes\\.config\\.json$"]),
   models: Object.freeze({}),
 });
+// #390: the budget config lives in lane-cost.mjs, which the installed status.mjs already imports (start.mjs is not installed).
+export { BUDGET_DEFAULTS, budgetConfig } from "./lane-cost.mjs";
 const MAX_LANES_LIMIT = 10;
 // A lane PATH with more entries than this is reported at launch (#416).
 const PATH_NOTE_ABOVE = 60;

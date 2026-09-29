@@ -8,7 +8,8 @@ You are the unattended night run. Nobody is watching; nothing you do may need a 
 2. `node scripts/lanes/status.mjs --json`: pick at most 3 issues from `ready` with stage `skip` or `quick`, oldest
    first, whose "Blocked by" issues are all closed. (A lane's own follow-up issues carry `lane-filed`, which
    `issue-contract` never lets become `ready`, so they are excluded automatically; never pick one even if it somehow
-   carries both labels.)
+   carries both labels.) Stop picking new issues once that output's `budget.over` is true (the rolling 24-hour token
+   spend passed its cap); say so in the step 4 digest.
 3. For each, follow `.claude/commands/lane.md` exactly, one at a time, except its Notify rule: a night lane sends no
    push notification; its stops go into the digest in step 4. Never post `review/owner`; never touch
    `.github/`, `.claude/`, `scripts/lanes/` or `lanes.config.json` (those PRs need the owner anyway). Stop a lane after
