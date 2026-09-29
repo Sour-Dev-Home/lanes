@@ -872,6 +872,18 @@ test("edge: a failed removal is logged as an error and retried on the next poll"
     assert.equal(w.cleanupLoads.length, 2);
   }));
 
+test("cleanup without its own run uses main's run for its git, gh and claude calls", () =>
+  withRoot(async (root) => {
+    const w = world(root, { issue: "CLOSED", prs: merged });
+    delete w.deps.cleanupDeps.run;
+    assert.equal(await main(ARGS, w.deps), 0);
+    assert.match(logLines(root).at(-1), / removed: /);
+    assert.ok(w.calls.some((c) => c.startsWith("git worktree remove")), "git worktree remove went through main's run");
+    assert.ok(w.calls.some((c) => c.startsWith("git branch")), "git branch delete went through main's run");
+    assert.ok(w.calls.some((c) => c.startsWith("claude ")), "claude call went through main's run");
+    assert.ok(w.calls.some((c) => c.startsWith("gh ")), "gh call went through main's run");
+  }));
+
 test("edge: three failed removals in a row give up", () =>
   withRoot(async (root) => {
     const w = world(root, { issue: "CLOSED", prs: merged });
