@@ -118,7 +118,8 @@ the JSON follows `contracts/lane-metrics.schema.json`. Locally it also reads `.l
 and model, relaunches and lane-hours; `--public` leaves those out. `--split` gives a before and after block at a
 date, so a change such as a model switch or a new required check can be compared without a per-PR list. The figures
 are a comparison, not a proof of cause, and GitHub keeps only each status's latest state, so a failure fixed by a later
-green status is not counted as rework.
+green status is not counted as rework. Minutes in the merge queue are a proxy (the last status on the PR head to the
+merge), and p90 and a per-tier split are not reported yet (issue #333).
 
 For the portfolio, export by hand and commit the file yourself: `node scripts/lanes/lane-metrics.mjs --public --split
 <date> --out docs/metrics/<date>.json`. `--out` refuses to write when the output holds an email, an @-mention, your
