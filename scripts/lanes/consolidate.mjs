@@ -6,7 +6,15 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseIssueForm } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
-import { startConfig } from "./start.mjs";
+
+// Same defaults as `start.softPaths` in start.mjs, which is not shipped to installed repos, so it is not imported.
+const DEFAULT_SOFT_PATHS = ["^docs/USING\\.md$", "^README\\.md$", "^lanes\\.config\\.json$"];
+
+function softPathsOf(raw) {
+  const soft = raw?.start?.softPaths ?? DEFAULT_SOFT_PATHS;
+  if (!Array.isArray(soft) || soft.some((s) => typeof s !== "string")) throw new Error("lanes.config.json: start.softPaths must be an array of regex strings");
+  return soft;
+}
 
 const CONSIDERED = ["ready", "lane-filed"];
 const hasLabel = (issue, name) => (issue.labels ?? []).some((l) => (typeof l === "string" ? l : l?.name) === name);
@@ -86,7 +94,7 @@ export function main(argv = process.argv.slice(2)) {
   try {
     const raw = existsSync("lanes.config.json") ? JSON.parse(readFileSync("lanes.config.json", "utf8")) : {};
     const seen = new Map(CONSIDERED.flatMap(ghIssues).map((i) => [i.number, i]));
-    console.log(formatGroups(consolidateGroups({ issues: [...seen.values()], softPaths: startConfig(raw).softPaths, laneFiledOnly: args.laneFiledOnly })));
+    console.log(formatGroups(consolidateGroups({ issues: [...seen.values()], softPaths: softPathsOf(raw), laneFiledOnly: args.laneFiledOnly })));
     return 0;
   } catch (e) {
     console.error(`consolidate: ${e.message}`);
