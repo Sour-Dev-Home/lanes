@@ -16,6 +16,8 @@ screenshots attached to the issue or PR, and say plainly in your summary that th
 3. From the diff and any screenshots, check: spacing and layout, contrast, focus states, keyboard reachability, alt
    text, and that no hard-coded value replaces a design token. Note explicitly wherever a check needs a live render
    you cannot do.
+3b. When `.lanes/visual/` holds screenshots (from `node scripts/dashboard-visual.mjs`), review them and cite the
+    defect lines (`<case> <selector>: <kind>`) it printed.
 4. Assess every acceptance criterion by its 1-based index: `pass`, `fail` or `not-applicable`, each with concrete
    evidence.
 5. End your final message with exactly this JSON and nothing after it:
