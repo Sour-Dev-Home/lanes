@@ -143,6 +143,27 @@ export function summarize(jsonlText, { days, now = Date.now() }) {
   });
 }
 
+// #390: the token caps, from the first measured week (lane p90 8.2 M, max 19.2 M; busiest day 87 M).
+export const BUDGET_DEFAULTS = Object.freeze({ perNightTokens: 100_000_000, perLaneTokens: 15_000_000 });
+
+/**
+ * The `budget` block of a parsed lanes.config.json, each missing key (or the whole block) filled from BUDGET_DEFAULTS.
+ * Throws when the block is not an object or a value is not a positive whole number. start.mjs re-exports it.
+ * @returns {{ perNightTokens: number, perLaneTokens: number }}
+ */
+export function budgetConfig(raw) {
+  const budget = raw?.budget;
+  if (budget === undefined) return { ...BUDGET_DEFAULTS };
+  if (budget === null || typeof budget !== "object" || Array.isArray(budget)) throw new Error("lanes.config.json: budget must be an object");
+  const out = {};
+  for (const key of Object.keys(BUDGET_DEFAULTS)) {
+    const value = budget[key] === undefined ? BUDGET_DEFAULTS[key] : budget[key];
+    if (!Number.isInteger(value) || value < 1) throw new Error(`lanes.config.json: budget.${key} must be a positive whole number, got ${JSON.stringify(budget[key])}`);
+    out[key] = value;
+  }
+  return out;
+}
+
 /**
  * #390: tokens of the lanes removed in the last `hours` (24 by default), from costs.jsonl text. A line that does not
  * parse, lies outside the window, or has no token total adds nothing.

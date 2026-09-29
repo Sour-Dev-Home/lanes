@@ -7,8 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GATE_CONTEXT, laneIssueOf, parseIssueForm, parsePrBody, reviewContext } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
-import { loadBudget, projectFolder } from "./lane-cost.mjs";
-import { BUDGET_DEFAULTS, budgetConfig } from "./start.mjs";
+import { BUDGET_DEFAULTS, budgetConfig, loadBudget, projectFolder } from "./lane-cost.mjs";
 import { claimedPaths } from "./pick.mjs";
 
 const ISSUE_LIMIT = 1000;
