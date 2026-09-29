@@ -70,6 +70,7 @@ export const MANIFEST = [
   "scripts/lanes/status.mjs",
   "scripts/lanes/setup-repo.mjs",
   "scripts/lanes/delivery-metrics.mjs",
+  "scripts/lanes/graphql-lib.mjs",
   "scripts/lanes/approve-guard.mjs",
   "scripts/lanes/start-guard.mjs",
   "scripts/lanes/shell-lex.mjs",

@@ -34,7 +34,7 @@
       },
       {
         "id": "metrics",
-        "paths": ["scripts/lanes/delivery-metrics.", "scripts/lanes/review-metrics.", "scripts/lanes/lane-metrics.", "scripts/lanes/diff-coverage."],
+        "paths": ["scripts/lanes/delivery-metrics.", "scripts/lanes/review-metrics.", "scripts/lanes/lane-metrics.", "scripts/lanes/diff-coverage.", "scripts/lanes/graphql-lib."],
         "imports": ["lib", "queue"]
       },
       {
