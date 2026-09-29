@@ -9,7 +9,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main as checkBlockers } from "./blockers.mjs";
 import { cleanupMerged } from "./cleanup.mjs";
@@ -99,6 +99,37 @@ function modelLabels(labels = []) {
 
 // ANSI escape sequences: CSI (colours, cursor moves) and OSC (e.g. hyperlinks), ended by BEL or ESC \.
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+/**
+ * #337: the environment a lane launches with. On Windows, Git's `usr\bin` and `mingw64\bin` go ahead of the inherited
+ * PATH so the POSIX tools resolve; `gitExecPath` is the output of `git --exec-path` (`<git>/mingw64/libexec/git-core`),
+ * or empty when git could not be run. Other platforms, and Windows without a usable Git, get `env` back unchanged
+ * (`note` says why in the second case). Never mutates `env`.
+ */
+export function launchEnv(env, platform, gitExecPath) {
+  if (platform !== "win32") return { env, note: null };
+  if (!gitExecPath) return { env, note: "PATH not adjusted: git not found" };
+  const parts = win32.normalize(gitExecPath.trim()).split(win32.sep).filter(Boolean);
+  const n = parts.length;
+  if (n < 4 || parts[n - 1] !== "git-core" || parts[n - 2] !== "libexec" || parts[n - 3].toLowerCase() !== "mingw64" || !/^[a-z]:$/i.test(parts[0])) {
+    return { env, note: `PATH not adjusted: unexpected git --exec-path: ${gitExecPath.trim()}` };
+  }
+  // A bare drive (`C:`) needs its separator back, or `C:usr\bin` would be drive-relative. A `;` would split the entry.
+  const root = parts.slice(0, n - 3).join(win32.sep) + (n === 4 ? win32.sep : "");
+  if (root.includes(";")) return { env, note: `PATH not adjusted: unexpected git --exec-path: ${gitExecPath.trim()}` };
+  const tools = [win32.join(root, "usr", "bin"), win32.join(root, "mingw64", "bin")].join(";");
+  const key = Object.keys(env).find((k) => k.toLowerCase() === "path") ?? "Path";
+  return { env: { ...env, [key]: env[key] ? `${tools};${env[key]}` : tools }, note: null };
+}
+
+// The launch environment for this machine: asks git where it lives; a git that cannot run counts as not found.
+function localLaunchEnv() {
+  let out = "";
+  try {
+    out = execFileSync("git", ["--exec-path"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch {}
+  return launchEnv(process.env, process.platform, out);
+}
 
 /** The session id from `claude --bg` output (`backgrounded · <id>`), or null when none was printed. Colour is ignored. */
 export function parseSessionId(output) {
@@ -262,15 +293,17 @@ function launchAll(numbers, deps, { tiers, models, labels }) {
   const lines = new Map();
   let failed = false;
   const root = numbers.length ? deps.root() : null;
+  const { env, note: envNote } = numbers.length && deps.launchEnv ? deps.launchEnv() : { env: undefined, note: null };
   for (const n of numbers) {
     const { opus, ignored } = modelLabels(labels.get(n));
     // A label name is untrusted text: control characters (ANSI escapes, newlines) become `?` in the log line.
     const notes = ignored.map((l) => `#${n}: ignored label ${l.replace(/[\x00-\x1f\x7f-\x9f]/g, "?")}`);
+    if (envNote) notes.push(`#${n}: ${envNote}`);
     // One attempt only: a launch that printed no id may still have started, and a retry could start it twice.
     let id = null;
     let why = "no session id in output";
     try {
-      id = parseSessionId(deps.claude(launchArgs(n, { tier: tiers.get(n), models, opus }), { cwd: root }));
+      id = parseSessionId(deps.claude(launchArgs(n, { tier: tiers.get(n), models, opus }), env ? { cwd: root, env } : { cwd: root }));
     } catch (err) {
       why = reason(err);
     }
@@ -335,7 +368,7 @@ function autoStart(go, deps, { maxLanes, softPaths, models }) {
  * files, `now()` the time in ms, and optionally `removeGrant(file)`. Returns the exit code and the lines to print,
  * cleanup's first.
  */
-export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig, cleanup: cleanupMerged, spawn, reaperLog, session, grantDir, now: Date.now }) {
+export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig, cleanup: cleanupMerged, spawn, reaperLog, session, grantDir, now: Date.now, launchEnv: localLaunchEnv }) {
   const args = argv.map((a) => String(a).replace(/^#/, ""));
   const auto = args[0] === "--auto";
   if (auto ? args.length > 2 || (args.length === 2 && args[1] !== "--go") : !args.length || args.some((a) => !/^[1-9]\d*$/.test(a))) {
@@ -474,7 +507,7 @@ function startIssues(args, deps, config) {
 const session = () => process.env.CLAUDE_CODE_SESSION_ID;
 const grantDir = () => fileURLToPath(new URL("../../.lanes/start/", import.meta.url));
 const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-const claude = (args, { cwd }) => execFileSync("claude", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+const claude = (args, { cwd, env }) => execFileSync("claude", args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 // The main checkout, even when run from a worktree: the parent of the shared .git directory.
 const repoRoot = () => dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
 // The main checkout's lanes.config.json, parsed; undefined when it does not exist (the defaults apply).

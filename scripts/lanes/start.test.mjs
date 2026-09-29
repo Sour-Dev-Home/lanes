@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { START_DEFAULTS, inFlightIssues, launchArgs, main as runStart, parseSessionId, planStart, startConfig } from "./start.mjs";
+import { START_DEFAULTS, inFlightIssues, launchArgs, launchEnv, main as runStart, parseSessionId, planStart, startConfig } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
@@ -1694,4 +1694,53 @@ test("#260: USING.md and start.md document model:opus, review reuse and what cle
   assert.doesNotMatch(using, /test-hunter reused from/);
   assert.match(using, /lanes with an open PR or unpushed commits are never touched/);
   assert.doesNotMatch(using, /closed-unmerged lanes are never touched/);
+});
+
+// #337: on Windows a lane's PATH gets Git's POSIX tools first; elsewhere the environment is untouched.
+const GIT_EXEC = "C:/Program Files/Git/mingw64/libexec/git-core";
+test("launchEnv: Windows puts Git's usr\\bin and mingw64\\bin ahead of the inherited PATH", () => {
+  const inherited = { Path: "C:\\Windows;C:\\Tools", OTHER: "x" };
+  const { env, note } = launchEnv(inherited, "win32", GIT_EXEC);
+  assert.equal(env.Path, "C:\\Program Files\\Git\\usr\\bin;C:\\Program Files\\Git\\mingw64\\bin;C:\\Windows;C:\\Tools");
+  assert.equal(env.OTHER, "x");
+  assert.equal(note, null);
+  assert.equal(inherited.Path, "C:\\Windows;C:\\Tools", "input is not mutated");
+});
+test("launchEnv: Windows with an upper-case PATH key keeps that key, and with no PATH sets one", () => {
+  assert.match(launchEnv({ PATH: "C:\\a" }, "win32", GIT_EXEC).env.PATH, /^C:\\Program Files\\Git\\usr\\bin;.*;C:\\a$/);
+  assert.equal(launchEnv({}, "win32", GIT_EXEC).env.Path, "C:\\Program Files\\Git\\usr\\bin;C:\\Program Files\\Git\\mingw64\\bin");
+});
+test("launchEnv: Windows without Git found launches with the inherited env and says why", () => {
+  const inherited = { Path: "C:\\a" };
+  for (const [exec, why] of [[null, "git not found"], ["", "git not found"], ["/weird", "unexpected git --exec-path: /weird"]]) {
+    const { env, note } = launchEnv(inherited, "win32", exec);
+    assert.equal(env, inherited);
+    assert.equal(note, `PATH not adjusted: ${why}`);
+  }
+});
+test("launchEnv: edge: trailing newline, MinGW64 casing, Git at a drive root, and a ';' in the root", () => {
+  assert.match(launchEnv({ Path: "x" }, "win32", `${GIT_EXEC}\r\n`).env.Path, /^C:\\Program Files\\Git\\usr\\bin;/);
+  assert.match(launchEnv({ Path: "x" }, "win32", "C:/Git/MinGW64/libexec/git-core").env.Path, /^C:\\Git\\usr\\bin;/);
+  assert.match(launchEnv({ Path: "x" }, "win32", "C:/mingw64/libexec/git-core").env.Path, /^C:\\usr\\bin;C:\\mingw64\\bin;x$/);
+  const semi = launchEnv({ Path: "x" }, "win32", "C:/a;b/Git/mingw64/libexec/git-core");
+  assert.equal(semi.env.Path, "x");
+  assert.match(semi.note, /^PATH not adjusted: unexpected git --exec-path/);
+});
+test("launchEnv: Linux and macOS pass the environment through unchanged", () => {
+  const inherited = { PATH: "/usr/bin" };
+  for (const platform of ["linux", "darwin"]) {
+    const { env, note } = launchEnv(inherited, platform, GIT_EXEC);
+    assert.equal(env, inherited);
+    assert.equal(note, null);
+  }
+});
+test("launch: the adjusted env goes to the background launch and the note is printed", () => {
+  const f = fakes({ issues: { 1: {} } });
+  const seen = [];
+  const launchClaude = f.deps.claude;
+  f.deps.claude = (args, opts) => (seen.push(opts?.env), launchClaude(args, opts));
+  f.deps.launchEnv = () => ({ env: { PATH: "adjusted" }, note: "PATH not adjusted: because" });
+  const { lines } = main(["1"], f.deps);
+  assert.deepEqual(seen.filter(Boolean), [{ PATH: "adjusted" }]);
+  assert.ok(lines.includes("#1: PATH not adjusted: because"), lines.join("|"));
 });
