@@ -276,13 +276,14 @@ function walk(cmd, depth, visit, onOpaque, onEval) {
     });
     // What a command piped into a shell prints may be its arguments (echo, printf): read them as one live script (#246).
     if (piped && words.length > 1) nested(unliteralLive(words.slice(1).join(" ")));
+    // What cmd /c, start, schtasks /tr or a scheduled-task cmdlet starts is a command line of its own (#308), also
+    // when find -exec or xargs runs the launcher.
+    if (!dataOnly) for (const line of launchedCommands(words)) nested(line);
   };
   for (const [k, words] of resolveSegments(lexed.segments).entries()) {
     scan(words, lexed.stdin[k], feedsShell(lexed.segments, lexed.pipes, k));
-    // The command find -exec or xargs runs is a simple command of its own (#113), and what cmd /c, start, schtasks /tr
-    // or a scheduled-task cmdlet starts is a command line of its own (#308).
+    // The command find -exec or xargs runs is a simple command of its own (#113).
     if (!dataOnly) for (const sub of runnerCommands(words)) scan(sub);
-    if (!dataOnly) for (const line of launchedCommands(words)) nested(line);
   }
   // A redirection target is no word, but a substitution in it still runs (#191).
   for (const t of lexed.targets) if (isNestedScript(t) && !(dataOnly && !UNRESOLVED_RE.test(t))) nested(unliteral(t));

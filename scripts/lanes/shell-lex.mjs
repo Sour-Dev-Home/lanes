@@ -289,10 +289,13 @@ export function mayExpandTo(w, names) {
 const CMD_RE = /^cmd(\.exe)?$/i;
 const START_RE = /^start(\.exe)?$/i;
 const SCHTASKS_RE = /^schtasks(\.exe)?$/i;
-const TASK_CMDLET_RE = /^(new-scheduledtaskaction|register-scheduledtask|set-scheduledtask)$/i;
+const TASK_CMDLET_RE = /^(new-scheduledtaskaction|register-scheduledtask|set-scheduledtask|register-scheduledjob|set-scheduledjob)$/i;
 // cmd's start options; /node, /affinity and /machine take a value. Any other `/word` may be a program's path.
-const START_FLAG_RE = /^\/(d|i|b|min|max|wait|separate|shared|low|normal|high|realtime|abovenormal|belownormal|elevate)$/i;
+const START_FLAG_RE = /^\/(i|b|min|max|wait|separate|shared|low|normal|high|realtime|abovenormal|belownormal|elevate)$/i;
 const START_VALUED_FLAG_RE = /^\/(d|node|affinity|machine)$/i;
+// cmd's /c or /k (Git Bash's //c too), with any command glued to it; and cmd's call.
+const CMD_RUN_RE = /^\/\/?[ck](.*)$/is;
+const CALL_RE = /^call$/i;
 // Wrappers that run the command after them, and their options or a duration (timeout 5).
 const WRAPPER_RE = /^(env|exec|command|nohup|time|timeout|nice|sudo)(\.exe)?$/i;
 // A PowerShell parameter name (`-Execute`, `-TaskName:`): anything else is a value.
@@ -314,10 +317,12 @@ function launcherAt(words) {
 
 /**
  * The command lines a simple command's words start through a launcher that names no program with node or a shell
- * (#308), for both guards to read as commands of their own: what `cmd /c` or `/k` runs (with %X% and !X! unresolved);
- * the program cmd's or Git Bash's `start` opens by its file association, from the first word after its options and,
- * as that word may be a window title, from the second too; schtasks' `/tr` value; and the values given to
- * New-ScheduledTaskAction, Register-ScheduledTask or Set-ScheduledTask, joined and each alone, since any of them could
+ * (#308), for both guards to read as commands of their own: what `cmd /c` or `/k` runs (glued `/cx` and Git Bash's
+ * `//c` too, with %X% and !X! unresolved) and what cmd's `call` runs; the program cmd's or Git Bash's `start` opens by
+ * its file association, with its options dropped wherever they stand, from the first word left and, as that word may
+ * be a window title, from the second too; schtasks' `/tr` value; and the values given to
+ * New-ScheduledTaskAction, Register-ScheduledTask, Set-ScheduledTask or the ScheduledJob pair (-FilePath, -ScriptBlock),
+ * joined and each alone, since any of them could
  * be the program. Empty for any other command.
  * @param {string[]} words
  * @returns {string[]}
@@ -328,13 +333,22 @@ export function launchedCommands(words) {
   const name = basename(words[at]);
   const args = words.slice(at + 1);
   if (CMD_RE.test(name)) {
-    const c = args.findIndex((w) => /^\/[ck]$/i.test(w));
-    return c === -1 ? [] : [args.slice(c + 1).join(" ").replace(/%[^%\s]*%|![^!\s]*!/g, CMD_VAR)];
+    // `/c`, `/K`, Git Bash's `//c`, and cmd's `/cprogram` with the command glued on (security review round 1).
+    const c = args.findIndex((w) => CMD_RUN_RE.test(w));
+    if (c === -1) return [];
+    const glued = CMD_RUN_RE.exec(args[c])[1];
+    return [[...(glued ? [glued] : []), ...args.slice(c + 1)].join(" ").replace(/%[^%\s]*%|![^!\s]*!/g, CMD_VAR)];
   }
+  // cmd's call runs the rest as a command.
+  if (CALL_RE.test(name)) return [args.join(" ")];
   if (START_RE.test(name)) {
-    let i = 0;
-    for (; i < args.length && START_FLAG_RE.test(args[i]); i += START_VALUED_FLAG_RE.test(args[i]) ? 2 : 1);
-    const rest = args.slice(i);
+    // Options may come before or after a title (`start "t" /b x`), so every one is dropped wherever it stands.
+    const rest = [];
+    for (let i = 0; i < args.length; i += 1) {
+      const w = args[i].replace(/^\/\//, "/");
+      if (START_VALUED_FLAG_RE.test(w)) i += 1;
+      else if (!START_FLAG_RE.test(w)) rest.push(args[i]);
+    }
     return [rest.join(" "), rest.slice(1).join(" ")];
   }
   if (SCHTASKS_RE.test(name)) {
@@ -383,9 +397,12 @@ export const dequoted = (s) => s.replace(DEQUOTE_RE, "");
 export function wmiProcessCreate(text) {
   const plain = dequoted(withoutLiteralSubstitutions(String(text ?? ""))).replace(/\+/g, "");
   const flat = plain.replace(/[\s()]/g, "").toLowerCase();
-  if (!/create/.test(flat)) return false;
+  // Create, or a WMI/CIM method call whose method name may be built at run time (-MethodName $m, security review round 1).
+  if (!/create/.test(flat) && !/\b(invoke-(cim|wmi)method|icim|iwmi)\b/i.test(plain)) return false;
   if (/win32_process/.test(flat) || (/wmic/.test(flat) && /process/.test(flat))) return true;
-  return plain.split(/[^\w.*?[\]]+/).some((t) => /[*?[]/.test(t) && mayExpandTo(t, ["win32_process"]));
+  // Each word, and what follows a `[type]` cast glued to it ([wmiclass]Win32_Proc* once quotes are dropped).
+  const words = plain.split(/[^\w.*?[\]]+/).flatMap((t) => [t, ...[...t.matchAll(/\](?=[\w*?])/g)].map((m) => t.slice(m.index + 1))]);
+  return words.some((t) => /[*?[]/.test(t) && mayExpandTo(t, ["win32_process"]));
 }
 
 /** A grant file, parsed: null when it does not exist, { unreadable: true } when it cannot be read or parsed. */

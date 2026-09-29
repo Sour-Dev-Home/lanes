@@ -498,8 +498,9 @@ const PS_SHELL_RE = /^(powershell|pwsh)$/i;
 const PS_LAUNCH_RE = /^(start-process|saps|start|invoke-item|ii)$/i;
 // .NET, COM, script-block and alias-drive routes to running code or a program that no word shows: a command using any
 // of them fails closed as a whole.
-// A [powershell]::Create() instance's AddCommand or AddScript runs whatever it is given (#308).
-const PS_OPAQUE_RE = /scriptblock|invokescript|invokecommand|add-type|process\]?::start|processstartinfo|diagnostics\.process|activator\]|comobject|alias:|powershell\]::create|\.add(?:command|script)\b/i;
+// A [powershell]::Create() instance's AddCommand or AddScript runs whatever it is given (#308), and so may a static
+// Create on a type held in a variable ([type]'powershell' | % { $_::Create() }, security review round 1).
+const PS_OPAQUE_RE = /scriptblock|invokescript|invokecommand|add-type|process\]?::start|processstartinfo|diagnostics\.process|activator\]|comobject|alias:|powershell\]::create|\.add(?:command|script)\b|\$\w*::create\b/i;
 // Commands that rename a program (an alias for node or claude): as a command word, their statement fails closed. Only
 // the command word counts, so a word such as "sal" in a message or file name does not (#61 test-hunter round 2).
 const PS_ALIAS_RE = /^(set-alias|new-alias|import-alias|sal|nal|ipal)$/i;
@@ -754,7 +755,8 @@ function psStatements(src, start, closer, depth) {
     if (stmt.items.length > 0) {
       stmt.pipedLive = pipeLive;
       pieces.push(psStatementText(stmt, extra, depth));
-      pipeLive ||= stmt.items.some((x) => x.word && !x.word.literal);
+      // A +-joined string ('cla'+'ude --bg' | iex) is spliced at run time too (#308).
+      pipeLive ||= stmt.items.some((x) => x.word && (!x.word.literal || x.word.joined || x.word.value === "+"));
       pipeText.push(...stmt.items.filter((x) => x.word?.literal).map((x) => x.word.value));
     }
     const piped = sep === "|";
