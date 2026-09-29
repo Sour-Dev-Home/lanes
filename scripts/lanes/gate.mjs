@@ -19,6 +19,7 @@ import {
   trustedStatuses,
 } from "./lib.mjs";
 import { parseBlockedBy, readBlockerReport } from "./blockers.mjs";
+import { classifyOwnerDiff, OWNER_DIFF_FILES } from "./owner-diff.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -164,6 +165,31 @@ export function reusableReviews(api, repo, number, pr, reviewers, { files = [], 
 }
 
 /**
+ * #381, ADR 0015: owner-diff.mjs's verdict on PR `pr`'s changes, for `gateDecision`'s `ownerDiff`. Only when every
+ * changed file is one of `OWNER_DIFF_FILES` does it fetch those files raw at the PR's base and head commits and classify
+ * them; otherwise it fetches nothing and returns null. Fails closed: a malformed commit SHA or any fetch failure (a file
+ * missing at base included) is "needs-owner".
+ */
+export function ownerDiffFor(api, repo, pr, files) {
+  if (!Array.isArray(files) || files.length === 0 || !files.every((f) => OWNER_DIFF_FILES.includes(f))) return null;
+  const sides = { base: pr?.base?.sha, head: pr?.head?.sha };
+  if (!SHA.test(sides.base ?? "") || !SHA.test(sides.head ?? "")) return "needs-owner";
+  // Paths come from OWNER_DIFF_FILES, never from the PR, so they are safe in the URL as they are.
+  const changed = OWNER_DIFF_FILES.filter((f) => files.includes(f));
+  const contents = { base: {}, head: {} };
+  try {
+    for (const [side, sha] of Object.entries(sides)) {
+      for (const file of changed) {
+        contents[side][file] = api([`repos/${repo}/contents/${file}?ref=${sha}`, "-H", "Accept: application/vnd.github.raw"]);
+      }
+    }
+  } catch {
+    return "needs-owner";
+  }
+  return classifyOwnerDiff({ files: changed, base: contents.base, head: contents.head }).verdict;
+}
+
+/**
  * Gathers every input `gateDecision` needs for PR `number` from the API and returns its verdict, without posting
  * anything. Returns `null` for a closed PR. Shared by `evaluatePr` (posts on the PR head) and `carry` (posts on the
  * merge-group commit): the merge queue must re-decide from these same live inputs, never trust a `lanes/gate` status
@@ -222,6 +248,7 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     interfaceContract,
     reused,
     blockers,
+    ownerDiff: ownerDiffFor(api, repo, pr, files),
   });
   return { pr, decision };
 }

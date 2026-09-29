@@ -143,6 +143,7 @@ const OWNER_SAMPLES = {
   "(^|/)auth/": ["src/auth/login.ts", "src/oauth/x.ts"],
   "(^|/)secrets?/": ["secrets/key.txt", "src/secretsauce/x.ts"],
   "^deploy/": ["deploy/prod.sh", "docs/deploy/x.md"],
+  "^scripts/lanes/owner-diff(\\.test)?\\.mjs$": ["scripts/lanes/owner-diff.test.mjs", "scripts/lanes/owner-diffs.mjs"],
 };
 
 test("every regex in lanes.config.json paths.owner matches its sample and not its near-miss", () => {
