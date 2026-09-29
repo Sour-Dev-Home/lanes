@@ -1,0 +1,28 @@
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Fetch origin/main
+        run: git fetch origin main:refs/remotes/origin/main
+      - name: Create the release from the CHANGELOG section
+        # The tag reaches the shell through env, never interpolated into the script; release.mjs validates it first.
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES=$(mktemp)
+          node scripts/lanes/release.mjs "$TAG" > "$NOTES"
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES"
