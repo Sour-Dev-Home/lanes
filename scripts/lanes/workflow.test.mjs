@@ -877,3 +877,13 @@ test("lane.md step 3 checks the POSIX tools after setup, records the PATH shape,
   assert.match(step3, /lanes #\$ARGUMENTS: shell PATH broken/);
   assert.match(step3, /Never prefix commands with `export PATH=…` or change PATH/);
 });
+
+const SCRATCH_RULE =
+  "scratch, probe and fuzz files go in `os.tmpdir()` (or a temp directory under it) and are deleted before the verdict; never write outside the lane's worktree, and never into another checkout of the repository.";
+
+for (const agent of ["security-reviewer", "test-hunter"]) {
+  test(`${agent} keeps scratch and probe files in the temp directory, never another checkout`, () => {
+    const md = readFileSync(`.claude/agents/${agent}.md`, "utf8").replace(/\s+/g, " ");
+    assert.ok(md.includes(SCRATCH_RULE), `${agent}.md lacks the scratch-file rule`);
+  });
+}
