@@ -1802,3 +1802,21 @@ test("a label failure leaves the launch and exit code intact and prints the fail
   assert.deepEqual(lines, ["#1 → id1", "#1: label not set: gh: rate limited"]);
   assert.equal(f.reapers.length, 1);
 });
+
+test("edge: markRunning reports a failed label creation and does not create for an unrelated edit failure", () => {
+  const calls = [];
+  const gh = (args) => {
+    calls.push(args.slice(0, 2).join(" "));
+    if (args[0] === "label") throw new Error("gh: create denied\nmore");
+    throw new Error("gh: 'lane:running' not found");
+  };
+  assert.equal(markRunning(5, { gh }), "#5: label not set: gh: create denied");
+  assert.deepEqual(calls, ["issue edit", "label create"]);
+  const other = [];
+  const gh2 = (args) => {
+    other.push(args[0]);
+    throw new Error("HTTP 502");
+  };
+  assert.equal(markRunning(5, { gh: gh2 }), "#5: label not set: HTTP 502");
+  assert.deepEqual(other, ["issue"]);
+});
