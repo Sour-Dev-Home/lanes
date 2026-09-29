@@ -1850,3 +1850,14 @@ test("launchEnv: a normal PATH gets no note and only the Git tools in front", ()
 test("edge: empty PATH entries survive deduplication", () => {
   assert.equal(launchEnv({ Path: "C:\\a;;C:\\a;" }, "win32", GIT_EXEC).env.Path, "C:\\Program Files\\Git\\usr\\bin;C:\\Program Files\\Git\\mingw64\\bin;C:\\a;;");
 });
+
+// #416: the note threshold is exactly 60 entries (the two Git tool entries count).
+test("edge: launchEnv reports a PATH of 61 entries but not one of exactly 60", () => {
+  const path = (n) => Array.from({ length: n }, (_, i) => `C:\d${i}`).join(";");
+  assert.equal(launchEnv({ Path: path(58) }, "win32", GIT_EXEC).note, null);
+  assert.equal(launchEnv({ Path: path(59) }, "win32", GIT_EXEC).note, "PATH has 61 entries (61 unique)");
+});
+test("edge: launchEnv counts unique entries after dropping duplicates in a long PATH", () => {
+  const path = Array.from({ length: 80 }, (_, i) => `C:\d${i % 65}`).join(";");
+  assert.equal(launchEnv({ Path: path }, "win32", GIT_EXEC).note, "PATH has 67 entries (67 unique)");
+});
