@@ -31,5 +31,7 @@ Report, in at most 15 lines:
 9. `node scripts/lanes/lessons.mjs --recurring`: for each pattern with no open issue whose title carries
    `lesson:<area>/<pattern>`, file one `lane-filed` Task issue (tier quick) proposing a lint rule or test, from this
    session, not the architecture advisor. Report the issues filed.
+10. `node scripts/lanes/consolidate.mjs`: report each group of open `ready` or `lane-filed` issues that share files, with
+   a one-line merge proposal per group (which issue absorbs the others) for the owner. Merge nothing: the owner decides.
 File one task issue per real problem (tier skip or quick). Do not fix anything in this session, with one exception:
 step 7's cleanup of merged lanes, closed-issue lanes and empty orphan folders, which removes only finished lanes with a clean worktree and nothing unpushed.
