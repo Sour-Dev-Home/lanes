@@ -329,3 +329,14 @@ test("edge: a line separator ends a comment, so code after it needs the owner", 
 test("edge: nested templates and a backslash-newline string continuation stay inside their block", () => {
   additive(appended('test("b", () => {\n  const a = `${`}`}`;\n  const s = "x\\\ny";\n});\n'));
 });
+
+// test-hunter round 2: pin the hex-sign fix by an outcome only it gives. A hex literal ends before "+", so the regex
+// after it is read as a regex; if the sign were swallowed the quote would open a string and this would be refused.
+test("edge: `0x1e+/'/.source` is a hex number plus a regex, so the block is additive", () => {
+  additive(appended('test("a", () => {\n  const r = 0x1e+/\'/.source;\n});\n'));
+});
+
+// A parameter is compiled with the body, so a name strict mode refuses is caught by the parser check.
+test("edge: a parameter name strict mode refuses needs the owner", () => {
+  needsOwner(appended('test("a", (eval) => {\n  void 1;\n});\n'), /does not parse/);
+});
