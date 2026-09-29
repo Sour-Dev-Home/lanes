@@ -479,6 +479,15 @@ test("#378 criterion 2: wmiProcessCreate reads a Win32_Process method named at r
   }
 });
 
+test("#378 edge: a long run of computed-method openers is read in bounded time (ReDoS, security review)", () => {
+  for (const unit of [".( $", ".$(", ".${", ". . $"]) {
+    const text = `[wmiclass]'Win32_Process'; ${unit.repeat(40_000)}`;
+    const t0 = performance.now();
+    wmiProcessCreate(text);
+    assert.ok(performance.now() - t0 < 500, `${JSON.stringify(unit)} took ${Math.round(performance.now() - t0)} ms`);
+  }
+});
+
 test("#378 criterion 3: mayBeNode reads node, and a glob that could expand to it, as node", () => {
   for (const w of ["node", "node.exe", "/usr/bin/node", "nodejs", "bun", "deno", "n*de", "no?e", "[n]ode", "/usr/bin/n*de", "N*DE", "n{o,x}de", "*", "n*"]) {
     assert.equal(mayBeNode(w), true, w);

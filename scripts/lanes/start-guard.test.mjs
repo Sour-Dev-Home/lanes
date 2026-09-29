@@ -2297,6 +2297,19 @@ test("#378 edge: run-time text is denied inside a chain, a nested script or a su
   }
 });
 
+test("#378 edge: a program glob that could be node running -e code that names start.mjs is denied", () => {
+  assert.deepEqual(decideFor(bash(`n*de -e "import('./scripts/lanes/start.mjs')"`)), deny(DENY_REASON));
+  assert.equal(decideFor(bash(`n*de -e "console.log(1)"`)), null);
+  // Read as JavaScript, not shell text: "sta" + "rt.mjs" is joined only by the JavaScript reading.
+  assert.deepEqual(decideFor(bash(`n*de -e 'require("child_process").execSync("node scripts/lanes/sta" + "rt.mjs 1")'`)), deny(DENY_REASON));
+});
+
+test("#378 edge: run-time text is denied after a shell keyword, a brace, ! or time", () => {
+  for (const cmd of ['if true; then eval "$X"; fi', 'while true; do eval "$X"; done', '{ eval "$X"; }', '! eval "$X"', 'time eval "$X"', 'true && { source "$F"; }']) {
+    assert.deepEqual(decideFor(bash(cmd)), deny(RUNTIME_TEXT_DENY_REASON), cmd);
+  }
+});
+
 test("#378 edge: eval, source and -c with text the shell already knows get no decision", () => {
   for (const cmd of [
     "eval echo hi", "source ~/.bashrc", "bash -c 'echo $HOME'", "eval 'echo $X'", 'X=hi; eval "$X"', 'grep -c "$X" f', 'echo eval "$X"',

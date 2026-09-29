@@ -428,7 +428,7 @@ const SHELL_C_RE = /^-[A-Za-z]*c[A-Za-z]*$/;
  */
 export function runtimeTextWords(words) {
   let at = words.findIndex((w) => !ASSIGN_RE.test(w));
-  while (at !== -1 && (words[at] === "builtin" || words[at] === "command")) at += 1;
+  while (at !== -1 && (words[at] === "builtin" || words[at] === "command" || /^(?:if|then|else|elif|do|while|until|time|!|\{)$/.test(words[at]))) at += 1;
   if (at !== -1 && EVAL_WORDS.has(words[at])) return words.slice(at + 1).filter((w) => LIVE_RE.test(w));
   return words.filter((w, i) => i > 1 && LIVE_RE.test(w) && SHELL_C_RE.test(words[i - 1]) && words.slice(0, i - 1).some((p) => SHELL_RE.test(basename(p))));
 }
@@ -438,7 +438,10 @@ export const runsRuntimeText = (words) => runtimeTextWords(words).length > 0;
 
 // A PowerShell method named at run time (#378): `.$m(…)`, `."$m"(…)`, `.($m)(…)`, `.${m}(…)`, `.$($n)(…)`, each maybe
 // through `.Invoke(…)`; a method looked up by a computed key (`.PSObject.Methods[$m]`); or WMI's own `.InvokeMethod(`.
-const COMPUTED_METHOD_RE = /\.\s*(?:\(\s*\$[^)]*\)|\$\{[^}]*\}|\$\([^)]*\)|\$[\w:]+)\s*(?:\.\s*invoke\s*)?\(|\bmethods\s*\[|\binvokemethod\s*\(/i;
+// Each run is bounded ({0,64}, whitespace {0,16}), so repeated `.( $` or `.$(` stays linear (security review, #378): a
+// guard that times out fails open. A longer computed name still holds `$`, which the create/Win32_Process checks read.
+const COMPUTED_METHOD_RE =
+  /\.\s{0,16}(?:\(\s{0,16}\$[^)]{0,64}\)|\$\{[^}]{0,64}\}|\$\([^)]{0,64}\)|\$[\w:]{1,64})\s{0,16}(?:\.\s{0,16}invoke\s{0,16})?\(|\bmethods\s{0,16}\[|\binvokemethod\s{0,16}\(/i;
 
 // Programs that start another program from their arguments with no `node` or shell `-c` in sight (#308).
 const CMD_RE = /^cmd(\.exe)?$/i;
