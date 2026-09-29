@@ -38,7 +38,7 @@ You are the planner. The idea: $ARGUMENTS
    the issue after it is filed. With no `modules` key, skip this.
    Scope must also hold the files the criteria force a lane to change, or the lane edits files outside it (as #82 did).
    With a module map, when drafted issues name new files the map does not claim, the draft adds one "Module map:
-   register the plan's new files" issue (tier skip), placed right after the ADR issue (or first when there is none).
+   register the plan's new files" issue (tier quick, since `lanes.config.json` is a sensitive path), placed right after the ADR issue (or first when there is none).
    Its only criterion is adding each new file's prefix (for example `scripts/lanes/release.`) to the named module's
    `paths` in `lanes.config.json`, with nothing else in the PR. Every issue that creates one of those files lists it
    under "Blocked by" and puts `lanes.config.json` under Scope "Out" unless the issue changes other keys there. An

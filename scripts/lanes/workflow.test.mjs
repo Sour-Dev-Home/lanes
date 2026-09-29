@@ -603,7 +603,9 @@ test("plan-issues.md step 5 checks open issues for the same files before draftin
 // #203: Scope must include the files the criteria force a lane to change (#82 missed both kinds).
 test("plan-issues.md step 5 registers a plan's new files in one up-front module-map issue, blocks the creators on it and keeps lanes.config.json out of their Scope", () => {
   const step = draftStep().replace(/\s+/g, " ");
-  assert.match(step, /adds one "Module map: register the plan's new files" issue \(tier skip\)/);
+  assert.match(step, /adds one "Module map: register the plan's new files" issue \(tier quick, since `lanes\.config\.json` is a sensitive path\)/);
+  // edge: a sensitive path is not allowed at tier:skip, so the issue must not be skip.
+  assert.doesNotMatch(step, /register the plan's new files" issue \(tier skip/);
   assert.match(step, /placed right after the ADR issue \(or first when there is none\)/);
   assert.match(step, /Its only criterion is adding each new file's prefix \(for example `scripts\/lanes\/release\.`\) to the named module's `paths` in `lanes\.config\.json`, with nothing else in the PR/);
   assert.match(step, /Every issue that creates one of those files lists it under "Blocked by"/);
