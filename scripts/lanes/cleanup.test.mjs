@@ -1689,6 +1689,12 @@ test("#399: a real claude stop failure is still reported and stops the lane", ()
   assert.match(render([r]), /^failed issue-7-x \(PR #90\) at claude stop s7: permission denied/);
 });
 
+test("edge: a worktree and branch missing after our own claude rm are not reported as already removed", () => {
+  const plan = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x")], prs: [merged("issue-7-x")] });
+  const [r] = runCleanup(plan, { run: () => {}, stillThere: () => false });
+  assert.equal(r.already, undefined);
+});
+
 test("edge: a gone worktree with unpushed work on a closed issue is still skipped, and a dirty one stays dirty", () => {
   const closed = { number: 7, state: "CLOSED" };
   const [a] = planCleanup({ worktrees: [wt("issue-7-x", { gone: true, unpushed: 2 })], issues: [closed] });
