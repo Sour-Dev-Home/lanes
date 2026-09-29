@@ -35,8 +35,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isAutomatedInput, powershellAsBash, preToolUseOutput } from "./approve-guard.mjs";
 import {
-  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, SHELL_RE, basename, dequoted, feedsShell, launchedCommands, lex, mayBeNode, mayExpandTo,
-  readGrant, runtimeTextWords, scriptSubcommand, withoutLiteralSubstitutions, wmiProcessCreate,
+  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, basename, dequoted, feedsShell, launchedCommands, lex, mayBeNode, mayExpandTo,
+  readGrant, releaseTagCommand, runtimeTextWords, scriptSubcommand, shellTextIndexes, withoutLiteralSubstitutions, wmiProcessCreate,
 } from "./shell-lex.mjs";
 
 // start.mjs reads the grant with the guard's own reader.
@@ -54,6 +54,9 @@ export const WMI_DENY_REASON =
   "this WMI/CIM process creation (Win32_Process Create, wmic process call create) builds its command line at run time (a variable, a hashtable or an expression), which could be claude --bg or a lane script, so start-guard denies it; run the program directly";
 export const RUNTIME_TEXT_DENY_REASON =
   "this command runs shell text known only at run time (eval, source or a shell's -c given $VAR, $(…) or a backtick), which could be start.mjs, queue.mjs or claude --bg, so start-guard denies it; run the command itself";
+// ADR 0017 decision 3: a pushed v* tag releases, so only the owner makes one, from their own terminal (#404).
+export const TAG_DENY_REASON =
+  "creating or pushing a v* tag starts a release, which the owner does from their own terminal, never from a Claude session (ADR 0017)";
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const START_PROMPT_RE = /^\/start((?:\s+[1-9][0-9]{0,8})+)$/;
 // The only form that may be allowed: the plain command with plain issue numbers, nothing chained, wrapped or redirected.
@@ -161,12 +164,83 @@ const isNestedScript = (w) => /[\s;&|()<>]/.test(w);
  * equal "." or "eval" (a grep pattern, a commit message word, a directory) from turning a later quoted word live.
  * Its literal backticks then run too, while a literal message elsewhere ('Fix `start.mjs`') stays text.
  */
-const runsAsShell = (words, i) => {
-  if (i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(words[i - 1]) && words.slice(0, i - 1).some((w) => SHELL_RE.test(basename(w)))) return true;
-  const cmdAt = words.findIndex((w) => !ASSIGN_RE.test(w));
-  return cmdAt !== -1 && cmdAt < i && (words[cmdAt] === "eval" || words[cmdAt] === "source" || words[cmdAt] === ".");
-};
+// shell-lex.mjs's shellTextIndexes since #404, shared with the run-time text rule: a -c script after options such as
+// `--` or `-e`, eval behind `command -p`, and su, runuser, script, flock, fish or sg text count too.
+const runsAsShell = (words, i) => shellTextIndexes(words).has(i);
 const unliteralLive = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, "`");
+
+/**
+ * A quoted word handed to powershell or pwsh, read with PowerShell's rules as the PowerShell tool's command is (#404),
+ * so `($env:Path -split ';').Count` is a value PowerShell prints, not a program `$env:Path`. Text PowerShell's reader
+ * cannot read is read as shell text, as before.
+ */
+function powershellText(w) {
+  try {
+    return powershellAsBash(unliteralLive(w));
+  } catch {
+    return unliteral(w);
+  }
+}
+
+// A search's pattern (#404): grep's and rg's first operand, or each -e/--regexp value, is matched against text and
+// never run nor printed as given, so a quoted pattern that names a lanes script (`grep -n "node scripts/lanes/queue.mjs"
+// f`, `rg start.mjs docs`) is no run. Only the pattern: a file operand may be printed (`grep -l`, `ls`), and cat, head
+// or tail print their here-string (`bash <(cat <<< "…")`), so any other word of any command is read as before
+// (security review rounds 1 and 2), the false positives of `cat n* f` and `echo foo * f` being accepted. rg counts only
+// without --pre, which runs a program on every file it searches.
+const SEARCH_RE = /^(grep|egrep|fgrep|rg)(\.exe)?$/i;
+// The options a search may have for its pattern to be exempt, an allowlist: none of them prints the pattern or a value
+// given to it (security review round 3: -o, -x, rg's -r/--replace and the --*-separator options do), and none runs a
+// program (rg's --pre). Short flags may be combined (-rn); -A, -B, -C and -m take a number, -g/--glob and -t/--type a
+// word that is a file filter. Any other option leaves every word read as before.
+const SEARCH_FLAGS_RE = /^-[nrRiIlLcqswvHEFPS]+$/;
+// rg's -r is --replace, which prints its value: rg's short flags leave r and R out.
+const RG_FLAGS_RE = /^-[niIlLcqswvHEFPS]+$/;
+const SEARCH_LONG = new Set([
+  "--line-number", "--recursive", "--ignore-case", "--files-with-matches", "--files-without-match", "--count", "--quiet", "--word-regexp",
+  "--invert-match", "--with-filename", "--no-messages", "--fixed-strings", "--extended-regexp", "--smart-case", "--hidden",
+]);
+const SEARCH_NUMBER_RE = /^-[ABCm]$/;
+const SEARCH_FILTER = new Set(["-g", "--glob", "-t", "--type"]);
+
+/**
+ * The indexes of simple command `words` that are a grep or rg pattern (SEARCH_RE): the first operand, or each -e or
+ * --regexp value, when every option is on the allowlist above. None for any other command or option.
+ */
+function searchPatterns(words) {
+  const at = new Set();
+  const cmd = words.findIndex((w) => !ASSIGN_RE.test(w));
+  if (cmd === -1 || !SEARCH_RE.test(basename(words[cmd]))) return at;
+  const flags = /^rg/i.test(basename(words[cmd])) ? RG_FLAGS_RE : SEARCH_FLAGS_RE;
+  const found = new Set();
+  let operand = -1;
+  let options = true;
+  for (let i = cmd + 1; i < words.length; i += 1) {
+    const w = words[i];
+    if (!options || !w.startsWith("-") || w === "-") {
+      if (operand === -1) operand = i;
+      continue;
+    }
+    if (w === "--") options = false;
+    else if (w === "-e" || w === "--regexp") found.add((i += 1));
+    else if (SEARCH_NUMBER_RE.test(w) && /^[0-9]+$/.test(words[i + 1] ?? "")) i += 1;
+    else if (/^-[ABCm][0-9]+$/.test(w)) continue;
+    else if (SEARCH_FILTER.has(w)) i += 1;
+    else if (!flags.test(w) && !SEARCH_LONG.has(w)) return at;
+  }
+  if (found.size === 0 && operand !== -1) found.add(operand);
+  return found;
+}
+
+/**
+ * The index of the word in `own` (a simple command's words without assignments) that is or may be node: node or a
+ * glob that could be node anywhere but a search pattern (#404), since any other command may run its arguments or print
+ * them for a shell to run, whether through a pipe, `<(…)` or `<<<` (security review, #404).
+ */
+function nodeWordAt(own) {
+  const patterns = searchPatterns(own);
+  return own.findIndex((w, i) => !patterns.has(i) && mayBeNode(w));
+}
 
 // Programs that write what they are given to a file, and never run it (#89); cd and mkdir may come alongside.
 const WRITE_COMMANDS = new Set(["cat", "echo", "printf"]);
@@ -271,11 +345,17 @@ function walk(cmd, depth, visit, onOpaque, onEval) {
     if (!dataOnly) visit(words, stdin);
     const scripts = dataOnly ? new Map() : evalScripts(words);
     const programs = programWords(words);
+    // A search's pattern is no script (#404), unless a shell reads the output or a here-string in the call could be
+    // mistaken for the pattern (`grep <<< "…" x`, whose here-string grep reads as its input and prints).
+    const patterns = piped || cmd.includes("<<<") ? new Set() : searchPatterns(words);
+    const powershellAt = words.findIndex((w) => PS_SHELL_RE.test(basename(w)));
     words.forEach((w, i) => {
       if (scripts.has(i)) onEval(scripts.get(i));
-      else if (isNestedScript(w) && !(dataOnly && !UNRESOLVED_RE.test(w))) {
-        // A jq program or Go template keeps its quoted `$` literal: `$s` there is its own variable (#61).
-        nested(piped || runsAsShell(words, i) ? unliteralLive(w) : programs.has(i) ? w : unliteral(w));
+      else if (isNestedScript(w) && !((dataOnly || patterns.has(i)) && !UNRESOLVED_RE.test(w))) {
+        // A jq program or Go template keeps its quoted `$` literal: `$s` there is its own variable (#61). PowerShell's
+        // text is read with its own rules (#404).
+        if (powershellAt !== -1 && i > powershellAt && !piped) nested(powershellText(w));
+        else nested(piped || runsAsShell(words, i) ? unliteralLive(w) : programs.has(i) ? w : unliteral(w));
       }
     });
     // What a command piped into a shell prints may be its arguments (echo, printf): read them as one live script (#246).
@@ -390,8 +470,9 @@ function scriptCandidates(plain, nodeAt) {
 function commandWords(words, stdin) {
   const own = words.filter((w) => !ASSIGN_RE.test(w));
   const plain = stdin === undefined ? own : [...own, stdin];
-  // A glob that could expand to node (`n*de`, `[n]ode`) runs node too (#378).
-  const nodeAt = own.findIndex(mayBeNode);
+  // A glob that could expand to node (`n*de`, `[n]ode`) runs node too (#378); a command that only prints or searches
+  // runs none of its arguments, glob or `node`, and one that prints them only a glob its output would run (#404).
+  const nodeAt = nodeWordAt(own);
   const scripts = scriptCandidates(plain, nodeAt);
   return { plain, nodeAt, scripts, counts: (i) => i < own.length || scripts.has(i) };
 }
@@ -512,6 +593,21 @@ function scanRuntimeText(command) {
     () => {},
   );
   return { found, leading };
+}
+
+/** True when a simple command anywhere in a Bash command, nested scripts included, creates or pushes a v* tag (#404). */
+function scanReleaseTags(command) {
+  let found = false;
+  walk(
+    String(command ?? ""),
+    0,
+    (words) => {
+      if (releaseTagCommand(words)) found = true;
+    },
+    () => {},
+    () => {},
+  );
+  return found;
 }
 
 /** True when a Bash command runs `claude --bg` (or `--background`) directly, behind any wrapper, or cannot be read. */
@@ -675,6 +771,8 @@ function decide(input, grant, now, depth) {
     if (d !== null) return d.decision === "deny" ? d : { decision: "deny", reason: DENY_REASON };
   }
   if (encoded.unresolved) return { decision: "deny", reason: UNRESOLVED_DENY_REASON };
+  // A v* tag, made or pushed, is the owner's alone, whatever grant there is (ADR 0017, #404).
+  if (scanReleaseTags(command)) return { decision: "deny", reason: TAG_DENY_REASON };
   const bg = scanBgLaunches(command);
   if (bg.found) return { decision: "deny", reason: bg.unparsed ? PARSE_DENY_REASON : BG_DENY_REASON };
   // Before any grant is read: no /start grant, of any form, reaches queue.mjs.
