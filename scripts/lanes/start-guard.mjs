@@ -112,7 +112,13 @@ const EXPANDS_RE = /[$`\\]/;
  * `$(cat <<'D' … D)` at `i` (shell-lex.mjs): its output is the body, known and literal, so it reads as that text, as if
  * single-quoted. Null for any other substitution, or an unquoted delimiter whose body could still expand.
  */
-const literalSub = (cmd, i) => literalSubstitution(cmd, i, EXPANDS_RE);
+const literalSub = (cmd, i) => (PLAIN_CAT_HEREDOC_RE.test(cmd.slice(i, i + CAT_OPENER_MAX)) ? literalSubstitution(cmd, i, EXPANDS_RE) : null);
+// The opener of such a substitution with a delimiter of letters, digits, `_`, `.` or `-` only (bare or quoted, and
+// at most the one backslash before a bare word that `<<\EOF` uses), ending its line. Bash unquotes any other delimiter (`"E\$F"` is `E$F`) in ways this lexer might not, so
+// that body is never read as literal text (#269), the rule PLAIN_DELIM_RE and DELIM_END_RE apply to top-level
+// heredocs (#240).
+const PLAIN_CAT_HEREDOC_RE = /^\$\([ \t]*cat[ \t]+<<-?[ \t]*(?:'[A-Za-z0-9_.-]+'|"[A-Za-z0-9_.-]+"|\\?[A-Za-z0-9_.-]+)[ \t]*\r?\n/;
+const CAT_OPENER_MAX = 4096;
 
 // A `$` or backtick the shell takes literally (single-quoted, escaped, or in a literal heredoc message) is lexed as
 // one of these, so UNRESOLVED_RE sees only the ones that expand (#89). A quoted script is walked with them restored:
