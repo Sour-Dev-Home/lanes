@@ -92,6 +92,26 @@ export function gateDescriptions(reply) {
   return out;
 }
 
+// PR number → ms since epoch at which the gate's current status was set, from the same reply as gateDescriptions
+// (the status context's `createdAt`). A PR without a readable time is left out.
+export function gateSince(reply) {
+  const out = new Map();
+  for (const node of reply?.data?.repository?.pullRequests?.nodes ?? []) {
+    const ms = Date.parse(node.commits?.nodes?.[0]?.commit?.status?.context?.createdAt);
+    if (Number.isFinite(ms)) out.set(node.number, ms);
+  }
+  return out;
+}
+
+// "5m", "2h 10m", "3d 4h": how long ago `since` was at `now` (both ms). Never negative.
+export function formatAge(since, now) {
+  const minutes = Math.max(0, Math.floor((now - since) / 60_000));
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
 // A background session on a permission prompt reads, in `claude agents --json`:
 // { status: "waiting", waitingFor: "permission prompt", state: "blocked" }. A lane that ended its turn is also
 // `blocked`, without `waitingFor`, so both fields are checked.
@@ -320,7 +340,9 @@ const firstLine = (text) => plain((text ?? "").trim().split("\n")[0]).trim() || 
 
 // The open PRs in `summary.waitingOnOwner` that wait on the owner's /approve: the gate's own owner wait, or a body
 // asking for /approve. Prompts, stopped lanes and issues also wait on the owner but are not approvals.
-export function waitingApprovals(prs, summary) {
+// `since` (gateSince's output) and `now` add each PR's `age` since it began waiting; the list is oldest first, PRs of
+// unknown age last, in the order given.
+export function waitingApprovals(prs, summary, since = new Map(), now = Date.now()) {
   const waiting = new Map(summary.waitingOnOwner.map((i) => [i.number, i]));
   const out = [];
   for (const pr of prs) {
@@ -329,9 +351,9 @@ export function waitingApprovals(prs, summary) {
     const sections = parsePrBody(pr.body).sections;
     const needs = (sections["needs the owner"] ?? "").trim();
     if (item.stage !== "owner" && !/\/approve\b/i.test(needs)) continue;
-    out.push({ number: pr.number, title: plain(pr.title ?? ""), needs: firstLine(needs), contract: firstLine(sections["contract changes"]), files: (pr.files ?? []).length });
+    out.push({ number: pr.number, title: plain(pr.title ?? ""), needs: firstLine(needs), contract: firstLine(sections["contract changes"]), files: (pr.files ?? []).length, ...(since.has(pr.number) && { age: formatAge(since.get(pr.number), now), since: since.get(pr.number) }) });
   }
-  return out;
+  return out.map((w, i) => [w, i]).sort(([a, i], [b, j]) => (a.since ?? Infinity) - (b.since ?? Infinity) || i - j).map(([w]) => w);
 }
 
 // The lanes in flight whose session is busy but has written nothing for STALLED_MINUTES or more; they need the owner too.
@@ -341,7 +363,7 @@ export function stalledItems(summary) {
 
 export function renderWaiting(waiting, stalled = []) {
   if (!waiting.length && !stalled.length) return "none";
-  const approvals = waiting.map((w) => `#${w.number} ${w.title}\n  Needs the owner: ${w.needs}\n  Contract changes: ${w.contract}\n  Files changed: ${w.files}`);
+  const approvals = waiting.map((w) => `#${w.number} ${w.title}${w.age ? ` — waiting ${w.age}` : ""}\n  Needs the owner: ${w.needs}\n  Contract changes: ${w.contract}\n  Files changed: ${w.files}`);
   const lines = stalled.map((s) => `#${s.number} ${plain(s.title ?? "")} — stalled ${s.session.stalledMin} min: claude attach ${plain(String(s.session.id))}`);
   return [...approvals, ...(lines.length ? [lines.join("\n")] : [])].join("\n\n");
 }
@@ -359,7 +381,7 @@ const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", std
 export const STATUS_QUERY =
   "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ " +
   "mergeQueue { entries(first:100){ nodes { state position pullRequest { number } } } } " +
-  `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description } } } } } } } } }`;
+  `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description createdAt } } } } } } } } }`;
 
 async function main(argv = process.argv.slice(2)) {
   const sinceIdx = argv.indexOf("--since");
@@ -387,7 +409,7 @@ async function main(argv = process.argv.slice(2)) {
   if (data.issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
   const summary = summarize(data);
   if (argv.includes("--waiting")) {
-    console.log(renderWaiting(waitingApprovals(data.prs, summary), stalledItems(summary)));
+    console.log(renderWaiting(waitingApprovals(data.prs, summary, gateSince(reply)), stalledItems(summary)));
     return;
   }
   // Only a hint: when cleanup.mjs is not installed or its inputs cannot be read, /status stays silent rather than failing.

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
-import { approveLine, gateDescriptions, laneBranches, laneSessions, loadLaneBranches, loadSessions, mergeQueueEntries, render, renderWaiting, stalledItems, stalledLanes, summarize, waitingApprovals } from "./status.mjs";
+import { approveLine, formatAge, gateDescriptions, gateSince, laneBranches, laneSessions, loadLaneBranches, loadSessions, mergeQueueEntries, render, renderWaiting, stalledItems, stalledLanes, summarize, waitingApprovals } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -799,6 +799,37 @@ test("edge: --waiting strips control characters from the title and body lines", 
   const out = waitingOf([waitingPr(7, { title: "a\u001b[31mred", body: waitingBody("go\u001b[2Jnow") })]);
   assert.equal(out.includes("\u001b"), false);
   assert.match(out, /#7 a\[31mred/);
+});
+
+// #383: each waiting PR's age since it began waiting (the gate status's time), oldest first.
+test("--waiting shows each PR's age since it began waiting, oldest first", () => {
+  const now = Date.UTC(2026, 8, 29, 12, 0, 0);
+  const prs = [waitingPr(7), waitingPr(8), waitingPr(9)];
+  const since = new Map([[7, now - 30 * 60_000], [8, now - (2 * 3600 + 5 * 60) * 60_000 / 60], [9, now - 26 * 3600_000]]);
+  const list = waitingApprovals(prs, summarize({ prs, issues: [], merged: [] }), since, now);
+  assert.deepEqual(list.map((w) => [w.number, w.age]), [[9, "1d 2h"], [8, "2h 5m"], [7, "30m"]]);
+  assert.match(renderWaiting(list), /^#9 pr 9 — waiting 1d 2h\n/);
+});
+
+test("edge: a waiting PR with no known time has no age and sorts after the aged ones", () => {
+  const prs = [waitingPr(7), waitingPr(8)];
+  const list = waitingApprovals(prs, summarize({ prs, issues: [], merged: [] }), new Map([[8, 0]]), 90_000);
+  assert.deepEqual(list.map((w) => [w.number, w.age]), [[8, "1m"], [7, undefined]]);
+  assert.doesNotMatch(renderWaiting(list), /#7 pr 7 —/);
+});
+
+test("gateSince reads the gate status time per PR and skips a missing or unreadable one", () => {
+  const node = (number, createdAt) => ({ number, commits: { nodes: [{ commit: { status: { context: { description: "d", createdAt } } } }] } });
+  const reply = { data: { repository: { pullRequests: { nodes: [node(1, "2026-09-29T10:00:00Z"), node(2, "junk"), { number: 3, commits: { nodes: [] } }] } } } };
+  assert.deepEqual([...gateSince(reply)], [[1, Date.UTC(2026, 8, 29, 10)]]);
+  assert.deepEqual([...gateSince({})], []);
+});
+
+test("edge: formatAge is never negative and rolls minutes into hours and days", () => {
+  assert.equal(formatAge(100, 50), "0m");
+  assert.equal(formatAge(0, 59 * 60_000), "59m");
+  assert.equal(formatAge(0, 60 * 60_000), "1h 0m");
+  assert.equal(formatAge(0, 48 * 3600_000), "2d 0h");
 });
 
 test("approveLine lists at most 10 numbers and is empty for none", () => {

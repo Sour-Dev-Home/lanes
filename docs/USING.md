@@ -32,13 +32,18 @@
    of you typing `/start <N ...>`, `/start --auto` or `/start --auto --go` in that session (a `/start --auto` never
    allows `--go`), and it denies a direct `claude --bg` in every session and permission mode. `start.mjs` checks the
    same grant itself and deletes it after its launches, so it runs once per `/start` however it was reached (ADR 0007).
-   **Or keep the queue running**: `node scripts/lanes/queue.mjs` in your own terminal (never from Claude: it exits 2
+   **Recommended: keep the queue running**, and use `/start` (above) as the manual alternative when you want to pick
+   the issues yourself. Run `/approvals` about twice a day and approve in one or two batches: the queue prints
+   each waiting PR with how long it has waited, and `/approvals` lists them oldest first with a ready `/approve` line.
+   `node scripts/lanes/queue.mjs` in your own terminal (never from Claude: it exits 2
    when `CLAUDECODE` is set, and the start guard denies it in every session). It takes no arguments. Every 3 minutes
    it cleans up merged lanes, re-reads every open `ready` issue, the open PRs and the sessions, and launches what
    `/start --auto --go` would, under the same `start.maxLanes`, `start.softPaths` and `start.models`; an issue made
    `ready` mid-run joins on the next tick, and one skipped for an overlap or the cap is tried again. Each line is
-   time-stamped. A PR waiting on you (`/approve`, a failing check or review, a failing gate) is printed once each time
-   its state changes, and the queue keeps working the rest. A failed launch is printed and that issue is not tried
+   time-stamped. The PRs waiting on you (`/approve`, a failing check or review, a failing gate) print as one block,
+   oldest first, in each tick where one started waiting, stopped or changed its reason and in no other: each line has the
+   PR's number, title, how long it has waited and what you must decide, and the block ends with one `/approve N M K`
+   line (at most 10 numbers, the PRs waiting on `/approve`). The queue keeps working the rest. A failed launch is printed and that issue is not tried
    again until you restart the queue. A GitHub read that fails is retried next tick; three in a row exit 1. It exits
    0 after three idle ticks in a row (nothing in flight, nothing to launch); Ctrl-C stops it at any time. Each lane it
    launches gets the same detached reaper `/start` starts (ADR 0010, logged to `.lanes/reap/<N>.log`), so a lane that
