@@ -281,6 +281,52 @@ test("sessionsFrom keeps each background session's status and state, marks one w
   ]);
 });
 
+test("sessionsFrom reads a lane-<N> name as the issue whatever its cwd, and ignores other names (#341)", () => {
+  const agents = [
+    { kind: "background", id: "s338", cwd: "C:/repo", name: "lane-338", status: "idle" },
+    { kind: "background", id: "s9", cwd: "C:/repo", name: "reactapps-dc", status: "idle" },
+  ];
+  assert.deepEqual(sessionsFrom(agents, "C:/repo"), [
+    { id: "s338", cwd: "C:/repo", issue: 338, status: "idle", state: undefined, name: "lane-338" },
+    { id: "s9", cwd: "C:/repo", issue: null, status: "idle", state: undefined },
+  ]);
+});
+
+test("a lane-<N> session at the repository root is stopped when #N's PR merged, and its worktree goes after it (#341)", () => {
+  const named = { id: "s338", cwd: "C:\\repo", issue: 338, state: "idle", name: "lane-338", alive: true };
+  const [entry] = planCleanup({ worktrees: [main, wt("issue-338-x")], sessions: [named], prs: [merged("issue-338-x")] });
+  assert.equal(entry.skip, undefined);
+  assert.deepEqual(cmds(entry).slice(0, 2), ["claude stop s338", "claude rm s338"]);
+  assert.ok(cmds(entry).includes(`git worktree remove ${ROOT}/.claude/worktrees/issue-338-x`));
+});
+
+test("never removes a worktree while a lane-<N> session for that issue is working, whatever its cwd (#341)", () => {
+  const named = { id: "s338", cwd: "C:\\repo", issue: 338, status: "busy", state: "working", name: "lane-338" };
+  const plan = planCleanup({ worktrees: [main, wt("issue-338-x")], sessions: [named], prs: [merged("issue-338-x")] });
+  assert.equal(plan.length, 1, "the session is placed with the worktree, not planned twice");
+  assert.equal(plan[0].skip, "session still working");
+});
+
+test("edge: a session with neither a lane name nor an issue folder is ignored; another issue's name does not block", () => {
+  const other = { id: "s1", cwd: "C:\\repo", issue: null, status: "busy", state: "working" };
+  const elsewhere = { id: "s2", cwd: "C:\\repo", issue: 9, status: "busy", state: "working", name: "lane-9" };
+  const [entry] = planCleanup({ worktrees: [main, wt("issue-338-x")], sessions: [other, elsewhere], prs: [merged("issue-338-x")] });
+  assert.equal(entry.skip, undefined);
+});
+
+test("edge: an orphan lane folder is not removed while a lane-<N> session for its issue is running (#341)", () => {
+  const named = { id: "s338", cwd: "C:\\repo", issue: 338, state: "idle", name: "lane-338" };
+  const orphan = { path: `${ROOT}/.claude/worktrees/issue-338-x`, files: 0 };
+  const plan = planCleanup({ sessions: [named], orphans: [orphan] });
+  assert.match(plan.find((e) => e.orphan).skip, /session s338 is in it/);
+});
+
+test("edge: a working lane-<N> session whose cwd is inside another issue's worktree still blocks issue N's worktree (#341)", () => {
+  const named = { id: "s11", cwd: `${ROOT}/.claude/worktrees/issue-10-x`, issue: 11, status: "busy", state: "working", name: "lane-11" };
+  const plan = planCleanup({ worktrees: [main, wt("issue-10-x"), wt("issue-11-y")], sessions: [named], prs: [merged("issue-11-y")] });
+  assert.equal(plan.find((e) => e.issue === 11).skip, "session still working");
+});
+
 test("edge: empty inputs plan nothing", () => {
   assert.deepEqual(planCleanup({ worktrees: [], sessions: [], prs: [] }), []);
   assert.deepEqual(planCleanup({}), []);

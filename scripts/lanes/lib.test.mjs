@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, loadAdrs, loadConfig, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -16,6 +16,33 @@ const permissionApi = (reply) => {
   };
   return { api, calls };
 };
+
+test("laneIssueOf reads the lane-<N> name first, then an issue-<N> folder in the cwd, else null", () => {
+  const cwd = "C:\\repo\\.claude\\worktrees\\issue-12-slug";
+  assert.equal(laneIssueOf({ kind: "background", name: "lane-338", cwd: "C:\\repo" }), 338);
+  assert.equal(laneIssueOf({ kind: "background", name: "lane-5", cwd }), 5, "the name wins over the folder");
+  assert.equal(laneIssueOf({ kind: "background", name: "reactapps-dc", cwd }), 12);
+  assert.equal(laneIssueOf({ kind: "background", cwd }), 12);
+  assert.equal(laneIssueOf({ kind: "background", cwd: "C:\\repo\\.claude\\worktrees\\issue-7" }), 7);
+  assert.equal(laneIssueOf({ name: "lane-9", cwd: "C:\\repo" }), 9, "a session with no kind (sessionsFrom output) still counts");
+  assert.equal(laneIssueOf({ kind: "background", name: "other", cwd: "C:\\repo" }), null);
+});
+
+test("laneIssueOf ignores names that only look like lane names, and non-background sessions", () => {
+  for (const name of ["lane-", "lane-0", "lane-07", "lane-12x", "xlane-12", "Lane-12", "lane-12-b", " lane-12", "lane--3"]) {
+    assert.equal(laneIssueOf({ kind: "background", name, cwd: "C:\\repo" }), null, name);
+  }
+  assert.equal(laneIssueOf({ kind: "interactive", name: "lane-12", cwd: "C:\\repo" }), null);
+  assert.equal(laneIssueOf({ kind: "interactive", cwd: "C:\\repo\\.claude\\worktrees\\issue-12-x" }), null);
+  assert.equal(laneIssueOf({ kind: "background", name: "lane-99999999999999999999", cwd: "C:\\repo" }), null, "unsafe integer");
+  for (const bad of [null, undefined, {}, { name: 5, cwd: 7 }, "lane-3"]) assert.equal(laneIssueOf(bad), null);
+});
+
+test("laneIssueOf takes the folder directly under the last .claude/worktrees, not lane-shaped parents or children", () => {
+  assert.equal(laneIssueOf({ kind: "background", cwd: "C:\\issue-3\\repo\\.claude\\worktrees\\issue-8-x\\issue-9-notes" }), 8);
+  assert.equal(laneIssueOf({ kind: "background", cwd: "/work/issue-4-x/repo/sub" }), 4, "no worktrees folder: the first lane-shaped one");
+  assert.equal(laneIssueOf({ kind: "background", cwd: "C:\\repo\\.claude\\worktrees\\scratch" }), null);
+});
 
 test("authorCanWrite trusts write, maintain and admin, read from the collaborator permission endpoint", () => {
   for (const [permission, role_name] of [["admin", "admin"], ["write", "maintain"], ["write", "write"]]) {

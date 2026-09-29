@@ -115,6 +115,16 @@ test("give up after 3 consecutive failures", () => {
   assert.match(r.reason, /3 consecutive/);
 });
 
+test("a session named lane-7 that reports the repository root is the right target (#341)", () => {
+  const r = tick({ sessions: [lane({ name: "lane-7", cwd: "C:\\repo" })], prs: [pr("MERGED")], issueState: "CLOSED" });
+  assert.equal(r.action, "remove");
+});
+
+test("edge: a session named lane-8 in issue-7's worktree is another issue's session", () => {
+  const r = tick({ sessions: [lane({ name: "lane-8" })], prs: [pr("MERGED")], issueState: "CLOSED" });
+  assert.equal(r.action, "give-up");
+});
+
 test("give up when the target session's cwd is another issue's worktree", () => {
   const r = tick({ sessions: [lane({ cwd: "C:\\repo\\.claude\\worktrees\\issue-8-y" })], prs: [pr("MERGED")], issueState: "CLOSED" });
   assert.equal(r.action, "give-up");

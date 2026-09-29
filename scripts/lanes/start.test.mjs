@@ -166,6 +166,11 @@ test("inFlightIssues counts open issue-* PRs and background sessions in issue wo
     { kind: "background", cwd: "/repo" },
   ];
   assert.deepEqual(inFlightIssues({ prs, sessions }), [5, 6, 8]);
+  // #341: a lane named lane-<N> counts whatever cwd it reports; a session with neither name nor folder is ignored.
+  const named = [{ kind: "background", name: "lane-338", cwd: "/repo" }, { kind: "background", name: "reactapps-dc", cwd: "/repo" }, { kind: "interactive", name: "lane-40", cwd: "/repo" }];
+  assert.deepEqual(inFlightIssues({ prs: [], sessions: named }), [338]);
+  assert.deepEqual(inFlightIssues({ prs: [], sessions: named, finished: [338] }), []);
+  assert.deepEqual(inFlightIssues({ prs: [], sessions: [{ kind: "background", name: "lane-5", cwd: "/repo/.claude/worktrees/issue-6-x" }] }), [5]);
 });
 
 // Criterion 6: an issue already in flight is refused.

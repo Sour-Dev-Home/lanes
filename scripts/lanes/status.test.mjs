@@ -373,6 +373,17 @@ test("a ready issue overlapping an open PR's changed files is one at a time with
   ]);
 });
 
+test("laneSessions finds a session by its lane-<N> name even when it reports the repository root (#341)", () => {
+  const sessions = laneSessions([agent("aaaa0338", ROOT, { name: "lane-338" }), agent("bbbb0001", ROOT, { name: "reactapps-dc" }), agent("cccc0002", ROOT)], ROOT);
+  assert.deepEqual([...sessions.keys()], [338]);
+  assert.equal(sessions.get(338).id, "aaaa0338");
+});
+
+test("edge: laneSessions lets the name win over the cwd folder, and ignores a lane name in another repository", () => {
+  const sessions = laneSessions([agent("aaaa0001", wt("issue-10-x"), { name: "lane-11" }), agent("bbbb0002", "C:\\other", { name: "lane-12" })], ROOT);
+  assert.deepEqual([...sessions.keys()], [11]);
+});
+
 test("a ready issue overlapping a running lane with no PR yet is one at a time with running #N", () => {
   const s = summarize({
     prs: [],
