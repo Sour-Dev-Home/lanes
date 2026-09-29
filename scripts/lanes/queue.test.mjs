@@ -744,3 +744,136 @@ test("CLI: a label failure is printed, keeps the launch and the reaper, and does
   assert.equal(run.reapers.length, 1);
   assert.deepEqual(run.launched.map((l) => l.n), [1]);
 });
+
+// --- #382: a stalled or PR-less lane is stopped and relaunched once, never over unpushed work. ---
+
+const lane = (n, over = {}) => ({ kind: "background", id: `old-${n}`, cwd: `/repo/.claude/worktrees/issue-${n}-work`, status: "busy", startedAt: 1, ...over });
+
+// A queue run with recovery deps over `world`; `opts.workLeft` is the reason work is left (or null), `opts.stalledIssues`
+// the issues stalledLanes reports, `opts.markers` a Map of issue → marker. Removing a lane drops its session.
+function recoveryRun(world, { workLeft = null, stalledIssues = [], markers = new Map(), stopWorks = true } = {}) {
+  const run = fakeRun(world, { onSleep: (t) => t === 3 && (world.issues = []) });
+  const stopped = [];
+  const removed = [];
+  const claude = run.deps.claude;
+  run.deps.claude = (args, opts) => {
+    if (args[0] !== "stop") return claude(args, opts);
+    stopped.push(args[1]);
+    return "";
+  };
+  run.deps.recovery = {
+    stalled: () => new Map(stalledIssues.map((n) => [n, 45])),
+    worktree: (n) => ({ path: `/repo/.claude/worktrees/issue-${n}-work`, branch: `issue-${n}-work` }),
+    workLeft: () => workLeft,
+    waitStopped: () => stopWorks,
+    remove: (id, tree) => {
+      removed.push([id, tree.path]);
+      world.sessions = world.sessions.filter((s) => s.id !== id);
+    },
+    marker: { read: (n) => markers.get(n) ?? null, write: (n, rec) => markers.set(n, rec) },
+  };
+  return { ...run, stopped, removed, markers };
+}
+
+test("#382: a stalled clean lane is stopped, its worktree removed, and the issue relaunched once", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7)] };
+  const run = recoveryRun(world, { stalledIssues: [7] });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.stopped, ["old-7"]);
+  assert.deepEqual(run.removed, [["old-7", "/repo/.claude/worktrees/issue-7-work"]]);
+  assert.deepEqual(run.launched.map((l) => l.n), [7]);
+  const marker = run.markers.get(7);
+  assert.deepEqual([marker.issue, marker.session, marker.reason], [7, "old-7", "stalled for 45 minutes"]);
+  assert.ok(Number.isFinite(Date.parse(marker.time)));
+});
+
+test("#382: a stalled lane with unpushed work is stopped, left untouched and not relaunched", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7)] };
+  const run = recoveryRun(world, { stalledIssues: [7], workLeft: "1 commit not on any remote" });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.stopped, ["old-7"]);
+  assert.deepEqual(run.removed, []);
+  assert.deepEqual(run.launched, []);
+  assert.equal(run.out.filter((l) => l.endsWith(" #7: stalled with unpushed work, left for the owner")).length, 1, run.out.join("\n"));
+  assert.equal(run.stopped.length, 1, "later ticks leave the stopped lane alone");
+});
+
+test("#382: a lane that ended with no open PR is recovered like a stalled one", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { status: "idle" })] };
+  const run = recoveryRun(world);
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.removed.map((r) => r[0]), ["old-7"]);
+  assert.deepEqual(run.launched.map((l) => l.n), [7]);
+  assert.equal(run.markers.get(7).reason, "session ended with no open PR");
+});
+
+test("#382: a second stall on an issue with a marker is reported once and never retried", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { id: "new-7" })] };
+  const markers = new Map([[7, { issue: 7, session: "old-7", reason: "stalled for 40 minutes", time: "2026-09-29T08:00:00.000Z" }]]);
+  const run = recoveryRun(world, { stalledIssues: [7], markers });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.stopped, []);
+  assert.deepEqual(run.removed, []);
+  assert.deepEqual(run.launched, []);
+  assert.equal(run.out.filter((l) => l.endsWith(" #7: stalled again after recovery: stalled for 45 minutes")).length, 1, run.out.join("\n"));
+});
+
+test("#382: a lane with an open PR is never touched, stalled or idle", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const status of ["busy", "idle"]) {
+    const world = { issues: [issue(7, ["src/a.mjs"])], prs: [pr(70, 7, ["src/a.mjs"])], sessions: [lane(7, { status })] };
+    const run = recoveryRun(world, { stalledIssues: [7] });
+    const sleep = run.deps.sleep;
+    run.deps.sleep = async (ms) => { await sleep(ms); if (run.ticks() === 3) { world.prs = []; world.sessions = []; } };
+    assert.equal(await main([], run.deps), 0);
+    assert.deepEqual([run.stopped, run.removed, run.launched], [[], [], []]);
+  }
+});
+
+test("#382: edge: a session waiting on a prompt, or an issue that is closed or not ready, is left alone", async () => {
+  const { main } = await import("./queue.mjs");
+  const cases = [
+    [issue(7, ["src/a.mjs"]), lane(7, { status: "idle", state: "blocked" })],
+    [issue(7, ["src/a.mjs"], { labels: ["tier:quick"] }), lane(7, { status: "idle" })],
+  ];
+  for (const [i, s] of cases) {
+    const world = { issues: [i], prs: [], sessions: [s] };
+    const run = recoveryRun(world);
+    assert.equal(await main([], run.deps), 0);
+    assert.deepEqual([run.stopped, run.removed], [[], []]);
+  }
+});
+
+test("#382: edge: a session that will not stop is reported and its worktree left", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7)] };
+  const run = recoveryRun(world, { stalledIssues: [7], stopWorks: false });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual([run.removed, run.launched], [[], []]);
+  assert.ok(run.out.some((l) => / #7: could not stop session old-7, left for the owner$/.test(l)), run.out.join("\n"));
+});
+
+test("#382: edge: a lane whose worktree cannot be found is stopped and relaunched without a removal", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7)] };
+  const run = recoveryRun(world, { stalledIssues: [7] });
+  run.deps.recovery.worktree = () => null;
+  run.deps.recovery.remove = (id) => { world.sessions = world.sessions.filter((s) => s.id !== id); run.removed.push([id, null]); };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.removed, [["old-7", null]]);
+  assert.deepEqual(run.launched.map((l) => l.n), [7]);
+});
+
+test("#382: edge: a failing removal is printed and the issue is not relaunched", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7)] };
+  const run = recoveryRun(world, { stalledIssues: [7] });
+  run.deps.recovery.remove = () => { throw Object.assign(new Error("x"), { stderr: "Permission denied\nmore" }); };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+  assert.ok(run.out.some((l) => / #7: recovery failed: Permission denied$/.test(l)), run.out.join("\n"));
+});

@@ -5,15 +5,15 @@
 // Usage: node scripts/lanes/queue.mjs, in the owner's own terminal. Exit 0: idle for three ticks in a row.
 // 1: three GitHub reads failed in a row. 2: an argument, a bad lanes.config.json, or run inside Claude (CLAUDECODE).
 import { execFileSync, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseBlockedBy } from "./blockers.mjs";
-import { cleanupMerged } from "./cleanup.mjs";
-import { GATE_CONTEXT } from "./lib.mjs";
+import { cleanupMerged, laneWorkLeft, parseWorktrees, removeLaneWorktree, waitForStop } from "./cleanup.mjs";
+import { GATE_CONTEXT, laneIssueOf } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
-import { inFlightIssues, launchArgs, launchEnv, markRunning, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
-import { gateDescriptions, prStage } from "./status.mjs";
+import { inFlightIssues, launchArgs, localLaunchEnv, markRunning, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
+import { gateDescriptions, prStage, stalledLanes } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
 // waiting on owner.
@@ -92,6 +92,37 @@ export function planTick({ issues = [], prs = [], sessions = [], maxLanes = STAR
   return { launch, waiting, idle, lines };
 }
 
+/**
+ * #382: which lanes to recover this tick. Pure. A lane is a ready, open issue with no open PR whose newest background
+ * session is stalled (`stalled`: issue → minutes silent, from status.mjs's stalledLanes) or idle with no prompt
+ * pending (ended without a PR). An issue with a marker is `again` (reported, never retried), unless the marker names
+ * this very session, which was already handled (its work was left for the owner).
+ * @param {{ issues: object[], prs: object[], sessions: object[], stalled?: Map<number, number>, marker?: (n: number) => { session?: string } | null }} input
+ * @returns {{ number: number, id: string, reason: string, again: boolean }[]} by issue number
+ */
+export function planRecovery({ issues = [], prs = [], sessions = [], stalled = new Map(), marker = () => null }) {
+  const withPr = new Set(prs.map(branchIssue));
+  const ready = new Set(issues.filter((i) => isOpen(i) && labelsOf(i).includes("ready")).map((i) => i.number));
+  const newest = new Map();
+  for (const s of sessions) {
+    const n = laneIssueOf(s);
+    if (!n || typeof s.id !== "string" || (newest.get(n)?.startedAt ?? -1) > (s.startedAt ?? 0)) continue;
+    newest.set(n, s);
+  }
+  const out = [];
+  for (const [n, s] of newest) {
+    if (!ready.has(n) || withPr.has(n)) continue;
+    let reason = null;
+    if (stalled.has(n)) reason = `stalled for ${stalled.get(n)} minutes`;
+    else if (s.status === "idle" && s.state !== "blocked") reason = "session ended with no open PR";
+    if (!reason) continue;
+    const marked = marker(n);
+    if (marked?.session === s.id) continue;
+    out.push({ number: n, id: s.id, reason, again: Boolean(marked) });
+  }
+  return out.sort((a, b) => a.number - b.number);
+}
+
 export const TICK_MS = 3 * 60 * 1000;
 const IDLE_TICKS = 3;
 const READ_FAILURES = 3;
@@ -119,6 +150,49 @@ function readSnapshot(deps, root) {
   const sessions = JSON.parse(deps.claude(["agents", "--json", "--cwd", root], { cwd: root }));
   if (!Array.isArray(sessions)) throw new Error("claude agents --json printed no list");
   return { issues, prs, sessions };
+}
+
+// #382: stops each lane planRecovery names and, when its worktree is clean and fully pushed, removes it so the tick's
+// normal launch path relaunches the issue (the removed session leaves `snapshot.sessions`). Unpushed or uncommitted
+// work is left and said. Each issue gets one attempt per run (`attempted`) and a stalled-again line once (`told`);
+// a marker is written before anything is removed, so a crash cannot allow a second relaunch.
+function recoverLanes(snapshot, { deps, dir, say, attempted, told }) {
+  const { recovery, claude } = deps;
+  let stalled;
+  try {
+    stalled = recovery.stalled(snapshot.sessions, dir);
+  } catch (err) {
+    say(`stall check failed: ${reason(err)}`);
+    return;
+  }
+  for (const { number: n, id, reason: why, again } of planRecovery({ ...snapshot, stalled, marker: recovery.marker.read })) {
+    if (again) {
+      if (!told.has(n)) say(`#${n}: stalled again after recovery: ${why}`);
+      told.add(n);
+      continue;
+    }
+    if (attempted.has(n)) continue;
+    attempted.add(n);
+    try {
+      claude(["stop", id], { cwd: dir });
+      if (!recovery.waitStopped(id)) {
+        say(`#${n}: could not stop session ${id}, left for the owner`);
+        continue;
+      }
+      const tree = recovery.worktree(n, dir);
+      const left = tree ? recovery.workLeft(tree) : null;
+      recovery.marker.write(n, { issue: n, session: id, reason: why, time: new Date(deps.now()).toISOString(), outcome: left ? "left" : "relaunch" });
+      if (left) {
+        say(`#${n}: stalled with unpushed work, left for the owner`);
+        continue;
+      }
+      recovery.remove(id, tree);
+      snapshot.sessions = snapshot.sessions.filter((s) => s.id !== id);
+      say(`#${n}: ${why}; stopped and removed, relaunching once`);
+    } catch (err) {
+      say(`#${n}: recovery failed: ${reason(err)}`);
+    }
+  }
 }
 
 /**
@@ -152,6 +226,8 @@ export async function main(argv, deps = DEFAULT_DEPS) {
   const { maxLanes, softPaths, models } = settings;
   const failedLaunches = new Set();
   const waits = new Map();
+  const attempted = new Set();
+  const told = new Set();
   let idleTicks = 0;
   let readFailures = 0;
   for (;;) {
@@ -178,6 +254,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       await sleep(TICK_MS);
       continue;
     }
+    if (deps.recovery) recoverLanes(snapshot, { deps, dir, say, attempted, told });
     // An issue whose launch failed stays open (its blockers and ranking still count) but is no longer a candidate.
     const issues = snapshot.issues.map((i) => (failedLaunches.has(i.number) ? { ...i, labels: labelsOf(i).filter((l) => l !== "ready") } : i));
     const plan = planTick({ ...snapshot, issues, maxLanes, softPaths });
@@ -228,18 +305,37 @@ export async function main(argv, deps = DEFAULT_DEPS) {
 const repoRoot = () => dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
 const run = (cmd) => (args, { cwd, env } = {}) => execFileSync(cmd, args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000, windowsHide: true });
 
-// The launch environment for this machine: asks git where it lives; a git that cannot run counts as not found.
-function localLaunchEnv() {
-  let out = "";
-  try {
-    out = execFileSync("git", ["--exec-path"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  } catch {}
-  return launchEnv(process.env, process.platform, out);
-}
+// #382: the stall, worktree and marker effects of recovery on this machine. Markers live in the main checkout's
+// .lanes/queue-recover/<N>.json, and are removed by hand to allow another recovery.
+const markerFile = (n) => join(repoRoot(), ".lanes", "queue-recover", `${n}.json`);
+const DEFAULT_RECOVERY = {
+  stalled: (agents, root) => stalledLanes(agents, root),
+  worktree: (n) => {
+    const tree = parseWorktrees(run("git")(["worktree", "list", "--porcelain"])).find((t) => !t.main && Number(/^issue-(\d+)-./.exec(t.branch ?? "")?.[1]) === n);
+    return tree ? { path: tree.path, branch: tree.branch } : null;
+  },
+  workLeft: (tree) => laneWorkLeft(tree.path, tree.branch),
+  waitStopped: (id) => waitForStop(id, { run: (cmd, args) => run(cmd)(args), sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }),
+  remove: (id, tree) => (tree ? removeLaneWorktree({ id, ...tree }, (cmd, args) => run(cmd)(args)) : run("claude")(["rm", id])),
+  marker: {
+    read: (n) => {
+      try {
+        return JSON.parse(readFileSync(markerFile(n), "utf8"));
+      } catch {
+        return null;
+      }
+    },
+    write: (n, record) => {
+      mkdirSync(dirname(markerFile(n)), { recursive: true });
+      writeFileSync(markerFile(n), `${JSON.stringify(record, null, 2)}\n`);
+    },
+  },
+};
 
 const DEFAULT_DEPS = {
   env: process.env,
   launchEnv: localLaunchEnv,
+  recovery: DEFAULT_RECOVERY,
   gh: run("gh"),
   claude: run("claude"),
   root: repoRoot,

@@ -1589,3 +1589,51 @@ test("edge: an orphan folder has no issue, so no label is touched", () => {
   runCleanup(plan, { run: () => {}, stillThere: () => true, removeDir: () => {}, unmark: (n) => unmarked.push(n) });
   assert.deepEqual(unmarked, []);
 });
+
+// --- #382: the dirty and unpushed checks and the removal steps queue.mjs reuses to recover a stalled lane. ---
+
+const fakeGit = ({ status = "", unpushed = "0", failStatus = false, failCount = false } = {}) => (cmd, args) => {
+  if (args.includes("status")) {
+    if (failStatus) throw new Error("git status failed");
+    return status;
+  }
+  if (args[0] === "rev-list") {
+    if (failCount) throw new Error("bad ref");
+    return `${unpushed}\n`;
+  }
+  return "";
+};
+
+test("#382: laneWorkLeft: a clean, fully pushed worktree has no work left", async () => {
+  const { laneWorkLeft } = await import("./cleanup.mjs");
+  assert.equal(laneWorkLeft("/w/issue-5-x", "issue-5-x", fakeGit()), null);
+});
+
+test("#382: laneWorkLeft: uncommitted changes and unpushed commits are named", async () => {
+  const { laneWorkLeft } = await import("./cleanup.mjs");
+  assert.match(laneWorkLeft("/w", "issue-5-x", fakeGit({ status: " M a.mjs\n" })), /uncommitted/);
+  assert.equal(laneWorkLeft("/w", "issue-5-x", fakeGit({ unpushed: "2" })), "2 commits not on any remote");
+  assert.equal(laneWorkLeft("/w", "issue-5-x", fakeGit({ unpushed: "1" })), "1 commit not on any remote");
+});
+
+test("#382: edge: laneWorkLeft treats unreadable status or commit counts as work left", async () => {
+  const { laneWorkLeft } = await import("./cleanup.mjs");
+  assert.match(laneWorkLeft("/w", "b", fakeGit({ failStatus: true })), /cannot read/);
+  assert.match(laneWorkLeft("/w", "b", fakeGit({ failCount: true })), /cannot read/);
+  assert.match(laneWorkLeft("/w", "b", fakeGit({ unpushed: "abc" })), /cannot read/);
+});
+
+test("#382: removeLaneWorktree: claude rm, git worktree remove, git branch -D, never forced", async () => {
+  const { removeLaneWorktree } = await import("./cleanup.mjs");
+  const log = [];
+  removeLaneWorktree({ id: "s1", path: "/w/issue-5-x", branch: "issue-5-x" }, (cmd, args) => log.push([cmd, ...args]));
+  assert.deepEqual(log, [["claude", "rm", "s1"], ["git", "worktree", "remove", "/w/issue-5-x"], ["git", "branch", "-D", "issue-5-x"]]);
+});
+
+test("#382: edge: removeLaneWorktree stops at the first failing step", async () => {
+  const { removeLaneWorktree } = await import("./cleanup.mjs");
+  const log = [];
+  const run = (cmd, args) => { log.push(args[0]); if (args[0] === "worktree") throw new Error("busy"); };
+  assert.throws(() => removeLaneWorktree({ id: "s1", path: "/w", branch: "b" }, run), /busy/);
+  assert.deepEqual(log, ["rm", "worktree"]);
+});
