@@ -349,6 +349,24 @@ test("edge: an issue with no Scope paths is never listed, and overlaps is empty 
   assert.deepEqual(build().overlaps, []);
 });
 
+test("edge: the command reads start.softPaths from lanes.config.json in the working directory, and refuses a malformed one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "snapshot-cfg-"));
+  const script = join(process.cwd(), "scripts/lanes/snapshot.mjs");
+  const run = () => JSON.parse(execFileSync(process.execPath, [script, "--from", "in.json"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  try {
+    writeFileSync(join(dir, "in.json"), JSON.stringify({ prs: [], issues: [scoped(1, "`a.mjs`"), scoped(2, "`a.mjs`")], generatedAt: NOW }));
+    assert.deepEqual(run().overlaps, [{ a: 1, b: 2 }]);
+    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ start: { softPaths: ["^a\\.mjs$"] } }));
+    assert.deepEqual(run().overlaps, []);
+    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ start: { softPaths: [1] } }));
+    assert.throws(run, /softPaths must be an array of regex strings/);
+    writeFileSync(join(dir, "lanes.config.json"), "{}");
+    assert.deepEqual(run().overlaps, [{ a: 1, b: 2 }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("edge: an issue that already has a PR is not listed in overlaps", () => {
   assert.deepEqual(build({ issues: [scoped(1, "`a.mjs`"), scoped(2, "`a.mjs`")], prs: [pr(7)] }).overlaps, []);
 });
