@@ -1,0 +1,185 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const src = readFileSync("dashboard/app.js", "utf8");
+const app = (() => {
+  const sandbox = { module: { exports: {} } };
+  vm.runInNewContext(src, sandbox);
+  return sandbox.module.exports;
+})();
+
+// A minimal document: it records text and refuses innerHTML, outerHTML and insertAdjacentHTML.
+function fakeDoc() {
+  const make = (tag) => {
+    const node = { tag, children: [], attrs: {}, className: "", textContent: "", hidden: false };
+    for (const p of ["innerHTML", "outerHTML"]) Object.defineProperty(node, p, { set() { throw new Error(`${p} used`); }, get: () => "" });
+    node.insertAdjacentHTML = () => { throw new Error("insertAdjacentHTML used"); };
+    node.appendChild = (c) => (node.children.push(c), c);
+    node.append = (...cs) => cs.forEach((c) => node.children.push(typeof c === "string" ? { tag: "#text", textContent: c, children: [] } : c));
+    node.setAttribute = (k, v) => { node.attrs[k] = String(v); if (k === "class") node.className = String(v); };
+    node.addEventListener = () => {};
+    return node;
+  };
+  return { createElement: make, createElementNS: (_ns, tag) => make(tag), createTextNode: (t) => ({ tag: "#text", textContent: t, children: [] }) };
+}
+const textOf = (n) => (n.textContent ?? "") + " " + (n.children ?? []).map(textOf).join(" ");
+const walk = (n, f) => { f(n); (n.children ?? []).forEach((c) => walk(c, f)); };
+const pr = (number) => ({ number, headSha: "a".repeat(40), checks: [] });
+const issue = (number, stage, extra = {}) => ({ number, title: `t${number}`, tier: "full", stage, blockedBy: [], ...extra });
+
+test("app.js has no innerHTML, outerHTML, insertAdjacentHTML, document.write, eval, import or require", () => {
+  assert.doesNotMatch(src, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function|\bimport\b|\brequire\(/);
+});
+
+test("fetches snapshot.json every 60 s and treats 20 minutes as stale", () => {
+  assert.match(src, /fetch\(["']snapshot\.json/);
+  assert.equal(app.POLL_MS, 60_000);
+  assert.equal(app.STALE_MS, 20 * 60_000);
+});
+
+test("staleNote is empty within 20 minutes and names the age past it", () => {
+  const now = Date.parse("2026-09-28T12:00:00Z");
+  assert.equal(app.staleNote("2026-09-28T11:41:00Z", now), "");
+  assert.match(app.staleNote("2026-09-28T11:30:00Z", now), /stale.*30 min/i);
+});
+
+test("edge: staleNote treats an unreadable time as stale", () => {
+  assert.match(app.staleNote("garbage", Date.now()), /stale/i);
+});
+
+test("stageOf maps snapshot stages onto the nine display stages", () => {
+  const gate = (ref) => issue(1, "gate", { blockedBy: [{ kind: "review", ref, reason: "r" }] });
+  assert.equal(app.stageOf(issue(1, "starting")), "writing");
+  assert.equal(app.stageOf(issue(1, "failing")), "writing");
+  assert.equal(app.stageOf(gate("test-hunter")), "test review");
+  assert.equal(app.stageOf(gate("security-reviewer")), "security review");
+  assert.equal(app.stageOf(gate("architecture-advisor")), "architecture review");
+  assert.equal(app.stageOf(issue(1, "owner")), "waiting on owner");
+  assert.equal(app.stageOf(issue(1, "contract")), "waiting on owner");
+  assert.equal(app.stageOf(issue(1, "ready")), "queued");
+  assert.equal(app.stageOf(issue(1, "queued")), "merge queue");
+  assert.equal(app.stageOf(issue(1, "blocked")), "blocked");
+  assert.deepEqual(JSON.parse(JSON.stringify(app.STAGES)), ["writing", "test review", "security review", "architecture review", "waiting on owner", "queued", "merge queue", "merged", "blocked"]);
+});
+
+test("edge: an unknown stage or a gate wait with no reviewer name still maps to a stage", () => {
+  assert.ok(app.STAGES.includes(app.stageOf(issue(1, "brand-new"))));
+  assert.ok(app.STAGES.includes(app.stageOf(issue(1, "gate", { blockedBy: [] }))));
+});
+
+test("renderLegend lists every stage", () => {
+  const d = fakeDoc();
+  const ul = d.createElement("ul");
+  app.renderLegend(d, ul);
+  for (const s of app.STAGES) assert.ok(textOf(ul).includes(s), s);
+});
+
+test("renderTask names why a blocked task is blocked", () => {
+  const li = app.renderTask(fakeDoc(), issue(5, "blocked", { blockedBy: [{ kind: "issue", ref: "#3", reason: "waits on open issue #3" }] }));
+  assert.ok(textOf(li).includes("waits on open issue #3"));
+  assert.ok(textOf(li).includes("#5"));
+});
+
+test("edge: a blocked task with an empty reason shows its ref; with no blockers it says no reason recorded", () => {
+  const li = app.renderTask(fakeDoc(), issue(5, "blocked", { blockedBy: [{ kind: "issue", ref: "#3", reason: "" }] }));
+  assert.ok(textOf(li).includes("#3"));
+  assert.match(textOf(app.renderTask(fakeDoc(), issue(6, "blocked"))), /no reason recorded/i);
+});
+
+test("XSS fixture: a hostile title, ref and reason land only in text, never as elements", () => {
+  const evil = `<img src=x onerror=alert(1)>"'</script>`;
+  const d = fakeDoc();
+  const li = app.renderTask(d, issue(9, "blocked", { title: evil, blockedBy: [{ kind: "check", ref: evil, reason: evil }] }));
+  assert.ok(textOf(li).includes(evil));
+  walk(li, (n) => assert.ok(!/^(img|script)$/.test(n.tag), n.tag));
+  const svg = app.renderGraph(d, [issue(9, "blocked", { title: evil })], []);
+  walk(svg, (n) => assert.ok(!/^(img|script)$/.test(n.tag), n.tag));
+});
+
+test("approveLine lists the PR numbers of tasks waiting on the owner, sorted, and is empty when none", () => {
+  const list = [issue(1, "owner", { pr: pr(11) }), issue(2, "ready"), issue(3, "owner", { pr: pr(7) })];
+  assert.equal(app.approveLine(list), "/approve 7 11");
+  assert.equal(app.approveLine([issue(2, "ready")]), "");
+});
+
+test("edge: approveLine skips an owner task with no PR and any non-integer number", () => {
+  assert.equal(app.approveLine([issue(1, "owner"), issue(2, "owner", { pr: { number: "9; rm", checks: [] } })]), "");
+});
+
+test("renderWaiting shows the line with a copy button, and the page cannot post anything", () => {
+  const d = fakeDoc();
+  const box = d.createElement("div");
+  app.renderWaiting(d, box, [issue(1, "owner", { pr: pr(11), blockedBy: [{ kind: "owner", ref: "review/owner", reason: "waiting on owner (/approve)" }] })]);
+  assert.ok(textOf(box).includes("/approve 11"));
+  let button = false;
+  walk(box, (n) => { if (n.tag === "button") button = true; });
+  assert.ok(button);
+  assert.doesNotMatch(src, /method\s*:\s*["']POST|XMLHttpRequest|api\.github\.com|sendBeacon|WebSocket/i);
+  assert.equal([...src.matchAll(/fetch\(/g)].length, 1);
+});
+
+test("edge: renderWaiting says nothing waits when the list is empty", () => {
+  const d = fakeDoc();
+  const box = d.createElement("div");
+  app.renderWaiting(d, box, []);
+  assert.match(textOf(box), /nothing/i);
+});
+
+test("criticalPath is the longest blocking chain, and ignores edges to unlisted issues", () => {
+  const edges = [{ from: 1, to: 2 }, { from: 2, to: 3 }, { from: 1, to: 4 }, { from: 9, to: 3 }];
+  assert.deepEqual(JSON.parse(JSON.stringify(app.criticalPath([1, 2, 3, 4], edges))), [1, 2, 3]);
+});
+
+test("edge: criticalPath survives a cycle, an empty graph and a single node", () => {
+  assert.deepEqual(JSON.parse(JSON.stringify(app.criticalPath([], []))), []);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.criticalPath([1], []))), [1]);
+  const p = app.criticalPath([1, 2], [{ from: 1, to: 2 }, { from: 2, to: 1 }]);
+  assert.ok(p.length >= 1 && p.length <= 2);
+});
+
+test("renderGraph draws a node per issue, an edge per link, and marks the critical path", () => {
+  const svg = app.renderGraph(fakeDoc(), [issue(1, "ready"), issue(2, "blocked"), issue(3, "blocked")], [{ from: 1, to: 2 }, { from: 2, to: 3 }]);
+  assert.equal(svg.tag, "svg");
+  let nodes = 0, edges = 0, crit = 0;
+  walk(svg, (n) => {
+    if (/\bnode\b/.test(n.className)) nodes++;
+    if (/\bedge\b/.test(n.className)) edges++;
+    if (/\bcritical\b/.test(n.className)) crit++;
+  });
+  assert.equal(nodes, 3);
+  assert.equal(edges, 2);
+  assert.ok(crit >= 3);
+});
+
+test("edge: renderGraph with no issues still returns an svg", () => {
+  assert.equal(app.renderGraph(fakeDoc(), [], []).tag, "svg");
+});
+
+test("formatGenerated shows the timestamp, and flags an unreadable one", () => {
+  assert.ok(app.formatGenerated("2026-09-28T12:00:00Z").includes("2026-09-28"));
+  assert.match(app.formatGenerated("nope"), /unknown/i);
+});
+
+test("index.html loads app.js and style.css only, with a viewport meta and no external resource", () => {
+  const html = readFileSync("dashboard/index.html", "utf8");
+  assert.match(html, /name="viewport"/);
+  assert.match(html, /src="app\.js"/);
+  assert.match(html, /href="style\.css"/);
+  assert.doesNotMatch(html, /(src|href)="https?:/);
+});
+
+test("style.css has design tokens, dark mode, transitions, a phone breakpoint and a colour per stage", () => {
+  const css = readFileSync("dashboard/style.css", "utf8");
+  assert.match(css, /:root\s*\{[^}]*--bg:/);
+  assert.match(css, /prefers-color-scheme:\s*dark/);
+  assert.match(css, /transition:/);
+  assert.match(css, /@media \(max-width:\s*\d+px\)/);
+  for (const s of app.STAGES) assert.ok(css.includes(`--stage-${s.replace(/ /g, "-")}:`), s);
+});
+
+test("lanes.config.json marks dashboard/ as ui and sensitive", () => {
+  const cfg = JSON.parse(readFileSync("lanes.config.json", "utf8"));
+  for (const k of ["ui", "sensitive"]) assert.ok(cfg.paths[k].some((p) => new RegExp(p).test("dashboard/app.js")), k);
+});

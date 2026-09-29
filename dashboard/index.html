@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lanes dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1>Lanes</h1>
+  <p id="generated" class="muted">Loading snapshot…</p>
+  <p id="stale" class="stale" hidden></p>
+</header>
+<main>
+  <section aria-labelledby="waiting-h">
+    <h2 id="waiting-h">Waiting on you</h2>
+    <div id="waiting"></div>
+  </section>
+  <section aria-labelledby="legend-h">
+    <h2 id="legend-h">Legend</h2>
+    <ul id="legend" class="legend"></ul>
+  </section>
+  <section aria-labelledby="tasks-h">
+    <h2 id="tasks-h">Tasks</h2>
+    <ul id="tasks" class="tasks"></ul>
+  </section>
+  <section aria-labelledby="graph-h">
+    <h2 id="graph-h">Dependency graph</h2>
+    <p class="muted">An arrow runs from the blocking task to the one it blocks. The critical path is outlined.</p>
+    <div id="graph" class="graph"></div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

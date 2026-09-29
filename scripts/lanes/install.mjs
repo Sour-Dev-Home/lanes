@@ -86,6 +86,9 @@ export const MANIFEST = [
   "scripts/lanes/snapshot.mjs",
   "contracts/snapshot.schema.json",
   ".github/workflows/dashboard.yml",
+  "dashboard/index.html",
+  "dashboard/app.js",
+  "dashboard/style.css",
   "docs/USING.md",
 ];
 

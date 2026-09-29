@@ -221,3 +221,13 @@ which GitHub ignores, unless the target repository is public. It asks `gh` wheth
 is unknown it treats the repository as private. To turn the dashboard on, either run
 `node scripts/lanes/install.mjs <target> --public` (`--private` forces the disabled copy), or rename the file to
 `dashboard.yml` yourself. Do that only when you accept that the snapshot's contents are readable by anyone.
+
+### Turning the dashboard page on
+
+The page itself is `dashboard/` (`index.html`, `app.js`, `style.css`), which `install.mjs` copies and the workflow
+publishes next to `snapshot.json`. Enable Pages once per repository: Settings, Pages, Source "GitHub Actions". After
+the next run of the `dashboard` workflow the page is at `https://<owner>.github.io/<repo>/`.
+
+**The site is public**, even for a private repository: anyone with the URL can read every task title, stage and
+blocker reason in the snapshot. The page only reads, and its "waiting on you" list gives you an `/approve N M K` line
+to copy; approving still happens in the owner session.
