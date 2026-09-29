@@ -1,0 +1,76 @@
+{
+  "version": 0,
+  "generatedAt": "2026-09-29T12:00:00.000Z",
+  "issues": [
+    { "number": 101, "title": "Ready issue with no blocker", "tier": "quick", "stage": "ready", "blockedBy": [] },
+    { "number": 102, "title": "Blocked by 101, first link of a chain", "tier": "full", "stage": "blocked", "blockedBy": [{ "kind": "issue", "ref": "#101", "reason": "blocked by #101" }] },
+    { "number": 103, "title": "Not ready, last link of a chain of three", "tier": "unknown", "stage": "not-ready", "blockedBy": [{ "kind": "issue", "ref": "#102", "reason": "blocked by #102" }] },
+    { "number": 104, "title": "A deliberately long title that runs to exactly one hundred and twenty characters so the page must wrap or clip it well!!", "tier": "skip", "stage": "already met", "blockedBy": [] },
+    { "number": 105, "title": "Lane running, no pull request yet", "tier": "full", "stage": "running", "blockedBy": [] },
+    {
+      "number": 106,
+      "title": "Lane just opened its pull request",
+      "tier": "quick",
+      "stage": "starting",
+      "blockedBy": [{ "kind": "check", "ref": "verify", "reason": "verify is pending" }],
+      "pr": { "number": 206, "headSha": "1111111111111111111111111111111111111111", "checks": [{ "name": "verify", "result": "pending" }] }
+    },
+    {
+      "number": 107,
+      "title": "A check failed on the pull request",
+      "tier": "full",
+      "stage": "failing",
+      "blockedBy": [{ "kind": "check", "ref": "verify", "reason": "verify failed" }],
+      "pr": { "number": 207, "headSha": "2222222222222222222222222222222222222222", "checks": [{ "name": "verify", "result": "fail" }] }
+    },
+    {
+      "number": 108,
+      "title": "Contract change waits on a reviewer",
+      "tier": "full",
+      "stage": "contract",
+      "blockedBy": [{ "kind": "review", "ref": "architecture-advisor", "reason": "waiting for review/architecture-advisor" }],
+      "pr": { "number": 208, "headSha": "3333333333333333333333333333333333333333", "checks": [{ "name": "verify", "result": "pass" }] }
+    },
+    {
+      "number": 109,
+      "title": "Pull request awaiting the owner",
+      "tier": "full",
+      "stage": "owner",
+      "blockedBy": [{ "kind": "owner", "ref": "owner", "reason": "waiting on owner (/approve)" }],
+      "pr": { "number": 209, "headSha": "4444444444444444444444444444444444444444", "checks": [{ "name": "verify", "result": "pass" }, { "name": "lanes/gate", "result": "pending" }] },
+      "criteria": [{ "index": 1, "result": "pass" }, { "index": 2, "result": "fail" }, { "index": 3, "result": "not-applicable" }]
+    },
+    {
+      "number": 110,
+      "title": "Gate still settling",
+      "tier": "quick",
+      "stage": "gate",
+      "blockedBy": [{ "kind": "check", "ref": "lanes/gate", "reason": "gate is pending" }],
+      "pr": { "number": 210, "headSha": "5555555555555555555555555555555555555555", "checks": [{ "name": "lanes/gate", "result": "pending" }] }
+    },
+    {
+      "number": 111,
+      "title": "Waiting on the test hunter",
+      "tier": "full",
+      "stage": "review",
+      "blockedBy": [{ "kind": "review", "ref": "test-hunter", "reason": "waiting for review/test-hunter" }],
+      "pr": { "number": 211, "headSha": "6666666666666666666666666666666666666666", "checks": [{ "name": "verify", "result": "pass" }] }
+    },
+    {
+      "number": 112,
+      "title": "In the merge queue",
+      "tier": "quick",
+      "stage": "queued",
+      "blockedBy": [{ "kind": "queue", "ref": "merge queue", "reason": "in the merge queue" }],
+      "pr": { "number": 212, "headSha": "7777777777777777777777777777777777777777", "checks": [{ "name": "verify", "result": "pass" }] }
+    }
+  ],
+  "edges": [
+    { "from": 101, "to": 102 },
+    { "from": 102, "to": 103 }
+  ],
+  "overlaps": [
+    { "a": 101, "b": 105 },
+    { "a": 105, "b": 106 }
+  ]
+}

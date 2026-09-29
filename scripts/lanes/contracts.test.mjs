@@ -289,7 +289,11 @@ const snapshotInput = {
 
 test("the snapshot schema defines every top-level and per-issue field, required ones listed, no other keys", () => {
   assert.deepEqual([...snapshotSchema.required].sort(), ["edges", "generatedAt", "issues", "version"]);
-  assert.deepEqual(Object.keys(snapshotSchema.properties).sort(), ["edges", "generatedAt", "issues", "version"]);
+  assert.deepEqual(Object.keys(snapshotSchema.properties).sort(), ["edges", "generatedAt", "issues", "overlaps", "version"]);
+  const pair = snapshotSchema.properties.overlaps.items;
+  assert.deepEqual([...pair.required].sort(), ["a", "b"]);
+  assert.deepEqual(Object.keys(pair.properties).sort(), ["a", "b"]);
+  assert.equal(pair.additionalProperties, false);
   assert.equal(snapshotSchema.additionalProperties, false);
   const issue = snapshotSchema.properties.issues.items;
   assert.deepEqual([...issue.required].sort(), ["blockedBy", "number", "stage", "tier", "title"]);
@@ -311,7 +315,51 @@ test("a snapshot built by snapshot.mjs conforms to the schema, and it exercises 
 
 test("every stage snapshot.mjs can emit is in the schema's stage enum", () => {
   const stages = snapshotSchema.properties.issues.items.properties.stage.enum;
-  for (const s of ["ready", "blocked", "not-ready", "already met", "starting", "failing", "contract", "owner", "gate", "review", "queued"]) assert.ok(stages.includes(s), s);
+  for (const s of ["ready", "blocked", "not-ready", "already met", "starting", "failing", "contract", "owner", "gate", "review", "queued", "running"]) assert.ok(stages.includes(s), s);
+});
+
+// `a < b` compares two fields, which the schema cannot say, so it is checked here (ADR 0014).
+const overlapErrors = (s) => (s.overlaps ?? []).filter((p) => !(p.a < p.b)).map((p) => `${p.a} >= ${p.b}`);
+const fixture = JSON.parse(readFileSync("contracts/dashboard-visual.fixture.json", "utf8"));
+const fixtureIssue = (n) => fixture.issues.find((i) => i.number === n);
+
+test("the visual-check fixture conforms to the snapshot schema, with every overlap pair ordered a < b", () => {
+  assert.equal(schemaAccepts(snapshotSchema, fixture), true);
+  assert.deepEqual(overlapErrors(fixture), []);
+});
+
+test("the visual-check fixture covers every stage, blocker kind, a chain of three, two overlaps, a long title and an owner wait", () => {
+  const stageEnum = snapshotSchema.properties.issues.items.properties.stage.enum;
+  const kindEnum = snapshotSchema.properties.issues.items.properties.blockedBy.items.properties.kind.enum;
+  assert.deepEqual([...new Set(fixture.issues.map((i) => i.stage))].sort(), [...stageEnum].sort());
+  assert.deepEqual([...new Set(fixture.issues.flatMap((i) => i.blockedBy.map((b) => b.kind)))].sort(), [...kindEnum].sort());
+  const blocks = new Map(fixture.edges.map((e) => [e.from, e.to]));
+  assert.ok(fixture.edges.some((e1) => blocks.has(e1.to) && fixture.edges.some((e2) => e2.from === e1.to)), "a Blocked-by chain of three");
+  assert.ok(fixture.overlaps.length >= 2, "two overlap pairs");
+  assert.ok(fixture.issues.some((i) => i.title.length === 120), "a 120-character title");
+  assert.ok(fixture.issues.some((i) => i.stage === "owner" && i.pr && i.blockedBy.some((b) => b.kind === "owner")), "a PR awaiting the owner");
+  const numbers = new Set(fixture.issues.map((i) => i.number));
+  for (const e of fixture.edges) assert.ok(numbers.has(e.from) && numbers.has(e.to), `edge ${e.from}->${e.to} names listed issues`);
+  for (const p of fixture.overlaps) assert.ok(numbers.has(p.a) && numbers.has(p.b), `overlap ${p.a}/${p.b} names listed issues`);
+});
+
+test("the snapshot schema and overlap check reject a bad overlaps list", () => {
+  const mutate = (fn) => {
+    const s = structuredClone(fixture);
+    fn(s);
+    return s;
+  };
+  const bad = [
+    ["an extra field on a pair", (s) => (s.overlaps[0].path = "a.mjs")],
+    ["a pair missing b", (s) => delete s.overlaps[0].b],
+    ["a zero issue number", (s) => (s.overlaps[0].a = 0)],
+    ["a string issue number", (s) => (s.overlaps[0].b = "9")],
+    ["overlaps that is not an array", (s) => (s.overlaps = {})],
+  ];
+  for (const [name, fn] of bad) assert.equal(schemaAccepts(snapshotSchema, mutate(fn)), false, name);
+  for (const [name, fn] of [["a >= b", (s) => ([s.overlaps[0].a, s.overlaps[0].b] = [s.overlaps[0].b, s.overlaps[0].a])], ["a == b", (s) => (s.overlaps[0].b = s.overlaps[0].a)]]) {
+    assert.notDeepEqual(overlapErrors(mutate(fn)), [], `edge: ${name}`);
+  }
 });
 
 test("the snapshot schema rejects a bad snapshot, field by field", () => {
