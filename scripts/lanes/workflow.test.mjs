@@ -848,3 +848,14 @@ test("test-hunter, security-reviewer and architecture-advisor start from git dif
     assert.match(text, /read files by range, not whole/, name);
   }
 });
+
+test("lane.md step 3 checks the POSIX tools after setup, records the PATH shape, stops, and never prefixes export PATH", () => {
+  const step3 = readFileSync(".claude/commands/lane.md", "utf8").match(/^3\. [\s\S]*?(?=^4\. )/m)[0].replace(/\s+/g, " ");
+  assert.match(step3, /`command -v head ls wc grep` as its own command/);
+  assert.match(step3, /\.lanes\/logs\/path-\$ARGUMENTS\.txt/);
+  assert.match(step3, /number of PATH entries/);
+  assert.match(step3, /`\/usr\/bin` and `\/mingw64\/bin`/);
+  assert.match(step3, /never the full PATH/);
+  assert.match(step3, /lanes #\$ARGUMENTS: shell PATH broken/);
+  assert.match(step3, /Never prefix commands with `export PATH=…` or change PATH/);
+});
