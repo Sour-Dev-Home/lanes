@@ -1,11 +1,11 @@
 // scripts/lanes/approve-guard.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AUTOMATED_INPUT_PREFIXES, DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, powershellAsBash, readGrant, runHook, validGrant } from "./approve-guard.mjs";
+import { AUTOMATED_INPUT_PREFIXES, DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, readGrant, runHook, validGrant } from "./approve-guard.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const SHA = "a".repeat(40);
@@ -24,7 +24,7 @@ test("only a prompt that is exactly /approve <digits> names a PR", () => {
 });
 
 test("UserPromptSubmit /approve N grants { sessionId, pr: N, at }", () => {
-  assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: "/approve 16" }, NOW), { action: "grant", sessionId: "s1", grant: { sessionId: "s1", pr: 16, at: new Date(NOW).toISOString() } });
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: "/approve 16" }, NOW), { action: "grant", sessionId: "s1", grants: [{ sessionId: "s1", pr: 16, at: new Date(NOW).toISOString() }] });
 });
 
 test("UserPromptSubmit of any other prompt clears the session's grant", () => {
@@ -157,7 +157,7 @@ const decision = (out) => (out ? JSON.parse(out).hookSpecificOutput.permissionDe
 
 test("hook flow: /approve 16 then the owner command is allowed, and the allow keeps the grant (post-review consumes it)", () => withDir((dir) => {
   runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/approve 16" }), { dir, now: NOW });
-  const file = join(dir, "s1.json");
+  const file = join(dir, "s1.16.json");
   const written = readFileSync(file, "utf8");
   assert.deepEqual(JSON.parse(written), { sessionId: "s1", pr: 16, at: new Date(NOW).toISOString() });
   const first = JSON.parse(runHook("pre-tool-use", JSON.stringify(bash(OWNER)), { dir, now: NOW + 1000 }));
@@ -214,8 +214,9 @@ test("edge: findFreshGrant is null when the grant directory does not exist yet",
 
 test("hook flow: another prompt clears the grant", () => withDir((dir) => {
   runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/approve 16" }), { dir, now: NOW });
+  assert.equal(existsSync(join(dir, "s1.16.json")), true);
   runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "go on" }), { dir, now: NOW });
-  assert.equal(existsSync(join(dir, "s1.json")), false);
+  assert.equal(existsSync(join(dir, "s1.16.json")), false);
   assert.equal(decision(runHook("pre-tool-use", JSON.stringify(bash(OWNER)), { dir, now: NOW })), "deny");
 }));
 
@@ -226,7 +227,7 @@ test("hook flow: another session's grant does not allow", () => withDir((dir) =>
 
 test("hook flow: an unreadable grant file denies", () => withDir((dir) => {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "s1.json"), "{not json");
+  writeFileSync(join(dir, "s1.16.json"), "{not json");
   assert.equal(decision(runHook("pre-tool-use", JSON.stringify(bash(OWNER)), { dir, now: NOW })), "deny");
 }));
 
@@ -1068,7 +1069,7 @@ test("#262 criterion 3: every other prompt behaves as before, including one that
 });
 
 test("#262 criterion 4: a grant that survives a notification still expires after its TTL, and a used-up grant is not revived", () => withDir((dir) => {
-  const file = join(dir, "s1.json");
+  const file = join(dir, "s1.16.json");
   runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/approve 16" }), { dir, now: NOW });
   const written = readFileSync(file, "utf8");
   for (const w of WRAPPERS) runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: `${w}\nreviewer finished` }), { dir, now: NOW + 1000 });
@@ -1185,7 +1186,7 @@ test("#61 criterion 4: an allowed and a denied PowerShell call through the hook 
   const dir = mkdtempSync(join(tmpdir(), "approve-guard-"));
   const out = (s) => (s === "" ? null : JSON.parse(s).hookSpecificOutput);
   try {
-    writeFileSync(join(dir, "s1.json"), JSON.stringify(grant()));
+    writeFileSync(join(dir, "s1.16.json"), JSON.stringify(grant()));
     assert.equal(out(runHook("pre-tool-use", JSON.stringify(ps(OWNER)), { dir, now: NOW })).permissionDecision, "allow");
     assert.equal(out(runHook("pre-tool-use", JSON.stringify(ps(`& ${OWNER}`)), { dir, now: NOW })).permissionDecision, "deny");
     assert.equal(runHook("pre-tool-use", JSON.stringify(ps("Get-Date")), { dir, now: NOW }), "");
@@ -1219,3 +1220,122 @@ test("#61 edge: powershellAsBash reads PowerShell quoting into Bash words", () =
   assert.equal(powershellAsBash("x ''"), "'x' '�'");
   assert.throws(() => powershellAsBash("(".repeat(40) + ")".repeat(40)), (e) => /too deep/.test(e.message) && e.readerLimit === true);
 });
+
+// --- #275: /approve <N> [<N>...] grants each PR its own file ------------------------------------------------------
+
+const ownerFor = (pr) => `node scripts/lanes/post-review.mjs owner success "approved by owner" --pr ${pr} --sha ${SHA}`;
+const hookDecision = (dir, pr, now = NOW + 1000, session = "s1") => decision(runHook("pre-tool-use", JSON.stringify(bash(ownerFor(pr), { session_id: session })), { dir, now }));
+const submit = (dir, prompt, now = NOW, session = "s1") => runHook("user-prompt-submit", JSON.stringify({ session_id: session, prompt }), { dir, now });
+const sessionFiles = (dir, session = "s1") => (existsSync(dir) ? readdirSync(dir).filter((n) => n.startsWith(`${session}.`)).sort() : []);
+const upTo = (n) => Array.from({ length: n }, (_, i) => i + 1);
+
+test("#275 criterion 1: /approve with 1 to 10 distinct numbers grants one { sessionId, pr, at } per PR", () => {
+  const at = new Date(NOW).toISOString();
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: "/approve 16 17" }, NOW), { action: "grant", sessionId: "s1", grants: [{ sessionId: "s1", pr: 16, at }, { sessionId: "s1", pr: 17, at }] });
+  assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: `/approve ${upTo(10).join(" ")}` }, NOW).grants.map((g) => g.pr), upTo(10));
+  assert.deepEqual(parseApprovePrompts("/approve 16 17"), [16, 17]);
+  assert.deepEqual(parseApprovePrompts(" /approve 5\n"), [5]);
+});
+
+test("#275 criterion 1: 11 or more numbers, or a duplicate, grants nothing and clears", () => {
+  for (const p of [`/approve ${upTo(11).join(" ")}`, `/approve ${upTo(40).join(" ")}`, "/approve 16 16", "/approve 16 17 16"]) {
+    assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: p }, NOW), { action: "clear", sessionId: "s1" }, p);
+    assert.equal(parseApprovePrompts(p), null, p);
+  }
+});
+
+test("#275 criterion 1: the hook writes each grant under its own file name", () => withDir((dir) => {
+  submit(dir, "/approve 16 17");
+  assert.deepEqual(sessionFiles(dir), ["s1.16.json", "s1.17.json"]);
+  for (const pr of [16, 17]) assert.deepEqual(JSON.parse(readFileSync(join(dir, `s1.${pr}.json`), "utf8")), { sessionId: "s1", pr, at: new Date(NOW).toISOString() });
+  // A refused list clears what the session held.
+  submit(dir, "/approve 16 16");
+  assert.deepEqual(sessionFiles(dir), []);
+  submit(dir, `/approve ${upTo(10).join(" ")}`);
+  assert.equal(sessionFiles(dir).length, 10);
+  submit(dir, `/approve ${upTo(11).join(" ")}`);
+  assert.deepEqual(sessionFiles(dir), []);
+}));
+
+test("#275 criterion 2: any other prompt clears every grant file the session holds, and only that session's", () => withDir((dir) => {
+  submit(dir, "/approve 16 17 18");
+  submit(dir, "/approve 16", NOW, "s2");
+  submit(dir, "/approve 16", NOW, "s1-2");
+  writeFileSync(join(dir, "s1.json"), JSON.stringify(grant())); // a grant written before #275
+  submit(dir, "thanks");
+  assert.deepEqual(sessionFiles(dir), []);
+  assert.deepEqual(sessionFiles(dir, "s2"), ["s2.16.json"]);
+  assert.deepEqual(sessionFiles(dir, "s1-2"), ["s1-2.16.json"]);
+}));
+
+test("#275 criterion 2: a new /approve list replaces the session's earlier grants", () => withDir((dir) => {
+  submit(dir, "/approve 16 17");
+  submit(dir, "/approve 18");
+  assert.deepEqual(sessionFiles(dir), ["s1.18.json"]);
+  assert.equal(hookDecision(dir, 16), "deny");
+  assert.equal(hookDecision(dir, 18), "allow");
+}));
+
+test("#275 criterion 3: two PRs approved in one prompt are each allowed once; a PR not listed is refused", async () => {
+  const { requireOwnerGrant, claimGrant } = await import("./post-review.mjs");
+  withDir((dir) => {
+    submit(dir, "/approve 16 17");
+    assert.equal(hookDecision(dir, 16), "allow");
+    assert.equal(hookDecision(dir, 17), "allow");
+    assert.equal(hookDecision(dir, 18), "deny");
+    assert.throws(() => requireOwnerGrant("18", dir, NOW + 1000), /no fresh \/approve 18 grant/);
+    // post-review claims and then deletes PR 16's grant; PR 17's is untouched and still works.
+    const file16 = requireOwnerGrant("16", dir, NOW + 1000);
+    assert.equal(file16, join(dir, "s1.16.json"));
+    rmSync(claimGrant(file16, "16"));
+    assert.equal(hookDecision(dir, 16), "deny");
+    assert.throws(() => requireOwnerGrant("16", dir, NOW + 1000), /no fresh \/approve 16 grant/);
+    assert.equal(hookDecision(dir, 17), "allow");
+    assert.equal(requireOwnerGrant("17", dir, NOW + 1000), join(dir, "s1.17.json"));
+    // Each grant still lapses after its TTL.
+    assert.equal(hookDecision(dir, 17, NOW + GRANT_TTL_MS), "deny");
+    assert.throws(() => requireOwnerGrant("17", dir, NOW + GRANT_TTL_MS), /no fresh \/approve 17 grant/);
+  });
+});
+
+test("#275 criterion 3: a stale grant among fresh ones is refused, the fresh ones allowed", async () => {
+  const { requireOwnerGrant } = await import("./post-review.mjs");
+  withDir((dir) => {
+    submit(dir, "/approve 16 17");
+    writeFileSync(join(dir, "s1.18.json"), JSON.stringify(grant({ pr: 18, at: new Date(NOW - GRANT_TTL_MS).toISOString() })));
+    assert.equal(hookDecision(dir, 18, NOW), "deny");
+    assert.throws(() => requireOwnerGrant("18", dir, NOW), /no fresh \/approve 18 grant/);
+    assert.equal(hookDecision(dir, 16, NOW), "allow");
+    assert.equal(hookDecision(dir, 17, NOW), "allow");
+  });
+});
+
+test("#275 edge: another session's multi-PR grant does not allow this session", () => withDir((dir) => {
+  submit(dir, "/approve 16 17", NOW, "s2");
+  assert.equal(hookDecision(dir, 16), "deny");
+  assert.equal(hookDecision(dir, 16, NOW + 1000, "s2"), "allow");
+}));
+
+test("#275 edge: a grant file whose pr does not match its name, or that holds another session, is refused", () => withDir((dir) => {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "s1.16.json"), JSON.stringify(grant({ pr: 17 })));
+  writeFileSync(join(dir, "s1.17.json"), JSON.stringify(grant({ sessionId: "s2", pr: 17 })));
+  assert.equal(hookDecision(dir, 16), "deny");
+  assert.equal(hookDecision(dir, 17), "deny");
+}));
+
+test("#275 edge: malformed lists never grant, and odd --pr values never reach another file", () => withDir((dir) => {
+  for (const p of ["/approve", "/approve ", "/approve 16  17", "/approve 16,17", "/approve 16 #17", "/approve 16 0", "/approve 16 1234567890", "/approve 16 17 now", "/approve\t16 17", "/approve 16\n17", undefined, 16]) {
+    assert.equal(parseApprovePrompts(p), null, JSON.stringify(p));
+  }
+  submit(dir, "/approve 16");
+  for (const pr of ["016", "../s1.16", "16.json", "1e1", "-16", "16/../16"]) {
+    assert.equal(decision(runHook("pre-tool-use", JSON.stringify(bash(`node scripts/lanes/post-review.mjs owner success x --pr ${pr} --sha ${SHA}`)), { dir, now: NOW + 1000 })), "deny", pr);
+  }
+}));
+
+test("#275 edge: a wrapped multi-PR /approve never grants and keeps the session's grants", () => withDir((dir) => {
+  submit(dir, "/approve 16");
+  submit(dir, `${AUTOMATED_INPUT_PREFIXES[0]}\n/approve 17 18`);
+  assert.deepEqual(sessionFiles(dir), ["s1.16.json"]);
+}));

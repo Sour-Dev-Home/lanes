@@ -1,8 +1,8 @@
 // scripts/lanes/approve-guard.mjs — the barrier between a session and posting review/owner (owner decision, 2026-09-27).
 // Wired in .claude/settings.json as two hooks:
 //   UserPromptSubmit: node scripts/lanes/approve-guard.mjs user-prompt-submit
-//     a prompt that is exactly `/approve <N>` writes a grant { sessionId, pr: N, at } to .lanes/approve/<session>.json;
-//     any other prompt in that session deletes it, except an automated input (AUTOMATED_INPUT_PREFIXES), which neither
+//     a prompt that is exactly `/approve <N> [<N>...]` (1 to 10 distinct numbers) writes one grant { sessionId, pr: N, at }
+//     per PR to .lanes/approve/<session>.<N>.json (#275); any other prompt in that session deletes them all, except an automated input (AUTOMATED_INPUT_PREFIXES), which neither
 //     creates nor deletes one (#262).
 //   PreToolUse (Bash): node scripts/lanes/approve-guard.mjs pre-tool-use
 //     `post-review.mjs owner` is allowed (no prompt) only as the plain command, only with a grant from this
@@ -23,6 +23,10 @@ export const DENY_REASON = "owner approval only from /approve <N> in this sessio
 export const UNPARSED_REASON = `the command could not be parsed and names post-review.mjs: ${DENY_REASON}`;
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const APPROVE_RE = /^\/approve ([1-9][0-9]{0,8})$/;
+// `/approve <N> [<N>...]`: numbers separated by one space, so the match is linear (#275).
+const APPROVE_LIST_RE = /^\/approve((?: [1-9][0-9]{0,8})+)$/;
+export const MAX_APPROVE_PRS = 10;
+const PR_RE = /^[1-9][0-9]{0,8}$/;
 const POST_REVIEW_RE = /post-review(\.mjs)?$/i;
 const NON_OWNER_REVIEWERS = new Set(["test-hunter", "ui-reviewer", "security-reviewer", "architecture-advisor"]);
 const VALUED_FLAGS = new Set(["--file", "--pr", "--sha"]);
@@ -36,6 +40,19 @@ export function parseApprovePrompt(prompt) {
   if (typeof prompt !== "string") return null;
   const m = APPROVE_RE.exec(prompt.trim());
   return m ? Number(m[1]) : null;
+}
+
+/**
+ * The PR numbers of a prompt that is exactly `/approve <N> [<N>...]` (surrounding whitespace ignored): 1 to
+ * MAX_APPROVE_PRS distinct numbers, in the order typed. More numbers, a duplicate or any other text is null (#275).
+ */
+export function parseApprovePrompts(prompt) {
+  if (typeof prompt !== "string") return null;
+  const m = APPROVE_LIST_RE.exec(prompt.trim());
+  if (!m) return null;
+  const prs = m[1].slice(1).split(" ").map(Number);
+  if (prs.length > MAX_APPROVE_PRS || new Set(prs).size !== prs.length) return null;
+  return prs;
 }
 
 // How the harness opens an input the owner did not type: a subagent or background task finishing, or a message or
@@ -55,17 +72,45 @@ export function isAutomatedInput(prompt) {
 }
 
 /**
- * UserPromptSubmit: grant for `/approve <N>`, clear for any other prompt, nothing for a session id unsafe as a file
- * name or for an automated input (#262). Keeping the grant across an automated input is safe: such a prompt never
- * creates one, whatever its body says, and the grant still lapses after GRANT_TTL_MS and is spent by its one run.
+ * UserPromptSubmit: one grant per PR for `/approve <N> [<N>...]` (#275), clear for any other prompt, nothing for a
+ * session id unsafe as a file name or for an automated input (#262). Keeping the grants across an automated input is
+ * safe: such a prompt never creates one, whatever its body says, and each grant still lapses after GRANT_TTL_MS and is
+ * spent by its one run.
  */
 export function onUserPromptSubmit(input, now = Date.now()) {
   const sessionId = input?.session_id;
   if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId)) return { action: "none" };
   if (isAutomatedInput(input.prompt)) return { action: "none" };
-  const pr = parseApprovePrompt(input.prompt);
-  if (pr === null) return { action: "clear", sessionId };
-  return { action: "grant", sessionId, grant: { sessionId, pr, at: new Date(now).toISOString() } };
+  const prs = parseApprovePrompts(input.prompt);
+  if (prs === null) return { action: "clear", sessionId };
+  const at = new Date(now).toISOString();
+  return { action: "grant", sessionId, grants: prs.map((pr) => ({ sessionId, pr, at })) };
+}
+
+/** A session's grant file for one PR: <session>.<pr>.json. A session id holds no '.', so the name is unambiguous (#275). */
+export function grantFileName(sessionId, pr) {
+  return `${sessionId}.${pr}.json`;
+}
+
+/** Deletes every grant file `sessionId` holds in `dir`: <session>.<pr>.json, and <session>.json from before #275. */
+function clearSessionGrants(dir, sessionId) {
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  const prefix = `${sessionId}.`;
+  for (const name of names) {
+    if (name === `${sessionId}.json` || (name.startsWith(prefix) && name.endsWith(".json") && PR_RE.test(name.slice(prefix.length, -".json".length)))) {
+      // One file that cannot be deleted must not stop the rest, nor the new grants written after the clear.
+      try {
+        rmSync(join(dir, name), { force: true });
+      } catch {
+        // It still lapses after GRANT_TTL_MS and is spent by its one run.
+      }
+    }
+  }
 }
 
 /**
@@ -1147,11 +1192,12 @@ export function isFreshGrant(grant, pr, now = Date.now()) {
 /**
  * PreToolUse: null (no decision) unless the command runs `post-review.mjs owner`; then allow only with this session's
  * fresh grant for the same --pr, and deny everything else.
- * @param grant the session's grant file as parsed, null when there is none, or { unreadable: true }
+ * @param grantOrLookup the session's grant file as parsed, null when there is none, or { unreadable: true }; or a
+ *   function from the command's --pr (a string of digits) to that, so each PR reads its own grant file (#275)
  * The allow leaves the grant in place: post-review.mjs checks it again, claims it before any gh call (#180) and deletes it once the status is posted (#81).
  * @returns {null | { decision: "allow" | "deny", reason: string }}
  */
-export function decidePreToolUse(input, grant, now = Date.now()) {
+export function decidePreToolUse(input, grantOrLookup, now = Date.now()) {
   const tool = input?.tool_name;
   if (tool !== "Bash" && tool !== "PowerShell") return null;
   const command = String(input.tool_input?.command ?? "");
@@ -1173,7 +1219,10 @@ export function decidePreToolUse(input, grant, now = Date.now()) {
   const deny = { decision: "deny", reason: DENY_REASON };
   const sessionId = input.session_id;
   if (found.length !== 1 || !found[0].standalone) return deny;
-  if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId) || !validGrant(grant)) return deny;
+  if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId)) return deny;
+  if (typeof grantOrLookup === "function" && !PR_RE.test(String(found[0].pr ?? ""))) return deny;
+  const grant = typeof grantOrLookup === "function" ? grantOrLookup(found[0].pr) : grantOrLookup;
+  if (!validGrant(grant)) return deny;
   if (grant.sessionId !== sessionId || String(grant.pr) !== found[0].pr) return deny;
   if (!isFreshGrant(grant, grant.pr, now)) return deny;
   return { decision: "allow", reason: `owner approval from /approve ${grant.pr} in this session` };
@@ -1220,12 +1269,11 @@ export function runHook(event, raw, { dir, now = Date.now() }) {
   if (event === "user-prompt-submit") {
     try {
       const r = onUserPromptSubmit(JSON.parse(raw), now);
-      const file = r.action === "none" ? null : join(dir, `${r.sessionId}.json`);
+      // Every prompt that is not an automated input starts from no grants: a new list replaces the last one (#275).
+      if (r.action !== "none") clearSessionGrants(dir, r.sessionId);
       if (r.action === "grant") {
         mkdirSync(dir, { recursive: true });
-        writeFileSync(file, `${JSON.stringify(r.grant)}\n`);
-      } else if (r.action === "clear") {
-        rmSync(file, { force: true });
+        for (const g of r.grants) writeFileSync(join(dir, grantFileName(r.sessionId, g.pr)), `${JSON.stringify(g)}\n`);
       }
     } catch {
       // Never block a prompt; a grant that was not written only means the owner command is denied.
@@ -1236,8 +1284,10 @@ export function runHook(event, raw, { dir, now = Date.now() }) {
     try {
       const input = JSON.parse(raw);
       const sessionId = input?.session_id;
-      const file = typeof sessionId === "string" && SESSION_RE.test(sessionId) ? join(dir, `${sessionId}.json`) : null;
-      const d = decidePreToolUse(input, file ? readGrant(file) : null, now);
+      const safe = typeof sessionId === "string" && SESSION_RE.test(sessionId);
+      // Each PR's grant is its own file; decidePreToolUse checks --pr is plain digits before this reads it (#275).
+      const lookup = (pr) => (safe && PR_RE.test(pr) ? readGrant(join(dir, grantFileName(sessionId, pr))) : null);
+      const d = decidePreToolUse(input, lookup, now);
       if (d === null) return "";
       // An allow keeps the grant: post-review.mjs claims it when it runs (#180) and deletes it only after the review/owner status is posted (#81).
       return preToolUseOutput(d.decision, d.reason);
