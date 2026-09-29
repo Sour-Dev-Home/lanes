@@ -1104,3 +1104,111 @@ test("main posts no error status for a failure that is not a GitHub call", () =>
   assert.throws(() => main({ REPO: "o/r", EVENT_NAME: "merge_group", GROUP_SHA: "bad" }, api), /GROUP_SHA/);
   assert.equal(posted.length, 0);
 });
+
+// #381, ADR 0015: the gate fetches lanes.config.json and workflow.test.mjs at base and head only when the PR changes
+// nothing else, and passes owner-diff.mjs's verdict to gateDecision.
+const BASE = "b".repeat(40);
+const CONFIG_FILE = "lanes.config.json";
+const WORKFLOW_FILE = "scripts/lanes/workflow.test.mjs";
+const ownerConfig = compileConfig({
+  requiredChecks: ["verify"],
+  paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [], owner: ["^lanes\\.config\\.json$", "^scripts/lanes/workflow\\.test\\.mjs$"] },
+});
+const baseConfigText = JSON.stringify({ paths: { owner: ["^a$"] } }, null, 2) + "\n";
+const appendedConfigText = JSON.stringify({ paths: { owner: ["^a$", "^b$"] } }, null, 2) + "\n";
+const contentsRoute = (file, sha) => `repos/o/r/contents/${file}?ref=${sha}`;
+function ownerDiffRoutes(files, contents) {
+  const routes = fullRoutes([verdictComment("leo", "test-hunter"), verdictComment("leo", "architecture-advisor")]);
+  routes["repos/o/r/pulls/5"] = { ...routes["repos/o/r/pulls/5"], base: { ref: "main", sha: BASE } };
+  routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`] = [reviewStatus, { ...reviewStatus, context: "review/architecture-advisor" }];
+  routes["repos/o/r/pulls/5/files"] = files.join("\n") + "\n";
+  return { ...routes, ...contents };
+}
+// Records every gh api call, so a test can prove which files were fetched.
+function recording(routes) {
+  const { api: inner, posted } = fakeApi(routes);
+  const calls = [];
+  const api = (args) => {
+    calls.push(args);
+    return inner(args);
+  };
+  return { api, posted, calls };
+}
+const contentCalls = (calls) => calls.filter((a) => a[0].includes("/contents/"));
+
+test("a PR that only appends to paths.owner passes the gate without the owner once reviews are in", () => {
+  const { api, calls } = recording(
+    ownerDiffRoutes([CONFIG_FILE], {
+      [contentsRoute(CONFIG_FILE, BASE)]: baseConfigText,
+      [contentsRoute(CONFIG_FILE, SHA)]: appendedConfigText,
+    }),
+  );
+  const d = evaluatePr(api, "o/r", 5, ownerConfig);
+  assert.equal(d.state, "success");
+  assert.equal(d.description, "unattended-eligible (tier:full), reviews in");
+  // Fetched raw, once per side.
+  assert.equal(contentCalls(calls).length, 2);
+  assert.ok(contentCalls(calls).every((a) => a.includes("Accept: application/vnd.github.raw")));
+});
+
+test("a PR that edits a paths.owner entry still waits on the owner", () => {
+  const { api } = recording(
+    ownerDiffRoutes([CONFIG_FILE], {
+      [contentsRoute(CONFIG_FILE, BASE)]: baseConfigText,
+      [contentsRoute(CONFIG_FILE, SHA)]: JSON.stringify({ paths: { owner: ["^x$", "^b$"] } }),
+    }),
+  );
+  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).description, "waiting on owner (/approve) (owner-only path)");
+});
+
+test("a PR appending a test block to workflow.test.mjs passes; both files together are both checked", () => {
+  const tests = 'import { test } from "node:test";\n';
+  const block = 'test("new pin", () => {\n});\n';
+  const { api, calls } = recording(
+    ownerDiffRoutes([CONFIG_FILE, WORKFLOW_FILE], {
+      [contentsRoute(CONFIG_FILE, BASE)]: baseConfigText,
+      [contentsRoute(CONFIG_FILE, SHA)]: appendedConfigText,
+      [contentsRoute(WORKFLOW_FILE, BASE)]: tests,
+      [contentsRoute(WORKFLOW_FILE, SHA)]: tests + block,
+    }),
+  );
+  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).state, "success");
+  assert.equal(contentCalls(calls).length, 4);
+});
+
+test("a fetch failure passes needs-owner, so the PR waits on the owner", () => {
+  // No base route: the fake API throws for it, as GitHub does for a file missing at base.
+  const { api } = recording(ownerDiffRoutes([CONFIG_FILE], { [contentsRoute(CONFIG_FILE, SHA)]: appendedConfigText }));
+  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).description, "waiting on owner (/approve) (owner-only path)");
+});
+
+test("the gate fetches nothing when the PR changes any other file", () => {
+  const { api, calls } = recording(
+    ownerDiffRoutes([CONFIG_FILE, "src/a.ts"], {
+      [contentsRoute(CONFIG_FILE, BASE)]: baseConfigText,
+      [contentsRoute(CONFIG_FILE, SHA)]: appendedConfigText,
+    }),
+  );
+  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).description, "waiting on owner (/approve) (owner-only path)");
+  assert.deepEqual(contentCalls(calls), []);
+});
+
+test("edge: a renamed-in owner file lists its old name too, so nothing is fetched", () => {
+  const { api, calls } = recording(ownerDiffRoutes([CONFIG_FILE, "old.json"], {}));
+  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).description, "waiting on owner (/approve) (owner-only path)");
+  assert.deepEqual(contentCalls(calls), []);
+});
+
+test("edge: a malformed base or head SHA fetches nothing and waits on the owner", () => {
+  const routes = ownerDiffRoutes([CONFIG_FILE], {});
+  routes["repos/o/r/pulls/5"] = { ...routes["repos/o/r/pulls/5"], base: { ref: "main", sha: "../x" } };
+  const { api, calls } = recording(routes);
+  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).description, "waiting on owner (/approve) (owner-only path)");
+  assert.deepEqual(contentCalls(calls), []);
+});
+
+test("edge: a PR with no owner-diff files fetches nothing", () => {
+  const { api, calls } = recording(fullRoutes([verdictComment("leo", "test-hunter")]));
+  assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
+  assert.deepEqual(contentCalls(calls), []);
+});
