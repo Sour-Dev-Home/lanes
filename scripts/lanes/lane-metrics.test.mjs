@@ -172,6 +172,15 @@ test("edge: queue minutes run to the merge when nothing removed the PR, sum re-q
   assert.deepEqual(friction.stuckQueueMinutes, { count: 2, median: 45, p90: 57 });
 });
 
+test("edge: a closing issue with an unrecognised tier label lands in unknown, never as free text", () => {
+  const mk = (number, tier) => richNode({ number, createdAt: "2026-09-10T08:00:00Z", mergedAt: "2026-09-10T10:00:00Z", scope: ["a.mjs"], tier });
+  const r = build({ prs: rich(mk(21, "secret-customer-name"), mk(22, "fullish"), mk(23, "quick")) });
+  assert.equal(accepts(schema, r), true);
+  assert.deepEqual(r.byTier.map((t) => t.tier), ["quick", "unknown"]);
+  assert.equal(r.byTier[1].rework.prs, 2);
+  assert.doesNotMatch(JSON.stringify(r), /secret-customer-name/);
+});
+
 test("byTier splits rework, scope drift, owner time and friction by the closing issue's tier, and conforms", () => {
   const r = build();
   assert.equal(accepts(schema, r), true);
