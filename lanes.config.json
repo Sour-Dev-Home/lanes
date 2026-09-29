@@ -28,13 +28,13 @@
         "paths": [
           "scripts/lanes/pick.", "scripts/lanes/status.", "scripts/lanes/paths.", "scripts/lanes/start.", "scripts/lanes/start-guard.",
           "scripts/lanes/queue.", "scripts/lanes/cleanup.", "scripts/lanes/reap.", "scripts/lanes/lifecycle.",
-          "scripts/lanes/snapshot."
+          "scripts/lanes/snapshot.", "scripts/lanes/lane-cost."
         ],
         "imports": ["lib", "gate"]
       },
       {
         "id": "metrics",
-        "paths": ["scripts/lanes/delivery-metrics.", "scripts/lanes/review-metrics.", "scripts/lanes/lane-metrics.", "scripts/lanes/lane-cost.","scripts/lanes/diff-coverage."],
+        "paths": ["scripts/lanes/delivery-metrics.", "scripts/lanes/review-metrics.", "scripts/lanes/lane-metrics.", "scripts/lanes/diff-coverage."],
         "imports": ["lib", "queue"]
       },
       {

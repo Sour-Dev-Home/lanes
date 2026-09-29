@@ -539,7 +539,7 @@ export function waitForStop(id, { run, sleep }) {
 export function recordSessionCost(id, issue, inputs, costDeps = {}) {
   const session = inputs.sessions?.find((s) => s.id === id);
   const label = inputs.issues?.find((i) => i.number === issue)?.labels?.map((l) => /^tier:(.+)$/.exec(l?.name ?? "")?.[1]).find(Boolean);
-  return recordLaneCost({ issue, tier: label ?? null, sessionId: session?.sessionId, startedAt: session?.startedAt }, { root: inputs.root, ...costDeps });
+  return recordLaneCost({ issue, tier: label ?? null, sessionId: session?.sessionId, startedAt: session?.startedAt, cwd: session?.cwd }, { root: inputs.root, ...costDeps });
 }
 
 const branchExists = (branch) => {

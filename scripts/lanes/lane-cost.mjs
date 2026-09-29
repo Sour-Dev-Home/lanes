@@ -9,15 +9,17 @@
 //     launchedAt, removedAt }
 // No path and no prompt text is ever written: `reason` is one of the fixed strings below.
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { percentile } from "./delivery-metrics.mjs";
 
 const DAY_MS = 24 * 3_600_000;
 const TIER_ORDER = ["full", "quick", "skip", "unknown"];
 export const REASONS = { noSession: "no session id", missing: "transcript not found", unreadable: "transcript unreadable" };
+const MAX_MODEL_CHARS = 100;
+// A transcript larger than this is not read into memory; the lane gets `tokens: null` instead.
+export const MAX_TRANSCRIPT_BYTES = 256 * 1024 * 1024;
 
 const count = (n) => (Number.isFinite(n) && n > 0 ? n : 0);
 
@@ -60,6 +62,11 @@ export function sessionUsage(jsonlText) {
 // Claude Code names a project's transcript folder after its path with every non-alphanumeric character as `-`.
 export const projectFolder = (root) => String(root).replace(/[^A-Za-z0-9]/g, "-");
 
+function readTranscript(file) {
+  if (statSync(file).size > MAX_TRANSCRIPT_BYTES) throw Object.assign(new Error("transcript too large"), { code: "E2BIG" });
+  return readFileSync(file, "utf8");
+}
+
 const isoOrNull = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
@@ -68,18 +75,25 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
  * gives `tokens: null` and a fixed `reason`.
  * @param {{ issue: number|null, tier?: string|null, sessionId?: string, startedAt?: number, root: string, now?: () => number, home?: string, read?: (file: string) => string }} lane
  */
-export function costLine({ issue, tier = null, sessionId, startedAt, root, now = Date.now, home = homedir(), read = (f) => readFileSync(f, "utf8") }) {
-  const base = { issue: issue ?? null, tier: tier ?? null, sessionId: sessionId ?? null, model: null, launchedAt: isoOrNull(startedAt), removedAt: isoOrNull(now()) };
+export function costLine({ issue, tier = null, sessionId, startedAt, root, cwd, now = Date.now, home = homedir(), read = readTranscript }) {
+  const base = { issue: issue ?? null, tier: TIER_ORDER.includes(tier) ? tier : null, sessionId: sessionId ?? null, model: null, launchedAt: isoOrNull(startedAt), removedAt: isoOrNull(now()) };
   if (typeof sessionId !== "string" || !SAFE_ID.test(sessionId)) return { ...base, sessionId: null, tokens: null, reason: REASONS.noSession };
   let text;
-  try {
-    text = read(join(home, ".claude", "projects", projectFolder(root), `${sessionId}.jsonl`));
-  } catch (err) {
-    return { ...base, tokens: null, reason: err?.code === "ENOENT" ? REASONS.missing : REASONS.unreadable };
+  // A session launched from the root writes its transcript under the folder of the directory it later works in (the
+  // worktree), so try the root's folder first and then the session's own cwd folder.
+  const folders = [...new Set([root, cwd].filter((p) => typeof p === "string" && p).map(projectFolder))];
+  for (const [i, folder] of folders.entries()) {
+    try {
+      text = read(join(home, ".claude", "projects", folder, `${sessionId}.jsonl`));
+      break;
+    } catch (err) {
+      if (err?.code === "ENOENT" && i < folders.length - 1) continue;
+      return { ...base, tokens: null, reason: err?.code === "ENOENT" ? REASONS.missing : REASONS.unreadable };
+    }
   }
   const { models, messages, ...tokens } = sessionUsage(text);
   if (messages === 0) return { ...base, tokens: null, reason: REASONS.unreadable };
-  return { ...base, model: models.join(",") || null, tokens };
+  return { ...base, model: models.join(",").slice(0, MAX_MODEL_CHARS) || null, tokens };
 }
 
 /** Appends `line` to `<root>/.lanes/costs.jsonl`; throws only when the file cannot be written. */
@@ -124,7 +138,9 @@ export function summarize(jsonlText, { days, now = Date.now() }) {
   return TIER_ORDER.filter((t) => byTier.has(t)).map((t) => {
     const { tokens, ...row } = byTier.get(t);
     const sorted = [...tokens].sort((a, b) => a - b);
-    return { ...row, medianTokens: sorted.length ? Math.round(percentile(sorted, 0.5)) : null, totalTokens: sorted.reduce((a, b) => a + b, 0) };
+    const mid = sorted.length >> 1;
+    const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    return { ...row, medianTokens: sorted.length ? Math.round(median) : null, totalTokens: sorted.reduce((a, b) => a + b, 0) };
   });
 }
 

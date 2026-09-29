@@ -64,6 +64,22 @@ test("costLine reads <home>/.claude/projects/<folder>/<session>.jsonl and totals
   });
 });
 
+test("costLine falls back to the session's cwd folder when the root's folder has no transcript (real Claude Code layout)", () => {
+  const asked = [];
+  const read = (f) => {
+    asked.push(f.replace(/\\/g, "/"));
+    if (asked.length === 1) throw Object.assign(new Error("x"), { code: "ENOENT" });
+    return msg("a", u(1, 2));
+  };
+  const line = costLine({ ...lane, cwd: "/r/x/.claude/worktrees/issue-7", read });
+  assert.equal(asked.length, 2);
+  assert.match(asked[1], /projects\/-r-x--claude-worktrees-issue-7\/abc-123\.jsonl$/);
+  assert.equal(line.tokens.total, 3);
+  // both missing: still tokens null with the fixed reason, and nothing of either path in the line
+  const none = costLine({ ...lane, cwd: "/r/x/wt", read: () => { throw Object.assign(new Error("x"), { code: "ENOENT" }); } });
+  assert.deepEqual([none.tokens, none.reason], [null, REASONS.missing]);
+});
+
 test("costLine with a missing transcript gives tokens null and a fixed reason", () => {
   const line = costLine({ ...lane, read: () => { throw Object.assign(new Error("ENOENT: C:\\secret\\path"), { code: "ENOENT" }); } });
   assert.equal(line.tokens, null);
@@ -78,6 +94,18 @@ test("edge: costLine with an unreadable, empty or id-less session", () => {
   assert.equal(none.reason, REASONS.noSession);
   assert.equal(none.sessionId, null);
   assert.equal(costLine({ ...lane, startedAt: undefined, tier: undefined, read: () => "" }).launchedAt, null);
+});
+
+test("edge: costLine keeps only a known tier and caps the model string", () => {
+  assert.equal(costLine({ ...lane, tier: "weird\ntier", read: () => "" }).tier, null);
+  const long = costLine({ ...lane, read: () => msg("a", u(1, 1), "m".repeat(500)) });
+  assert.equal(long.model.length, 100);
+});
+
+test("edge: costLine does not read a transcript over the size cap", () => {
+  const big = costLine({ ...lane, read: () => { throw Object.assign(new Error("transcript too large"), { code: "E2BIG" }); } });
+  assert.equal(big.tokens, null);
+  assert.equal(big.reason, REASONS.unreadable);
 });
 
 test("recordLaneCost appends one line per call under .lanes/costs.jsonl with only the known fields", () => {
