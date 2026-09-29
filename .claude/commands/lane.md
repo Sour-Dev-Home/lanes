@@ -29,6 +29,10 @@ files with Edit, not Write.
    `git worktree add -b issue-$ARGUMENTS-<short-slug> .claude/worktrees/issue-$ARGUMENTS-<short-slug> origin/main`,
    and enter it with the EnterWorktree tool's `path` parameter when available (otherwise `cd` into it). Do not call
    EnterWorktree with `name`: it creates a `worktree-<name>` branch. Run `npm run setup` in it.
+   Then run `command -v head ls wc grep` as its own command. If any is missing, write the PATH shape (the number of PATH
+   entries and whether `/usr/bin` and `/mingw64/bin` are present, never the full PATH) to `.lanes/logs/path-$ARGUMENTS.txt`,
+   notify `lanes #$ARGUMENTS: shell PATH broken`, report that line and stop. Never prefix commands with `export PATH=…` or
+   change PATH to work around missing tools.
 4. Read the issue's Interface contract and Scope. Touch nothing out of scope. If the contract is wrong or missing,
    stop and file a new task issue for the contract instead of inventing one.
 4b. Practice (the project skills, agent-skills): build in thin vertical slices with `incremental-implementation` and
