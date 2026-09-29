@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, RUNTIME_TEXT_DENY_REASON, UNRESOLVED_DENY_REASON, WMI_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, grantPath, grantRefusal, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, readGrant, runHook } from "./start-guard.mjs";
+import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, RUNTIME_TEXT_DENY_REASON, TAG_DENY_REASON, UNRESOLVED_DENY_REASON, WMI_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, grantPath, grantRefusal, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, readGrant, runHook } from "./start-guard.mjs";
 import { AUTOMATED_INPUT_PREFIXES } from "./approve-guard.mjs";
 import { WRAPPERS, automatedInputLeavesTheGrant } from "./shell-lex.fixtures.mjs";
 
@@ -2361,4 +2361,99 @@ test("#378 criterion 4: commands that only print, pass or read such text get no 
   for (const cmd of ["([wmiclass]'Win32_Process').Properties", "Get-CimInstance Win32_Process", "ls n*", "git commit -F msg.txt"]) {
     assert.equal(decideFor(ps(cmd)), null, cmd);
   }
+});
+
+// --- #404: the run-time text, computed WMI method, glob and release tag gaps #378 left ----------------------------
+
+test("#404 criterion 1: a shell's -c script after --, -e, -x or +x is denied as run-time text", () => {
+  for (const cmd of ['bash -c -- "$X"', 'bash -c -e "$X"', 'bash -c -x "$X"', 'bash -c +x "$X"', 'sh -c -o errexit "$X"']) {
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(RUNTIME_TEXT_DENY_REASON), cmd);
+  }
+  // edge: the script after -- still runs its backticks and names.
+  assert.deepEqual(decideFor(bash("bash -c -- 'node scripts/lanes/start.mjs 1'")), deny(DENY_REASON));
+  assert.deepEqual(decideFor(bash("bash -c -e '`echo scripts/lanes/queue.mjs`'")), deny(QUEUE_DENY_REASON));
+});
+
+test("#404 criterion 2: builtin and command with their own options are looked through before eval, source and dot", () => {
+  for (const cmd of ['command -p eval "$X"', 'command -- eval "$X"', 'builtin -- source "$F"', 'command -p -- . "$F"']) {
+    assert.deepEqual(decideFor(bash(cmd)), deny(RUNTIME_TEXT_DENY_REASON), cmd);
+  }
+});
+
+test("#404 criterion 3: su, runuser, script, flock, sg, fish and pwsh given run-time text are denied", () => {
+  for (const cmd of [
+    'su -c "$X"', 'su root -c "$X"', 'runuser -c "$X" u', 'script -c "$X" /dev/null', 'flock /tmp/l -c "$X"', 'sg grp -c "$X"', 'sg grp "$X"',
+    'fish -c "$X"', 'pwsh -c "$X"', 'pwsh -Command "$X"', 'powershell -Command "$x"',
+  ]) {
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(RUNTIME_TEXT_DENY_REASON), cmd);
+  }
+  assert.equal(decideFor(bash("su -c 'echo $X'")), null);
+});
+
+const COMPUTED_WMI_PS = [
+  `$o = Get-WmiObject Win32_Process; $o.('{0}{1}' -f 'Cre','ate')('node x')`,
+  `$o = [wmiclass]'Win32_Process'; $o | ForEach-Object -MemberName $m 'node x'`,
+  `$o = [wmiclass]'Win32_Process'; $o.GetType().InvokeMember($m, 'InvokeMethod', $null, $o, @('node x'))`,
+  `$o = [wmiclass]'Win32_Process'; $f = $o.$m; $f.Invoke('node x')`,
+];
+
+test("#404 criterion 4: a Win32_Process method named by a computed expression is denied through the PowerShell tool", () => {
+  for (const cmd of COMPUTED_WMI_PS) {
+    assert.deepEqual(decideFor(ps(cmd)), deny(WMI_DENY_REASON), cmd);
+    assert.deepEqual(decideFor(ps(cmd), grant()), deny(WMI_DENY_REASON), `${cmd} with a grant`);
+  }
+});
+
+test("#404 criterion 6: a POSIX class glob that could be node running start.mjs is denied", () => {
+  for (const cmd of ["[[:alpha:]]ode scripts/lanes/start.mjs 1", "n[[:alnum:]]de scripts/lanes/start.mjs 1"]) {
+    assert.deepEqual(decideFor(bash(cmd), grant({ issues: [1] })), deny(DENY_REASON), cmd);
+  }
+});
+
+test("#404 criterion 7: a bare glob argument of a command that only prints or reads is not node", () => {
+  for (const cmd of ["echo foo * scripts/lanes/start.mjs", "cat n* scripts/lanes/start.mjs", "ls n* scripts/lanes/queue.mjs", "grep -l x n* scripts/lanes/start.mjs"]) {
+    assert.equal(decideFor(bash(cmd)), null, cmd);
+  }
+  // A glob as the program word, or behind a wrapper, is still node; and so is one whose output a shell runs.
+  assert.deepEqual(decideFor(bash("n* scripts/lanes/start.mjs 1")), deny(DENY_REASON));
+  assert.deepEqual(decideFor(bash("echo n* scripts/lanes/start.mjs | sh")), deny(DENY_REASON));
+  assert.deepEqual(decideFor(bash("xargs n* scripts/lanes/start.mjs")), deny(DENY_REASON));
+});
+
+test("#404 criterion 11: creating or pushing a v* tag is denied from any session, and listing or a branch push is not", () => {
+  assert.match(TAG_DENY_REASON, /ADR 0017/);
+  for (const cmd of [
+    "git tag v1.2.3", "git tag -a v1.2.3 -m x", "git push --tags", "git push --follow-tags", "git push origin v1.2.3", "git push origin refs/tags/v1.2.3",
+    "git status && git tag v1.2.3", "bash -c 'git push --tags'",
+  ]) {
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(TAG_DENY_REASON), cmd);
+    assert.deepEqual(decideFor(ps(cmd)), deny(TAG_DENY_REASON), `${cmd} (PowerShell)`);
+  }
+  for (const cmd of ["git tag -l", "git tag --list 'v*'", "git push origin issue-404-guard-gaps", "git push -u origin HEAD"]) {
+    assert.equal(decideFor(bash(cmd)), null, cmd);
+  }
+});
+
+test("#404 criterion 12: a read-only search whose pattern names a lanes script gets no decision", () => {
+  for (const cmd of [
+    'grep -n "queue.mjs" .claude/commands/night.md', "rg start.mjs docs", "grep -rn 'queue.mjs\\|start.mjs' .claude/commands",
+    'rg -n "start.mjs --auto" docs', 'grep -n "node scripts/lanes/queue.mjs" .claude/commands/night.md', "grep -n node scripts/lanes/start.mjs",
+  ]) {
+    assert.equal(decideFor(bash(cmd)), null, cmd);
+  }
+  // A search whose output a shell runs, a pattern that runs a substitution, or rg's --pre program still counts.
+  assert.deepEqual(decideFor(bash("grep -h 'node scripts/lanes/start.mjs 1' f | sh")), deny(DENY_REASON));
+  assert.deepEqual(decideFor(bash('grep "$(node scripts/lanes/queue.mjs)" f')), deny(QUEUE_DENY_REASON));
+  assert.deepEqual(decideFor(bash("rg --pre node x scripts/lanes/start.mjs")), deny(DENY_REASON));
+});
+
+test("#404 criterion 13: a case pattern glob and a PowerShell variable read get no decision; run-time PowerShell text stays denied", () => {
+  for (const cmd of ['case ":$PATH:" in *:/usr/bin:*) echo yes;; esac', 'case ":$PATH:" in *:/usr/bin:*) echo yes;; *) echo no;; esac', `powershell -NoProfile -Command "($env:Path -split ';').Count"`]) {
+    assert.equal(decideFor(bash(cmd)), null, cmd);
+  }
+  // Text with a known start whose program is the unknown part keeps the unresolved reason; both deny (#378).
+  assert.deepEqual(decideFor(bash('powershell -Command "& $p"')), deny(UNRESOLVED_DENY_REASON));
+  assert.deepEqual(decideFor(bash("powershell -Command '& $p'")), deny(UNRESOLVED_DENY_REASON));
+  assert.deepEqual(decideFor(bash("case x in *) node scripts/lanes/start.mjs 1;; esac")), deny(DENY_REASON));
+  assert.deepEqual(decideFor(bash("powershell -NoProfile -Command \"node scripts/lanes/start.mjs 1\"")), deny(DENY_REASON));
 });

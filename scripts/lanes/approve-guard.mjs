@@ -16,7 +16,7 @@
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { dequoted, launchedCommands, lex, mayBeNode, mayExpandTo, readGrant, RUNS_ON_EXPANSION_RE, runsRuntimeText, scriptSubcommand, unmark, wmiProcessCreate } from "./shell-lex.mjs";
+import { dequoted, launchedCommands, lex, mayBeNode, mayExpandTo, readGrant, releaseTagCommand, RUNS_ON_EXPANSION_RE, runsRuntimeText, scriptSubcommand, unmark, wmiProcessCreate } from "./shell-lex.mjs";
 
 // post-review.mjs reads the grant with the guard's own reader.
 export { readGrant } from "./shell-lex.mjs";
@@ -26,7 +26,9 @@ export const DENY_REASON = "owner approval only from /approve <N> in this sessio
 // A command that names post-review but cannot be parsed (an unterminated quote) fails closed with this reason (#100).
 export const UNPARSED_REASON = `the command could not be parsed and names post-review.mjs: ${DENY_REASON}`;
 // A WMI/CIM process creation whose command line is built at run time (#308).
-export const WMI_REASON = `this WMI/CIM process creation builds its command line at run time, which could be post-review.mjs owner: ${DENY_REASON}`;
+// ADR 0017 decision 3: a pushed v* tag releases, so only the owner makes one, from their own terminal (#404).
+export const TAG_REASON = "creating or pushing a v* tag starts a release, which the owner does from their own terminal, never from a Claude session (ADR 0017)";
+export const WMI_REASON =`this WMI/CIM process creation builds its command line at run time, which could be post-review.mjs owner: ${DENY_REASON}`;
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const APPROVE_RE = /^\/approve ([1-9][0-9]{0,8})$/;
 // `/approve <N> [<N>...]`: numbers separated by one space, so the match is linear (#275).
@@ -186,7 +188,72 @@ function asBashText(text, shellName) {
 }
 // Commands that hand their arguments to a shell as text without a -c flag of bash's (#219): watch, ssh, su -c,
 // script -c, flock -c, parallel, tmux, screen. Every argument after one counts as run.
-const SHELL_TEXT_COMMANDS = new Set(["watch", "ssh", "su", "runuser", "script", "flock", "parallel", "tmux", "screen"]);
+const SHELL_TEXT_COMMANDS = new Set(["watch", "ssh", "su", "runuser", "script", "flock", "parallel", "tmux", "screen", "sg"]);
+// powershell's own options (#404), read past before its command text: those that take no value, those that take the
+// next word, and -Command or -File, after which the rest is the command. Any other option leaves the text unread.
+const PS_BOOLEAN_OPTION_RE = /^[-/](noprofile|nop|nologo|noninteractive|noni|noexit|sta|mta|login|l)$/i;
+const PS_VALUED_OPTION_RE = /^[-/](executionpolicy|ex|ep|windowstyle|w|workingdirectory|wd|outputformat|of|o|inputformat|if|version|v|configurationname|config)$/i;
+const PS_COMMAND_OPTION_RE = /^[-/](c|co|com|comm|comma|comman|command|f|fi|fil|file)$/i;
+
+/**
+ * The command text powershell or pwsh runs from its arguments `plain[from…]`, past its own options, with an
+ * -EncodedCommand value decoded (foreignText); null when an option this reader does not know stands before it.
+ */
+function powershellCommandText(plain, from, shellName) {
+  let i = from;
+  for (; i < plain.length; i += 1) {
+    const w = unmark(plain[i]);
+    if (PS_BOOLEAN_OPTION_RE.test(w)) continue;
+    if (PS_VALUED_OPTION_RE.test(w)) i += 1;
+    else if (PS_COMMAND_OPTION_RE.test(w) || isEncodedFlag(w)) {
+      i += 1;
+      break;
+    } else if (/^[-/]/.test(w)) return null;
+    else break;
+  }
+  return plain.slice(i).map((_, j) => foreignText(plain, i + j, shellName)).join(" ");
+}
+
+// awk and sed programs that run a command (#404): awk's system(), a pipe to or from a command (`| "cmd"`,
+// `"cmd" |`, `| getline`, gawk's `|&`, a pipe to a variable ending a statement), and sed's `e` command or s///e flag.
+// Each run is bounded, so a long program stays linear.
+const AWK_RE = /^(awk|gawk|mawk|nawk)(\.exe)?$/i;
+const SED_RE = /^(sed|gsed)(\.exe)?$/i;
+const AWK_RUN_RE = /system\s{0,16}\(|\|\s{0,16}getline|\|&|\|\s{0,16}"|"\s{0,16}\||\|\s{0,16}[A-Za-z_]\w{0,64}\s{0,16}(?:[;}\n]|$)/;
+const SED_RUN_RE = /(?:^|[;\n{}!0-9$/])\s{0,16}e(?:[\s;}]|$)|[^\w\s\\][gpimIMw0-9]{0,8}e[gpimIM0-9]{0,8}(?:[\s;}]|$)/;
+
+/**
+ * The text of an awk or sed call's program when that program runs a command (#404), with the values that feed it
+ * (awk's -v and `name=value` operands), or null: no program that runs one, a program read from a file (-f), or
+ * another command. `args` are the call's arguments with their real characters.
+ */
+function runningProgram(name, args) {
+  const programs = [];
+  const values = [];
+  let fromFile = false;
+  let options = true;
+  const awk = AWK_RE.test(name);
+  if (!awk && !SED_RE.test(name)) return null;
+  for (let i = 0; i < args.length; i += 1) {
+    const w = args[i];
+    if (options && w === "--") options = false;
+    else if (options && (w === "-f" || w === "--file" || w.startsWith("--file="))) {
+      fromFile = true;
+      if (!w.includes("=")) i += 1;
+    } else if (options && awk && w === "-v") values.push(args[(i += 1)] ?? "");
+    else if (options && awk && /^-v./s.test(w)) values.push(w.slice(2));
+    else if (options && awk && (w === "-F" || w === "-i" || w === "-l")) i += 1;
+    else if (options && (w === "-e" || w === "--expression" || w === "--source")) programs.push(args[(i += 1)] ?? "");
+    else if (options && /^--(expression|source)=/.test(w)) programs.push(w.slice(w.indexOf("=") + 1));
+    else if (options && w.startsWith("-") && w !== "-") continue;
+    else if (programs.length === 0 && !fromFile) {
+      programs.push(w);
+      options = false;
+    } else if (awk && /^[A-Za-z_]\w*=/.test(w)) values.push(w);
+  }
+  const runs = programs.some((p) => (awk ? AWK_RUN_RE : SED_RUN_RE).test(p));
+  return runs ? [...programs, ...values].join("\n") : null;
+}
 // Commands that only print, list or search their arguments: a "node" among them is never run. Every other command
 // word may be a wrapper (env, sudo, time, xargs, …), so a "node" behind it counts.
 const NON_RUNNING_COMMANDS = new Set(["echo", "printf", "grep", "egrep", "fgrep", "rg", "ls", "which", "where", "whereis", "type", "cat", "head", "tail", "wc", "file", "stat", "man"]);
@@ -391,12 +458,33 @@ function scan(cmd, depth, out) {
     // Shell text known only at run time (shell-lex.mjs's runsRuntimeText, shared with start-guard.mjs) could be
     // post-review.mjs owner; the scan below denies it too, and this keeps both guards reading it by one rule (#378).
     if (runsArgs && runsRuntimeText(plain)) out.push({ pr: undefined, standalone: false });
+    // A v* tag, made or pushed, is the owner's alone (ADR 0017, #404).
+    if (releaseTagCommand(plain)) out.push({ pr: undefined, standalone: false, tag: true });
+    // An awk or sed program that runs a command (#404): one holding a backslash escape could spell any name
+    // (`post-revi\145w`), so it fails closed; one with none is read with its strings joined, as awk's "a" "b" joins them.
+    const running = programArgs ? runningProgram(name ?? "", plain.slice(1).map(unmark)) : null;
+    if (running !== null && (running.includes("\\") || /post-review/i.test(running.replace(/["'\s]/g, "")))) out.push({ pr: undefined, standalone: false });
     // What powershell, pwsh, cmd or fish runs: its arguments as one command line, scanned in bash terms (#119).
+    // powershell's text with its own syntax in it is read with PowerShell's rules (powershellAsBash, #404), past the
+    // shell's own options, and then its words are not read again as bash; text that cannot be read fails closed.
+    let readAsPowerShell = false;
     if (foreignFrom !== Infinity) {
       const line = plain.slice(foreignFrom).map((_, j) => foreignText(plain, foreignFrom + j, foreignName)).join(" ");
       const bashText = asBashText(line, foreignName);
-      if (bashText === null && POWERSHELL_SPLICE_RE.test(line)) out.push({ pr: undefined, standalone: false });
-      else scanScript(bashText ?? line, depth, out);
+      if (bashText === null && POWERSHELL_SPLICE_RE.test(line)) {
+        const text = powershellCommandText(plain, foreignFrom, foreignName);
+        let read = null;
+        try {
+          read = text === null ? null : powershellAsBash(text);
+        } catch {
+          read = null;
+        }
+        if (read === null) out.push({ pr: undefined, standalone: false });
+        else {
+          readAsPowerShell = true;
+          scanScript(read, depth, out);
+        }
+      } else scanScript(bashText ?? line, depth, out);
     }
     // What cmd /c, start, schtasks /tr or a scheduled-task cmdlet starts, as a command line of its own (#308).
     for (const line of launchedCommands(plain)) scanScript(unmark(line), depth, out);
@@ -418,6 +506,8 @@ function scan(cmd, depth, out) {
       for (const w of words) scanNested(w, depth, out, herestring);
     }
     plain.forEach((raw, i) => {
+      // PowerShell's own text was read above with its rules: `($env:Path -split ';')` is no bash program.
+      if (readAsPowerShell && i >= foreignFrom) return;
       // A word run as shell text reads with its quoted characters alive again.
       const shell = i >= evalFrom || argsRun;
       const w = shell ? unmark(raw) : raw;
@@ -914,7 +1004,8 @@ export function decidePreToolUse(input, grantOrLookup, now = Date.now()) {
   }
   if (found.length === 0) return null;
   if (found.some((f) => f.unparsed)) return { decision: "deny", reason: UNPARSED_REASON };
-  const deny = { decision: "deny", reason: DENY_REASON };
+  if (found.some((f) => f.tag)) return { decision: "deny", reason: TAG_REASON };
+  const deny ={ decision: "deny", reason: DENY_REASON };
   const sessionId = input.session_id;
   if (found.length !== 1 || !found[0].standalone) return deny;
   if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId)) return deny;

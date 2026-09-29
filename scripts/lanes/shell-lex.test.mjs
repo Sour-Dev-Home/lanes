@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CAT_HEREDOC_RE, HEREDOC_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, ansiCString, dequoted, heredocOperator, launchedCommands, lex, literalSubstitution, mark,
-  mayBeNode, mayExpandTo, plainLiteralSubstitution, readGrant, readHeredoc, runsRuntimeText, skipRedirectTarget, unmark, wmiProcessCreate,
+  mayBeNode, mayExpandTo, plainLiteralSubstitution, readGrant, readHeredoc, releaseTagCommand, runsRuntimeText, skipRedirectTarget, unmark, wmiProcessCreate,
 } from "./shell-lex.mjs";
 
 const source = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
@@ -485,6 +485,102 @@ test("#378 edge: a long run of computed-method openers is read in bounded time (
     const t0 = performance.now();
     wmiProcessCreate(text);
     assert.ok(performance.now() - t0 < 500, `${JSON.stringify(unit)} took ${Math.round(performance.now() - t0)} ms`);
+  }
+});
+
+// --- #404: the run-time text, computed WMI method, glob and release tag gaps #378 left ----------------------------
+
+test("#404 criterion 1: a shell's -c script after --, -e, -x or +x is read as run-time text", () => {
+  for (const cmd of ['bash -c -- "$X"', 'bash -c -e "$X"', 'bash -c -x "$X"', 'bash -c +x "$X"', 'sh -c -o errexit "$X"', 'bash -c -e -- "$X"']) {
+    assert.equal(runsRuntimeText(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of ["bash -c -- 'echo $X'", 'bash -c -e "echo hi" "$X"']) assert.equal(runsRuntimeText(lex(cmd)[0]), false, cmd);
+});
+
+test("#404 criterion 2: builtin and command are looked through with their own options before eval, source and dot", () => {
+  for (const cmd of ['command -p eval "$X"', 'command -- eval "$X"', 'builtin -- source "$F"', 'command -p -- . "$F"', 'builtin command eval "$X"']) {
+    assert.equal(runsRuntimeText(lex(cmd)[0]), true, cmd);
+  }
+  assert.equal(runsRuntimeText(lex('command -v eval "$X"')[0]), false);
+});
+
+test("#404 criterion 3: su, runuser, script, flock, sg, fish and pwsh given run-time text are read as such", () => {
+  for (const cmd of [
+    'su -c "$X"', 'su root -c "$X"', 'runuser -c "$X" u', 'script -c "$X" /dev/null', 'flock /tmp/l -c "$X"', 'sg grp -c "$X"', 'sg grp "$X"',
+    'fish -c "$X"', 'pwsh -c "$X"', 'pwsh -Command "$X"', 'powershell -Command "& $p"', 'su --command="$X"', 'sudo -u root su -c "$X"',
+  ]) {
+    assert.equal(runsRuntimeText(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of ["su -c 'echo $X'", 'grep -rn sg "$DIR"', 'echo script -c "$X"', `powershell -NoProfile -Command "($env:Path -split ';').Count"`]) {
+    assert.equal(runsRuntimeText(lex(cmd)[0]), false, cmd);
+  }
+});
+
+const COMPUTED_WMI = [
+  `$o = Get-WmiObject Win32_Process; $o.('{0}{1}' -f 'Cre','ate')('node x')`,
+  `$o = [wmiclass]'Win32_Process'; $o.("Cr" + $e)('node x')`,
+  `$o = [wmiclass]'Win32_Process'; $o | ForEach-Object -MemberName $m 'node x'`,
+  `$o = [wmiclass]'Win32_Process'; $o | % $m 'node x'`,
+  `$o = [wmiclass]'Win32_Process'; $o.GetType().InvokeMember($m, 'InvokeMethod', $null, $o, @('node x'))`,
+  `$o = [wmiclass]'Win32_Process'; $f = $o.$m; $f.Invoke('node x')`,
+];
+
+test("#404 criterion 4: a Win32_Process method named by a computed expression is read as process creation", () => {
+  for (const t of COMPUTED_WMI) assert.equal(wmiProcessCreate(t), true, t);
+  for (const t of ["Get-CimInstance Win32_Process | % { $_.$p }", "$o = [wmiclass]'Win32_Process'; $o.$p", "Get-CimInstance Win32_Process | ForEach-Object Name"]) {
+    assert.equal(wmiProcessCreate(t), false, t);
+  }
+});
+
+test("#404 criterion 5: the widened computed-method reader stays linear", () => {
+  for (const unit of [".( $", ".(", "% $", " -m $", "$a.invoke", ".GetType().InvokeMember"]) {
+    const text = `[wmiclass]'Win32_Process'; ${unit.repeat(40_000)}`;
+    const t0 = performance.now();
+    wmiProcessCreate(text);
+    assert.ok(performance.now() - t0 < 500, `${JSON.stringify(unit)} took ${Math.round(performance.now() - t0)} ms`);
+  }
+});
+
+test("#404 criterion 6: a POSIX class in a glob bracket is one character", () => {
+  for (const w of ["[[:alpha:]]ode", "[[:lower:]]od[[:alpha:]]", "n[[:alnum:]]de", "[![:digit:]]ode", "[[=n=]]ode", "[[.n.]]ode"]) assert.equal(mayBeNode(w), true, w);
+  // A bracket is read as any one character, whatever its members (failing closed), so only the length can rule out.
+  for (const w of ["[[:alpha:]]", "[[:alpha:]ode", "[[:alpha:]]oode"]) assert.equal(mayBeNode(w), false, w);
+  // edge: an unclosed class or bracket, and a long run of openers, stay bounded.
+  assert.equal(mayBeNode("[[:alpha"), false);
+  const t0 = performance.now();
+  mayBeNode(`${"[[:".repeat(300)}x`);
+  assert.ok(performance.now() - t0 < 500);
+});
+
+test("#404 criterion 13: a case pattern is no command word, in either lexer shape", () => {
+  for (const cmd of ['case ":$PATH:" in *:/usr/bin:*) echo yes;; esac', "case x in a|*) echo a;; *) echo b;; esac", "case x in (n*) echo a;; (*) echo b;; esac"]) {
+    const flat = lex(cmd).map(words);
+    assert.ok(flat.every((seg) => !/[*]/.test(seg[0])), `${cmd}: ${JSON.stringify(flat)}`);
+    assert.ok(lex(cmd, { bodies: true }).segments.every((seg) => !/[*]/.test(seg[0])), cmd);
+  }
+  assert.deepEqual(lex("case x in *) node a.mjs;; esac").map(words).find((s) => s[0] === "node"), ["node", "a.mjs"]);
+  // edge: a pattern holding a substitution is read as before, so what it runs is still seen.
+  assert.ok(lex("case x in $(node b.mjs)) echo;; esac").map(words).some((s) => s[0] === "node"));
+  // edge: an operator after `in` leaves pattern reading, so a command after it is never dropped (bash runs it).
+  for (const cmd of ['( "case" x in; node a.mjs )', "case x in\nnode a.mjs\n)", "case x in & node a.mjs )", "case x in a) ;; b; node a.mjs )"]) {
+    assert.ok(lex(cmd).map(words).some((s) => s[0] === "node"), cmd);
+    assert.ok(lex(cmd, { bodies: true }).segments.some((s) => s[0] === "node"), cmd);
+  }
+  assert.equal(lex("case x in\n  *) echo;;\n  n*) echo;;\nesac").map(words).some((s) => /[*]/.test(s[0])), false);
+  // edge: `in` elsewhere is no case.
+  assert.deepEqual(lex("echo case x in *)").map(words)[0], ["echo", "case", "x", "in", "*"]);
+});
+
+test("#404 criterion 11: releaseTagCommand reads creating and pushing a v* tag", () => {
+  for (const cmd of [
+    "git tag v1.2.3", "git tag -a v1.2.3 -m x", "git tag -m x v1.2.3", "git -C . tag -s v2", "git push --tags", "git push --follow-tags",
+    "git push origin v1.2.3", "git push origin refs/tags/v1.2.3", "git push origin HEAD:refs/tags/v1", "git push --mirror origin", "env git tag v1",
+    "git push origin tag v1.2.3", "git -c push.followTags=true push",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of ["git tag -l", "git tag --list 'v*'", "git push origin main", "git tag", "git push -u origin issue-404-x", "git tag -d v1", "echo git tag v1", "git log v1..HEAD"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
   }
 });
 

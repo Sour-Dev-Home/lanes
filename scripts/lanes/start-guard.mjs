@@ -35,8 +35,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isAutomatedInput, powershellAsBash, preToolUseOutput } from "./approve-guard.mjs";
 import {
-  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, SHELL_RE, basename, dequoted, feedsShell, launchedCommands, lex, mayBeNode, mayExpandTo,
-  readGrant, runtimeTextWords, scriptSubcommand, withoutLiteralSubstitutions, wmiProcessCreate,
+  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, NODE_RE, QUOTED_TICK, basename, dequoted, feedsShell, launchedCommands, lex, mayBeNode, mayExpandTo,
+  readGrant, releaseTagCommand, runtimeTextWords, scriptSubcommand, shellTextIndexes, withoutLiteralSubstitutions, wmiProcessCreate,
 } from "./shell-lex.mjs";
 
 // start.mjs reads the grant with the guard's own reader.
@@ -54,6 +54,9 @@ export const WMI_DENY_REASON =
   "this WMI/CIM process creation (Win32_Process Create, wmic process call create) builds its command line at run time (a variable, a hashtable or an expression), which could be claude --bg or a lane script, so start-guard denies it; run the program directly";
 export const RUNTIME_TEXT_DENY_REASON =
   "this command runs shell text known only at run time (eval, source or a shell's -c given $VAR, $(…) or a backtick), which could be start.mjs, queue.mjs or claude --bg, so start-guard denies it; run the command itself";
+// ADR 0017 decision 3: a pushed v* tag releases, so only the owner makes one, from their own terminal (#404).
+export const TAG_DENY_REASON =
+  "creating or pushing a v* tag starts a release, which the owner does from their own terminal, never from a Claude session (ADR 0017)";
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const START_PROMPT_RE = /^\/start((?:\s+[1-9][0-9]{0,8})+)$/;
 // The only form that may be allowed: the plain command with plain issue numbers, nothing chained, wrapped or redirected.
@@ -161,12 +164,58 @@ const isNestedScript = (w) => /[\s;&|()<>]/.test(w);
  * equal "." or "eval" (a grep pattern, a commit message word, a directory) from turning a later quoted word live.
  * Its literal backticks then run too, while a literal message elsewhere ('Fix `start.mjs`') stays text.
  */
-const runsAsShell = (words, i) => {
-  if (i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(words[i - 1]) && words.slice(0, i - 1).some((w) => SHELL_RE.test(basename(w)))) return true;
-  const cmdAt = words.findIndex((w) => !ASSIGN_RE.test(w));
-  return cmdAt !== -1 && cmdAt < i && (words[cmdAt] === "eval" || words[cmdAt] === "source" || words[cmdAt] === ".");
-};
+// shell-lex.mjs's shellTextIndexes since #404, shared with the run-time text rule: a -c script after options such as
+// `--` or `-e`, eval behind `command -p`, and su, runuser, script, flock, fish or sg text count too.
+const runsAsShell = (words, i) => shellTextIndexes(words).has(i);
 const unliteralLive = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, "`");
+
+/**
+ * A quoted word handed to powershell or pwsh, read with PowerShell's rules as the PowerShell tool's command is (#404),
+ * so `($env:Path -split ';').Count` is a value PowerShell prints, not a program `$env:Path`. Text PowerShell's reader
+ * cannot read is read as shell text, as before.
+ */
+function powershellText(w) {
+  try {
+    return powershellAsBash(unliteralLive(w));
+  } catch {
+    return unliteral(w);
+  }
+}
+
+// Commands that only list, read or search, whose arguments are file names and patterns, never run and never printed
+// as given (#404): a quoted pattern that names a lanes script (`grep -n "node scripts/lanes/queue.mjs" f`), or a glob
+// among the arguments (`cat n* f`), is no run. rg counts only without --pre, which runs a program on every file it
+// searches. echo and printf are not among them: what they print may be run later (`f | sh` after `f() { echo …; }`).
+const READS_ONLY_RE = /^(grep|egrep|fgrep|rg|ls|cat|head|tail|wc)(\.exe)?$/i;
+// Commands that print their arguments: the first one is the program word of what they print, so a glob there may be
+// node once run; a glob further on is not (`echo foo * scripts/lanes/start.mjs`, #404).
+const PRINTS_RE = /^(echo|printf)(\.exe)?$/i;
+
+/** The index of simple command `words`' command word when it matches `re`, or -1. */
+function commandAt(words, re) {
+  const at = words.findIndex((w) => !ASSIGN_RE.test(w));
+  return at !== -1 && re.test(basename(words[at])) ? at : -1;
+}
+
+/** True when simple command `words`' command word only lists, reads or searches (READS_ONLY_RE). */
+const readsOnly = (words) => commandAt(words, READS_ONLY_RE) !== -1 && !words.some((w) => /^--pre(=|$)/.test(w));
+
+/**
+ * The index of the word in `own` (a simple command's words without assignments) that is or may be node: none for a
+ * command that only reads (readsOnly); for echo or printf, node itself anywhere or a glob as the first argument
+ * (#404); otherwise node or a glob that could be node anywhere, since any other command word may run its arguments,
+ * the false positive of `mv n* x` being accepted.
+ */
+function nodeWordAt(own) {
+  if (readsOnly(own)) return -1;
+  const printer = commandAt(own, PRINTS_RE);
+  if (printer === -1) return own.findIndex(mayBeNode);
+  const first = own.findIndex((w, i) => i > printer && !/^-[neE]+$/.test(w));
+  const wrapped = (i) => own.slice(first, i).some((w) => PRINTED_WRAPPER_RE.test(basename(w)));
+  return own.findIndex((w, i) => NODE_RE.test(basename(w)) || ((i === first || (first !== -1 && i > first && wrapped(i))) && mayBeNode(w)));
+}
+// Wrappers that put a program after them in printed text too (`echo env n* x`).
+const PRINTED_WRAPPER_RE = /^(env|exec|command|builtin|nohup|time|timeout|nice|sudo|doas|setsid|stdbuf|xargs)(\.exe)?$/i;
 
 // Programs that write what they are given to a file, and never run it (#89); cd and mkdir may come alongside.
 const WRITE_COMMANDS = new Set(["cat", "echo", "printf"]);
@@ -271,11 +320,16 @@ function walk(cmd, depth, visit, onOpaque, onEval) {
     if (!dataOnly) visit(words, stdin);
     const scripts = dataOnly ? new Map() : evalScripts(words);
     const programs = programWords(words);
+    // A command that only prints or searches runs no quoted argument, unless a shell reads its output (#404).
+    const readOnly = !piped && readsOnly(words);
+    const powershellAt = words.findIndex((w) => PS_SHELL_RE.test(basename(w)));
     words.forEach((w, i) => {
       if (scripts.has(i)) onEval(scripts.get(i));
-      else if (isNestedScript(w) && !(dataOnly && !UNRESOLVED_RE.test(w))) {
-        // A jq program or Go template keeps its quoted `$` literal: `$s` there is its own variable (#61).
-        nested(piped || runsAsShell(words, i) ? unliteralLive(w) : programs.has(i) ? w : unliteral(w));
+      else if (isNestedScript(w) && !((dataOnly || readOnly) && !UNRESOLVED_RE.test(w))) {
+        // A jq program or Go template keeps its quoted `$` literal: `$s` there is its own variable (#61). PowerShell's
+        // text is read with its own rules (#404).
+        if (powershellAt !== -1 && i > powershellAt && !piped) nested(powershellText(w));
+        else nested(piped || runsAsShell(words, i) ? unliteralLive(w) : programs.has(i) ? w : unliteral(w));
       }
     });
     // What a command piped into a shell prints may be its arguments (echo, printf): read them as one live script (#246).
@@ -390,8 +444,9 @@ function scriptCandidates(plain, nodeAt) {
 function commandWords(words, stdin) {
   const own = words.filter((w) => !ASSIGN_RE.test(w));
   const plain = stdin === undefined ? own : [...own, stdin];
-  // A glob that could expand to node (`n*de`, `[n]ode`) runs node too (#378).
-  const nodeAt = own.findIndex(mayBeNode);
+  // A glob that could expand to node (`n*de`, `[n]ode`) runs node too (#378); a command that only prints or searches
+  // runs none of its arguments, glob or `node`, and one that prints them only a glob its output would run (#404).
+  const nodeAt = nodeWordAt(own);
   const scripts = scriptCandidates(plain, nodeAt);
   return { plain, nodeAt, scripts, counts: (i) => i < own.length || scripts.has(i) };
 }
@@ -512,6 +567,21 @@ function scanRuntimeText(command) {
     () => {},
   );
   return { found, leading };
+}
+
+/** True when a simple command anywhere in a Bash command, nested scripts included, creates or pushes a v* tag (#404). */
+function scanReleaseTags(command) {
+  let found = false;
+  walk(
+    String(command ?? ""),
+    0,
+    (words) => {
+      if (releaseTagCommand(words)) found = true;
+    },
+    () => {},
+    () => {},
+  );
+  return found;
 }
 
 /** True when a Bash command runs `claude --bg` (or `--background`) directly, behind any wrapper, or cannot be read. */
@@ -675,6 +745,8 @@ function decide(input, grant, now, depth) {
     if (d !== null) return d.decision === "deny" ? d : { decision: "deny", reason: DENY_REASON };
   }
   if (encoded.unresolved) return { decision: "deny", reason: UNRESOLVED_DENY_REASON };
+  // A v* tag, made or pushed, is the owner's alone, whatever grant there is (ADR 0017, #404).
+  if (scanReleaseTags(command)) return { decision: "deny", reason: TAG_DENY_REASON };
   const bg = scanBgLaunches(command);
   if (bg.found) return { decision: "deny", reason: bg.unparsed ? PARSE_DENY_REASON : BG_DENY_REASON };
   // Before any grant is read: no /start grant, of any form, reaches queue.mjs.

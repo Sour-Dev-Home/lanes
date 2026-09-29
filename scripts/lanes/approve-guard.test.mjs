@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AUTOMATED_INPUT_PREFIXES, DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, WMI_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, readGrant, runHook, validGrant } from "./approve-guard.mjs";
+import { AUTOMATED_INPUT_PREFIXES, DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, WMI_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, readGrant, runHook, TAG_REASON, validGrant } from "./approve-guard.mjs";
 import { WRAPPERS, automatedInputLeavesTheGrant } from "./shell-lex.fixtures.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
@@ -1022,8 +1022,12 @@ test("ordinary powershell/pwsh/cmd/fish commands unrelated to post-review get no
     'cmd /c "(cd x && dir)"',
     "fish -c 'for f in *.mjs; echo (basename $f); end'",
   ]) allowed(cmd);
-  // powershell concatenation can spell any name, so it fails closed on purpose.
-  denied("powershell -Command \"'a' + 'b'\"");
+  // powershell text is read with PowerShell's rules since #404, as the PowerShell tool's is: a concatenation that is
+  // only printed runs nothing, and one that is run or names the program fails closed.
+  allowed("powershell -Command \"'a' + 'b'\"");
+  denied("powershell -Command \"iex ('node scripts/lanes/post-'+'review.mjs owner --pr 16')\"");
+  denied("powershell -Command \"& ('no'+'de') scripts/lanes/post-review.mjs owner --pr 16\"");
+  denied("pwsh -NoProfile -c \"& ('no'+'de') ('scripts/lanes/post-'+'review.mjs') owner --pr 16\"");
   // The bash reading still catches a splice where it matters.
   denied("fish -c 'node scripts/lanes/post-rev*.mjs owner --pr 16'");
   denied('cmd /c "node scripts/lanes/%S% owner --pr 16"');
@@ -1508,4 +1512,76 @@ test("#378 criterion 4: commands that only print, pass or read such text get no 
   for (const cmd of ["([wmiclass]'Win32_Process').Properties", "Get-CimInstance Win32_Process", "ls n*", "git commit -F msg.txt"]) {
     assert.equal(decidePs(cmd), null, cmd);
   }
+});
+
+// --- #404: the run-time text, computed WMI method, glob and release tag gaps #378 left ----------------------------
+
+const DENY = { decision: "deny", reason: DENY_REASON };
+
+test("#404 criteria 1-3: -c after options, builtin/command options, and su, sg, fish or pwsh run-time text stay denied", () => {
+  for (const cmd of [
+    'bash -c -- "$X"', 'bash -c +x "$X"', 'command -p eval "$X"', 'builtin -- source "$F"', 'su -c "$X"', 'sg grp "$X"', 'sg grp -c "$X"',
+    'fish -c "$X"', 'pwsh -Command "$X"', 'flock /tmp/l -c "$X"',
+  ]) {
+    assert.deepEqual(decideBash(cmd, grant({ pr: 1 })), DENY, cmd);
+  }
+});
+
+test("#404 criterion 4: a Win32_Process method named by a computed expression is denied through the PowerShell tool", () => {
+  for (const cmd of [
+    `$o = Get-WmiObject Win32_Process; $o.('{0}{1}' -f 'Cre','ate')('node x')`,
+    `$o = [wmiclass]'Win32_Process'; $o | ForEach-Object -MemberName $m 'node x'`,
+    `$o = [wmiclass]'Win32_Process'; $o.GetType().InvokeMember($m, 'InvokeMethod', $null, $o, @('node x'))`,
+    `$o = [wmiclass]'Win32_Process'; $f = $o.$m; $f.Invoke('node x')`,
+  ]) {
+    assert.deepEqual(decidePs(cmd), { decision: "deny", reason: WMI_REASON }, cmd);
+  }
+});
+
+test("#404 criterion 8: an awk octal escape inside system() is denied", () => {
+  assert.deepEqual(decideBash(`awk 'BEGIN{system("node scripts/lanes/post-revi\\145w.mjs owner success x --pr 5")}'`), DENY);
+  assert.deepEqual(decideBash(`awk 'BEGIN{system("node scripts/lanes/post-revi\\145w.mjs owner success x --pr 5")}'`, grant({ pr: 5 })), DENY);
+});
+
+test("#404 criterion 9: an awk or sed program that runs a command fails closed when it holds a backslash escape", () => {
+  for (const cmd of [
+    `awk 'BEGIN{system("no\\x64e x")}'`, `awk 'BEGIN{"no\\x64e x" | getline}'`, `awk 'BEGIN{print "x" | "no\\x64e"}'`, `awk '{print | c}' c='sh\\n' f`,
+    `gawk 'BEGIN{print "x" |& "no\\x64e"}'`, `sed 's/x/no\\x64e/e' f`, `sed '1e no\\x64e x' f`, `gsed -e 's|a|b\\x|e' f`,
+    // edge: awk's string concatenation splits a name no escape is needed for.
+    `awk 'BEGIN{system("node scripts/lanes/post-" "review.mjs owner success x --pr 5")}'`,
+  ]) {
+    assert.deepEqual(decideBash(cmd), DENY, cmd);
+  }
+});
+
+test("#404 criterion 10: plain awk, sed and jq programs that run nothing still get no decision", () => {
+  for (const cmd of [
+    "awk '{print $1}' f", "sed -n 's/a$/b/p' f", "jq '.x as $s | $s' f", "awk -F'\\t' '{print $2}' f", `awk '{print $1"\\t"$2}' f`,
+    "sed 's/\\./x/g' f", `awk '/error|warn/ {print "\\t" $0}' f`, "awk 'BEGIN{system(\"date\")}'",
+  ]) {
+    assert.equal(decideBash(cmd), null, cmd);
+  }
+});
+
+test("#404 criterion 11: creating or pushing a v* tag is denied from any session, and listing or a branch push is not", () => {
+  assert.match(TAG_REASON, /ADR 0017/);
+  for (const cmd of ["git tag v1.2.3", "git tag -a v1.2.3 -m x", "git push --tags", "git push --follow-tags", "git push origin v1.2.3", "git push origin refs/tags/v1.2.3"]) {
+    assert.deepEqual(decideBash(cmd, grant({ pr: 1 })), { decision: "deny", reason: TAG_REASON }, cmd);
+    assert.deepEqual(decidePs(cmd), { decision: "deny", reason: TAG_REASON }, `${cmd} (PowerShell)`);
+  }
+  for (const cmd of ["git tag -l", "git tag --list 'v*'", "git push origin issue-404-guard-gaps"]) assert.equal(decideBash(cmd), null, cmd);
+});
+
+test("#404 criterion 13: a case pattern glob and a PowerShell variable read get no decision; run-time PowerShell text stays denied", () => {
+  for (const cmd of ['case ":$PATH:" in *:/usr/bin:*) echo yes;; esac', 'case ":$PATH:" in *:/usr/bin:*) echo yes;; *) echo no;; esac', `powershell -NoProfile -Command "($env:Path -split ';').Count"`]) {
+    assert.deepEqual(findOwnerInvocations(cmd), [], cmd);
+    assert.equal(decideBash(cmd), null, cmd);
+  }
+  for (const cmd of ['powershell -Command "$x"', 'powershell -Command "& $p"', "powershell -Command '& $p'", "case x in *) node scripts/lanes/post-review.mjs owner success x --pr 1;; esac"]) {
+    assert.deepEqual(decideBash(cmd), DENY, cmd);
+  }
+  // edge: PowerShell text read with PowerShell's rules still finds the script, and one it cannot read fails closed.
+  assert.deepEqual(decideBash(`powershell -NoProfile -Command "& node scripts/lanes/post-review.mjs owner success x --pr 1"`), DENY);
+  assert.deepEqual(decideBash(`powershell -Command "(node scripts/lanes/post-revie?.mjs owner x --pr 1)"`), DENY);
+  assert.deepEqual(decideBash(`powershell -Command "(unclosed"`), DENY);
 });

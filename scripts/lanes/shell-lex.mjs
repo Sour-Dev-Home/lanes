@@ -333,10 +333,33 @@ function braceExpand(s) {
 }
 
 /**
+ * The index of the `]` closing the bracket expression that opens at `open`, as bash reads one, or -1: a `!` or `^`
+ * right after the `[` negates, a `]` first is a member, and a POSIX class `[:alpha:]` (or `[=a=]`, `[.a.]`) is one
+ * member however many characters spell it (#404), so `[[:alpha:]]ode` closes after the second `]`. A class that never
+ * closes is plain text; one delimiter's first miss is remembered, so a run of `[[:` stays linear.
+ */
+function bracketEnd(s, open) {
+  let i = open + 1;
+  if (s[i] === "!" || s[i] === "^") i += 1;
+  if (s[i] === "]") i += 1;
+  const unclosed = new Set();
+  for (; i < s.length; i += 1) {
+    if (s[i] === "]") return i;
+    const d = s[i + 1];
+    if (s[i] === "[" && (d === ":" || d === "=" || d === ".") && !unclosed.has(d)) {
+      const close = s.indexOf(`${d}]`, i + 2);
+      if (close === -1) unclosed.add(d);
+      else i = close + 1;
+    }
+  }
+  return -1;
+}
+
+/**
  * The steps of a glob pattern (with no brace left to expand), as bash reads it: `*` any run, `?` and a closed `[…]`
- * one character, an integer sequence's DIGITS an optional `-` and one or more digits, and anything else itself. A
- * closed brace is literal text. An unclosed `{` is literal to bash too (#123), but it is read as optional, so a word
- * such as post-review{.mjs that names the script once the stray brace is dropped still fails closed.
+ * (bracketEnd) one character, an integer sequence's DIGITS an optional `-` and one or more digits, and anything else
+ * itself. A closed brace is literal text. An unclosed `{` is literal to bash too (#123), but it is read as optional,
+ * so a word such as post-review{.mjs that names the script once the stray brace is dropped still fails closed.
  */
 function globSteps(s) {
   const steps = [];
@@ -346,9 +369,9 @@ function globSteps(s) {
       if (steps.at(-1)?.kind !== "any") steps.push({ kind: "any" });
     } else if (c === "?") steps.push({ kind: "one" });
     else if (c === DIGITS) steps.push({ kind: "digits" });
-    else if (c === "[" && s.indexOf("]", i + 2) !== -1) {
+    else if (c === "[" && bracketEnd(s, i) !== -1) {
       steps.push({ kind: "one" });
-      i = s.indexOf("]", i + 2);
+      i = bracketEnd(s, i);
     } else if (c === "{" && closingBrace(s, i) === -1) steps.push({ kind: "optional", ch: "{" });
     else steps.push({ kind: "char", ch: (ORIGINAL[c] ?? c).toLowerCase() });
   }
@@ -419,29 +442,102 @@ export const mayBeNode = (w) => NODE_RE.test(basename(w)) || mayExpandTo(w, NODE
 const LIVE_RE = new RegExp(`[$\`${QUOTED_TICK}]`);
 const EVAL_WORDS = new Set(["eval", "source", "."]);
 const SHELL_C_RE = /^-[A-Za-z]*c[A-Za-z]*$/;
+// A shell's options that take the next word as their value (`-o errexit`, `+O extglob`).
+const SHELL_VALUED_RE = /^[-+][oO]$/;
+// Programs that hand their -c (or --command) value to a shell as text (#404): su, runuser, script, flock and fish.
+const TEXT_C_RE = /^(su|runuser|script|flock|fish)(\.exe)?$/i;
+// A -c value glued to its flag (`-c"$X"`, `--command=$X`).
+const GLUED_C_RE = /^(?:-[A-Za-z]*c.|--command=)/s;
+// sg runs every word after its group as shell text, with or without -c.
+const SG_RE = /^sg(\.exe)?$/i;
+const POWERSHELL_RE = /^(powershell|pwsh)(\.exe)?$/i;
+// Words that put a program right after them (a wrapper, its options or a duration aside): the new text runners above
+// count only there, so `grep -rn sg "$DIR"` is no sg run.
+const RUNS_NEXT_RE = /^(env|exec|command|builtin|nohup|time|timeout|nice|sudo|doas|setsid|stdbuf|ionice|chrt|taskset|xargs|su|runuser|flock|watch)(\.exe)?$/i;
+const KEYWORD_RE = /^(?:if|then|else|elif|do|while|until|time|!|\{)$/;
+// `$env:NAME` is PowerShell's environment read (#404): in a word handed to powershell it is PowerShell's, not the
+// shell's, the risk of a shell variable named `env` being accepted, as bash sets none.
+const powershellLive = (w) => LIVE_RE.test(w.replace(/\$env:/gi, ""));
+
+/** The index of the word after builtin or command and their own options (-p, --) at `at`, or `at` for any other word. */
+function pastBuiltin(words, at) {
+  while (words[at] === "builtin" || words[at] === "command") {
+    at += 1;
+    while (words[at] === "--" || /^-p+$/.test(words[at] ?? "")) at += 1;
+  }
+  return at;
+}
+
+/** The index of the script a shell's -c flag at `c` takes: the first word after it that is no option (#404). */
+function shellScriptAt(words, c) {
+  for (let i = c + 1; i < words.length; i += 1) {
+    if (words[i] === "--") return i + 1;
+    if (SHELL_VALUED_RE.test(words[i])) i += 1;
+    else if (!/^[-+]/.test(words[i])) return i;
+  }
+  return words.length;
+}
 
 /**
- * The words of simple command `words`, as lex gives them, that are shell text known only at run time (#378): an
- * argument of eval, source or `.` as the command word (also behind builtin or command) that still holds `$` or a
- * backtick, or such a -c script of a shell named anywhere earlier (`env bash -c`). Such text could be any command at
- * all. A `$` or backtick in single quotes is marked by lex, so `bash -c 'echo $HOME'` and `eval 'echo $X'` hold none.
+ * The indexes of simple command `words` that a shell runs as text: the arguments of eval, source or `.` as the
+ * command word (behind builtin or command and their options too, #404); the script a shell's -c takes, with a shell
+ * named anywhere earlier and options such as `--`, `-e` or `+x` between (#404); the -c or --command value of su,
+ * runuser, script, flock or fish, and every word after sg's group, each where a program stands. PowerShell's own text
+ * is not shell text: runtimeTextWords reads it apart.
+ */
+export function shellTextIndexes(words) {
+  const at = new Set();
+  let cmd = words.findIndex((w) => !ASSIGN_RE.test(w));
+  while (cmd !== -1 && cmd < words.length) {
+    const next = KEYWORD_RE.test(words[cmd]) ? cmd + 1 : pastBuiltin(words, cmd);
+    if (next === cmd) break;
+    cmd = next;
+  }
+  if (cmd !== -1 && EVAL_WORDS.has(words[cmd])) for (let i = cmd + 1; i < words.length; i += 1) at.add(i);
+  words.forEach((w, p) => {
+    const name = basename(w);
+    if (SHELL_RE.test(name)) {
+      for (let c = p + 1; c < words.length; c += 1) if (SHELL_C_RE.test(words[c])) at.add(shellScriptAt(words, c));
+      return;
+    }
+    const program = p === cmd || words.slice(0, p).some((x) => RUNS_NEXT_RE.test(basename(x)));
+    if (!program) return;
+    if (TEXT_C_RE.test(name)) {
+      for (let c = p + 1; c < words.length; c += 1) {
+        if (SHELL_C_RE.test(words[c]) || words[c] === "--command") at.add(c + 1);
+        else if (GLUED_C_RE.test(words[c])) at.add(c);
+      }
+    } else if (SG_RE.test(name)) for (let i = p + 2; i < words.length; i += 1) at.add(i);
+  });
+  return at;
+}
+
+/**
+ * The words of simple command `words`, as lex gives them, that are shell text known only at run time (#378): a word
+ * shellTextIndexes finds that still holds `$` or a backtick, or any word after powershell or pwsh (where a program
+ * stands) that does, bar a `$env:` read (#404). Such text could be any command at all. A `$` or backtick in single
+ * quotes is marked by lex, so `bash -c 'echo $HOME'` and `eval 'echo $X'` hold none.
  */
 export function runtimeTextWords(words) {
-  let at = words.findIndex((w) => !ASSIGN_RE.test(w));
-  while (at !== -1 && (words[at] === "builtin" || words[at] === "command" || /^(?:if|then|else|elif|do|while|until|time|!|\{)$/.test(words[at]))) at += 1;
-  if (at !== -1 && EVAL_WORDS.has(words[at])) return words.slice(at + 1).filter((w) => LIVE_RE.test(w));
-  return words.filter((w, i) => i > 1 && LIVE_RE.test(w) && SHELL_C_RE.test(words[i - 1]) && words.slice(0, i - 1).some((p) => SHELL_RE.test(basename(p))));
+  const at = shellTextIndexes(words);
+  const cmd = words.findIndex((w) => !ASSIGN_RE.test(w));
+  const ps = words.findIndex((w, p) => POWERSHELL_RE.test(basename(w)) && (p === cmd || words.slice(0, p).some((x) => RUNS_NEXT_RE.test(basename(x)))));
+  return words.filter((w, i) => (at.has(i) && LIVE_RE.test(w)) || (ps !== -1 && i > ps && powershellLive(w)));
 }
 
 /** True when simple command `words` runs shell text known only at run time (runtimeTextWords), #378. */
 export const runsRuntimeText = (words) => runtimeTextWords(words).length > 0;
 
-// A PowerShell method named at run time (#378): `.$m(…)`, `."$m"(…)`, `.($m)(…)`, `.${m}(…)`, `.$($n)(…)`, each maybe
-// through `.Invoke(…)`; a method looked up by a computed key (`.PSObject.Methods[$m]`); or WMI's own `.InvokeMethod(`.
-// Each run is bounded ({0,64}, whitespace {0,16}), so repeated `.( $` or `.$(` stays linear (security review, #378): a
-// guard that times out fails open. A longer computed name still holds `$`, which the create/Win32_Process checks read.
+// A PowerShell method named at run time (#378): `.$m(…)`, `."$m"(…)`, `.${m}(…)`, `.$($n)(…)`, each maybe through
+// `.Invoke(…)`; any member named by an expression, `.(…)`, which covers `.($m)` and a format or concatenation such as
+// `.('{0}{1}' -f 'Cre','ate')` (#404); a method looked up by a computed key (`.PSObject.Methods[$m]`); WMI's own
+// `.InvokeMethod(` and reflection's `.InvokeMember(` (#404); a method held in a variable and invoked (`$f.Invoke(`,
+// #404); and ForEach-Object (`%`, `foreach`) given a variable or wildcard member name, or any `-MemberName` (by a prefix)
+// given a variable or expression (#404). Each run is bounded ({0,64}, whitespace {0,16}), so repeated `.( $` or `.$(`
+// stays linear (security review, #378): a guard that times out fails open. A longer computed name still holds `$`,
+// which the create/Win32_Process checks read.
 const COMPUTED_METHOD_RE =
-  /\.\s{0,16}(?:\(\s{0,16}\$[^)]{0,64}\)|\$\{[^}]{0,64}\}|\$\([^)]{0,64}\)|\$[\w:]{1,64})\s{0,16}(?:\.\s{0,16}invoke\s{0,16})?\(|\bmethods\s{0,16}\[|\binvokemethod\s{0,16}\(/i;
+  /\.\s{0,16}(?:\(|(?:\$\{[^}]{0,64}\}|\$\([^)]{0,64}\)|\$[\w:]{1,64})\s{0,16}(?:\.\s{0,16}invoke\s{0,16})?\()|\$[\w:]{1,64}\s{0,16}\.\s{0,16}invoke\s{0,16}\(|\bmethods\s{0,16}\[|\binvoke(?:method|member)\s{0,16}\(|(?:\bforeach(?:-object)?|%)\s{1,16}(?:\$|[\w-]{0,64}[*?])|\s-m[a-z]{0,9}\s{0,16}:?\s{0,16}[$(]/i;
 
 // Programs that start another program from their arguments with no `node` or shell `-c` in sight (#308).
 const CMD_RE = /^cmd(\.exe)?$/i;
@@ -518,6 +614,53 @@ export function launchedCommands(words) {
     return [values.join(" "), ...values];
   }
   return [];
+}
+
+// --- Release tags (ADR 0017 decision 3, #404) -----------------------------------------------------------------------
+
+const GIT_RE = /^git(\.exe)?$/i;
+// git's own options that take the next word as their value.
+const GIT_VALUED = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--exec-path"]);
+// git tag's options that take the next word as their value, and those that list, delete or verify instead of creating.
+const TAG_VALUED = new Set(["-m", "-F", "-u", "--message", "--file", "--local-user", "--cleanup", "--format", "--sort", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--column", "--trailer"]);
+const TAG_READS_RE = /^(?:-[A-Za-z]*[ldv][A-Za-z]*|-n[0-9]*|--list|--delete|--verify|--contains|--no-contains|--merged|--no-merged|--points-at)(?:=.*)?$/s;
+// git push's options that take the next word as their value, and those that push every tag.
+const PUSH_VALUED = new Set(["-o", "--push-option", "--repo", "--receive-pack", "--exec"]);
+const PUSH_TAGS_RE = /^--(?:tags|follow-tags|mirror)$/;
+// A ref that is, or could be, a v* tag: `v1.2.3`, `refs/tags/v1`.
+const RELEASE_REF_RE = /^\+?(?:refs\/tags\/)?v/i;
+
+/**
+ * True when simple command `words` creates or pushes a `v*` tag (ADR 0017 decision 3): git, as the program behind any
+ * wrappers, running `tag` with a name starting with v and no list, delete or verify option, or `push` with --tags,
+ * --follow-tags or --mirror, `-c push.followTags=…`, or a refspec whose destination is a v* ref (`v1.2.3`,
+ * `refs/tags/v1`, `HEAD:refs/tags/v1`, `tag v1`). A branch starting with v counts too: git alone knows which it is.
+ * Both guards deny it from any session; the owner tags from their own terminal.
+ */
+export function releaseTagCommand(words) {
+  const at = launcherAt(words);
+  if (at >= words.length || !GIT_RE.test(basename(words[at]))) return false;
+  let i = at + 1;
+  let followTags = false;
+  for (; i < words.length && words[i].startsWith("-"); i += 1) {
+    if (words[i] === "-c" && /^push\.followtags/i.test(words[i + 1] ?? "")) followTags = true;
+    if (GIT_VALUED.has(words[i])) i += 1;
+  }
+  const sub = words[i];
+  const args = [];
+  let reads = false;
+  for (let j = i + 1; j < words.length; j += 1) {
+    const w = words[j];
+    if (sub === "tag" && TAG_READS_RE.test(w)) reads = true;
+    if (sub === "push" && PUSH_TAGS_RE.test(w)) return true;
+    if ((sub === "tag" && (TAG_VALUED.has(w) || /^-[A-Za-z]*[mFu]$/.test(w))) || (sub === "push" && PUSH_VALUED.has(w))) j += 1;
+    else if (!w.startsWith("-")) args.push(w);
+  }
+  if (sub === "tag") return !reads && args.length > 0 && RELEASE_REF_RE.test(args[0]);
+  if (sub !== "push") return false;
+  if (followTags) return true;
+  // The first argument is the remote; each one after it is a refspec, or `tag` before a tag's name.
+  return args.slice(1).some((w, k, specs) => RELEASE_REF_RE.test(w.split(":").at(-1)) || (w === "tag" && k + 1 < specs.length));
 }
 
 /**
@@ -634,17 +777,64 @@ export function lex(cmd, { bodies: withBodies = false } = {}) {
     if (procSubs.length > 0) segments.at(-1).inProcSub = true;
     else delete segments.at(-1).inProcSub;
   };
+  // A `case` statement's patterns are no commands (#404): `case x in *) …;; *) …;; esac` would otherwise read each
+  // `*` as a program word. `cases` counts the open `case … in`s; `inPattern` is true from `in` or `;;` (`;&`, `;;&`)
+  // up to the pattern's `)`, whose words are then dropped. `esac` there ends the statement instead. Only an `in`
+  // ended by whitespace opens a pattern: `in;` is a word followed by a new command. `at` is the index being read.
+  let cases = 0;
+  let inPattern = false;
+  let at = 0;
   const endWord = () => {
     if (word !== null && target) {
       targets.push(word);
       if (target === "stdin") stdin[stdin.length - 1] = word;
       target = false;
     } else if (word !== null) {
-      if (wordLiteral) (segments.at(-1).literal ??= new Set()).add(segments.at(-1).length);
-      segments.at(-1).push(word);
+      const seg = segments.at(-1);
+      if (wordLiteral) (seg.literal ??= new Set()).add(seg.length);
+      seg.push(word);
+      if (cases > 0 && word === "esac" && seg.slice(0, -1).every((w) => KEYWORD_RE.test(w))) {
+        inPattern = false;
+        cases -= 1;
+      } else if (!inPattern && word === "in" && /\s/.test(cmd[at] ?? "") && seg.length >= 3 && seg.at(-3) === "case" && seg.slice(0, -3).every((w) => KEYWORD_RE.test(w))) {
+        cases += 1;
+        inPattern = true;
+        word = null;
+        wordLiteral = false;
+        endSegment();
+      }
     }
     word = null;
     wordLiteral = false;
+  };
+  // In a pattern: `)` ends it and drops its words, unless a backtick substitution is in them (read as before, so what
+  // it runs is still seen); `|` separates alternatives; a leading `(` or line break is optional syntax. Any other
+  // operator (`$(`, `;`, `&`, a redirection, a line break after a word) leaves pattern reading, so the rest is read as
+  // before: `"case" x in; node …)` is a command named case and then node, which bash runs. Returns the index to go on
+  // from, or null.
+  const patternOperator = (i) => {
+    const c = cmd[i];
+    const empty = word === null && segments.at(-1).length === 0;
+    if ((c === "\n" || c === "\r") && empty) return i;
+    if (";&<>\n\r".includes(c)) {
+      inPattern = false;
+      return null;
+    }
+    if (c === ")") {
+      endWord();
+      const seg = segments.at(-1);
+      inPattern = false;
+      if (!seg.some((w) => w.includes("`") || w.includes(QUOTED_TICK))) segments[segments.length - 1] = [];
+      if (!withBodies) markProcSub();
+      return i;
+    }
+    if (c === "|") {
+      endWord();
+      return i;
+    }
+    if (c === "(" && empty) return i;
+    if (c === "(") inPattern = false;
+    return null;
   };
   // Every new segment (after ; & | || && newlines and parentheses) takes the process-substitution mark it is under.
   const endSegment = () => {
@@ -759,6 +949,7 @@ export function lex(cmd, { bodies: withBodies = false } = {}) {
 
   for (let i = 0; i < cmd.length; i += 1) {
     const c = cmd[i];
+    at = i;
     if (c === "'") {
       const end = cmd.indexOf("'", i + 1);
       if (end === -1) throw new Error("unterminated '");
@@ -854,7 +1045,14 @@ export function lex(cmd, { bodies: withBodies = false } = {}) {
       }
       i = end;
     } else {
-      const next = withBodies ? bodiesOperator(i) : wordsOperator(i);
+      let next = inPattern ? patternOperator(i) : null;
+      // `;;`, `;&` or `;;&` inside a case: the next clause's pattern follows.
+      if (next === null && cases > 0 && !inPattern && c === ";" && (cmd[i + 1] === ";" || cmd[i + 1] === "&")) {
+        endSegment();
+        inPattern = true;
+        next = cmd.startsWith(";;&", i) ? i + 2 : i + 1;
+      }
+      if (next === null) next = withBodies ? bodiesOperator(i) : wordsOperator(i);
       if (next !== null) i = next;
       // A `<<` that HEREDOC_RE does not read ends the word (bodies shape; the words shape reads every `<` above).
       else if (c === "<" || /\s/.test(c)) endWord();
