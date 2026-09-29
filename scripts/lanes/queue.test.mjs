@@ -857,15 +857,33 @@ test("#382: edge: a session that will not stop is reported and its worktree left
   assert.ok(run.out.some((l) => / #7: could not stop session old-7, left for the owner$/.test(l)), run.out.join("\n"));
 });
 
-test("#382: edge: a lane whose worktree cannot be found is stopped and relaunched without a removal", async () => {
+test("#382: edge: a lane whose worktree cannot be found is stopped, left for the owner and not relaunched", async () => {
   const { main } = await import("./queue.mjs");
   const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7)] };
   const run = recoveryRun(world, { stalledIssues: [7] });
   run.deps.recovery.worktree = () => null;
-  run.deps.recovery.remove = (id) => { world.sessions = world.sessions.filter((s) => s.id !== id); run.removed.push([id, null]); };
   assert.equal(await main([], run.deps), 0);
-  assert.deepEqual(run.removed, [["old-7", null]]);
-  assert.deepEqual(run.launched.map((l) => l.n), [7]);
+  assert.deepEqual([run.removed, run.launched], [[], []]);
+  assert.ok(run.out.some((l) => / #7: stalled, worktree not found, left for the owner$/.test(l)), run.out.join("\n"));
+});
+
+test("#382: edge: the worktree lookup gets the session's cwd", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7)] };
+  const run = recoveryRun(world, { stalledIssues: [7] });
+  const seen = [];
+  const worktree = run.deps.recovery.worktree;
+  run.deps.recovery.worktree = (n, cwd) => (seen.push(cwd), worktree(n, cwd));
+  await main([], run.deps);
+  assert.deepEqual(seen, ["/repo/.claude/worktrees/issue-7-work"]);
+});
+
+test("#382: edge: a session id that is not a plain token is never passed to claude stop", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { id: "--all" })] };
+  const run = recoveryRun(world, { stalledIssues: [7] });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual([run.stopped, run.removed, run.launched], [[], [], []]);
 });
 
 test("#382: edge: a failing removal is printed and the issue is not relaunched", async () => {
@@ -876,4 +894,35 @@ test("#382: edge: a failing removal is printed and the issue is not relaunched",
   assert.equal(await main([], run.deps), 0);
   assert.deepEqual(run.launched, []);
   assert.ok(run.out.some((l) => / #7: recovery failed: Permission denied$/.test(l)), run.out.join("\n"));
+});
+
+test("#382: edge: one attempt per issue per run even when the marker cannot be read back", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7)] };
+  const run = recoveryRun(world, { stalledIssues: [7], workLeft: "uncommitted changes" });
+  run.deps.recovery.marker.read = () => null;
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.stopped, ["old-7"]);
+});
+
+test("#382: edge: a failing stall check is printed and touches no lane", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7)] };
+  const run = recoveryRun(world);
+  run.deps.recovery.stalled = () => { throw new Error("boom\nmore"); };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual([run.stopped, run.removed], [[], []]);
+  assert.ok(run.out.some((l) => / stall check failed: boom$/.test(l)), run.out.join("\n"));
+});
+
+test("#382: edge: planRecovery judges only the newest session of an issue, and skips a marker's own session", async () => {
+  const { planRecovery } = await import("./queue.mjs");
+  const issues = [issue(7, ["src/a.mjs"])];
+  const older = lane(7, { id: "old", status: "idle", startedAt: 1 });
+  const newer = lane(7, { id: "new", status: "busy", startedAt: 2 });
+  assert.deepEqual(planRecovery({ issues, prs: [], sessions: [older, newer] }), []);
+  assert.deepEqual(planRecovery({ issues, prs: [], sessions: [newer, older] }), []);
+  const idle = lane(7, { id: "same", status: "idle" });
+  assert.deepEqual(planRecovery({ issues, prs: [], sessions: [idle], marker: () => ({ session: "same" }) }), []);
+  assert.deepEqual(planRecovery({ issues, prs: [], sessions: [idle], marker: () => ({ session: "other" }) }).map((r) => r.again), [true]);
 });

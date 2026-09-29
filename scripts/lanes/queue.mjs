@@ -9,7 +9,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseBlockedBy } from "./blockers.mjs";
-import { cleanupMerged, laneWorkLeft, parseWorktrees, removeLaneWorktree, waitForStop } from "./cleanup.mjs";
+import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWorktree, waitForStop } from "./cleanup.mjs";
 import { GATE_CONTEXT, laneIssueOf } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { inFlightIssues, launchArgs, localLaunchEnv, markRunning, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
@@ -106,7 +106,8 @@ export function planRecovery({ issues = [], prs = [], sessions = [], stalled = n
   const newest = new Map();
   for (const s of sessions) {
     const n = laneIssueOf(s);
-    if (!n || typeof s.id !== "string" || (newest.get(n)?.startedAt ?? -1) > (s.startedAt ?? 0)) continue;
+    // An id that is not a plain token could be read as an option by `claude stop` or `claude rm`.
+    if (!n || typeof s.id !== "string" || !SESSION_ID.test(s.id) || (newest.get(n)?.startedAt ?? -1) > (s.startedAt ?? 0)) continue;
     newest.set(n, s);
   }
   const out = [];
@@ -118,7 +119,7 @@ export function planRecovery({ issues = [], prs = [], sessions = [], stalled = n
     if (!reason) continue;
     const marked = marker(n);
     if (marked?.session === s.id) continue;
-    out.push({ number: n, id: s.id, reason, again: Boolean(marked) });
+    out.push({ number: n, id: s.id, cwd: s.cwd, reason, again: Boolean(marked) });
   }
   return out.sort((a, b) => a.number - b.number);
 }
@@ -165,7 +166,7 @@ function recoverLanes(snapshot, { deps, dir, say, attempted, told }) {
     say(`stall check failed: ${reason(err)}`);
     return;
   }
-  for (const { number: n, id, reason: why, again } of planRecovery({ ...snapshot, stalled, marker: recovery.marker.read })) {
+  for (const { number: n, id, cwd, reason: why, again } of planRecovery({ ...snapshot, stalled, marker: recovery.marker.read })) {
     if (again) {
       if (!told.has(n)) say(`#${n}: stalled again after recovery: ${why}`);
       told.add(n);
@@ -179,11 +180,12 @@ function recoverLanes(snapshot, { deps, dir, say, attempted, told }) {
         say(`#${n}: could not stop session ${id}, left for the owner`);
         continue;
       }
-      const tree = recovery.worktree(n, dir);
-      const left = tree ? recovery.workLeft(tree) : null;
+      // Fail closed: a worktree that cannot be found or read is never removed from under a session.
+      const tree = recovery.worktree(n, cwd);
+      const left = tree ? recovery.workLeft(tree) : "worktree not found";
       recovery.marker.write(n, { issue: n, session: id, reason: why, time: new Date(deps.now()).toISOString(), outcome: left ? "left" : "relaunch" });
       if (left) {
-        say(`#${n}: stalled with unpushed work, left for the owner`);
+        say(left === "worktree not found" ? `#${n}: stalled, worktree not found, left for the owner` : `#${n}: stalled with unpushed work, left for the owner`);
         continue;
       }
       recovery.remove(id, tree);
@@ -310,19 +312,30 @@ const run = (cmd) => (args, { cwd, env } = {}) => execFileSync(cmd, args, { cwd,
 const markerFile = (n) => join(repoRoot(), ".lanes", "queue-recover", `${n}.json`);
 const DEFAULT_RECOVERY = {
   stalled: (agents, root) => stalledLanes(agents, root),
-  worktree: (n) => {
-    const tree = parseWorktrees(run("git")(["worktree", "list", "--porcelain"])).find((t) => !t.main && Number(/^issue-(\d+)-./.exec(t.branch ?? "")?.[1]) === n);
+  // The lane's own worktree: the one at the session's cwd, on an issue-N-* branch. Anything else is not found.
+  worktree: (n, cwd) => {
+    const same = (a, b) => String(a).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() === String(b).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    const tree = parseWorktrees(run("git")(["worktree", "list", "--porcelain"])).find((t) => !t.main && same(t.path, cwd) && Number(/^issue-(\d+)-./.exec(t.branch ?? "")?.[1]) === n);
     return tree ? { path: tree.path, branch: tree.branch } : null;
   },
   workLeft: (tree) => laneWorkLeft(tree.path, tree.branch),
-  waitStopped: (id) => waitForStop(id, { run: (cmd, args) => run(cmd)(args), sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }),
-  remove: (id, tree) => (tree ? removeLaneWorktree({ id, ...tree }, (cmd, args) => run(cmd)(args)) : run("claude")(["rm", id])),
+  // `claude agents --json` is asked from the repo root, as readSnapshot asks it.
+  waitStopped: (id) => waitForStop(id, { run: (cmd, args) => run(cmd)(cmd === "claude" && args[0] === "agents" ? [...args, "--cwd", repoRoot()] : args), sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }),
+  remove: (id, tree) => removeLaneWorktree({ id, ...tree }, (cmd, args) => run(cmd)(args)),
   marker: {
     read: (n) => {
+      let text;
       try {
-        return JSON.parse(readFileSync(markerFile(n), "utf8"));
+        text = readFileSync(markerFile(n), "utf8");
+      } catch (err) {
+        if (err.code === "ENOENT") return null;
+        return {};
+      }
+      // A marker that exists but cannot be read still counts as marked: it never allows a second recovery.
+      try {
+        return JSON.parse(text) ?? {};
       } catch {
-        return null;
+        return {};
       }
     },
     write: (n, record) => {
