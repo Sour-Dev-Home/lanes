@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lanes-lock.schema.json",
+  "title": "Lanes lock file",
+  "description": "lanes.lock.json (ADR 0016): the version of lanes a project runs and the sha256 of every file the upgrade installed, so an upgrade can tell a local edit from a stale copy. Strict: no other keys, and every path is repo-relative with no `..` segment, no leading `/` or `\\`, no drive letter and no backslash, so a hand-edited lock cannot point an upgrade outside the repository. lanes.lock.json is an owner path (lanes.config.json paths.owner), so a lane cannot edit it.",
+  "type": "object",
+  "required": ["version", "files"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "description": "The lanes release the files came from, as a semver string (MAJOR.MINOR.PATCH, optional -prerelease and +build).", "$ref": "#/$defs/semver" },
+    "files": {
+      "description": "Repo-relative path to the sha256 of that file as installed.",
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/repoPath" },
+      "additionalProperties": { "$ref": "#/$defs/sha256" }
+    }
+  },
+  "$defs": {
+    "semver": { "type": "string", "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$" },
+    "sha256": { "description": "64 lowercase hex characters.", "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "repoPath": { "description": "Repo-relative, forward slashes, no `.` or `..` or empty segment, no segment ending in a dot or space (Windows strips them), no leading `/`, no `:` (drive letter, NTFS stream), no backslash or control character.", "type": "string", "pattern": "^(?!.*:)(?![/\\\\])(?!.*\\\\)(?!.*[\\u0000-\\u001f])(?!(.*/)?[^/]*[. ](/|$))(?!.*//)(?!.*/$).+$" }
+  }
+}

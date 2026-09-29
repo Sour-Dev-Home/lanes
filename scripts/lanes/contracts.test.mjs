@@ -150,9 +150,9 @@ const metricsSchema = JSON.parse(readFileSync("contracts/review-metrics.schema.j
 
 /**
  * The JSON Schema subset the contracts use (type, enum, const, minimum, pattern, maxLength, items, required,
- * properties, additionalProperties, plus local `$ref` to `#/$defs/<name>`). A keyword outside it makes the schema throw, so it can never pass unchecked.
+ * properties, additionalProperties as false or a schema, propertyNames, plus local `$ref` to `#/$defs/<name>`). A keyword outside it makes the schema throw, so it can never pass unchecked.
  */
-const KNOWN_KEYWORDS = new Set(["$schema", "$id", "title", "description", "type", "enum", "const", "minimum", "maximum", "pattern", "maxLength", "items", "required", "properties", "additionalProperties", "$defs", "$ref"]);
+const KNOWN_KEYWORDS = new Set(["$schema", "$id", "title", "description", "type", "enum", "const", "minimum", "maximum", "pattern", "maxLength", "items", "required", "properties", "additionalProperties", "propertyNames", "$defs", "$ref"]);
 function schemaAccepts(schema, value, root = schema) {
   for (const k of Object.keys(schema)) if (!KNOWN_KEYWORDS.has(k)) throw new Error(`schemaAccepts does not implement "${k}"`);
   if (schema.$ref !== undefined) {
@@ -180,7 +180,8 @@ function schemaAccepts(schema, value, root = schema) {
   if (types.includes("object")) {
     if ((schema.required ?? []).some((k) => !Object.hasOwn(value, k))) return false;
     for (const [k, v] of Object.entries(value)) {
-      const sub = schema.properties?.[k];
+      if (schema.propertyNames && !schemaAccepts(schema.propertyNames, k, root)) return false;
+      const sub = schema.properties?.[k] ?? (typeof schema.additionalProperties === "object" ? schema.additionalProperties : undefined);
       if (sub ? !schemaAccepts(sub, v, root) : schema.additionalProperties === false) return false;
     }
   }
@@ -553,4 +554,52 @@ test("edge: schemaAccepts refuses an unresolvable $ref, and every $ref in the la
   const refs = [...JSON.stringify(laneSchema).matchAll(/"\$ref":"#\/\$defs\/([A-Za-z]+)"/g)].map((m) => m[1]);
   assert.ok(refs.length > 10);
   for (const r of refs) assert.ok(laneSchema.$defs[r], r);
+});
+
+// The upgrade lock contract (ADR 0016): contracts/lanes-lock.schema.json.
+const lockSchema = JSON.parse(readFileSync("contracts/lanes-lock.schema.json", "utf8"));
+const HASH = "a".repeat(64);
+const lock = (files, over = {}) => ({ version: "1.2.3", files, ...over });
+
+test("the lock schema accepts a valid lock", () => {
+  assert.equal(schemaAccepts(lockSchema, lock({ "scripts/lanes/gate.mjs": HASH, ".claude/agents/x.md": HASH })), true);
+});
+
+test("the lock schema rejects an absolute path, a .. path, a short hash and an extra key", () => {
+  assert.equal(schemaAccepts(lockSchema, lock({ "/etc/passwd": HASH })), false);
+  assert.equal(schemaAccepts(lockSchema, lock({ "../outside.txt": HASH })), false);
+  assert.equal(schemaAccepts(lockSchema, lock({ "a/../../b": HASH })), false);
+  assert.equal(schemaAccepts(lockSchema, lock({ "a/b.mjs": "abc123" })), false);
+  assert.equal(schemaAccepts(lockSchema, lock({ "a/b.mjs": HASH }, { extra: 1 })), false);
+});
+
+test("edge: lock paths with a drive letter, backslash, empty segment or trailing slash are rejected", () => {
+  for (const p of ["C:/x", "c:\\x", "\\x", "a\\b", "a//b", "a/", "a/..", "..", "", "./../x", "x:y", "xy:z", "f:stream", ".", "./a", "a/./b", "a/.. ", "a/...", "a. /b", "a\0b", "a\nb", "a\n../b", "a\tb"]) {
+    assert.equal(schemaAccepts(lockSchema, lock({ [p]: HASH })), false, JSON.stringify(p));
+  }
+  for (const p of ["a", "..a/b", "a/..b", ".gitattributes", "a/.hidden/b", "a b/c d.txt"]) {
+    assert.equal(schemaAccepts(lockSchema, lock({ [p]: HASH })), true, JSON.stringify(p));
+  }
+});
+
+test("edge: lock hashes must be 64 lowercase hex characters", () => {
+  for (const h of ["A".repeat(64), "a".repeat(65), "g".repeat(64), "", 5, null]) {
+    assert.equal(schemaAccepts(lockSchema, lock({ "a.mjs": h })), false, String(h));
+  }
+});
+
+test("edge: lock version must be semver, and version and files are required", () => {
+  for (const v of ["1.2", "v1.2.3", "01.2.3", "", 1, null]) assert.equal(schemaAccepts(lockSchema, lock({}, { version: v })), false, String(v));
+  for (const v of ["0.0.0", "1.2.3-rc.1", "1.2.3+build.5"]) assert.equal(schemaAccepts(lockSchema, lock({}, { version: v })), true, v);
+  assert.equal(schemaAccepts(lockSchema, { files: {} }), false);
+  assert.equal(schemaAccepts(lockSchema, { version: "1.0.0" }), false);
+  assert.equal(schemaAccepts(lockSchema, lock([])), false);
+  assert.equal(schemaAccepts(lockSchema, null), false);
+});
+
+test("lanes.config.json makes lanes.lock.json an owner path", () => {
+  const owner = JSON.parse(readFileSync("lanes.config.json", "utf8")).paths.owner;
+  assert.ok(owner.includes("^lanes\\.lock\\.json$"));
+  assert.ok(owner.some((p) => new RegExp(p).test("lanes.lock.json")));
+  assert.ok(!owner.some((p) => new RegExp(p).test("sub/lanes.lock.jsonx")));
 });

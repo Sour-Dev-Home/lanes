@@ -137,6 +137,7 @@ const OWNER_SAMPLES = {
   "^vendor/": ["vendor/agent-skills/VENDORED.md", "src/vendor/x.ts"],
   "(^|/)CLAUDE\\.md$": ["backend/CLAUDE.md", "docs/NOTCLAUDE.md"],
   "^\\.gitattributes$": [".gitattributes", "src/.gitattributes"],
+  "^lanes\\.lock\\.json$": ["lanes.lock.json", "sub/lanes.lock.json"],
   "^scripts/preflight\\.mjs$": ["scripts/preflight.mjs", "scripts/preflight.test.mjs"],
   "(^|/)\\.env": [".env.local", "src/environment.ts"],
   "(^|/)auth/": ["src/auth/login.ts", "src/oauth/x.ts"],
