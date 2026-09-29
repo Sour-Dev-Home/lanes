@@ -1,0 +1,72 @@
+# 0017: Narrower CI on pull requests, a tag-gated release, and lanes.config.json as a soft path
+
+Status: accepted
+
+## Context
+
+`verify.yml` runs the full `npm test` (every `scripts/**/*.test.mjs`) on ubuntu Node 22 and 24 and windows Node 22, on
+`pull_request`, `merge_group` and `push` to main alike; `verify` is a required check. A large adopter repo's suite would
+slow every lane's feedback loop, and the README (#391) will claim macOS support the matrix does not cover. Lanes has
+`package.json` at `0.1.0` and a CHANGELOG (#388), but no release workflow. `pickStartable`'s `softPaths` (pick.mjs;
+default in start.mjs) is the only way two issues touching the same file can start together; `lanes.config.json` is
+not in it, so issues that each add one module-map line or config key run one at a time. Nothing reads a PR's
+`mergeable` state today. Standing constraints: zero npm dependencies, no extra adopter setup, lanes share the owner's
+GitHub identity (ADR 0004/0007), `queue.mjs` never runs inside Claude or on a schedule (ADR 0005).
+
+## Decision
+
+1. **Affected tests, on `pull_request` only.** `scripts/lanes/affected-tests.mjs` (module `modules`) uses
+   `lanes.config.json`'s `modules.entries` (`moduleOf`, `importSpecifiers` from modules.mjs) to print the test files of
+   the changed modules plus every module that imports them, directly or transitively, or `ALL` when any changed file
+   maps to no module, is a workflow, `package.json`, `lanes.config.json`, under `contracts/`, a test helper or fixture,
+   or the diff cannot be read. `verify.yml` uses it only on `pull_request`; `merge_group` and `push` to main always run
+   the full suite, so nothing merges without every test passing. `ci.affectedTests` in `lanes.config.json` (default
+   `true`) set to `false` restores full runs on every event.
+2. **macOS on `merge_group` and `push` only.** `verify.yml` adds macOS on Node 22, run on `merge_group` and `push` to
+   main and never on `pull_request`; the required `verify` result includes it wherever it runs.
+3. **A tag-triggered release.** `.github/workflows/release.yml` (`contents: write`) runs on a pushed `v*` tag and creates
+   a GitHub Release from that version's `CHANGELOG.md` section, only when `scripts/lanes/release.mjs` confirms the
+   tagged commit is reachable from `origin/main`, the tag equals `package.json`'s `version`, and `CHANGELOG.md` has that
+   version's section. `start-guard.mjs` and `approve-guard.mjs` deny creating or pushing a `v*` tag from any Claude
+   session, under ADR 0004/0007's accepted-risk rule (a bypass is minor, a regression critical); the owner tags from
+   their own terminal. No tag ruleset: the shared identity defeats one. Release notes only, no `npm publish`.
+4. **An adopter smoke test.** `scripts/lanes/adopter-smoke.test.mjs` (module `install`, so affected tests pick it up
+   whenever install or upgrade code changes) runs under `npm test`: it git-inits a temp repo, runs `install.mjs`,
+   validates `lanes.lock.json` against `contracts/lanes-lock.schema.json` and its hashes, edits one lanes-owned file and
+   one `lanes.config.json` key, runs `upgrade.mjs` and asserts the edited file is refused and the key kept.
+   `setup-repo.mjs` is left out: it has no dry run and calls the GitHub API.
+5. **`lanes.config.json` becomes a soft path.** `^lanes\.config\.json$` joins `start.softPaths` (this repo's config and
+   start.mjs's default). Scheduling only: it stays an owner path, and every PR touching it still needs `/approve` or
+   ADR 0015's fast path. `status.mjs` and the snapshot read each open lane PR's `mergeable` state and show `CONFLICTING`
+   as `conflict: rebase needed`, and `queue.mjs` treats it as an owner wait (ADR 0005 step 5). Consolidating
+   same-file issues stays the default; the soft path covers the one-line config additions consolidation cannot merge.
+   Splitting the module map into its own file is rejected: ADR 0008 chose no new file, and a second owner file moves
+   the hotspot.
+6. **The scheduled queue does not change.** ADR 0005 and 0006 stand: a no-argument `queue.mjs` in the owner's own
+   terminal already works every ready issue, and ADR 0016's budgets cap its spend.
+
+## Consequences
+
+- PR feedback narrows to the affected modules with a tested fail-safe; `merge_group` and `push` stay the full,
+  unconditional check.
+- macOS is covered without adding runner minutes to every PR.
+- A tag push gains write authority (Releases), bounded by three mechanical checks and the guard denial.
+- Issues that each add a line to `lanes.config.json` can run together, and a real conflict surfaces to the owner.
+
+## Governs
+
+- scripts/lanes/affected-tests.mjs
+- scripts/lanes/affected-tests.test.mjs
+- .github/workflows/verify.yml
+- .github/workflows/release.yml
+- scripts/lanes/release.mjs
+- scripts/lanes/release.test.mjs
+- scripts/lanes/adopter-smoke.test.mjs
+- scripts/lanes/workflow.test.mjs
+- scripts/lanes/start-guard.mjs
+- scripts/lanes/approve-guard.mjs
+- scripts/lanes/start.mjs
+- scripts/lanes/status.mjs
+- scripts/lanes/snapshot.mjs
+- scripts/lanes/queue.mjs
+- lanes.config.json
