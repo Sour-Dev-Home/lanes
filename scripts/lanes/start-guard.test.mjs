@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, UNRESOLVED_DENY_REASON, WMI_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, grantPath, grantRefusal, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, readGrant, runHook } from "./start-guard.mjs";
 import { AUTOMATED_INPUT_PREFIXES } from "./approve-guard.mjs";
+import { WRAPPERS, automatedInputLeavesTheGrant } from "./shell-lex.fixtures.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const START = "node scripts/lanes/start.mjs 12 14";
@@ -1324,15 +1325,7 @@ test("#240 edge (test-hunter): a $( substitution in a gh word keeps a literal he
 
 // --- automated inputs keep the grant (#262) -----------------------------------------------------------------------
 
-const WRAPPERS = ["<task-notification>", "Another Claude session sent a message:", "<cross-session-message", "[Cross-session idle notice]"];
-
-test("#262 criterion 1: a prompt that starts with an automated-input wrapper leaves the grant alone", () => {
-  for (const w of WRAPPERS) {
-    for (const p of [w, `${w}\nreviewer done`, `  \n\t${w} from="peer">hi</cross-session-message>`]) {
-      assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: p }, NOW), { action: "none" }, JSON.stringify(p));
-    }
-  }
-});
+automatedInputLeavesTheGrant(onUserPromptSubmit, NOW);
 
 test("#262 criterion 2: a wrapped /start 5 or /start --auto --go never grants", () => {
   for (const w of WRAPPERS) {

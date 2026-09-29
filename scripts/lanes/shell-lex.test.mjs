@@ -1,8 +1,13 @@
 // scripts/lanes/shell-lex.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { CAT_HEREDOC_RE, HEREDOC_RE, heredocOperator, lex, literalSubstitution, readHeredoc, skipRedirectTarget, unmark } from "./shell-lex.mjs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  CAT_HEREDOC_RE, HEREDOC_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, heredocOperator, lex, literalSubstitution, plainLiteralSubstitution, readGrant, readHeredoc,
+  skipRedirectTarget, unmark,
+} from "./shell-lex.mjs";
 
 const source = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
 // A lexed segment's words with the literal stand-ins turned back into their characters.
@@ -125,4 +130,146 @@ test("#194 edge: a bare literal substitution word, a backslash in a redirect tar
   const r = readHeredoc("a\r\nEOF\r\n", 0, "EOF", false);
   assert.deepEqual([r.body, r.terminated], ["a", true]);
   assert.equal(literalSubstitution("$(cat <<-\\EOF\r\n\t$(x)\r\n\tEOF\r\n)", 0)?.body, "$(x)");
+});
+
+// --- one lexer for both guards (#351) -----------------------------------------------------------------------------
+
+// A lexed word with start-guard's stand-ins shown, so an assertion names which character was marked.
+const shown = (s) => s.replaceAll(LIT_DOLLAR, "<$>").replaceAll(LIT_TICK, "<`>").replaceAll(QUOTED_TICK, "<'`>");
+const lexBodies = (cmd) => {
+  const r = lex(cmd, { bodies: true });
+  return { ...r, segments: r.segments.map((s) => s.map(shown)), targets: r.targets.map(shown) };
+};
+
+test("#351 criterion 1: lex(cmd, { bodies: true }) returns writes, fd duplications, stdin, pipes, targets and bodies", () => {
+  assert.deepEqual(lexBodies("cat <<EOF | sh\necho hi\nEOF\nnode < s.js 2>&1 > out.txt"), {
+    segments: [["cat"], ["sh"], ["node"]],
+    writes: [false, false, "dup"],
+    stdin: [undefined, undefined, "s.js"],
+    pipes: [true, false, false],
+    targets: ["s.js", "1", "out.txt"],
+    bodies: [{ text: "echo hi", literal: true, toShell: true, seg: 0, start: 15, end: 26 }],
+  });
+  // An arithmetic expression, a backtick command (quoted or not) and a substitution in a redirection target are bodies.
+  assert.deepEqual(lexBodies('echo "$((x + $(id)))" `whoami` > "`date`.log"'), {
+    segments: [["echo", "0", "<'`>whoami<'`>"]],
+    writes: [true],
+    stdin: [undefined],
+    pipes: [false],
+    targets: ["`date`.log"],
+    bodies: [{ text: "x + $(id)", literal: false }, { text: "whoami", literal: false }, { text: "date", literal: false }],
+  });
+  // `>>` writes, a here-string stays a word, and `&>` is one operator.
+  assert.deepEqual(lexBodies('printf x >> a.txt; cat <<<"hi"').segments, [["printf", "x"], ["cat", "hi"]]);
+  assert.deepEqual(lexBodies('printf x >> a.txt; cat <<<"hi"').writes, [true, false]);
+  assert.deepEqual(lexBodies("echo &> f"), { segments: [["echo"]], writes: [true], stdin: [undefined], pipes: [false], targets: ["f"], bodies: [] });
+});
+
+test("#351 criterion 1: start-guard.mjs has no lexer of its own and calls shell-lex.mjs's", () => {
+  const text = source("start-guard.mjs");
+  assert.doesNotMatch(text, /function lex\b/);
+  assert.match(text, /import \{[^}]*\blex\b[^}]*\} from "\.\/shell-lex\.mjs"/);
+  assert.match(text, /\blex\([^)]*\{ bodies: true \}\)/);
+  // Every call asks for start-guard's shape: the words shape would read its commands with approve-guard's rules.
+  for (const call of text.matchAll(/\blex\([^)]*\)/g)) assert.match(call[0], /\{ bodies: true \}/, call[0]);
+});
+
+test("#351 criterion 2: readHeredoc, literalSubstitution and readGrant exist once, in shell-lex.mjs, and both guards import from it", () => {
+  const lexText = source("shell-lex.mjs");
+  for (const name of ["readHeredoc", "literalSubstitution", "readGrant"]) {
+    assert.match(lexText, new RegExp(`^export function ${name}\\(`, "m"), `shell-lex.mjs defines ${name}`);
+  }
+  for (const name of ["approve-guard.mjs", "start-guard.mjs"]) {
+    const text = source(name);
+    for (const def of [/function readHeredoc\b/, /function literalSubstitution\b/, /function readGrant\b/, /const EXPANDS_RE\b/, /PLAIN_CAT_HEREDOC_RE =/]) {
+      assert.doesNotMatch(text, def, `${name} defines ${def.source}`);
+    }
+    assert.match(text, /import \{[^}]*\breadGrant\b[^}]*\} from "\.\/shell-lex\.mjs"/, `${name} imports readGrant`);
+    // start.mjs and post-review.mjs still import readGrant from the guard they belong to.
+    assert.match(text, /export \{ readGrant \} from "\.\/shell-lex\.mjs";/, `${name} re-exports readGrant`);
+  }
+});
+
+test("#351 criterion 3: the WRAPPERS fixture and the #262 criterion 1 test body live once, in shell-lex.fixtures.mjs", () => {
+  assert.match(source("shell-lex.fixtures.mjs"), /^export const WRAPPERS = /m);
+  for (const name of ["approve-guard.test.mjs", "start-guard.test.mjs"]) {
+    const text = source(name);
+    assert.doesNotMatch(text, /const WRAPPERS\b/, `${name} keeps its own WRAPPERS`);
+    assert.doesNotMatch(text, /test\("#262 criterion 1:/, `${name} keeps its own #262 criterion 1 body`);
+    assert.match(text, /import \{[^}]*\bWRAPPERS\b[^}]*\} from "\.\/shell-lex\.fixtures\.mjs"/, `${name} imports the fixture`);
+  }
+});
+
+test("#351 criterion 5: readHeredoc reads unterminated, tab-stripped, and quoted versus unquoted bodies", () => {
+  assert.deepEqual(readHeredoc("one\ntwo", 0, "EOF", false), { body: "one\ntwo", end: 7, terminated: false });
+  assert.deepEqual(readHeredoc("", 0, "EOF", false), { body: "", end: 0, terminated: false });
+  // Tabs are stripped for <<- only, and only leading ones: a tab-led delimiter ends only a <<- body.
+  assert.deepEqual(readHeredoc("\t\tx\ty\n\tEOF\nrest", 0, "EOF", true), { body: "x\ty", end: 10, terminated: true });
+  assert.deepEqual(readHeredoc("\tx\n\tEOF\n", 0, "EOF", false), { body: "\tx\n\tEOF", end: 8, terminated: false });
+  // A delimiter line must be exactly the delimiter: trailing text does not end the body.
+  assert.equal(readHeredoc("EOF x\nEOF", 0, "EOF", false).body, "EOF x");
+  // Through each shape of lex: a quoted delimiter's body is literal, an unquoted one is literal only with nothing to expand.
+  const bodies = lex("cat <<-'EOF'\n\tx $y\n\tEOF\ncat <<EOF\n$y\nEOF\ncat <<EOF\nplain\nEOF", { bodies: true }).bodies;
+  assert.deepEqual(bodies.map((b) => [b.text, b.literal]), [["x $y", true], ["$y", false], ["plain", true]]);
+  assert.deepEqual(lex("cat <<-'EOF'\n\tx $y\n\tEOF\ncat <<EOF\n$y\nEOF").map((s) => s.heredocs), [[{ body: "x $y", quoted: true }], [{ body: "$y", quoted: false }]]);
+});
+
+test("#351 criterion 5: literalSubstitution and plainLiteralSubstitution", () => {
+  const quoted = "$(cat <<'EOF'\n$HOME `x`\nEOF\n)";
+  assert.deepEqual(literalSubstitution(quoted, 0), { body: "$HOME `x`", end: quoted.length - 1 });
+  assert.deepEqual(plainLiteralSubstitution(quoted, 0), { body: "$HOME `x`", end: quoted.length - 1 });
+  // start-guard's rule: an unquoted body with any `$`, backtick or backslash could still expand.
+  assert.deepEqual(literalSubstitution("$(cat <<EOF\n$HOME\nEOF\n)", 0)?.body, "$HOME");
+  assert.equal(plainLiteralSubstitution("$(cat <<EOF\n$HOME\nEOF\n)", 0), null);
+  assert.equal(plainLiteralSubstitution("$(cat <<EOF\na\\b\nEOF\n)", 0), null);
+  assert.deepEqual(plainLiteralSubstitution("$(cat <<EOF\nplain\nEOF\n)", 0)?.body, "plain");
+  // ...and only a plain delimiter (#269): one bash unquotes in its own way is never read as literal.
+  assert.equal(plainLiteralSubstitution("$(cat <<\"E\\$F\"\nx\nE$F\n)", 0), null);
+  assert.equal(plainLiteralSubstitution("$(cat <<'E F'\nx\nE F\n)", 0), null);
+  assert.deepEqual(literalSubstitution("$(cat <<'EF'\nx\nEF\n)", 0)?.body, "x");
+  assert.equal(plainLiteralSubstitution("echo", 0), null);
+  assert.equal(plainLiteralSubstitution("x $(cat <<'EOF'\nhi\nEOF\n)", 2)?.body, "hi");
+});
+
+test("#351 criterion 5: readGrant tells a missing, unreadable and corrupt grant file apart", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shell-lex-grant-"));
+  try {
+    writeFileSync(join(dir, "ok.json"), '{"sessionId":"s1","pr":5}\n');
+    writeFileSync(join(dir, "bad.json"), "{not json");
+    writeFileSync(join(dir, "empty.json"), "");
+    mkdirSync(join(dir, "a-dir.json"));
+    assert.deepEqual(readGrant(join(dir, "ok.json")), { sessionId: "s1", pr: 5 });
+    assert.equal(readGrant(join(dir, "missing.json")), null);
+    assert.deepEqual(readGrant(join(dir, "bad.json")), { unreadable: true });
+    assert.deepEqual(readGrant(join(dir, "empty.json")), { unreadable: true });
+    assert.deepEqual(readGrant(join(dir, "a-dir.json")), { unreadable: true }, "a directory is unreadable, not missing");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#351 edge: the bodies shape marks only `$` and backticks, and never refuses a stand-in character", () => {
+  assert.deepEqual(lexBodies("echo 'a$b`c{d}' \"x\\$y\" \\$z *").segments, [["echo", "a<$>b<`>c{d}", "x<$>y", "<$>z", "*"]]);
+  assert.deepEqual(lexBodies("echo ").segments, [["echo", ""]]);
+  assert.throws(() => lex("echo "), /private-use/);
+});
+
+test("#351 edge: the bodies shape on empty, malformed and unterminated input", () => {
+  assert.deepEqual(lex("", { bodies: true }), { segments: [], writes: [], stdin: [], pipes: [], targets: [], bodies: [] });
+  assert.deepEqual(lex("   \n ; ", { bodies: true }).segments, []);
+  assert.throws(() => lex("echo `open", { bodies: true }), /unterminated `/);
+  assert.throws(() => lex('echo "`open"', { bodies: true }), /unterminated `/);
+  assert.throws(() => lex("echo 'open", { bodies: true }), /unterminated '/);
+  // `$((` with no closing `))` is no arithmetic expansion: it lexes as before, with no body.
+  assert.deepEqual(lexBodies("echo $((1 + 2").segments, [["echo", "$"], ["1", "+", "2"]]);
+  assert.deepEqual(lexBodies("echo $((1 + 2").bodies, []);
+  // An unterminated heredoc's body runs to the end.
+  assert.deepEqual(lex("bash <<EOF\nnode x", { bodies: true }).bodies, [{ text: "node x", literal: true, toShell: true, seg: 0, start: 11, end: 17 }]);
+});
+
+test("#351 edge: the two shapes read pipes as each guard did", () => {
+  // approve-guard's shape marks the group before `| sh`; start-guard's marks a pipe only from a non-empty command.
+  assert.equal(lex("(echo x) | sh")[0].pipedOut, true);
+  assert.deepEqual(lex("(echo x) | sh", { bodies: true }).pipes, [false, false]);
+  assert.deepEqual(lex("a | b || c |& d", { bodies: true }).pipes, [true, false, true, false]);
 });

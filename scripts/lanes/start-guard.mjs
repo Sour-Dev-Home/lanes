@@ -30,8 +30,13 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isAutomatedInput, powershellAsBash } from "./approve-guard.mjs";
-import { HEREDOC_RE, heredocOperator, literalSubstitution, readHeredoc } from "./shell-lex.mjs";
+import { isAutomatedInput, powershellAsBash, preToolUseOutput } from "./approve-guard.mjs";
+import {
+  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, SHELL_RE, basename, feedsShell, lex, plainLiteralSubstitution, readGrant,
+} from "./shell-lex.mjs";
+
+// start.mjs reads the grant with the guard's own reader.
+export { readGrant } from "./shell-lex.mjs";
 
 export const GRANT_TTL_MS = 15 * 60 * 1000;
 export const DENY_REASON = "lanes are launched only from /start <N> typed by the owner in this session";
@@ -59,7 +64,6 @@ const CLAUDE_RE = /(?<!\.)claude(-code)?(\.exe|\.cmd|\.ps1)?$/i;
 const BG_FLAG_RE = /^--(bg|background)(=.*)?$/;
 const MAX_DEPTH = 4;
 
-const basename = (w) => w.split(/[\\/]/).at(-1);
 
 /** The issue numbers of a prompt that is exactly `/start <N> [<N> ...]` (surrounding whitespace ignored), else null. */
 export function parseStartPrompt(prompt) {
@@ -83,8 +87,8 @@ export function parseAutoPrompt(prompt) {
  */
 export function onUserPromptSubmit(input, now = Date.now()) {
   const sessionId = input?.session_id;
-  if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId)) return { action: "none" };
-  if (isAutomatedInput(input.prompt)) return { action: "none" };
+  const acts = typeof sessionId === "string" && SESSION_RE.test(sessionId) && !isAutomatedInput(input.prompt);
+  if (!acts) return { action: "none" };
   const at = new Date(now).toISOString();
   const auto = parseAutoPrompt(input.prompt);
   if (auto !== null) return { action: "grant", sessionId, grant: { sessionId, auto, at } };
@@ -93,257 +97,28 @@ export function onUserPromptSubmit(input, now = Date.now()) {
   return { action: "grant", sessionId, grant: { sessionId, issues, at } };
 }
 
-/** The index of the backtick closing the one at `i` (a backslash escapes the next character), or -1. */
-function backtickEnd(cmd, i) {
-  for (let j = i + 1; j < cmd.length; j += 1) {
-    if (cmd[j] === "\\") j += 1;
-    else if (cmd[j] === "`") return j;
-  }
-  return -1;
-}
-
-// A redirection operator: `>`, `>>`, `>|`, `>&`, `<`, `<&`, `<>`, `&>` or `&>>` (#191).
-const REDIRECT_RE = /^(?:&>>?|>[>|&]?|<[&>]?)/;
-// Text in an unquoted heredoc body that bash could still expand: any `$`, backtick or backslash (#89), stricter than
-// approve-guard.mjs, which lets a plain `$VAR` stay text.
-const EXPANDS_RE = /[$`\\]/;
-
-/**
- * `$(cat <<'D' … D)` at `i` (shell-lex.mjs): its output is the body, known and literal, so it reads as that text, as if
- * single-quoted. Null for any other substitution, or an unquoted delimiter whose body could still expand.
- */
-const literalSub = (cmd, i) => (PLAIN_CAT_HEREDOC_RE.test(cmd.slice(i, i + CAT_OPENER_MAX)) ? literalSubstitution(cmd, i, EXPANDS_RE) : null);
-// The opener of such a substitution with a delimiter of letters, digits, `_`, `.` or `-` only (bare or quoted, and
-// at most the one backslash before a bare word that `<<\EOF` uses), ending its line. Bash unquotes any other delimiter (`"E\$F"` is `E$F`) in ways this lexer might not, so
-// that body is never read as literal text (#269), the rule PLAIN_DELIM_RE and DELIM_END_RE apply to top-level
-// heredocs (#240).
-const PLAIN_CAT_HEREDOC_RE = /^\$\([ \t]*cat[ \t]+<<-?[ \t]*(?:'[A-Za-z0-9_.-]+'|"[A-Za-z0-9_.-]+"|\\?[A-Za-z0-9_.-]+)[ \t]*\r?\n/;
-const CAT_OPENER_MAX = 4096;
-
-// A `$` or backtick the shell takes literally (single-quoted, escaped, or in a literal heredoc message) is lexed as
-// one of these, so UNRESOLVED_RE sees only the ones that expand (#89). A quoted script is walked with them restored:
-// the shell that runs it (bash -c, eval) expands them.
-const LIT_DOLLAR = "";
-const LIT_TICK = "";
-// A restored backtick comes back as this one: still unresolved, but lexed as a plain character, not as the start of a
-// substitution the way a live backtick is (#197), so a literal message such as 'Fix `start.mjs`' is not read as a
-// run of start.mjs.
-const QUOTED_TICK = "";
-const literal = (s) => s.replaceAll("$", LIT_DOLLAR).replaceAll("`", LIT_TICK);
+// A `$` or backtick the shell takes literally is lexed as LIT_DOLLAR or LIT_TICK (shell-lex.mjs), so UNRESOLVED_RE
+// sees only the ones that expand (#89). A quoted script is walked with them restored: the shell that runs it (bash -c,
+// eval) expands them; a restored backtick comes back as QUOTED_TICK, so a literal message such as 'Fix `start.mjs`'
+// is not read as a run of start.mjs (#197).
+// Every command is lexed in shell-lex.mjs's bodies shape; its words shape is approve-guard.mjs's.
+const lexBodies = (cmd) => lex(cmd, { bodies: true });
 const unliteral = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, QUOTED_TICK);
 // Text with every quote, backslash and backtick dropped (PowerShell's curly quotes too), for the checks that read raw
 // text: a name split by quoting, as in st"art.mjs or --"bg", reads whole (#61, like #62 in approve-guard.mjs).
 const dequoted = (s) => s.replace(new RegExp(`['"\\\\\`‘-„${LIT_TICK}${QUOTED_TICK}]`, "g"), "");
 
-/**
- * `$((…))` at `i`, an arithmetic expansion (#102): its expression and the index of its closing `)`. Null for anything
- * that is not plainly one (a quote, backtick, backslash or newline inside, `$( (…) )`, or no closing `))`), which is
- * then lexed as before.
- */
-function arithmetic(cmd, i) {
-  if (!cmd.startsWith("$((", i)) return null;
-  let depth = 0;
-  for (let j = i + 3; j < cmd.length; j += 1) {
-    const c = cmd[j];
-    if ("'\"`\\\n".includes(c)) return null;
-    if (c === "(") depth += 1;
-    else if (c === ")") {
-      if (depth > 0) depth -= 1;
-      else return cmd[j + 1] === ")" ? { expr: cmd.slice(i + 3, j), end: j + 1 } : null;
-    }
-  }
-  return null;
-}
-
-/**
- * An arithmetic expression as a script to walk: its variables are numbers there, so they read as 0. Whatever is left,
- * such as a `$(…)` inside, is walked like any quoted script.
- */
-const arithmeticScript = (expr) => expr.replace(/\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9#?]/g, "0");
-
-/**
- * Shell-ish lexer (the same rules as approve-guard.mjs): words (quotes and backslashes resolved, nothing expanded)
- * grouped into simple commands split on ; & | ( ) newlines and redirections. A heredoc's body is not lexed as
- * commands: it is returned in `bodies`, for the caller to read as a quoted script, as is an arithmetic expansion's
- * expression (its word reads as `0`), as is an unquoted backtick substitution's command (#197). A body is `literal`
- * when the shell expands nothing in it. A redirection target (and a fd number right before its operator, as in
- * `2>file`) is no word of its command: it is returned in `targets`, for the caller to scan for a substitution (#191).
- * A here-string (`<<<`) stays a word. `pipes[k]` is true when segment k's output is piped (`|` or `|&`, not `||`) into
- * the next, and a heredoc body is `toShell` when a shell reads it: its own command, or one down its pipeline (#246).
- * Throws on an unterminated quote or backtick.
- * @returns {{ segments: string[][], writes: (boolean | "dup")[], stdin: (string | undefined)[], pipes: boolean[], targets: string[], bodies: { text: string, literal: boolean, toShell?: boolean, start?: number, end?: number }[] }}
- */
-function lex(cmd) {
-  const segments = [[]];
-  // Per segment: true when it holds an output redirection (`>`), so writes to a file; "dup" once it duplicates an fd.
-  const writes = [false];
-  const pipes = [false];
-  // Per segment: the target of its input redirection (`<`), which node reads as its script when no argument is one.
-  const stdin = [undefined];
-  const targets = [];
-  const bodies = [];
-  const pending = [];
-  let word = null;
-  // Whether the next word is a redirection target: false, "stdin" or "other".
-  let target = false;
-  const endWord = () => {
-    if (word !== null && target) {
-      targets.push(word);
-      if (target === "stdin") stdin[stdin.length - 1] = word;
-      target = false;
-    } else if (word !== null) segments.at(-1).push(word);
-    word = null;
-  };
-  const endSegment = () => {
-    endWord();
-    target = false;
-    if (segments.at(-1).length > 0) {
-      segments.push([]);
-      writes.push(false);
-      pipes.push(false);
-      stdin.push(undefined);
-    }
-  };
-  for (let i = 0; i < cmd.length; i += 1) {
-    const c = cmd[i];
-    if (c === "'") {
-      const end = cmd.indexOf("'", i + 1);
-      if (end === -1) throw new Error("unterminated '");
-      word = (word ?? "") + literal(cmd.slice(i + 1, end));
-      i = end;
-    } else if (c === '"') {
-      let j = i + 1;
-      let s = "";
-      for (; j < cmd.length && cmd[j] !== '"'; j += 1) {
-        const lit = cmd[j] === "$" ? literalSub(cmd, j) : null;
-        if (lit) {
-          s += literal(lit.body);
-          j = lit.end;
-          continue;
-        }
-        const arith = cmd[j] === "$" ? arithmetic(cmd, j) : null;
-        if (arith) {
-          bodies.push({ text: arithmeticScript(arith.expr), literal: false });
-          s += "0";
-          j = arith.end;
-          continue;
-        }
-        if (cmd[j] === "`") {
-          // A live backtick substitution runs even with no whitespace to make the word a nested script, as in
-          // "`scripts/lanes/queue.mjs`" (#113 test-hunter): its command is a body to walk; the word keeps its text.
-          const close = backtickEnd(cmd, j);
-          if (close === -1) throw new Error("unterminated `");
-          bodies.push({ text: cmd.slice(j + 1, close).replace(/\\([`$\\"])/g, "$1"), literal: false });
-          s += cmd.slice(j, close + 1);
-          j = close;
-          continue;
-        }
-        if (cmd[j] === "\\" && '"\\$`'.includes(cmd[j + 1] ?? "")) {
-          j += 1;
-          s += literal(cmd[j]);
-          continue;
-        }
-        s += cmd[j];
-      }
-      if (j >= cmd.length) throw new Error('unterminated "');
-      word = (word ?? "") + s;
-      i = j;
-    } else if (c === "$" && literalSub(cmd, i)) {
-      const lit = literalSub(cmd, i);
-      word = (word ?? "") + literal(lit.body);
-      i = lit.end;
-    } else if (c === "$" && arithmetic(cmd, i)) {
-      const arith = arithmetic(cmd, i);
-      bodies.push({ text: arithmeticScript(arith.expr), literal: false });
-      word = (word ?? "") + "0";
-      i = arith.end;
-    } else if (c === "`") {
-      // A backtick substitution is one word, whitespace and all (#197). Its command runs, so it is returned as a body
-      // to walk; the word holds it between QUOTED_TICKs (so it still reads as unresolved) with no shell syntax, so
-      // walk() does not read the same text again as a nested script.
-      const j = backtickEnd(cmd, i);
-      if (j === -1) throw new Error("unterminated `");
-      const inner = cmd.slice(i + 1, j).replace(/\\([`$\\])/g, "$1");
-      bodies.push({ text: inner, literal: false });
-      word = (word ?? "") + QUOTED_TICK + inner.replace(/[\s;&|()<>]/g, "_") + QUOTED_TICK;
-      i = j;
-    } else if (c === "\\") {
-      if (cmd[i + 1] !== "\n") word = (word ?? "") + literal(cmd[i + 1] ?? "");
-      i += 1;
-    } else if (c === "\n" && pending.length > 0) {
-      // The heredocs opened on this line: their bodies follow it, each up to its delimiter line.
-      endSegment();
-      let end = i;
-      for (const h of pending.splice(0)) {
-        const r = readHeredoc(cmd, end + 1, h.delim, h.stripTabs);
-        bodies.push({ text: r.body, literal: h.quoted || !EXPANDS_RE.test(r.body), toShell: h.toShell, seg: h.seg, start: end + 1, end: r.end });
-        end = r.end;
-      }
-      i = end;
-    } else if (c === "<" && cmd.startsWith("<<<", i)) {
-      // A here-string: its word is the command's input, read as a script like any quoted word.
-      endWord();
-      i += 2;
-    } else if (REDIRECT_RE.test(cmd.slice(i, i + 3)) && !cmd.startsWith("<<", i)) {
-      // A bare fd number right before the operator (`2>file`) belongs to it (#191).
-      if (c !== "&" && word !== null && /^[0-9]+$/.test(word)) word = null;
-      endWord();
-      const op = REDIRECT_RE.exec(cmd.slice(i, i + 3))[0];
-      // An fd duplication (`2>&1`) keeps its command from reading as data-only, as when `&` still split it off.
-      if (/[<>]&/.test(op)) writes[writes.length - 1] = "dup";
-      else if (op.includes(">") && writes.at(-1) !== "dup") writes[writes.length - 1] = true;
-      target = op === "<" || op === "<>" ? "stdin" : "other";
-      i += op.length - 1;
-    } else if (";&|()\n\r".includes(c)) {
-      if (c === "|" && cmd[i - 1] !== "|" && cmd[i + 1] !== "|" && segments.at(-1).length > 0) pipes[pipes.length - 1] = true;
-      endSegment();
-    } else if (c === "<" && cmd[i - 1] !== "<" && cmd[i + 1] === "<" && cmd[i + 2] !== "<" && HEREDOC_RE.test(cmd.slice(i))) {
-      const m = HEREDOC_RE.exec(cmd.slice(i));
-      endWord();
-      // `toShell`: a shell reads the body as its script (`bash <<'EOF'`), so even a quoted body's backticks run.
-      const program = segments.at(-1).find((w) => !ASSIGN_RE.test(w));
-      pending.push({ ...heredocOperator(m), toShell: program !== undefined && SHELL_RE.test(basename(program)), seg: segments.length - 1 });
-      i += m[0].length - 1;
-    } else if (c === "<" || /\s/.test(c)) {
-      // A `<<` that HEREDOC_RE does not read ends the word, as before.
-      endWord();
-    } else {
-      word = (word ?? "") + c;
-    }
-  }
-  endSegment();
-  // A pipeline can go on after the heredoc's body (`cat <<'EOF' |` then the body, then `sh`), so this waits for the end.
-  for (const b of bodies) if (b.seg !== undefined && feedsShell(segments, pipes, b.seg)) b.toShell = true;
-  // Only the last segment can be empty, so `writes` stays aligned with the segments kept.
-  const kept = segments.filter((s) => s.length > 0);
-  return { segments: kept, writes: writes.slice(0, kept.length), stdin: stdin.slice(0, kept.length), pipes: pipes.slice(0, kept.length), targets, bodies };
-}
-
-/**
- * True when segment k's output is piped into a shell further down its pipeline (#246): a shell named anywhere in a
- * piped-to command (`| sh`, `| env bash -s`, `| xargs sh -c`), or eval, source or `.` as its command word.
- */
-function feedsShell(segments, pipes, k) {
-  for (let j = k + 1; j < segments.length && pipes[j - 1]; j += 1) {
-    const words = segments[j];
-    const program = words.find((w) => !ASSIGN_RE.test(w));
-    if (words.some((w) => SHELL_RE.test(basename(w))) || program === "eval" || program === "source" || program === ".") return true;
-  }
-  return false;
-}
-
 /** `cmd` without its literal `$(cat <<'D' … D)` substitutions, for the raw-text checks: their text is only data. */
 function withoutLiteralSubstitutions(cmd) {
   let out = "";
   for (let i = 0; i < cmd.length; i += 1) {
-    const lit = cmd[i] === "$" ? literalSub(cmd, i) : null;
+    const lit = cmd[i] === "$" ? plainLiteralSubstitution(cmd, i) : null;
     if (lit) i = lit.end;
     else out += cmd[i];
   }
   return out;
 }
 
-const ASSIGN_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
 const VAR_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
 // What is left of a word after substitution that could still expand to anything.
 const UNRESOLVED_RE = /[$`]/;
@@ -373,7 +148,6 @@ function resolveSegments(segments) {
 /** A quoted script, as in bash -c "…", sh -c '…', eval "…" or node -e "…": a word holding shell syntax. */
 const isNestedScript = (w) => /[\s;&|()<>]/.test(w);
 
-const SHELL_RE = /^(bash|sh|zsh|dash|ksh|ash)(\.exe)?$/i;
 /**
  * True when word `i` is a script a shell runs: the value of a shell's `-c` (`-lc`, `-ec`, …), with a shell named
  * anywhere earlier (so `env bash -c`, `timeout 5 bash -c` still count, the same as node is found behind a wrapper
@@ -476,7 +250,7 @@ function evalScripts(words) {
 function walk(cmd, depth, visit, onOpaque, onEval) {
   let lexed;
   try {
-    lexed = lex(cmd);
+    lexed = lexBodies(cmd);
   } catch {
     onOpaque(cmd);
     return;
@@ -564,7 +338,7 @@ function runnerCommands(words) {
 /** True when a whole Bash call only writes text (isDataOnly); false when it cannot be read. */
 function writesOnly(cmd) {
   try {
-    return isDataOnly(lex(cmd));
+    return isDataOnly(lexBodies(cmd));
   } catch {
     return false;
   }
@@ -895,23 +669,6 @@ function decide(input, grant, now, depth) {
 export function grantPath(dir, sessionId) {
   return typeof sessionId === "string" && SESSION_RE.test(sessionId) ? join(dir, `${sessionId}.json`) : null;
 }
-
-/** The grant file at `file`, parsed: null when there is none, { unreadable: true } when it cannot be read or parsed. */
-export function readGrant(file) {
-  let text;
-  try {
-    text = readFileSync(file, "utf8");
-  } catch (e) {
-    return e.code === "ENOENT" ? null : { unreadable: true };
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { unreadable: true };
-  }
-}
-
-const preToolUseOutput = (decision, reason) => JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: decision, permissionDecisionReason: reason } });
 
 /** One hook call: `event` is user-prompt-submit or pre-tool-use, `raw` the hook's stdin. Returns what to print. */
 export function runHook(event, raw, { dir, now = Date.now() }) {
