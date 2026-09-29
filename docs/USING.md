@@ -17,7 +17,8 @@
    `/start --auto` picks for you: it prints which ready issues it would start and why it skips each of the rest (a
    blocker, an overlap with another pick or with files running work already touches, the cap), and launches nothing.
    `/start --auto --go` recomputes that plan and launches exactly its picks; the paths in `start.softPaths` (this file
-   and `README.md` by default) never count as overlaps, for `/start <N...>` either. Owner only: a lane or a schedule never runs it.
+   and `README.md` by default) never count as overlaps, for `/start <N...>` either.
+   Owner only: a lane or a schedule never runs it.
    `start.models` (optional) picks each lane's model by its issue's tier: it maps `skip`, `quick` and `full` to a
    model name, and `/start` adds `--model <name>` to that tier's launches. A tier left
    out runs on your default model. This repository sets all three tiers to `sonnet`: issues are scoped
