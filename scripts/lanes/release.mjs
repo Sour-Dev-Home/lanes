@@ -25,7 +25,12 @@ export function changelogSection(changelog, version) {
  * `io` supplies `readText(path)` and `git(args)` (stdout, throwing on a non-zero exit); tests pass fakes.
  * @returns {{ code: 0, notes: string } | { code: 1, message: string }}
  */
+const USAGE = "usage: node scripts/lanes/release.mjs <tag>";
+
 export function main(argv, io = realIo) {
+  if (argv.includes("--help") || argv.includes("-h")) return { code: 0, notes: USAGE };
+  const unknown = argv.find((a, i) => i > 0 || (typeof a === "string" && a.startsWith("--")));
+  if (unknown !== undefined) return { code: 1, message: `unknown argument: ${unknown}\n${USAGE}` };
   const tag = argv[0];
   const m = typeof tag === "string" ? TAG.exec(tag) : null;
   if (!m) return { code: 1, message: `release: malformed tag ${JSON.stringify(tag ?? "")}: expected v<major>.<minor>.<patch>` };

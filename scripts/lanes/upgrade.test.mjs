@@ -62,6 +62,27 @@ test("plan: the dashboard workflow is tracked under its .disabled name when the 
   assert.deepEqual(plan, [{ file: `${dash}.disabled`, from: dash, action: "overwrite" }]);
 });
 
+test("--help and -h print the usage and exit 0 without planning or writing, even inside Claude", () => {
+  for (const argv of [["--help"], ["-h"], ["somewhere", "--apply", "--help"]]) {
+    const o = out();
+    assert.equal(main(argv, { CLAUDECODE: "1" }, { source: "/nonexistent-source", print: o.print }), 0);
+    assert.equal(o.lines.length, 1);
+    assert.match(o.lines[0], /^usage: upgrade\.mjs <target-dir> \[--apply\]/);
+  }
+});
+
+test("an unknown flag exits 2 naming it with the usage, and writes nothing", () => {
+  const { source, target } = fixture();
+  const before = [get(target, "a.txt"), get(target, "lanes.lock.json")];
+  for (const flag of ["--force", "-x", "--apply=1"]) {
+    const o = out();
+    assert.equal(main([target, flag], {}, { source, print: o.print }), 2, flag);
+    assert.equal(o.lines.length, 1);
+    assert.match(o.lines[0], new RegExp(`^unknown argument: ${flag}\\nusage: upgrade\\.mjs `));
+  }
+  assert.deepEqual([get(target, "a.txt"), get(target, "lanes.lock.json")], before);
+});
+
 test("main without --apply prints the plan and writes nothing", () => {
   const { source, target } = fixture();
   const before = [get(target, "a.txt"), get(target, "lanes.lock.json"), get(target, "lanes.config.json")];

@@ -55,6 +55,26 @@ test("a missing CHANGELOG.md exits 1", () => {
   assert.equal(main(["v0.2.0"], fake({ changelog: null })).code, 1);
 });
 
+test("--help and -h print the usage on stdout, exit 0 and touch neither git nor the filesystem", () => {
+  for (const argv of [["--help"], ["-h"], ["v0.2.0", "--help"]]) {
+    const io = fake();
+    const r = main(argv, io);
+    assert.equal(r.code, 0);
+    assert.match(r.notes, /^usage: node scripts\/lanes\/release\.mjs <tag>$/);
+    assert.deepEqual(io.calls, []);
+  }
+});
+
+test("an unknown flag or extra argument exits 1 naming it, with the usage, before git is touched", () => {
+  for (const [argv, name] of [[["--force"], "--force"], [["v0.2.0", "extra"], "extra"], [["v0.2.0", "--publish"], "--publish"]]) {
+    const io = fake();
+    const r = main(argv, io);
+    assert.equal(r.code, 1, JSON.stringify(argv));
+    assert.equal(r.message, `unknown argument: ${name}\nusage: node scripts/lanes/release.mjs <tag>`);
+    assert.deepEqual(io.calls, []);
+  }
+});
+
 test("malformed tags exit 1 before git or the filesystem is touched", () => {
   for (const tag of ["0.2.0", "v0.2", "v1.2.3.4", "vx", "v0.2.0;rm", "v0.2.0^{}", "-v0.2.0", "v0.2.0\nv0.2.0", "", undefined]) {
     const io = fake();

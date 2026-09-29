@@ -263,8 +263,14 @@ function removeLane(issue, { root, run, cleanupDeps = {} }) {
  * @returns {Promise<number>}
  */
 export async function main(argv, deps) {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    (deps.out ?? deps.err)(USAGE);
+    return 0;
+  }
   const args = parseArgs(argv);
   if (!args) {
+    const unknown = argv.find((a, i) => a.startsWith("-") && !(["--issue", "--session"].includes(a) && i % 2 === 0));
+    if (unknown !== undefined) deps.err(`unknown argument: ${unknown}`);
     deps.err(USAGE);
     return 2;
   }
@@ -354,6 +360,7 @@ function defaultDeps() {
     now: () => Date.now(),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     isRunning: pidRunning,
+    out: (line) => console.log(line),
     err: (line) => console.error(line),
     trap: (release) => {
       for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
