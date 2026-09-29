@@ -110,6 +110,22 @@ comments; a lane cannot grant it to itself.
 | Reviewer → gate | A JSON verdict (pass or fail per acceptance criterion, findings with `fixed`), posted as `review/<name>` | `post-review.mjs --file` refuses invalid or dishonest-looking verdicts; `lanes/gate` requires the reviewers per tier and diff |
 | Owner → merge | `review/owner` status | `lanes/gate`; dropped automatically by any new push |
 
+## Metrics
+
+`node scripts/lanes/lane-metrics.mjs [--days N] [--split YYYY-MM-DD] [--public] [--json|--markdown] [--out file]`
+reports how lanes perform over the merged lane PRs: rework, scope drift, owner time, PRs open at once and CI
+friction, with the `delivery-metrics` and `review-metrics` summaries embedded. Everything is a median or a count, and
+the JSON follows `contracts/lane-metrics.schema.json`. Locally it also reads `.lanes/costs.jsonl` for tokens per tier
+and model, relaunches and lane-hours; `--public` leaves those out. `--split` gives a before and after block at a
+date, so a change such as a model switch or a new required check can be compared without a per-PR list. The figures
+are a comparison, not a proof of cause, and GitHub keeps only each status's latest state, so a failure fixed by a later
+green status is not counted as rework. Minutes in the merge queue are a proxy (the last status on the PR head to the
+merge), and p90 and a per-tier split are not reported yet (issue #333).
+
+For the portfolio, export by hand and commit the file yourself: `node scripts/lanes/lane-metrics.mjs --public --split
+<date> --out docs/metrics/<date>.json`. `--out` refuses to write when the output holds an email, an @-mention, your
+GitHub login or a local path, and says which kind, never the text.
+
 ## Common pitfalls
 
 - **Vague issues make vague PRs.** If an acceptance criterion cannot be written as a test, rewrite it before the lane
