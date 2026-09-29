@@ -341,7 +341,7 @@ export function stalledItems(summary) {
 export function renderWaiting(waiting, stalled = []) {
   if (!waiting.length && !stalled.length) return "none";
   const approvals = waiting.map((w) => `#${w.number} ${w.title}\n  Needs the owner: ${w.needs}\n  Contract changes: ${w.contract}\n  Files changed: ${w.files}`);
-  const lines = stalled.map((s) => `#${s.number} ${plain(s.title ?? "")} — stalled ${s.session.stalledMin} min: claude attach ${s.session.id}`);
+  const lines = stalled.map((s) => `#${s.number} ${plain(s.title ?? "")} — stalled ${s.session.stalledMin} min: claude attach ${plain(String(s.session.id))}`);
   return [...approvals, ...(lines.length ? [lines.join("\n")] : [])].join("\n\n");
 }
 

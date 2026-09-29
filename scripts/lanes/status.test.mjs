@@ -831,6 +831,13 @@ test("stalled: an idle session with an old transcript is not stalled", () => {
   assert.equal(stalledOf([agent("aaaa0001", wt("issue-10-x"), { status: "idle", state: "blocked" })], () => ago(300)).size, 0);
 });
 
+test("edge: a session waiting on a prompt is not shown as stalled", () => {
+  const agents = [waitingAgent("aaaa0001", wt("issue-10-x"))];
+  const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions: laneSessions(agents, ROOT), stalled: new Map([[10, 90]]) });
+  assert.equal(s.waitingOnOwner[0].note, "waiting on a prompt: claude attach aaaa0001");
+  assert.equal(stalledItems(s).length, 0);
+});
+
 test("edge: stalled boundary, unsafe session id, and the fallback to the session's own folder", () => {
   assert.equal(stalledOf([agent("aaaa0001", wt("issue-10-x"))], () => ago(30)).size, 1);
   assert.equal(stalledOf([agent("aaaa0001", wt("issue-10-x"))], () => ago(29.9)).size, 0);
