@@ -19,7 +19,7 @@
         "paths": [
           "scripts/lanes/gate.", "scripts/lanes/gate-decision.", "scripts/lanes/blockers.", "scripts/lanes/approve-guard.",
           "scripts/lanes/post-review.", "scripts/lanes/issue-contract.", "scripts/lanes/reviewers.", "scripts/lanes/contracts.",
-          "scripts/lanes/workflow.", "scripts/gate-workflow.", "scripts/dashboard-workflow."
+          "scripts/lanes/workflow.", "scripts/gate-workflow.", "scripts/dashboard-workflow.", "scripts/dashboard."
         ],
         "imports": ["lib", "preflight"]
       },
@@ -58,6 +58,7 @@
       "(^|/)auth/",
       "(^|/)secrets?/",
       "^deploy/",
+      "^dashboard/",
       "(^|/)\\.env",
       "^package(-lock)?\\.json$",
       "(^|/)(pnpm-lock\\.yaml|yarn\\.lock)$",
@@ -65,7 +66,7 @@
       "(^|/)CLAUDE\\.md$",
       "^\\.gitattributes$"
     ],
-    "ui": ["^frontend/src/", "^src/ui/", "\\.css$"],
+    "ui": ["^frontend/src/", "^src/ui/", "\\.css$", "^dashboard/"],
     "owner": [
       "^scripts/lanes/(gate|lib|approve-guard|post-review|issue-contract)(\\.test)?\\.mjs$",
       "^scripts/lanes/gate-decision\\.test\\.mjs$",

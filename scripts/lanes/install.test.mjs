@@ -107,6 +107,10 @@ function localImports(file, text) {
   return specs.map((m) => path.posix.join(path.posix.dirname(file), m[1] ?? m[2]));
 }
 
+test("MANIFEST ships the dashboard page's three files", () => {
+  for (const f of ["index.html", "app.js", "style.css"]) assert.ok(MANIFEST.includes(`dashboard/${f}`), f);
+});
+
 test("MANIFEST includes cleanup.mjs", () => {
   assert.ok(MANIFEST.includes("scripts/lanes/cleanup.mjs"));
 });
