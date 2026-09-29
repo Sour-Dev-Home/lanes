@@ -5,8 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  CAT_HEREDOC_RE, HEREDOC_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, heredocOperator, launchedCommands, lex, literalSubstitution, mark, mayExpandTo,
-  plainLiteralSubstitution, readGrant, readHeredoc, skipRedirectTarget, unmark, wmiProcessCreate,
+  CAT_HEREDOC_RE, HEREDOC_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, ansiCString, dequoted, heredocOperator, launchedCommands, lex, literalSubstitution, mark,
+  mayExpandTo, plainLiteralSubstitution, readGrant, readHeredoc, skipRedirectTarget, unmark, wmiProcessCreate,
 } from "./shell-lex.mjs";
 
 const source = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
@@ -93,7 +93,9 @@ test("#194 edge: the operator reads the same delimiter from either regex", () =>
     ["<<-\\EOF", { delim: "EOF", stripTabs: true, quoted: true }],
   ]) {
     assert.deepEqual(heredocOperator(HEREDOC_RE.exec(text)), want, text);
-    assert.deepEqual(heredocOperator(CAT_HEREDOC_RE.exec(`$(cat ${text}\n`)), want, `$(cat ${text}`);
+    // A `$(cat <<D` delimiter that is not plain (`'E F'`) is never read as one (#310).
+    if (want.delim === "E F") assert.equal(CAT_HEREDOC_RE.exec(`$(cat ${text}\n`), null);
+    else assert.deepEqual(heredocOperator(CAT_HEREDOC_RE.exec(`$(cat ${text}\n`)), want, `$(cat ${text}`);
   }
   assert.equal(HEREDOC_RE.exec("<<<x"), null);
   assert.equal(HEREDOC_RE.exec("<<$x"), null);
@@ -348,4 +350,96 @@ test("#308 criterion 6: wmiProcessCreate reads Win32_Process Create, wmic proces
   ]) {
     assert.equal(wmiProcessCreate(t), false, t);
   }
+});
+
+// --- #310: ANSI-C quoting, plain heredoc delimiters, a literal `$` ---------------------------------------------------
+
+test("#310 criterion 1: $'…' is one literal string with its escapes resolved as bash does", () => {
+  assert.deepEqual(words(lex("grep $'a\\tb\\nc\\x41\\u00e9\\'d\\\\' f")[0]), ["grep", "a\tb\ncAé'd\\", "f"]);
+  assert.deepEqual(words(lex("grep -n $' ' x")[0]), ["grep", "-n", " ", "x"]);
+  assert.deepEqual(words(lex("node scripts/lanes/post-revie$'\\x77'.mjs owner")[0]), ["node", "scripts/lanes/post-review.mjs", "owner"]);
+  // Literal: a `$` or backtick it holds is marked, in both shapes.
+  assert.deepEqual([...lex("echo $'$x'")[0]], ["echo", mark("$x")]);
+  assert.deepEqual(lex("echo $'`$x`'", { bodies: true }).segments[0], ["echo", `${LIT_TICK}${LIT_DOLLAR}x${LIT_TICK}`]);
+  assert.deepEqual(ansiCString("$'a\\x41'z", 0), { text: "aA", end: 7 });
+  assert.equal(ansiCString("$x", 0), null);
+});
+
+test("#310 edge: $'…' octal, control, \\e, \\U, a NUL cutting the rest, an unknown escape and a bad hex escape", () => {
+  const read = (s) => ansiCString(s, 0)?.text;
+  // Octal takes at most three digits: \010 is a backspace, then a plain 2.
+  assert.equal(read("$'\\101\\0102'"), "A\b2");
+  assert.equal(read("$'a\\0b'"), "a");
+  assert.equal(read("$'\\cA\\c?\\e\\E'"), "\x01\x7f\x1b\x1b");
+  assert.equal(read("$'\\U0001F600'"), "\u{1F600}");
+  assert.equal(read("$'a\\x00b'"), "a");
+  assert.equal(read("$'\\q\\xg\\u'"), "\\q\\xg\\u");
+  assert.equal(read("$'\\\"\\?\\a\\b\\f\\r\\v'"), "\"?\x07\b\f\r\v");
+  // A long string reads whole (no argument-limit overflow).
+  assert.equal(read(`$'${"a".repeat(500_000)}'`).length, 500_000);
+  // Raw bytes read as UTF-8, as bash writes them out: \xe2\x80\xa8 is U+2028.
+  assert.equal(read("$'\\xe2\\x80\\xa8'"), " ");
+});
+
+test("#310 edge: an unterminated $'…' throws, and a private-use character it spells never reads as a marker", () => {
+  assert.throws(() => lex("echo $'abc"), /unterminated/);
+  assert.throws(() => lex("echo $'abc\\'", { bodies: true }), /unterminated/);
+  //  is the words shape's marked `$`: resolved, it must not come back as a real `$` in a nested script.
+  const [seg] = lex("bash -c $'\\ue000(x)'");
+  assert.equal(unmark(seg[2]).includes("$"), false);
+  assert.equal(lex("echo $'\\ue024'", { bodies: true }).segments[0][1].includes(LIT_DOLLAR), false);
+});
+
+test("#310 test-hunter edge: a marker spelled as UTF-8 bytes, and a \\u / \\U out of range or a surrogate, read as U+FFFD", () => {
+  const read = (s) => ansiCString(s, 0)?.text;
+  // \xee\x80\x80 and \356\200\200 are U+E000 in UTF-8, a marker character: it must not survive.
+  assert.equal(read("$'\\xee\\x80\\x80'"), "�");
+  assert.equal(read("$'\\356\\200\\200'"), "�");
+  assert.equal(read("$'\\U00110000\\ud800'"), "��");
+  assert.equal(unmark(lex("bash -c $'\\xee\\x80\\x80(x)'")[0][2]).includes("$"), false);
+});
+
+test("#310 edge: $'…' inside double quotes is not ANSI-C, and a redirection target skips a $'…' holding \\'", () => {
+  assert.deepEqual(words(lex('echo "$\'x\'"')[0]), ["echo", "$'x'"]);
+  const cmd = "echo >$'a\\'b' ; node x";
+  assert.equal(skipRedirectTarget(cmd, 6), cmd.indexOf(" ;"));
+  assert.deepEqual(words(lex(cmd)[1]), ["node", "x"]);
+});
+
+test("#310 edge: the raw-text reader also sees a $'…' name resolved", () => {
+  assert.match(dequoted("node scripts/lanes/q$'\\x75'eue.mjs"), /queue\.mjs/);
+  assert.match(dequoted("$(which cla$'\\x75'de) --bg"), /\$\([^)]*claude/);
+  assert.equal(dequoted("a 'b'"), "a b");
+});
+
+test("#310 criterion 2: a $(cat <<D body is literal only when D is plain, in both shapes", () => {
+  for (const opener of ["$(cat <<\"E\\$F\"\n", "$(cat <<'E F'\n", "$(cat <<\"E`x`\"\n", "$(cat <<''\n"]) {
+    assert.equal(CAT_HEREDOC_RE.test(opener), false, opener);
+    assert.equal(literalSubstitution(`${opener}x\nE$F\n)`, 0), null, opener);
+  }
+  for (const opener of ["$(cat <<'E.F-1'\n", '$(cat <<"EOF"\n', "$(cat <<\\EOF\n", "$(cat <<-EOF\n"]) assert.match(opener, CAT_HEREDOC_RE);
+  assert.deepEqual(literalSubstitution("$(cat <<'M'\nmsg $x\nM\n)", 0), { body: "msg $x", end: 21 });
+});
+
+test("#310 criterion 4: a $ bash takes literally, in double quotes or bare, is marked in both shapes", () => {
+  for (const [cmd, word] of [
+    ['grep "a$\\|b" f', "a$\\|b"], ['grep "x |y$" f', "x |y$"], ['echo "x ;y$"', "x ;y$"], ['grep "^\\s+at |^\\s*$" f', "^\\s+at |^\\s*$"],
+    ['echo "a$ b$,c$/d$=e$:f$]"', "a$ b$,c$/d$=e$:f$]"], ["echo a$\\|b", "a$|b"], ["echo a$", "a$"],
+  ]) {
+    assert.equal(lex(cmd)[0][1], mark(word), cmd);
+    assert.equal(lex(cmd, { bodies: true }).segments[0][1], word.replaceAll("$", LIT_DOLLAR), cmd);
+  }
+});
+
+test("#310 criterion 5: a $ bash expands stays live, and so do $\"…\", $[…] and a $ before a line continuation", () => {
+  for (const [cmd, word] of [
+    ['echo "x |$Y"', "x |$Y"], ['echo "$X"', "$X"], ['echo "$1$$$!$#$@$-"', "$1$$$!$#$@$-"],
+    ['echo "a$\\\nX"', "a$X"], ["echo a$\\\nX", "a$X"], ['echo a$"x"', "a$x"], ['echo "a\\\nb$X"', "ab$X"],
+  ]) {
+    assert.equal(lex(cmd)[0][1], word, cmd);
+    assert.equal(lex(cmd, { bodies: true }).segments[0][1], word, cmd);
+  }
+  // `$[` is bash's old arithmetic: live, so the `[` is no glob bracket here either.
+  assert.equal(lex('echo "a$[1]"')[0][1], `a$${mark("[")}1]`);
+  assert.equal(lex('echo "a$[1]"', { bodies: true }).segments[0][1], "a$[1]");
 });

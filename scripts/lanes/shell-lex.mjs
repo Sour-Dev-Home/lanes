@@ -12,7 +12,10 @@ export function skipRedirectTarget(cmd, i) {
   while (j < cmd.length && /\s/.test(cmd[j])) j += 1;
   while (j < cmd.length) {
     const c = cmd[j];
-    if (c === "'") {
+    if (c === "$" && cmd[j + 1] === "'") {
+      // `$'…'`, where a backslash escapes the next character, `\'` included (#310).
+      j = Math.min(ansiCEnd(cmd, j) + 1, cmd.length);
+    } else if (c === "'") {
       const end = cmd.indexOf("'", j + 1);
       j = end === -1 ? cmd.length : end + 1;
     } else if (c === '"') {
@@ -30,11 +33,106 @@ export function skipRedirectTarget(cmd, i) {
   return j;
 }
 
+// --- ANSI-C quoting and a literal `$` (#310) --------------------------------------------------------------------
+
+/** The index of the `'` closing the `$'` at `i` (a backslash escapes the next character, `\'` too), or the text's length. */
+function ansiCEnd(cmd, i) {
+  for (let j = i + 2; j < cmd.length; j += 1) {
+    if (cmd[j] === "\\") j += 1;
+    else if (cmd[j] === "'") return j;
+  }
+  return cmd.length;
+}
+
+const ANSI_C_SIMPLE = { a: 7, b: 8, e: 27, E: 27, f: 12, n: 10, r: 13, t: 9, v: 11, "\\": 92, "'": 39, '"': 34, "?": 63 };
+const ANSI_C_ESCAPE_RE = /\\(?:([abeEfnrtv\\'"?])|([0-7]{1,3})|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|c([^\\])|([^]))/y;
+// A private-use character is one of this file's markers (LITERAL, LIT_DOLLAR, …): one an escape spells reads as U+FFFD,
+// an ordinary character to bash as it is, so it never stands for a marked `$` that `unmark` would bring back to life.
+const PRIVATE_USE_RE = /[-]/g;
+const utf8 = new TextEncoder();
+const fromUtf8 = new TextDecoder();
+
+/**
+ * `$'…'` at `i`, bash's ANSI-C quoting (#310): its text with the escapes resolved as bash does (`\n`, `\t`, `\xHH`,
+ * `\uHHHH`, `\UHHHHHHHH`, octal, `\cX`, `\'`, …; an unknown one keeps its backslash; a NUL ends the text), read as UTF-8
+ * bytes the way bash writes them out, and `end`, the index of its closing `'`. Null when `i` holds no `$'`. Throws
+ * when it is unterminated.
+ */
+export function ansiCString(cmd, i) {
+  if (cmd[i] !== "$" || cmd[i + 1] !== "'") return null;
+  const end = ansiCEnd(cmd, i);
+  if (end >= cmd.length) throw new Error("unterminated $'");
+  const inner = cmd.slice(i + 2, end);
+  const bytes = [];
+  // Byte by byte: spreading a long run into push() would overflow the call's argument limit.
+  const text = (s) => {
+    for (const b of utf8.encode(s)) bytes.push(b);
+  };
+  for (let j = 0; j < inner.length; ) {
+    if (inner[j] !== "\\") {
+      const next = inner.indexOf("\\", j);
+      const stop = next === -1 ? inner.length : next;
+      text(inner.slice(j, stop));
+      j = stop;
+      continue;
+    }
+    ANSI_C_ESCAPE_RE.lastIndex = j;
+    const m = ANSI_C_ESCAPE_RE.exec(inner);
+    if (!m) {
+      // A backslash ending the text (`$'\c'` reads `\c` whole): kept as it is.
+      text(inner.slice(j));
+      break;
+    }
+    j += m[0].length;
+    const [, simple, octal, hex, u4, u8, ctrl, other] = m;
+    if (simple) bytes.push(ANSI_C_SIMPLE[simple]);
+    else if (octal) bytes.push(parseInt(octal, 8) & 0xff);
+    else if (hex) bytes.push(parseInt(hex, 16));
+    else if (u4 || u8) {
+      const cp = parseInt(u4 ?? u8, 16);
+      text(cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff) ? "�" : String.fromCodePoint(cp));
+    } else if (ctrl) bytes.push(ctrl === "?" ? 0x7f : ctrl.charCodeAt(0) < 0x80 ? ctrl.toUpperCase().charCodeAt(0) & 0x1f : 0x3f);
+    else text(`\\${other}`);
+  }
+  const nul = bytes.indexOf(0);
+  return { text: fromUtf8.decode(new Uint8Array(nul === -1 ? bytes : bytes.slice(0, nul))).replace(PRIVATE_USE_RE, "�"), end };
+}
+
+/** `text` with every `$'…'` in it resolved: raw text as bash may read it, for the checks that look for a name. */
+const ansiCResolved = (text) =>
+  text.replace(/\$'(?:[^'\\]|\\[^])*'/g, (s) => {
+    try {
+      return ansiCString(s, 0).text;
+    } catch {
+      return s;
+    }
+  });
+
+/**
+ * True when the `$` at `j` is a plain character to bash (#310): nothing it expands follows (no name, digit, special
+ * parameter, `{`, `(` or `[`), only whitespace, the end, shell punctuation, or a backslash escaping a character other
+ * than a newline (`"a$\|b"`). In double quotes (`quoted`) the closing `"` leaves it plain too; bare, `$"…"` and `$'…'`
+ * are quoting of their own, and a backslash-newline joins the next line on, so each keeps it live.
+ */
+function literalDollar(cmd, j, quoted) {
+  const next = cmd[j + 1];
+  if (next === undefined) return true;
+  if (next === "\\") return cmd[j + 2] !== undefined && cmd[j + 2] !== "\n" && cmd[j + 2] !== "\r";
+  if (next === '"') return quoted;
+  return /[\s|;&<>),./:=+%^~\]}]/.test(next);
+}
+
 // `<<D`, `<<-D`, `<<'D'`, `<<"D"` or `<<\D`; a quoted delimiter, or one led by a backslash, makes the body literal
 // (bash expands neither in it). `<<<` is a here-string, not this.
 export const HEREDOC_RE = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|(\\)?([^\s;&|()<>'"`$]+))/;
-// `$(cat <<D` and the end of its line: the start of a substitution whose output is only a heredoc's body.
-export const CAT_HEREDOC_RE = /^\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|(\\)?([A-Za-z0-9_.-]+))[ \t]*\r?\n/;
+// `$(cat <<D` and the end of its line: the start of a substitution whose output is only a heredoc's body. D is letters,
+// digits, `_`, `.` or `-` only (bare or quoted, and at most the one backslash before a bare word that `<<\EOF` uses):
+// bash unquotes any other delimiter (`"E\$F"` is `E$F`) in ways this lexer might not, so that body is never read as
+// literal text, in either shape (#269, #310), the rule start-guard.mjs's PLAIN_DELIM_RE and DELIM_END_RE apply to
+// top-level heredocs (#240).
+export const CAT_HEREDOC_RE = /^\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([A-Za-z0-9_.-]+)'|"([A-Za-z0-9_.-]+)"|(\\)?([A-Za-z0-9_.-]+))[ \t]*\r?\n/;
+// A `$(cat <<D` opener longer than this is not read as one.
+const CAT_OPENER_MAX = 4096;
 // Text in an unquoted heredoc body that runs a command while bash expands it.
 export const RUNS_ON_EXPANSION_RE = /\$\(|`/;
 
@@ -72,7 +170,7 @@ export function readHeredoc(cmd, from, delim, stripTabs) {
  * closing `)`.
  */
 export function literalSubstitution(cmd, i, expands = RUNS_ON_EXPANSION_RE) {
-  const m = CAT_HEREDOC_RE.exec(cmd.slice(i));
+  const m = CAT_HEREDOC_RE.exec(cmd.slice(i, i + CAT_OPENER_MAX));
   if (!m) return null;
   const { delim, stripTabs, quoted } = heredocOperator(m);
   const { body, end, terminated } = readHeredoc(cmd, i + m[0].length, delim, stripTabs);
@@ -102,19 +200,11 @@ const literal = (s) => s.replaceAll("$", LIT_DOLLAR).replaceAll("`", LIT_TICK);
 // Text in an unquoted heredoc body that bash could still expand: any `$`, backtick or backslash (#89), stricter than
 // RUNS_ON_EXPANSION_RE, which lets a plain `$VAR` stay text.
 const EXPANDS_RE = /[$`\\]/;
-// The opener of a `$(cat <<D` substitution with a delimiter of letters, digits, `_`, `.` or `-` only (bare or quoted,
-// and at most the one backslash before a bare word that `<<\EOF` uses), ending its line. Bash unquotes any other
-// delimiter (`"E\$F"` is `E$F`) in ways this lexer might not, so that body is never read as literal text (#269), the
-// rule start-guard.mjs's PLAIN_DELIM_RE and DELIM_END_RE apply to top-level heredocs (#240).
-const PLAIN_CAT_HEREDOC_RE = /^\$\([ \t]*cat[ \t]+<<-?[ \t]*(?:'[A-Za-z0-9_.-]+'|"[A-Za-z0-9_.-]+"|\\?[A-Za-z0-9_.-]+)[ \t]*\r?\n/;
-const CAT_OPENER_MAX = 4096;
-
 /**
- * start-guard.mjs's literalSubstitution: `$(cat <<'D' … D)` at `i` with a plain delimiter (PLAIN_CAT_HEREDOC_RE), whose
- * body, if its delimiter is unquoted, holds nothing that could expand (EXPANDS_RE). Null otherwise.
+ * start-guard.mjs's literalSubstitution: `$(cat <<'D' … D)` at `i` whose body, if its delimiter is unquoted, holds
+ * nothing that could expand (EXPANDS_RE). Null otherwise.
  */
-export const plainLiteralSubstitution = (cmd, i) =>
-  PLAIN_CAT_HEREDOC_RE.test(cmd.slice(i, i + CAT_OPENER_MAX)) ? literalSubstitution(cmd, i, EXPANDS_RE) : null;
+export const plainLiteralSubstitution = (cmd, i) => literalSubstitution(cmd, i, EXPANDS_RE);
 
 // A redirection operator: `>`, `>>`, `>|`, `>&`, `<`, `<&`, `<>`, `&>` or `&>>` (#191).
 const REDIRECT_RE = /^(?:&>>?|>[>|&]?|<[&>]?)/;
@@ -414,9 +504,11 @@ export function withoutLiteralSubstitutions(cmd) {
 }
 
 // Text with every quote, backslash and backtick dropped (PowerShell's curly quotes too), for the checks that read raw
-// text: a name split by quoting, as in st"art.mjs or --"bg", reads whole (#61, like #62 in approve-guard.mjs).
+// text: a name split by quoting, as in st"art.mjs or --"bg", reads whole (#61, like #62 in approve-guard.mjs). A name
+// spelled in `$'…'` escapes reads whole too: the text is followed by a copy with each `$'…'` resolved (#310), so what
+// either reading names counts.
 const DEQUOTE_RE = new RegExp(`['"\\\\\`${String.fromCharCode(0x2018)}-${String.fromCharCode(0x201e)}${LIT_TICK}${QUOTED_TICK}]`, "g");
-export const dequoted = (s) => s.replace(DEQUOTE_RE, "");
+export const dequoted = (s) => (s.includes("$'") ? `${s}\n${ansiCResolved(s)}` : s).replace(DEQUOTE_RE, "");
 
 /**
  * True when a call creates a process through WMI or CIM (#316): it names Win32_Process, or runs wmic's `process`, with
@@ -669,13 +761,27 @@ export function lex(cmd, { bodies: withBodies = false } = {}) {
             continue;
           }
         }
+        // A backslash-newline inside double quotes joins the lines, as bare (#310): `"post-revi\<newline>ew.mjs"`.
+        if (cmd[j] === "\\" && cmd[j + 1] === "\n") {
+          j += 1;
+          continue;
+        }
         const escaped = cmd[j] === "\\" && '"\\$`'.includes(cmd[j + 1] ?? "");
         if (escaped) j += 1;
-        s += escaped || !"$`".includes(cmd[j]) ? quote(cmd[j]) : cmd[j];
+        // A `$` bash reads as a plain character (`"a$\|b"`, `"x |y$"`) is marked like a quoted one (#310).
+        s += escaped || !"$`".includes(cmd[j]) || (cmd[j] === "$" && literalDollar(cmd, j, true)) ? quote(cmd[j]) : cmd[j];
       }
       if (j >= cmd.length) throw new Error('unterminated "');
       word = (word ?? "") + s;
       i = j;
+    } else if (c === "$" && cmd[i + 1] === "'") {
+      // ANSI-C quoting (#310): one literal string with its escapes resolved.
+      const ansi = ansiCString(cmd, i);
+      word = (word ?? "") + quote(ansi.text);
+      i = ansi.end;
+    } else if (c === "$" && literalDollar(cmd, i, false)) {
+      // A bare `$` bash reads as a plain character (`a$ b`, `a$\|b`), as in double quotes (#310).
+      word = (word ?? "") + quote(c);
     } else if (c === "$" && literalSub(cmd, i)) {
       const lit = literalSub(cmd, i);
       word = (word ?? "") + quote(lit.body);
