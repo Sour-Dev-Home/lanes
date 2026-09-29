@@ -976,3 +976,16 @@ test("#382: edge: planRecovery judges only the newest session of an issue, and s
   assert.deepEqual(planRecovery({ issues, prs: [], sessions: [idle], marker: () => ({ session: "same" }) }), []);
   assert.deepEqual(planRecovery({ issues, prs: [], sessions: [idle], marker: () => ({ session: "other" }) }).map((r) => r.again), [true]);
 });
+
+// #416: a conflicted lane PR is an owner wait; nothing launches for its issue.
+test("a conflicted lane PR is reported once as an owner wait and launches nothing for its issue", () => {
+  const conflicted = { ...pr(50, 7, ["a.mjs"]), mergeable: "CONFLICTING" };
+  const out = tick({ issues: [issue(7, ["a.mjs"])], prs: [conflicted] });
+  assert.deepEqual(out.launch, []);
+  assert.deepEqual(out.waiting, [{ number: 50, reason: "conflict: rebase needed" }]);
+  assert.equal(out.lines.filter((l) => l.includes("conflict: rebase needed")).length, 1);
+});
+test("edge: an UNKNOWN mergeable state is not an owner wait", () => {
+  const out = tick({ prs: [{ ...pr(50, 7, ["a.mjs"]), mergeable: "UNKNOWN" }] });
+  assert.deepEqual(out.waiting, []);
+});

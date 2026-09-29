@@ -17,7 +17,7 @@ import { approveLine, formatAge, gateDescriptions, gateSince, prStage, stalledLa
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
 // waiting on owner.
-const WAITING_STAGES = new Set(["failing", "contract", "owner"]);
+const WAITING_STAGES = new Set(["failing", "contract", "owner", "conflict"]);
 const labelsOf = (issue) => (issue.labels ?? []).map((l) => (typeof l === "string" ? l : l?.name));
 const isOpen = (issue) => (issue.state ?? "OPEN") === "OPEN";
 const branchIssue = (pr) => Number(String(pr.headRefName ?? "").match(/^issue-(\d+)-/)?.[1] ?? NaN);
@@ -172,7 +172,7 @@ function readSnapshot(deps, root) {
   const issues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body"]));
   // A blocker missing from a truncated list would read as closed, and a lane's claim would be lost.
   if (issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to plan from`);
-  const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,title,headRefName,files,statusCheckRollup"]));
+  const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,title,headRefName,files,mergeable,statusCheckRollup"]));
   if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to count lanes in flight`);
   const gate = JSON.parse(deps.gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${GATE_QUERY}`]));
   const descriptions = gateDescriptions(gate);

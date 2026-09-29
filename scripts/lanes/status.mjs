@@ -12,12 +12,15 @@ import { claimedPaths } from "./pick.mjs";
 
 const ISSUE_LIMIT = 1000;
 const FAILED = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"]);
+export const CONFLICT_NOTE = "conflict: rebase needed";
 
 // A PR that enters the merge queue loses its `autoMergeRequest`, so queue membership is checked first.
 // `gh pr list` leaves StatusContext descriptions out of `statusCheckRollup`, so the gate's comes from `gateDescription`.
 // queue.mjs derives its owner waits from this too, so the queue and /status never disagree (#122).
 export function prStage(pr, queuePosition, gateDescription) {
   if (queuePosition !== undefined) return { stage: "queued", note: `in merge queue, position ${queuePosition}` };
+  // A merge conflict blocks the merge whatever the checks say; `UNKNOWN` (GitHub still computing) says nothing.
+  if (pr.mergeable === "CONFLICTING") return { stage: "conflict", note: CONFLICT_NOTE };
   const rollup = pr.statusCheckRollup ?? [];
   const failing = rollup
     .filter((c) => c.context !== GATE_CONTEXT && (FAILED.has(c.conclusion) || FAILED.has(c.state)))
@@ -265,7 +268,7 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
     // approval already given only clears a /approve ask (the gate's own "waiting on owner" stage, or a "needs the
     // owner" note that asks for /approve) — an unrelated need (e.g. "pick a name for the package") still surfaces.
     const asksForApprove = /\/approve\b/i.test(needs);
-    if (session?.waiting) out.waitingOnOwner.push(withSession(item, session));
+    if (session?.waiting || stage === "conflict") out.waitingOnOwner.push(withSession(item, session));
     else if (stage === "gate") out.inFlight.push(withSession(item, session));
     else if (stage === "owner") (ownerApproved(pr) ? out.inFlight : out.waitingOnOwner).push(withSession(item, session));
     else if (needs && !/^nothing\b/i.test(needs)) {
@@ -393,7 +396,7 @@ async function main(argv = process.argv.slice(2)) {
   let rawAgents;
   const reply = gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${STATUS_QUERY}`]);
   const data = {
-    prs: gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefName,files"]),
+    prs: gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,mergeable,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefName,files"]),
     issues: gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,title,labels,body"]),
     merged: gh(["pr", "list", "--state", "merged", "--search", `merged:>=${since}`, "--limit", "100", "--json", "number,title"]),
     mergeQueue: mergeQueueEntries(reply),

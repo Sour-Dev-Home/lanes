@@ -897,3 +897,20 @@ test("edge: stalled boundary, unsafe session id, and the fallback to the session
   assert.equal(stalledOf([agent("aaaa0001", wt("issue-10-x"))], () => Number.NaN).size, 0);
   assert.equal(renderWaiting([], []), "none");
 });
+
+// #416: a lane PR that GitHub reports as CONFLICTING waits on the owner, whatever its checks say.
+test("a CONFLICTING PR shows conflict: rebase needed and waits on the owner; UNKNOWN shows nothing", () => {
+  const pending = [gate("PENDING", "waiting for review/test-hunter")];
+  const s = summarize({
+    prs: [pr(1, pending, { mergeable: "CONFLICTING" }), pr(2, pending, { mergeable: "UNKNOWN" }), pr(3, [gate("SUCCESS", "ok")], { mergeable: "MERGEABLE", autoMergeRequest: {} })],
+    issues: [], merged: [], mergeQueue: [],
+  });
+  assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.note]), [[1, "conflict: rebase needed"]]);
+  assert.deepEqual(s.inFlight.map((i) => i.number), [2, 3]);
+  assert.match(render(s, "24h"), /conflict: rebase needed/);
+});
+test("edge: a conflicted PR stays on the owner's list even after review/owner passed", () => {
+  const approved = { __typename: "StatusContext", context: "review/owner", state: "SUCCESS" };
+  const s = summarize({ prs: [pr(1, [gate("PENDING", "waiting on owner (/approve)"), approved], { mergeable: "CONFLICTING" })], issues: [], merged: [], mergeQueue: [] });
+  assert.deepEqual(s.waitingOnOwner.map((i) => i.number), [1]);
+});
