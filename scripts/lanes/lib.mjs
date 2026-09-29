@@ -636,6 +636,21 @@ function reuseNote(reuse) {
   return [...bySha].map(([sha, names]) => `, reused ${names.join("+")} from ${sha.slice(0, 7)}`).join("");
 }
 
+// ADR 0015: the only files a proven-additive diff may change and still skip the owner-only-path wait.
+const OWNER_DIFF_FILES = Object.freeze(["lanes.config.json", "scripts/lanes/workflow.test.mjs"]);
+
+/**
+ * #380, ADR 0015: whether a PR's owner-only paths need no /approve because owner-diff.mjs proved the diff additive.
+ * Fails closed: `ownerDiff` must be exactly "additive", every changed file one of `OWNER_DIFF_FILES` (compared as
+ * given, never normalised), and the tier must require at least one reviewer; `gateDecision` has already checked that
+ * each required reviewer passed on the head before it asks.
+ */
+function ownerPathExempt(ownerDiff, files, required) {
+  if (ownerDiff !== "additive") return false;
+  if (!Array.isArray(files) || files.length === 0) return false;
+  return required.length > 0 && files.every((f) => OWNER_DIFF_FILES.includes(f));
+}
+
 const NO_BLOCKERS = Object.freeze({ ok: true, open: [], unreadable: [] });
 const isIssueList = (xs) => Array.isArray(xs) && xs.every((x) => Number.isInteger(x) && x > 0);
 
@@ -660,9 +675,11 @@ function blockerStatus(blockers, closes) {
  * list: each a trusted review/<reviewer> success, for a reviewer in `REUSABLE_REVIEWERS`, from an earlier commit of
  * the PR whose own diff matches the head's. Each counts only when the head has no trusted status of its own for that
  * reviewer, and brings along that reviewer's verdict for its `sha`. `interfaceContract` (#241) is the issue's Interface
- * contract text; a path it names that the diff changes requires the architecture-advisor.
+ * contract text; a path it names that the diff changes requires the architecture-advisor. `ownerDiff` (#380, ADR 0015)
+ * is owner-diff.mjs's verdict on the diff: only the string "additive" can clear the owner-only-path wait, and only
+ * under `ownerPathExempt`'s conditions; the other reasons to wait on the owner still apply.
  */
-export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS }) {
+export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, ownerDiff = null }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
@@ -713,7 +730,7 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
   const waitOwner = (reason) => ({ state: "pending", description: `waiting on owner (/approve) (${reason})${note}`, stage: "owner" });
   // ADR 0002: the files that decide what gets checked and who approves always need the owner, at every tier. A
   // sensitive path only adds the security-reviewer (requiredReviewers); it no longer sends a PR to the owner.
-  if (cls.owner) return waitOwner("owner-only path");
+  if (cls.owner && !ownerPathExempt(ownerDiff, files, required)) return waitOwner("owner-only path");
   if (!NEEDS_NOTHING.test(pr.sections["needs the owner"] ?? "")) return waitOwner("needs the owner");
   let blocker = null;
   if (tier === "full") blocker = fullTierBlocker({ pr, required, verdicts, headSha, reuse });
