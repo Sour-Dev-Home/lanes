@@ -24,6 +24,7 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { percentile } from "./delivery-metrics.mjs";
+import { parseGraphql } from "./graphql-lib.mjs";
 import { parseVerdictComment } from "./lib.mjs";
 
 export const SCHEMA_VERSION = 1;
@@ -222,20 +223,7 @@ const PR_QUERY = `query($owner: String!, $name: String!, $cursor: String) {
   }
 }`;
 
-/** Parses a GraphQL response without ever echoing raw API text in an error (JSON.parse messages quote the input). */
-export function parseGraphql(text) {
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    throw new Error("GitHub returned a response that is not JSON");
-  }
-  const page = body?.data?.repository?.pullRequests;
-  if (!page || !Array.isArray(page.nodes) || typeof page.pageInfo?.hasNextPage !== "boolean") {
-    throw new Error("GitHub returned an unexpected GraphQL response");
-  }
-  return page;
-}
+export { parseGraphql };
 
 function fetchMergedPrs(from) {
   const [owner, name] = gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim().split("/");

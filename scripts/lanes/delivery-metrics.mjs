@@ -25,6 +25,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseGraphql } from "./graphql-lib.mjs";
 import { parseIssueForm } from "./lib.mjs";
 import { issuePaths } from "./paths.mjs";
 
@@ -289,20 +290,7 @@ function repoSlug(run = gh) {
   return { owner, name };
 }
 
-/** Parses a GraphQL response without ever echoing raw API text in an error (JSON.parse messages quote the input). */
-export function parseGraphql(text) {
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    throw new Error("GitHub returned a response that is not JSON");
-  }
-  const page = body?.data?.repository?.pullRequests;
-  if (!page || !Array.isArray(page.nodes) || typeof page.pageInfo?.hasNextPage !== "boolean") {
-    throw new Error("GitHub returned an unexpected GraphQL response");
-  }
-  return page;
-}
+export { parseGraphql };
 
 /**
  * Merged PRs updated since `from`, normalised. Without `rich` the query and output are the plain normalizePr shape;
