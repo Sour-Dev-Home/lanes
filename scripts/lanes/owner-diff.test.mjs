@@ -340,3 +340,38 @@ test("edge: `0x1e+/'/.source` is a hex number plus a regex, so the block is addi
 test("edge: a parameter name strict mode refuses needs the owner", () => {
   needsOwner(appended('test("a", (eval) => {\n  void 1;\n});\n'), /does not parse/);
 });
+
+// #409: an appended entry that could backtrack catastrophically is not proven additive.
+const ownerAppended = (entry) => config(json(withOwner([...baseConfig.paths.owner, entry])));
+
+test("a nested-quantifier paths.owner entry needs the owner, naming its index", () => {
+  needsOwner(ownerAppended("^(a+)+$"), /entry 2\b/);
+  needsOwner(ownerAppended("(x*)*"), /entry 2\b/);
+  needsOwner(ownerAppended("(a){2,}"), /entry 2\b/);
+});
+
+test("a paths.owner entry over 200 characters needs the owner; 200 is additive", () => {
+  needsOwner(ownerAppended("^" + "a".repeat(200)), /entry 2\b/);
+  additive(ownerAppended("^" + "a".repeat(199)));
+});
+
+test("a group followed by ? in a paths.owner entry is additive", () => {
+  additive(ownerAppended("^scripts/lanes/x(\\.test)?\\.mjs$"));
+});
+
+test("edge: a group-free run of quantifiers needs the owner; two is additive", () => {
+  needsOwner(ownerAppended("a?".repeat(28) + "a".repeat(28) + "b"), /entry 2\b/);
+  needsOwner(ownerAppended(".*.*.*.*.*.*x"), /entry 2\b/);
+  needsOwner(ownerAppended("a*a*a*a*a*a*b"), /entry 2\b/);
+  needsOwner(ownerAppended("^a*b*c*$"), /entry 2\b/);
+  additive(ownerAppended("^a*b*$"));
+});
+
+test("edge: the index names the offending entry among several appended", () => {
+  needsOwner(config(json(withOwner([...baseConfig.paths.owner, "^a$", "(b+)+"]))), /entry 3\b/);
+});
+
+test("every entry in the real lanes.config.json paths.owner passes the check", () => {
+  const real = JSON.parse(readFileSync(CONFIG, "utf8"));
+  additive(config(json(real), json({ ...real, paths: { ...real.paths, owner: [] } })));
+});
