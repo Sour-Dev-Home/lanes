@@ -648,7 +648,25 @@ export function cleanupMerged({ dryRun = false, deps = {} } = {}) {
   return render(runCleanup(planCleanup(inputs), { dryRun, run, stillThere, sessionEnded: isEnded, saveLog: save, recordCost: record, removeDir, waitStopped, sleep, unmark })).split("\n");
 }
 
+export const USAGE = "usage: node scripts/lanes/cleanup.mjs [--dry-run]";
+
+// What the CLI does before any git, gh or claude command: `--help`/`-h` prints the usage and stops (exit 0); any argument
+// but `--dry-run` is refused (exit 2) with its name and the usage; otherwise null and the cleanup runs.
+export function argsOutcome(argv) {
+  if (argv.includes("--help") || argv.includes("-h")) return { code: 0, stdout: USAGE };
+  const unknown = argv.find((a) => a !== "--dry-run");
+  if (unknown !== undefined) return { code: 2, stderr: `unknown argument: ${unknown}\n${USAGE}` };
+  return null;
+}
+
 function main(argv = process.argv.slice(2)) {
+  const early = argsOutcome(argv);
+  if (early) {
+    if (early.stdout) console.log(early.stdout);
+    if (early.stderr) console.error(early.stderr);
+    process.exitCode = early.code;
+    return;
+  }
   const lines = cleanupMerged({ dryRun: argv.includes("--dry-run") });
   console.log(lines.join("\n"));
   if (lines.some((line) => line.startsWith("failed "))) process.exitCode = 1;

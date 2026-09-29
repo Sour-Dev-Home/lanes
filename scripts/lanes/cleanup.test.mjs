@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
-  SESSION_ID, cleanableCount, cleanupMerged, findOrphans, formatStep, loadCleanupInputs, parseWorktrees, pidRunning, planCleanup, removeEmptyDir, render, runCleanup,
+  SESSION_ID, USAGE, argsOutcome, cleanableCount, cleanupMerged, findOrphans, formatStep, loadCleanupInputs, parseWorktrees, pidRunning, planCleanup, removeEmptyDir, render, runCleanup,
   recordSessionCost, saveSessionLog, sessionEnded, sessionsFrom, shOptions, waitForStop,
 } from "./cleanup.mjs";
 
@@ -1716,4 +1718,31 @@ test("edge: parseWorktrees marks a prunable entry gone, and loadCleanupInputs re
   const lane = loadCleanupInputs(ROOT, run).worktrees.find((w) => w.branch === "issue-7-x");
   assert.equal(lane.gone, true);
   assert.equal(lane.dirty, false);
+});
+
+test("argsOutcome: --help and -h stop with the usage and exit 0", () => {
+  for (const argv of [["--help"], ["-h"], ["--dry-run", "--help"], ["--bogus", "-h"]]) assert.deepEqual(argsOutcome(argv), { code: 0, stdout: USAGE });
+});
+
+test("argsOutcome: an unknown argument exits 2 naming it, with the usage", () => {
+  for (const [argv, name] of [[["--dryrun"], "--dryrun"], [["--dry-run", "extra"], "extra"], [["-x"], "-x"], [[""], ""]]) {
+    assert.deepEqual(argsOutcome(argv), { code: 2, stderr: `unknown argument: ${name}\n${USAGE}` }, JSON.stringify(argv));
+  }
+});
+
+test("argsOutcome: no argument and --dry-run let the cleanup run", () => {
+  assert.equal(argsOutcome([]), null);
+  assert.equal(argsOutcome(["--dry-run"]), null);
+});
+
+// The CLI itself: both refusals return before loadCleanupInputs, so no git, gh or claude command runs.
+test("cleanup.mjs --help and an unknown flag run no git, gh or claude command", () => {
+  const script = fileURLToPath(new URL("./cleanup.mjs", import.meta.url));
+  const help = spawnSync(process.execPath, [script, "--help"], { encoding: "utf8", env: { ...process.env, PATH: "" } });
+  assert.equal(help.status, 0);
+  assert.equal(help.stdout.trim(), USAGE);
+  const bad = spawnSync(process.execPath, [script, "--force"], { encoding: "utf8", env: { ...process.env, PATH: "" } });
+  assert.equal(bad.status, 2);
+  assert.equal(bad.stderr.trim(), `unknown argument: --force\n${USAGE}`);
+  assert.equal(bad.stdout, "");
 });

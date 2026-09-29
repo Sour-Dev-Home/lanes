@@ -126,7 +126,18 @@ export function applyUpgrade(source, target, plan) {
   return keys;
 }
 
+const USAGE = "usage: upgrade.mjs <target-dir> [--apply]: the target must be an existing directory";
+
 export function main(argv, env = process.env, { source = path.join(HERE, "..", ".."), manifest = MANIFEST, print = console.log } = {}) {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    print(USAGE);
+    return 0;
+  }
+  const unknown = argv.find((a) => a.startsWith("-") && a !== "--apply");
+  if (unknown !== undefined) {
+    print(`unknown argument: ${unknown}\n${USAGE}`);
+    return 2;
+  }
   if (env.CLAUDECODE) {
     print("upgrade.mjs refuses to run inside Claude (CLAUDECODE is set): run it in your own terminal");
     return 2;
@@ -134,7 +145,7 @@ export function main(argv, env = process.env, { source = path.join(HERE, "..", "
   const flags = argv.filter((a) => a.startsWith("--"));
   const [target, ...rest] = argv.filter((a) => !a.startsWith("--"));
   if (!target || rest.length || flags.some((f) => f !== "--apply") || !existsSync(target) || !statSync(target).isDirectory()) {
-    print("usage: upgrade.mjs <target-dir> [--apply]: the target must be an existing directory");
+    print(USAGE);
     return 2;
   }
   try {

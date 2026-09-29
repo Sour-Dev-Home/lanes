@@ -462,6 +462,28 @@ for (const argv of [
     }));
 }
 
+for (const flag of ["--help", "-h"]) {
+  test(`${flag} prints the usage, exits 0 and runs no command, lock or sleep`, () =>
+    withRoot(async (root) => {
+      const w = world(root);
+      const out = [];
+      assert.equal(await main(["--issue", "7", flag], { ...w.deps, out: (l) => out.push(l) }), 0);
+      assert.deepEqual(out, ["usage: node scripts/lanes/reap.mjs --issue N --session ID"]);
+      assert.deepEqual(w.errs, []);
+      assert.deepEqual(w.calls, []);
+      assert.equal(existsSync(join(root, ".lanes", "reap")), false);
+    }));
+}
+
+test("an unknown flag is named with the usage line, exit 2 and no command run", () =>
+  withRoot(async (root) => {
+    const w = world(root);
+    assert.equal(await main(["--issue", "7", "--session", "s7", "--force"], w.deps), 2);
+    assert.deepEqual(w.errs, ["unknown argument: --force", "usage: node scripts/lanes/reap.mjs --issue N --session ID"]);
+    assert.deepEqual(w.calls, []);
+    assert.equal(existsSync(join(root, ".lanes", "reap")), false);
+  }));
+
 // #209: the session-id pattern lives in cleanup.mjs; reap.mjs applies that one rather than a copy.
 test("reap.mjs imports SESSION_ID from cleanup.mjs and defines no pattern of its own", () => {
   const source = readFileSync(new URL("./reap.mjs", import.meta.url), "utf8");
