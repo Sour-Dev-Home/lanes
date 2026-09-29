@@ -1419,3 +1419,50 @@ test("#308 edge: wrappers, cmd's %X%, a scheduled task's run-time program and ma
   for (const c of ["cmd /c", "start", "schtasks /create /tr", "deno eval", "echo cmd /c start $X"]) assert.equal(decideBash(c), null, c);
   assert.equal(WMI_REASON.endsWith(DENY_REASON), true);
 });
+
+// --- #310: ANSI-C quoting, plain heredoc delimiters, a literal `$` in double quotes --------------------------------
+
+test("#310 criterion 1: a $'…' string reads as its text, so a raw line separator in one is plain and an escaped name is denied", () => {
+  allowed("grep -n $' ' scripts/lanes/*.mjs | cut -c1-80");
+  denied("node scripts/lanes/post-revie$'\\x77'.mjs owner --pr 5");
+  denied("node scripts/lanes/post-review.mjs $'\\x6fwner' --pr 5");
+  denied("bash -c $'node scripts/lanes/post-review.mjs owner --pr 5'");
+});
+
+test("#310 criterion 2: a $(cat <<\"E\\$F\" body is not literal, so an owner run after its real end is denied", () => {
+  // A data command (git, echo), whose literal message the guard does not scan: only reading the body's real end finds the run.
+  denied("git commit -m \"$(cat <<\"E\\$F\"\nE$F\n)\"\nnode scripts/lanes/post-review.mjs owner --pr 5\necho \"$(cat <<'G'\nE\\$F\n)\"");
+  denied("echo \"$(cat <<'E F'\nE F\n)\"\nnode scripts/lanes/post-review.mjs owner --pr 5\necho \"$(cat <<'G'\n'E F'\n)\"");
+});
+
+test("#310 criterion 3: git commit -m \"$(cat <<'EOF' … EOF)\" with a plain delimiter still gets no decision", () => {
+  allowed("git commit -m \"$(cat <<'EOF'\nFix the owner's $0 check\n\nCo-Authored-By: x\nEOF\n)\"");
+  allowed('git commit -m "$(cat <<EOF\nplain message\nEOF\n)"');
+});
+
+test("#310 criterion 4: a $ bash takes literally in double quotes makes no nested script", () => {
+  for (const c of ['grep -n "a$\\|b" f.mjs', 'grep -n "^const .*= {$\\|^export default" x.mjs', 'grep -v "x |y$" f', 'grep -vE "^\\s+at |^\\s*$" f', 'echo "x ;y$"']) {
+    allowed(c);
+  }
+});
+
+test("#310 criterion 5: a $ bash expands, and a quoted word a shell runs, keep their decisions", () => {
+  for (const c of ['echo "x |$Y"', 'bash -c "x |$Y"', 'bash -c "$X"', 'eval "$S"', 'bash -c "x$(echo)|y"']) {
+    assert.deepEqual(decideBash(c), { decision: "deny", reason: DENY_REASON }, c);
+  }
+});
+
+test("#310 edge: $\"…\", a backslash-newline in double quotes, a redirect target with $'\\'' and an unparsable $'…' name", () => {
+  // Bare `$"…"` is bash's locale quoting: the `$` is dropped, never plain.
+  denied('node scripts/lanes/post-revie$"w".mjs owner --pr 5');
+  // Inside double quotes a backslash-newline joins the lines.
+  denied('node "scripts/lanes/post-revi\\\new.mjs" owner --pr 5');
+  // `\'` does not close a $'…' redirect target, so the command after it is read.
+  denied("echo >$'a\\'b' ; node scripts/lanes/post-review.mjs owner --pr 5");
+  // A literal `$` next to the name, and a private-use character spelled by an escape.
+  denied("node scripts/lanes/post-review.mjs owner --pr 5 \"a$\"");
+  denied("bash -c $'\\ue000(node scripts/lanes/post-review.mjs owner --pr 5)'");
+  // A call that cannot be parsed, naming post-review.mjs only through escapes, fails closed.
+  assert.deepEqual(decideBash("node scripts/lanes/post-revie$'\\x77'.mjs owner --pr 5\necho 'x"), { decision: "deny", reason: UNPARSED_REASON });
+  assert.equal(decideBash("echo $'unterminated"), null);
+});

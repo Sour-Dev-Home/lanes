@@ -2230,6 +2230,45 @@ test("#308 edge: malformed launchers and a brace expansion too large to check", 
   assert.equal(decideFor(bash(`ls scripts/lanes/${huge}.mjs`)), null);
 });
 
+// --- #310: ANSI-C quoting, plain heredoc delimiters, a literal `$` in double quotes --------------------------------
+
+test("#310 criterion 1: a $'…' string reads as its text, so a raw line separator in one is plain and an escaped name is denied", () => {
+  assert.equal(decideFor(bash("grep -n $' ' scripts/lanes/*.mjs | cut -c1-80")), null);
+  for (const c of ["node scripts/lanes/st$'\\x61'rt.mjs 12", "node scripts/lanes/$'\\163tart.mjs' 12", "bash -c $'node scripts/lanes/start.mjs 12'"]) {
+    assert.deepEqual(decideFor(bash(c)), deny(DENY_REASON), c);
+  }
+  assert.deepEqual(decideFor(bash("node scripts/lanes/q$'\\x75'eue.mjs")), deny(QUEUE_DENY_REASON));
+  assert.equal(decideFor(bash("claude $'--\\x62g'"))?.decision, "deny");
+});
+
+test("#310 criterion 2: a $(cat <<\"E\\$F\" body is not literal, so a start.mjs run after its real end is denied", () => {
+  const c = "x \"$(cat <<\"E\\$F\"\nE$F\n)\"\nnode scripts/lanes/start.mjs 12\ny \"$(cat <<'G'\nE\\$F\n)\"";
+  assert.deepEqual(decideFor(bash(c)), deny(DENY_REASON));
+});
+
+test("#310 criterion 3: git commit -m \"$(cat <<'EOF' … EOF)\" with a plain delimiter still gets no decision", () => {
+  assert.equal(decideFor(bash("git commit -m \"$(cat <<'EOF'\nRun start.mjs for $0\nEOF\n)\"")), null);
+});
+
+test("#310 criterion 4: a $ bash takes literally in double quotes makes no nested script", () => {
+  for (const c of ['grep -n "a$\\|b" f.mjs', 'grep -n "^const .*= {$\\|^export default" x.mjs', 'grep -v "x |y$" f', 'grep -vE "^\\s+at |^\\s*$" f', 'echo "x ;y$"']) {
+    assert.equal(decideFor(bash(c)), null, c);
+  }
+});
+
+test("#310 criterion 5: a $ bash expands, and a quoted word a shell runs, keep their decisions", () => {
+  for (const c of ['echo "x |$Y"', 'bash -c "x |$Y"', 'bash -c "x$(echo)|y"']) assert.deepEqual(decideFor(bash(c)), deny(UNRESOLVED_DENY_REASON), c);
+  for (const c of ['bash -c "$X"', 'eval "$S"']) assert.equal(decideFor(bash(c)), null, c);
+});
+
+test("#310 edge: $\"…\", a backslash-newline in double quotes, a redirect target with $'\\'' and a claude found through $'…'", () => {
+  assert.deepEqual(decideFor(bash('node scripts/lanes/st$"a"rt.mjs 12')), deny(UNRESOLVED_DENY_REASON));
+  assert.deepEqual(decideFor(bash('node "scripts/lanes/sta\\\nrt.mjs" 12')), deny(DENY_REASON));
+  assert.deepEqual(decideFor(bash("echo >$'a\\'b' ; node scripts/lanes/start.mjs 12")), deny(DENY_REASON));
+  assert.equal(decideFor(bash("$(which cla$'\\x75'de) --bg"))?.decision, "deny");
+  assert.equal(decideFor(bash("echo $'unterminated")), null);
+});
+
 test("#308 edge: exactly 1024 brace expansions are still checked (boundary), and none of them names a lane script", () => {
   const atLimit = "{a,b}".repeat(10);
   assert.equal(decideFor(bash(`node scripts/lanes/${atLimit}.mjs`)), null);

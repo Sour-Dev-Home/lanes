@@ -16,7 +16,7 @@
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launchedCommands, lex, mayExpandTo, readGrant, RUNS_ON_EXPANSION_RE, scriptSubcommand, unmark, wmiProcessCreate } from "./shell-lex.mjs";
+import { dequoted, launchedCommands, lex, mayExpandTo, readGrant, RUNS_ON_EXPANSION_RE, scriptSubcommand, unmark, wmiProcessCreate } from "./shell-lex.mjs";
 
 // post-review.mjs reads the grant with the guard's own reader.
 export { readGrant } from "./shell-lex.mjs";
@@ -315,8 +315,9 @@ function scan(cmd, depth, out) {
   try {
     segments = lex(cmd);
   } catch {
-    // An unterminated quote: bash will not run it, but fail closed on the name with any quoting removed.
-    if (/post-review/i.test(unquoted(cmd))) out.push({ pr: undefined, standalone: false, unparsed: true });
+    // An unterminated quote: bash may still run the lines before it, so fail closed on the name with any quoting
+    // removed and any `$'…'` escapes resolved (#310).
+    if (/post-review/i.test(dequoted(cmd))) out.push({ pr: undefined, standalone: false, unparsed: true });
     return;
   }
   // `S=scripts/lanes/post-review.mjs; node $S owner … --pr N` must be caught too: resolve same-command
