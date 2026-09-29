@@ -1130,6 +1130,23 @@ test("#444: edge: the worktree is looked up by the PR's branch when the session 
   assert.deepEqual(run.launched.map((l) => l.n), [7]);
 });
 
+test("#444: edge: a fork PR reusing a lane's branch name is not resumed", async () => {
+  const { planRecovery } = await import("./queue.mjs");
+  const fork = { ...gatePr(70, 7, "waiting for review/test-hunter"), isCrossRepository: true };
+  assert.deepEqual(planRecovery({ issues: [issue(7, ["src/a.mjs"])], prs: [fork], sessions: [] }), []);
+});
+
+test("#444: edge: control characters in a check name never reach the printed line", async () => {
+  const { main } = await import("./queue.mjs");
+  const bad = pr(70, 7, ["src/a.mjs"], [{ name: "ver\u001b[31mify", conclusion: "FAILURE" }, gate("PENDING", "x")]);
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [bad], sessions: [idleLane(7)] };
+  const run = recoveryRun(world);
+  await main([], run.deps);
+  const line = run.out.find((l) => l.includes("resuming once"));
+  assert.ok(line, run.out.join("\n"));
+  assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(line));
+});
+
 test("#444: edge: over the token budget a dead lane is not relaunched and keeps no marker", async () => {
   const { main } = await import("./queue.mjs");
   const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/security-reviewer")], sessions: [idleLane(7)] };
@@ -1138,4 +1155,28 @@ test("#444: edge: over the token budget a dead lane is not relaunched and keeps 
   await main([], run.deps);
   assert.deepEqual(run.launched, []);
   assert.equal(run.markers.size, 0);
+});
+
+test("#444: edge: a worktree lookup that throws is reported once and nothing is relaunched", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/security-reviewer")], sessions: [idleLane(7)] };
+  const run = recoveryRun(world);
+  run.deps.recovery.worktree = () => {
+    throw new Error("git broke");
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+  assert.equal(run.out.filter((l) => / #7: recovery failed: git broke$/.test(l)).length, 1, run.out.join("\n"));
+});
+
+test("#444: edge: a marker that cannot be written stops the resume before any launch", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/security-reviewer")], sessions: [idleLane(7)] };
+  const run = recoveryRun(world);
+  run.deps.recovery.marker.write = () => {
+    throw new Error("disk full");
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+  assert.ok(run.out.some((l) => / #7: recovery failed: disk full$/.test(l)), run.out.join("\n"));
 });

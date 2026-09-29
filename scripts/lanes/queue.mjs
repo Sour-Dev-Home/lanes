@@ -161,7 +161,8 @@ export function planRecovery({ issues = [], prs = [], sessions = [], stalled = n
   const resumed = new Set();
   for (const pr of prs) {
     const n = branchIssue(pr);
-    if (!ready.has(n) || resumed.has(n)) continue;
+    // A fork's PR may reuse a lane's branch name; only the repo's own PR names a lane's worktree.
+    if (!ready.has(n) || resumed.has(n) || pr.isCrossRepository === true) continue;
     const { dead, session } = deadLaneSession(sessions, n);
     if (!dead) continue;
     const { stage, note } = prStage(pr, undefined, pr.gateDescription);
@@ -194,7 +195,7 @@ function readSnapshot(deps, root) {
   const issues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body"]));
   // A blocker missing from a truncated list would read as closed, and a lane's claim would be lost.
   if (issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to plan from`);
-  const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,title,headRefName,files,mergeable,statusCheckRollup"]));
+  const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,title,headRefName,files,mergeable,statusCheckRollup,isCrossRepository"]));
   if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to count lanes in flight`);
   const gate = JSON.parse(deps.gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${GATE_QUERY}`]));
   const descriptions = gateDescriptions(gate);
@@ -318,7 +319,8 @@ export async function main(argv, deps = DEFAULT_DEPS) {
   let readFailures = 0;
   for (;;) {
     const at = stamp(now());
-    const say = (line) => print(`${at} ${line}`);
+    // #444: check names and gate text in a line are external, so control characters (ANSI escapes) never reach the terminal.
+    const say = (line) => print(`${at} ${String(line).replace(/[\u0000-\u001f\u007f-\u009f]/g, "")}`);
     try {
       for (const line of cleanup()) if (line.trim()) say(line);
     } catch (err) {
