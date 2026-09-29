@@ -359,10 +359,12 @@ test("a group followed by ? in a paths.owner entry is additive", () => {
   additive(ownerAppended("^scripts/lanes/x(\\.test)?\\.mjs$"));
 });
 
-test("edge: a group-free run of quantifiers needs the owner; six is additive", () => {
+test("edge: a group-free run of quantifiers needs the owner; two is additive", () => {
   needsOwner(ownerAppended("a?".repeat(28) + "a".repeat(28) + "b"), /entry 2\b/);
-  needsOwner(ownerAppended(".*.*.*.*.*.*.*x"), /entry 2\b/);
-  additive(ownerAppended("^a?b?c?d?e?f?$"));
+  needsOwner(ownerAppended(".*.*.*.*.*.*x"), /entry 2\b/);
+  needsOwner(ownerAppended("a*a*a*a*a*a*b"), /entry 2\b/);
+  needsOwner(ownerAppended("^a*b*c*$"), /entry 2\b/);
+  additive(ownerAppended("^a*b*$"));
 });
 
 test("edge: the index names the offending entry among several appended", () => {

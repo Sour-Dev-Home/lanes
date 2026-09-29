@@ -120,8 +120,9 @@ function configChange(beforeText, afterText) {
 // #409: a pattern the gate later runs against filenames must not be able to hang it (ReDoS); `)?` stays allowed.
 const MAX_ENTRY_LENGTH = 200;
 const QUANTIFIED_GROUP = /\)[*+{]/;
-// Group-free blowups (`a?` x28 then `a` x28, `.*.*.*.*.*x`) need many quantifiers; the real entries hold at most one.
-const MAX_QUANTIFIERS = 6;
+// Group-free blowups (`a?` x28 then `a` x28, `a*a*a*a*a*a*b`) need many quantifiers; the real entries hold at most one.
+// Two keeps the worst case quadratic in the filename length.
+const MAX_QUANTIFIERS = 2;
 const quantifierCount = (entry) => (entry.match(/[*+?{]/g) ?? []).length;
 
 // ---- workflow.test.mjs -------------------------------------------------------------------------------------------
