@@ -20,7 +20,7 @@ and `vendor/agent-skills/references/security-checklist.md` differ, the sheet win
 | `package.json`, `package-lock.json` | Dependencies and install scripts | `sheets/CI_CD_Security_Cheat_Sheet.md` (Dependency Management), `sheets/Nodejs_Security_Cheat_Sheet.md` (Keep your packages up-to-date) |
 
 Scripts that import `node:child_process` (each call site runs `gh`, `git`, `claude` or a notifier):
-`scripts/preflight.mjs`, `scripts/lanes/blockers.mjs`, `scripts/lanes/cleanup.mjs`, `scripts/lanes/consolidate.mjs`,
+`scripts/preflight.mjs`, `scripts/lanes/affected-tests.mjs`, `scripts/lanes/blockers.mjs`, `scripts/lanes/cleanup.mjs`, `scripts/lanes/consolidate.mjs`,
 `scripts/lanes/delivery-metrics.mjs`, `scripts/lanes/diff-coverage.mjs`, `scripts/lanes/gate.mjs`, `scripts/lanes/install.mjs` (asks `gh repo view` whether the target is public), `scripts/lanes/issue-contract.mjs`,
 `scripts/lanes/lane-metrics.mjs`, `scripts/lanes/new-project.mjs`, `scripts/lanes/notify-hook.mjs`, `scripts/lanes/post-review.mjs`,
 `scripts/lanes/queue.mjs`, `scripts/lanes/reap.mjs`, `scripts/lanes/release.mjs` (runs `git merge-base` on a validated tag), `scripts/lanes/reviewers.mjs`, `scripts/lanes/review-metrics.mjs`,
