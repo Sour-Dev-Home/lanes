@@ -349,3 +349,35 @@ test("parseArgs reads the documented flags and rejects the rest", () => {
     assert.throws(() => parseArgs(bad), Error, bad.join(" "));
   }
 });
+
+// ---- extra edge cases (test-hunter) ----
+
+test("edge: failed statuses map to the stage allowlist, and an unknown or error-state context is reported as failing", () => {
+  const pr = richNode({
+    number: 20,
+    createdAt: "2026-09-10T00:00:00Z",
+    mergedAt: "2026-09-10T10:00:00Z",
+    statuses: [["review/owner", "failure", "2026-09-10T01:00:00Z"], ["some/other-check", "error", "2026-09-10T01:00:00Z"], ["lanes/gate", "pending", "2026-09-10T01:00:00Z"]],
+  });
+  const r = build({ prs: rich(pr) });
+  assert.deepEqual(r.rework.gateFailuresByStage, [{ stage: "owner", count: 1 }, { stage: "failing", count: 1 }]);
+  assert.equal(accepts(schema, r), true);
+});
+
+test("edge: a PR merged exactly at now counts, and a split exactly at now is accepted", () => {
+  const now = new Date("2026-09-28T00:00:00Z");
+  const pr = richNode({ number: 21, createdAt: "2026-09-27T00:00:00Z", mergedAt: "2026-09-28T00:00:00Z" });
+  const r = buildLaneReport({ prs: rich(pr), now, days: 28, split: "2026-09-28" });
+  assert.equal(r.rework.prs, 1);
+  assert.equal(r.split[0].after.rework.prs, 1); // merged at the split instant is after
+  assert.equal(r.split[0].before.rework.prs, 0);
+  assert.equal(accepts(schema, r), true);
+});
+
+test("edge: non-finite token totals and non-integer issues in costs lines do not crash or poison the totals", () => {
+  const text = [cost({ tokens: { total: 1e999 } }), cost({ issue: "7", sessionId: "x" }), cost({ issue: 1.5 }), cost({ tier: "bogus", tokens: { total: 4.6 } })].join("\n");
+  const r = build({ costsText: text });
+  assert.equal(accepts(schema, r), true);
+  assert.equal(r.relaunches, 0);
+  assert.ok(r.tokensByTierAndModel.every((row) => Number.isInteger(row.tokens)));
+});

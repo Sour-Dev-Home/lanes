@@ -39,6 +39,9 @@ const TIER_ORDER = ["full", "quick", "skip", "unknown"];
 const MODEL_ORDER = ["fable", "opus", "sonnet", "haiku", "unknown"];
 const STAGE_ORDER = ["gate", "review", "owner", "failing"];
 
+/** An error whose message is this script's own text (safe to print); any other error may quote gh output or API text. */
+export class UsageError extends Error {}
+
 const round = (value, digits = 1) => Math.round(value * 10 ** digits) / 10 ** digits;
 const ms = (iso) => Date.parse(iso);
 const stat = (values) => ({ count: values.length, median: values.length === 0 ? null : round(percentile(values, 0.5)) });
@@ -229,7 +232,7 @@ export function buildLaneReport({ prs, reviewPrs = [], runs = [], costsText, now
   };
   if (split !== undefined) {
     const at = ms(`${split}T00:00:00Z`);
-    if (!(at > from && at <= now.getTime())) throw new Error(`--split ${split} must fall inside the ${days}-day window (after ${new Date(from).toISOString().slice(0, 10)}, up to today)`);
+    if (!(at > from && at <= now.getTime())) throw new UsageError(`--split ${split} must fall inside the ${days}-day window (after ${new Date(from).toISOString().slice(0, 10)}, up to today)`);
     report.split = [{ date: split, before: aggregate({ ...input, start: from, end: at }), after: aggregate({ ...input, start: at, end }) }];
   }
   return report;
@@ -256,7 +259,7 @@ export function assertNoPii(text, { logins = [], patternsFile = process.env.PREF
   if (PATH_SHAPES.some((shape) => haystack.includes(shape.toLowerCase()))) found.push("a local path");
   if (logins.some((login) => login !== "" && haystack.includes(login.toLowerCase()))) found.push("a login");
   if (privateIds.some((id) => haystack.includes(id.toLowerCase()))) found.push("a private identifier");
-  if (found.length > 0) throw new Error(`refused: the output holds ${found.join(", ")}; nothing was written`);
+  if (found.length > 0) throw new UsageError(`refused: the output holds ${found.join(", ")}; nothing was written`);
 }
 
 /** Writes `text` to `file` only after assertNoPii passes. */
@@ -320,7 +323,7 @@ export function parseArgs(argv) {
   const options = { days: 28, split: undefined, public: false, format: "markdown", out: undefined };
   let format;
   const setFormat = (value) => {
-    if (format !== undefined && format !== value) throw new Error("--json and --markdown cannot be combined");
+    if (format !== undefined && format !== value) throw new UsageError("--json and --markdown cannot be combined");
     format = value;
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -335,16 +338,16 @@ export function parseArgs(argv) {
     } else if (arg === "--split") {
       const value = argv[++i];
       if (value === undefined || !/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(ms(`${value}T00:00:00Z`)) || new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) !== value) {
-        throw new Error("--split needs a date as YYYY-MM-DD");
+        throw new UsageError("--split needs a date as YYYY-MM-DD");
       }
       options.split = value;
     } else if (arg === "--out") {
       const value = argv[++i];
-      if (value === undefined || value.startsWith("--")) throw new Error("--out needs a file");
+      if (value === undefined || value.startsWith("--")) throw new UsageError("--out needs a file");
       options.out = value;
-    } else throw new Error(`Unknown argument: ${arg}`);
+    } else throw new UsageError(`Unknown argument: ${arg}`);
   }
-  if (!Number.isInteger(options.days) || options.days < 1 || options.days > 365) throw new Error("--days must be a whole number from 1 to 365");
+  if (!Number.isInteger(options.days) || options.days < 1 || options.days > 365) throw new UsageError("--days must be a whole number from 1 to 365");
   options.format = format ?? "markdown";
   return options;
 }
@@ -444,8 +447,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     main();
   } catch (error) {
-    // A failed gh run's stderr can quote API text; say only that it failed.
-    console.error(error && typeof error.status === "number" ? `gh failed (exit ${error.status}): check gh auth status and the network` : error instanceof Error ? error.message : "lane-metrics failed");
+    // A failed gh run's message carries the command and stderr, and a parse error can quote the response: print only our own errors' text.
+    console.error(error instanceof UsageError ? error.message : error && typeof error.status === "number" ? `gh failed (exit ${error.status}): check gh auth status and the network` : "lane-metrics failed: check gh auth status and the network");
     process.exitCode = 1;
   }
 }
