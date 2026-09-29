@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { areaOf, checkFragments, lessonsFor, main, MAX_CHARS, MAX_PATTERNS, readFragments, recurring } from "./lessons.mjs";
@@ -285,6 +285,9 @@ test("the real docs/lessons.d/ passes --check and holds the four general seed fr
 test("the CLI --paths prints the seed lessons for any path", () => {
   const r = spawnSync(process.execPath, ["scripts/lanes/lessons.mjs", "--paths", "scripts/lanes/gate.mjs"], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout.split("\n").filter(Boolean).length, 4);
+  // one line per distinct general pattern (fragments share a pattern across issues), so a new fragment cannot break this
+  const patterns = new Set(readdirSync("docs/lessons.d").filter((f) => f.startsWith("general-") && f.endsWith(".md"))
+    .map((f) => f.slice("general-".length).replace(/-\d+\.md$/, "")));
+  assert.equal(r.stdout.split("\n").filter(Boolean).length, patterns.size);
   assert.match(r.stdout, /^\(x1\) general\//m);
 });
