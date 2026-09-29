@@ -40,7 +40,7 @@ test("laneIssueOf ignores names that only look like lane names, and non-backgrou
 
 test("laneIssueOf takes the folder directly under the last .claude/worktrees, not lane-shaped parents or children", () => {
   assert.equal(laneIssueOf({ kind: "background", cwd: "C:\\issue-3\\repo\\.claude\\worktrees\\issue-8-x\\issue-9-notes" }), 8);
-  assert.equal(laneIssueOf({ kind: "background", cwd: "/home/u/issue-4-x/repo/sub" }), 4, "no worktrees folder: the first lane-shaped one");
+  assert.equal(laneIssueOf({ kind: "background", cwd: "/work/issue-4-x/repo/sub" }), 4, "no worktrees folder: the first lane-shaped one");
   assert.equal(laneIssueOf({ kind: "background", cwd: "C:\\repo\\.claude\\worktrees\\scratch" }), null);
 });
 
