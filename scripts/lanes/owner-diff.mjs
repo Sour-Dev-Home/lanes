@@ -102,8 +102,11 @@ function configChange(beforeText, afterText) {
   if (!Array.isArray(was) || !Array.isArray(now)) return `${CONFIG} paths.owner is not a list`;
   if (now.length <= was.length) return `${CONFIG} paths.owner appends no entry`;
   if (!was.every((entry, i) => jsonEqual(entry, now[i]))) return `${CONFIG} paths.owner removes, reorders or edits an entry`;
-  for (const entry of now.slice(was.length)) {
+  for (const [offset, entry] of now.slice(was.length).entries()) {
+    const index = was.length + offset;
     if (typeof entry !== "string" || entry === "") return `${CONFIG} paths.owner appends an entry that is not a pattern`;
+    if (entry.length > MAX_ENTRY_LENGTH) return `${CONFIG} paths.owner entry ${index} is longer than ${MAX_ENTRY_LENGTH} characters`;
+    if (QUANTIFIED_GROUP.test(entry)) return `${CONFIG} paths.owner entry ${index} holds a quantified group, which can backtrack catastrophically`;
     try {
       new RegExp(entry);
     } catch {
@@ -112,6 +115,10 @@ function configChange(beforeText, afterText) {
   }
   return null;
 }
+
+// #409: a pattern the gate later runs against filenames must not be able to hang it (ReDoS); `)?` stays allowed.
+const MAX_ENTRY_LENGTH = 200;
+const QUANTIFIED_GROUP = /\)[*+{]/;
 
 // ---- workflow.test.mjs -------------------------------------------------------------------------------------------
 
