@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, UNRESOLVED_DENY_REASON, WMI_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, grantPath, grantRefusal, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, readGrant, runHook } from "./start-guard.mjs";
+import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, RUNTIME_TEXT_DENY_REASON, UNRESOLVED_DENY_REASON, WMI_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, grantPath, grantRefusal, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, readGrant, runHook } from "./start-guard.mjs";
 import { AUTOMATED_INPUT_PREFIXES } from "./approve-guard.mjs";
 import { WRAPPERS, automatedInputLeavesTheGrant } from "./shell-lex.fixtures.mjs";
 
@@ -2258,7 +2258,8 @@ test("#310 criterion 4: a $ bash takes literally in double quotes makes no neste
 
 test("#310 criterion 5: a $ bash expands, and a quoted word a shell runs, keep their decisions", () => {
   for (const c of ['echo "x |$Y"', 'bash -c "x |$Y"', 'bash -c "x$(echo)|y"']) assert.deepEqual(decideFor(bash(c)), deny(UNRESOLVED_DENY_REASON), c);
-  for (const c of ['bash -c "$X"', 'eval "$S"']) assert.equal(decideFor(bash(c)), null, c);
+  // #378 closed the gap these two once stood for: shell text known only at run time is denied.
+  for (const c of ['bash -c "$X"', 'eval "$S"']) assert.deepEqual(decideFor(bash(c)), deny(RUNTIME_TEXT_DENY_REASON), c);
 });
 
 test("#310 edge: $\"…\", a backslash-newline in double quotes, a redirect target with $'\\'' and a claude found through $'…'", () => {
@@ -2273,4 +2274,91 @@ test("#308 edge: exactly 1024 brace expansions are still checked (boundary), and
   const atLimit = "{a,b}".repeat(10);
   assert.equal(decideFor(bash(`node scripts/lanes/${atLimit}.mjs`)), null);
   assert.deepEqual(decideFor(bash(`node scripts/lanes/${"{,}".repeat(9)}{start,x}.mjs`)), deny(DENY_REASON));
+});
+
+// --- #378: text, WMI methods and programs known only at run time -------------------------------------------------
+
+const RUNTIME_FORMS = ['eval "$X"', "eval $A$B", 'source "$F"', 'bash -c "$X"', 'sh -c "$(cat f)"', 'eval "$(ssh-agent -s)"'];
+
+test("#378 criterion 1: eval, source and a shell's -c given run-time text are denied, with or without a grant", () => {
+  assert.match(RUNTIME_TEXT_DENY_REASON, /known only at run time/);
+  for (const cmd of RUNTIME_FORMS) {
+    assert.deepEqual(decideFor(bash(cmd)), deny(RUNTIME_TEXT_DENY_REASON), cmd);
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(RUNTIME_TEXT_DENY_REASON), `${cmd} with a grant`);
+  }
+});
+
+test("#378 edge: run-time text is denied inside a chain, a nested script or a subshell, and behind builtin or env", () => {
+  for (const cmd of [
+    'echo hi && eval "$X"', "bash -c 'eval \"$X\"'", '(source "$F")', 'builtin eval "$X"', 'env bash -c "$X"', '. "$F"', "eval `cat f`",
+    'timeout 5 sh -lc "$X"', 'git status; eval "$X"',
+  ]) {
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(RUNTIME_TEXT_DENY_REASON), cmd);
+  }
+});
+
+test("#378 edge: a program glob that could be node running -e code that names start.mjs is denied", () => {
+  assert.deepEqual(decideFor(bash(`n*de -e "import('./scripts/lanes/start.mjs')"`)), deny(DENY_REASON));
+  assert.equal(decideFor(bash(`n*de -e "console.log(1)"`)), null);
+  // Read as JavaScript, not shell text: "sta" + "rt.mjs" is joined only by the JavaScript reading.
+  assert.deepEqual(decideFor(bash(`n*de -e 'require("child_process").execSync("node scripts/lanes/sta" + "rt.mjs 1")'`)), deny(DENY_REASON));
+});
+
+test("#378 edge: run-time text is denied after a shell keyword, a brace, ! or time", () => {
+  for (const cmd of ['if true; then eval "$X"; fi', 'while true; do eval "$X"; done', '{ eval "$X"; }', '! eval "$X"', 'time eval "$X"', 'true && { source "$F"; }']) {
+    assert.deepEqual(decideFor(bash(cmd)), deny(RUNTIME_TEXT_DENY_REASON), cmd);
+  }
+});
+
+test("#378 edge: eval, source and -c with text the shell already knows get no decision", () => {
+  for (const cmd of [
+    "eval echo hi", "source ~/.bashrc", "bash -c 'echo $HOME'", "eval 'echo $X'", 'X=hi; eval "$X"', 'grep -c "$X" f', 'echo eval "$X"',
+    'bash -c "echo hi" "$X"',
+  ]) {
+    assert.equal(decideFor(bash(cmd), grant()), null, cmd);
+  }
+});
+
+test("#378 criterion 2: a Win32_Process method named at run time is denied through the PowerShell tool", () => {
+  for (const cmd of ["([wmiclass]'Win32_Process').$m(1)", "$o = [wmiclass]'Win32_Process'; $o.$m($c)"]) {
+    assert.deepEqual(decideFor(ps(cmd)), deny(WMI_DENY_REASON), cmd);
+    assert.deepEqual(decideFor(ps(cmd), grant()), deny(WMI_DENY_REASON), `${cmd} with a grant`);
+  }
+});
+
+test("#378 edge: other computed forms of a Win32_Process method are denied too", () => {
+  for (const cmd of [
+    "$o = [wmiclass]'Win32_Process'; $o.\"$m\"($c)", "$o = [wmiclass]'Win32_Process'; $o.$m.Invoke($c)",
+    "$o = [wmiclass]'Win32_Process'; $o.PSObject.Methods[$m].Invoke($c)", "$o = [wmiclass]'Win32_Process'; $o.InvokeMethod($m, $a)",
+  ]) {
+    assert.deepEqual(decideFor(ps(cmd)), deny(WMI_DENY_REASON), cmd);
+  }
+});
+
+test("#378 criterion 3: a program glob that could be node running start.mjs or queue.mjs is denied through either tool", () => {
+  for (const tool of [bash, ps]) {
+    for (const cmd of ["n*de scripts/lanes/start.mjs 1", "[n]ode scripts/lanes/start.mjs 1"]) {
+      assert.deepEqual(decideFor(tool(cmd)), deny(DENY_REASON), cmd);
+      assert.deepEqual(decideFor(tool(cmd), grant({ issues: [1] })), deny(DENY_REASON), `${cmd} with a grant`);
+    }
+    assert.deepEqual(decideFor(tool("no?e scripts/lanes/queue.mjs")), deny(QUEUE_DENY_REASON));
+  }
+});
+
+test("#378 edge: a program glob behind a wrapper, or running a script named at run time, is denied", () => {
+  for (const cmd of ["env n*de scripts/lanes/start.mjs 1", "/usr/bin/n*de scripts/lanes/start.mjs 1", "n*de --no-warnings scripts/lanes/start.mjs 1"]) {
+    assert.deepEqual(decideFor(bash(cmd)), deny(DENY_REASON), cmd);
+  }
+  assert.deepEqual(decideFor(bash("n*de $S")), deny(UNRESOLVED_DENY_REASON));
+  assert.deepEqual(decideFor(bash("timeout 5 no?e scripts/lanes/queue.mjs")), deny(QUEUE_DENY_REASON));
+});
+
+test("#378 criterion 4: commands that only print, pass or read such text get no decision", () => {
+  for (const cmd of ['echo "$X"', "git commit -F msg.txt", "gh pr view 5 --jq '.x as $s | $s'", "ls n*", "node --test scripts/lanes/*.test.mjs"]) {
+    assert.equal(decideFor(bash(cmd)), null, cmd);
+    assert.equal(decideFor(bash(cmd), grant()), null, `${cmd} with a grant`);
+  }
+  for (const cmd of ["([wmiclass]'Win32_Process').Properties", "Get-CimInstance Win32_Process", "ls n*", "git commit -F msg.txt"]) {
+    assert.equal(decideFor(ps(cmd)), null, cmd);
+  }
 });
