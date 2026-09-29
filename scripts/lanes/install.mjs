@@ -1,7 +1,8 @@
 // Copies the lanes workflow into another repository: node scripts/lanes/install.mjs <target-dir> [--force]
 // Existing files are kept unless --force. Afterwards edit the target's lanes.config.json paths for its layout.
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -96,6 +97,7 @@ export const MANIFEST = [
 
 // GitHub Pages sites are public even for a private repository (ADR 0012), so this workflow is only live in a public one.
 const DASHBOARD_WORKFLOW = ".github/workflows/dashboard.yml";
+const LOCK = "lanes.lock.json";
 
 /**
  * Copies MANIFEST into `target`. Unless `isPublic`, the dashboard workflow is copied as `dashboard.yml.disabled`, which
@@ -123,7 +125,18 @@ export function install(source, target, { force = false, isPublic = false } = {}
     copied.push(dest);
     if (off) disabled.push(rel);
   }
+  const lockPath = path.join(target, LOCK);
+  if (force || !existsSync(lockPath)) writeLock(source, target, copied, lockPath);
   return { copied, skipped, disabled };
+}
+
+/** lanes.lock.json (contracts/lanes-lock.schema.json): the version and the sha256 of each file written, never the lock or the config. */
+function writeLock(source, target, copied, lockPath) {
+  const { version } = JSON.parse(readFileSync(path.join(source, "package.json"), "utf8"));
+  const files = {};
+  for (const dest of copied.filter((f) => f !== "lanes.config.json").sort())
+    files[dest] = createHash("sha256").update(readFileSync(path.join(target, dest))).digest("hex");
+  writeFileSync(lockPath, `${JSON.stringify({ version, files }, null, 2)}\n`);
 }
 
 const ghRepoView = (target) => execFileSync("gh", ["repo", "view", "--json", "isPrivate"], { cwd: target, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
