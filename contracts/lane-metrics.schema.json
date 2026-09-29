@@ -18,6 +18,7 @@
     "friction": { "$ref": "#/$defs/friction" },
     "delivery": { "$ref": "#/$defs/delivery" },
     "review": { "$ref": "#/$defs/review" },
+    "byTier": { "description": "Optional: the blocks split by the tier label of each PR's closing issue.", "$ref": "#/$defs/tierBreakdown" },
     "tokensByTierAndModel": { "description": "Local only, absent from public output: tokens per tier and model, with no price.", "$ref": "#/$defs/tokensByTierAndModel" },
     "relaunches": { "description": "Local only, absent from public output: lanes launched again after a failure.", "type": "integer", "minimum": 0 },
     "laneHours": { "description": "Local only, absent from public output: hours from lane launch to removal.", "$ref": "#/$defs/stat" },
@@ -49,7 +50,27 @@
       "type": "object",
       "required": ["count", "median"],
       "additionalProperties": false,
-      "properties": { "count": { "$ref": "#/$defs/count" }, "median": { "$ref": "#/$defs/median" } }
+      "properties": {
+        "count": { "$ref": "#/$defs/count" },
+        "median": { "$ref": "#/$defs/median" },
+        "p90": { "description": "The 90th percentile, or null when there are no values. Optional: reports written before it existed have none.", "$ref": "#/$defs/median" }
+      }
+    },
+    "tierBreakdown": {
+      "description": "The rework, scope drift, owner time and friction blocks again for the PRs whose closing issue carries one tier label; tiers with no PR are left out.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["tier", "rework", "scopeDrift", "ownerTime", "friction"],
+        "additionalProperties": false,
+        "properties": {
+          "tier": { "$ref": "#/$defs/tier" },
+          "rework": { "$ref": "#/$defs/rework" },
+          "scopeDrift": { "$ref": "#/$defs/scopeDrift" },
+          "ownerTime": { "$ref": "#/$defs/ownerTime" },
+          "friction": { "$ref": "#/$defs/friction" }
+        }
+      }
     },
     "window": {
       "type": "object",
@@ -181,6 +202,7 @@
         "friction": { "$ref": "#/$defs/friction" },
         "delivery": { "$ref": "#/$defs/delivery" },
         "review": { "$ref": "#/$defs/review" },
+        "byTier": { "$ref": "#/$defs/tierBreakdown" },
         "tokensByTierAndModel": { "description": "Local only, absent from public output.", "$ref": "#/$defs/tokensByTierAndModel" },
         "relaunches": { "description": "Local only, absent from public output.", "type": "integer", "minimum": 0 },
         "laneHours": { "description": "Local only, absent from public output.", "$ref": "#/$defs/stat" }

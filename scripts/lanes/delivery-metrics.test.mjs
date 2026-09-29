@@ -144,7 +144,7 @@ test("the report holds aggregates only: no author, login, email, name, title, br
 
 test("normalizePr keeps only numbers, dates, booleans and slugs, and skips nodes that did not merge", () => {
   const normalized = normalizePr(node({ title: "Revert x" }));
-  assert.deepEqual(Object.keys(normalized).sort(), ["createdAt", "enteredQueue", "isRevert", "linesChanged", "mergedAt", "queueRemovals"]);
+  assert.deepEqual(Object.keys(normalized).sort(), ["createdAt", "enteredQueue", "isRevert", "linesChanged", "mergedAt", "queueAdded", "queueRemovals", "queueRemoved"]);
   assert.equal(normalized.isRevert, true);
   assert.equal(normalizePr({ createdAt: "2026-09-26T00:00:00Z", mergedAt: null }), undefined);
   assert.equal(normalizePr(null), undefined);
@@ -221,6 +221,7 @@ const richNode = (overrides = {}) => ({
   ] } } } }] },
   closingIssuesReferences: { nodes: [{
     number: 295, title: "private-title-marker", author: { login: "octo-person" },
+    labels: { nodes: [{ name: "ready" }, { name: "tier:full" }, null] },
     body: "### Goal\nprivate-body-marker\n### Acceptance criteria\n\n- [ ] one\n- [x] two\n- [ ] three\n",
     userContentEdits: { nodes: [{ editedAt: "2026-09-24T00:00:00Z", editor: { login: "octo-person" }, diff: "private-body-marker" }, { editedAt: "bad" }] },
   }] },
@@ -239,7 +240,7 @@ test("normalizeRichPr keeps paths, dates, states and counts, and no login, title
     { context: "other", state: "success", at: "2026-09-26T02:00:00Z" },
   ]);
   assert.deepEqual(rich.checkRunAttempts, [2, 1]);
-  assert.deepEqual(rich.closingIssue, { number: 295, criteria: 3, criteriaDone: 1, bodyChars: 86, editedAt: ["2026-09-24T00:00:00Z"], scopePaths: [] });
+  assert.deepEqual(rich.closingIssue, { number: 295, criteria: 3, criteriaDone: 1, bodyChars: 86, tier: "full", editedAt: ["2026-09-24T00:00:00Z"], scopePaths: [] });
   const text = JSON.stringify(rich);
   for (const marker of ["octo-person", "person@example.invalid", "Real Name", "private-title-marker", "private-message-marker", "private-body-marker", "private-branch-marker", "Alice"]) {
     assert.ok(!text.includes(marker), `${marker} survived normalizeRichPr`);
@@ -259,7 +260,7 @@ test("normalizeRichPr ignores malformed attempts, missing edit lists and a closi
     closingIssuesReferences: { nodes: [{ number: 9 }] },
   }));
   assert.deepEqual(rich.checkRunAttempts, []);
-  assert.deepEqual(rich.closingIssue, { number: 9, criteria: 0, criteriaDone: 0, bodyChars: 0, editedAt: [], scopePaths: [] });
+  assert.deepEqual(rich.closingIssue, { number: 9, criteria: 0, criteriaDone: 0, bodyChars: 0, tier: "unknown", editedAt: [], scopePaths: [] });
 });
 
 const formBody = (goal = "private-body-marker") => [
@@ -292,9 +293,31 @@ test("normalizeRichPr survives non-array node lists and null entries instead of 
     closingIssuesReferences: { nodes: [{ number: 3, body: 5, userContentEdits: { nodes: {} } }] },
   }));
   assert.deepEqual([rich.files, rich.commitDates, rich.statuses, rich.checkRunAttempts], [[], [], [], []]);
-  assert.deepEqual(rich.closingIssue, { number: 3, criteria: 0, criteriaDone: 0, bodyChars: 0, editedAt: [], scopePaths: [] });
+  assert.deepEqual(rich.closingIssue, { number: 3, criteria: 0, criteriaDone: 0, bodyChars: 0, tier: "unknown", editedAt: [], scopePaths: [] });
   const nulls = normalizeRichPr(richNode({ lastCommit: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: [null, 1, "s"] } } } }] } }));
   assert.deepEqual([nulls.statuses, nulls.checkRunAttempts], [[], []]);
+});
+
+test("normalizePr keeps the merge-queue events' own times, oldest first, and drops unreadable ones", () => {
+  const n = normalizePr(node({ timelineItems: { nodes: [
+    { __typename: "RemovedFromMergeQueueEvent", reason: "merged", createdAt: "2026-09-26T03:00:00Z" },
+    { __typename: "AddedToMergeQueueEvent", createdAt: "2026-09-26T02:00:00Z" },
+    { __typename: "AddedToMergeQueueEvent", createdAt: "2026-09-26T01:00:00Z" },
+    { __typename: "AddedToMergeQueueEvent", createdAt: "not a date" },
+    { __typename: "AddedToMergeQueueEvent" },
+    { __typename: "RemovedFromMergeQueueEvent", reason: "x" },
+  ] } }));
+  assert.deepEqual(n.queueAdded, ["2026-09-26T01:00:00Z", "2026-09-26T02:00:00Z"]);
+  assert.deepEqual(n.queueRemoved, ["2026-09-26T03:00:00Z"]);
+  assert.deepEqual(normalizePr(node({ timelineItems: { nodes: [] } })).queueAdded, []);
+});
+
+test("normalizeRichPr reads the closing issue's tier label, and unknown for none or an unrecognised one", () => {
+  const tier = (labels) => normalizeRichPr(richNode({ closingIssuesReferences: { nodes: [{ number: 1, labels: { nodes: labels } }] } })).closingIssue.tier;
+  assert.equal(tier([{ name: "tier:quick" }]), "quick");
+  assert.equal(tier([{ name: "tier:skip" }]), "skip");
+  assert.equal(tier([{ name: "tier:huge" }, { name: "bug" }]), "unknown");
+  assert.equal(tier([]), "unknown");
 });
 
 test("prQuery: the plain query has no rich fields, the rich one adds them on the same paginated query", () => {

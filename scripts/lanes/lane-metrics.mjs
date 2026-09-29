@@ -12,8 +12,10 @@
 // - scope drift: changed files outside the closing issue's Scope (parseIssueForm and issuePaths, via normalizeRichPr).
 // - owner time: hours from the last reviewer success to review/owner success; edits to the closing issue after open.
 // - concurrency: lane PRs open when each one opened.
-// - friction: CI reruns (workflow run attempts above 1) and minutes from the PR's last status to its merge for PRs that
-//   went through the merge queue.
+// - friction: CI reruns (workflow run attempts above 1) and minutes in the merge queue, from the queue events' own
+//   times (added to removed, or to the merge when nothing removed it).
+// Every stat carries a median and a p90; `byTier` repeats rework, scope drift, owner time and friction per tier label of
+// the closing issue.
 // Without --public it also reads `.lanes/costs.jsonl` (lane-cost.mjs): tokens per tier and model, relaunches (more than
 // one session for an issue) and lane-hours. With --public those fields are absent, never zeroed.
 //
@@ -44,7 +46,11 @@ export class UsageError extends Error {}
 
 const round = (value, digits = 1) => Math.round(value * 10 ** digits) / 10 ** digits;
 const ms = (iso) => Date.parse(iso);
-const stat = (values) => ({ count: values.length, median: values.length === 0 ? null : round(percentile(values, 0.5)) });
+const stat = (values) => ({
+  count: values.length,
+  median: values.length === 0 ? null : round(percentile(values, 0.5)),
+  p90: values.length === 0 ? null : round(percentile(values, 0.9)),
+});
 const rate = (numerator, denominator) => (denominator === 0 ? null : round(numerator / denominator, 3));
 
 // ---- per-PR axes (each takes the normalizeRichPr shape) ----
@@ -100,12 +106,23 @@ function concurrency(prs) {
   return { maxOpenPrs: open.length === 0 ? 0 : Math.max(...open), medianOpenPrs: open.length === 0 ? null : round(percentile(open, 0.5)) };
 }
 
+/**
+ * Minutes a PR spent in the merge queue: each time it was added to the next time it was removed, and the last one to the
+ * merge when no removal follows it (a merge leaves the queue without a removal event).
+ */
+function queueMinutes(pr) {
+  const removed = pr.queueRemoved.map(ms);
+  let total = 0;
+  for (const added of pr.queueAdded.map(ms)) {
+    const leftAt = removed.find((at) => at >= added) ?? ms(pr.mergedAt);
+    total += Math.max(0, leftAt - added);
+  }
+  return total / MINUTE_MS;
+}
+
 function friction(prs) {
   const reruns = prs.map((pr) => pr.checkRunAttempts.reduce((sum, attempt) => sum + (attempt - 1), 0));
-  const stuck = prs
-    .filter((pr) => pr.enteredQueue && pr.statuses.length > 0)
-    .map((pr) => (ms(pr.mergedAt) - Math.max(...pr.statuses.map((s) => ms(s.at)))) / MINUTE_MS)
-    .filter((minutes) => minutes >= 0);
+  const stuck = prs.filter((pr) => pr.queueAdded.length > 0).map(queueMinutes).filter((minutes) => minutes >= 0);
   return { prsWithRerun: reruns.filter((n) => n > 0).length, ciReruns: reruns.reduce((sum, n) => sum + n, 0), stuckQueueMinutes: stat(stuck) };
 }
 
@@ -208,6 +225,9 @@ function aggregate({ prs, reviewPrs, runs, costs, start, end }) {
     friction: friction(merged),
     delivery: deliveryBlock({ prs: merged, runs: runs.filter((run) => inRange(run.createdAt)), days: (end - start) / DAY_MS, end }),
     review: reviewBlock({ reviewPrs: reviewPrs.filter((pr) => pr !== undefined && inRange(pr.mergedAt)), end }),
+    byTier: TIER_ORDER.map((tier) => ({ tier, prs: merged.filter((pr) => (pr.closingIssue?.tier ?? "unknown") === tier) }))
+      .filter(({ prs: group }) => group.length > 0)
+      .map(({ tier, prs: group }) => ({ tier, rework: rework(group), scopeDrift: scopeDrift(group), ownerTime: ownerTime(group), friction: friction(group) })),
   };
   return costs === undefined ? block : { ...block, ...localBlock(costs.filter((line) => inRange(line.removedAt))) };
 }
@@ -273,7 +293,7 @@ export function writeOutput(file, text, { logins = [], write = writeFileSync, pa
 
 const show = (value, suffix = "") => (value === null || value === undefined ? "n/a" : `${value}${suffix}`);
 const percent = (value) => (value === null ? "n/a" : `${round(value * 100)}%`);
-const statText = (s, suffix = "") => `median ${show(s.median, suffix)} over ${s.count}`;
+const statText = (s, suffix = "") => `median ${show(s.median, suffix)}${s.p90 === undefined ? "" : `, p90 ${show(s.p90, suffix)}`} over ${s.count}`;
 
 /** The headline rows of one aggregate, shared by the full report and the split table. */
 function rows(a) {
@@ -306,6 +326,13 @@ export function renderMarkdown(report) {
   section("Friction", [`- CI reruns: ${f.ciReruns} across ${f.prsWithRerun} PRs`, `- Minutes from the last status to merge, through the queue: ${statText(f.stuckQueueMinutes, " min")}`]);
   section("Delivery (from delivery-metrics)", [`- Merged PRs: ${d.mergedPrs} (${d.perDay} per day)`, `- Lead time median: ${show(d.leadTimeHoursMedian, " h")}; median change: ${show(d.medianLinesChanged, " lines")}`, `- Bounce ${percent(d.bounceRate)}, failed main runs ${percent(d.failureRate)}, reverts ${percent(d.revertRate)}`]);
   section("Review (from review-metrics)", [`- Runs: ${report.review.runs} (${report.review.runsWithoutMetrics} without metrics); real findings ${report.review.realFindings}, minor ${report.review.minorFindings}`, ...report.review.tiers.map((t) => `- ${t.tier}: ${t.runs} runs, ${t.realFindings} real findings, ${percent(t.noRealFindingShare)} with none`)]);
+  if ((report.byTier ?? []).length > 0) {
+    section("By tier (closing issue's tier label)", [
+      "| Tier | PRs | Failed status | Pushes after open | Files outside Scope | Owner wait | Queue minutes |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
+      ...report.byTier.map((t) => `| ${t.tier} | ${t.rework.prs} | ${t.rework.prsWithGateFailure} | ${statText(t.rework.pushesAfterOpen)} | ${statText(t.scopeDrift.filesOutsideScope)} | ${statText(t.ownerTime.waitHours, " h")} | ${statText(t.friction.stuckQueueMinutes, " min")} |`),
+    ]);
+  }
   if (report.tokensByTierAndModel !== undefined) {
     section("Tokens (local)", [...report.tokensByTierAndModel.map((t) => `- ${t.tier} on ${t.model}: ${t.tokens} tokens`), `- Relaunches: ${report.relaunches}`, `- Lane-hours: ${statText(report.laneHours, " h")}`]);
   }

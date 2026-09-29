@@ -80,6 +80,14 @@ export function safeReason(reason) {
   return /^[a-z_]{1,32}$/.test(slug) ? slug : "other";
 }
 
+/** The times of one kind of merge-queue event, oldest first; an event with no readable time is dropped. */
+function eventTimes(events, typename) {
+  return events
+    .filter((event) => event.__typename === typename && typeof event.createdAt === "string" && !Number.isNaN(Date.parse(event.createdAt)))
+    .map((event) => event.createdAt)
+    .sort((a, b) => Date.parse(a) - Date.parse(b));
+}
+
 /**
  * The ONLY place a GraphQL pull request node is read. Everything except numbers, dates, booleans and a slug is dropped
  * here (author, title, body, URL...), so nothing personal can reach the report.
@@ -95,6 +103,8 @@ export function normalizePr(node) {
     isRevert: typeof node.title === "string" && /^revert\b/i.test(node.title),
     enteredQueue: events.some((event) => event.__typename === "AddedToMergeQueueEvent"),
     queueRemovals: events.filter((event) => event.__typename === "RemovedFromMergeQueueEvent").map((event) => safeReason(event.reason)),
+    queueAdded: eventTimes(events, "AddedToMergeQueueEvent"),
+    queueRemoved: eventTimes(events, "RemovedFromMergeQueueEvent"),
   };
 }
 
@@ -215,7 +225,7 @@ const RICH_FIELDS = `
             ... on CheckRun { checkSuite { workflowRun { runAttempt } } }
           } } } } }
         }
-        closingIssuesReferences(first: 1) { nodes { number body userContentEdits(first: 100) { nodes { editedAt } } } }`;
+        closingIssuesReferences(first: 1) { nodes { number body labels(first: 20) { nodes { name } } userContentEdits(first: 100) { nodes { editedAt } } } }`;
 
 /** The paginated merged-PR query; `rich` adds the per-PR files, commits, statuses and closing-issue edits. */
 export function prQuery(rich = false) {
@@ -226,7 +236,7 @@ export function prQuery(rich = false) {
       nodes {
         number createdAt mergedAt updatedAt additions deletions title
         timelineItems(first: 100, itemTypes: [ADDED_TO_MERGE_QUEUE_EVENT, REMOVED_FROM_MERGE_QUEUE_EVENT]) {
-          nodes { __typename ... on RemovedFromMergeQueueEvent { reason } }
+          nodes { __typename ... on AddedToMergeQueueEvent { createdAt } ... on RemovedFromMergeQueueEvent { createdAt reason } }
         }${rich ? RICH_FIELDS : ""}
       }
     }
@@ -278,6 +288,7 @@ export function normalizeRichPr(node) {
           criteria: (body.match(/^\s*- \[[ xX]\]/gm) ?? []).length,
           criteriaDone: (body.match(/^\s*- \[[xX]\]/gm) ?? []).length,
           bodyChars: body.length,
+          tier: list(issue.labels?.nodes).map((label) => /^tier:(full|quick|skip)$/.exec(label?.name ?? "")?.[1]).find((t) => t !== undefined) ?? "unknown",
           editedAt: list(issue.userContentEdits?.nodes).map((edit) => isoDate(edit?.editedAt)).filter((date) => date !== undefined),
           scopePaths: scopePaths(body),
         }
