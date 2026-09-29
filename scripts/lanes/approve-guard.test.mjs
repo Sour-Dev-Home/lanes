@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AUTOMATED_INPUT_PREFIXES, DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, readGrant, runHook, validGrant } from "./approve-guard.mjs";
+import { AUTOMATED_INPUT_PREFIXES, DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, WMI_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, readGrant, runHook, validGrant } from "./approve-guard.mjs";
 import { WRAPPERS, automatedInputLeavesTheGrant } from "./shell-lex.fixtures.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
@@ -1332,3 +1332,90 @@ test("#275 edge: a wrapped multi-PR /approve never grants and keeps the session'
   submit(dir, `${AUTOMATED_INPUT_PREFIXES[0]}\n/approve 17 18`);
   assert.deepEqual(sessionFiles(dir), ["s1.16.json"]);
 }));
+
+// --- #308: remaining launchers, globs, deno eval and joined iex strings -------------------------------------------
+
+const decidePs = (command, g = null) => decidePreToolUse(ps(command), g, NOW);
+const decideBash = (command, g = null) => decidePreToolUse(bash(command), g, NOW);
+
+// The same list as start-guard.test.mjs's LAUNCHERS_308: each names its program only at run time.
+const LAUNCHERS_308 = [
+  "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$c}",
+  "Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $c",
+  "$p = [powershell]::Create(); $p.AddCommand($c).Invoke()",
+  "[PowerShell]::Create().AddScript($c).Invoke()",
+  "schtasks /create /tn x /tr $c",
+  "schtasks.exe /Create /TN x /TR $c /SC ONCE /ST 00:00",
+  "Register-ScheduledTask -TaskName x -Action (New-ScheduledTaskAction -Execute $c)",
+  "Register-ScheduledTask -TaskName x -Action $a",
+  "New-ScheduledTaskAction -Execute node -Argument $a",
+  "Start-Job -FilePath $f",
+];
+
+test("#308 criterion 1: each remaining PowerShell launcher with a computed name is denied, with or without a grant", () => {
+  for (const c of LAUNCHERS_308) {
+    assert.equal(decidePs(c)?.decision, "deny", c);
+    assert.equal(decidePs(c, grant())?.decision, "deny", `${c} (grant)`);
+  }
+  for (const c of [
+    `schtasks /create /tn x /tr '${OWNER}'`,
+    "New-ScheduledTaskAction -Execute node -Argument 'scripts/lanes/post-review.mjs owner success ok --pr 16'",
+    "[powershell]::Create().AddCommand('node').AddArgument('scripts/lanes/post-review.mjs').Invoke()",
+  ]) {
+    assert.equal(decidePs(c, grant())?.decision, "deny", c);
+  }
+  assert.equal(decideBash('schtasks /create /tn x /tr "$C"')?.decision, "deny");
+  assert.equal(decideBash('wmic process call create "$C"')?.decision, "deny");
+});
+
+test("#308 criterion 2: cmd /c start post-review.mjs owner through either tool is read as a run of that script", () => {
+  for (const decide of [decidePs, decideBash]) {
+    for (const c of ["cmd /c start scripts/lanes/post-review.mjs owner success ok --pr 16", 'cmd /c start "" scripts/lanes/post-review.mjs owner success ok --pr 16', "cmd /c start $X"]) {
+      assert.equal(decide(c, grant())?.decision, "deny", c);
+    }
+  }
+  assert.equal(decideBash("start scripts/lanes/post-review.mjs owner success ok --pr 16", grant())?.decision, "deny");
+});
+
+test("#308 criterion 3: a glob script word that could match post-review.mjs is still denied", () => {
+  for (const c of ["node scripts/lanes/post-*.mjs owner success ok --pr 16", "cmd /c start scripts/lanes/p?st-review.mjs owner success ok --pr 16"]) {
+    assert.equal(decideBash(c, grant())?.decision, "deny", c);
+  }
+});
+
+test("#308 criterion 4: deno eval is read like node -e, and an unparenthesised +-joined iex string is denied", () => {
+  for (const js of ["import('./scripts/lanes/post-review.mjs')", "process.argv.push($X)", "console.log(1 + 1)", "$JS", "scripts/lanes/post-review.mjs owner"]) {
+    assert.deepEqual(decideBash(`deno eval "${js}"`), decideBash(`node -e "${js}"`), js);
+  }
+  // Code known only at run time, or naming the owner command, is denied as node -e's is.
+  assert.equal(decideBash('deno eval "$JS"')?.decision, "deny");
+  assert.equal(decideBash('deno eval --quiet "$JS"')?.decision, "deny");
+  assert.equal(decideBash("deno eval 'scripts/lanes/post-review.mjs owner'")?.decision, "deny");
+  for (const c of ["iex 'node scripts/lanes/post-'+'review.mjs owner success ok --pr 16'", "Invoke-Expression 'node scripts/lanes/po'+'st-review.mjs owner'", "iex 'a' + 'b'"]) {
+    assert.equal(decidePs(c, grant())?.decision, "deny", c);
+  }
+});
+
+test("#308 criterion 5: read-only and launch-free commands still get no decision", () => {
+  for (const c of ["Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine", 'git commit -m "add sal column"', "gh pr merge 16 --auto", "Get-ChildItem *.md"]) {
+    assert.equal(decidePs(c), null, c);
+  }
+  for (const c of ['git commit -m "add sal column"', "gh pr merge 16 --auto"]) assert.equal(decideBash(c), null, c);
+});
+
+test("#308 edge: launchers of harmless programs and harmless deno or iex calls get no decision", () => {
+  for (const c of ["cmd /c start notepad", "schtasks /query /tn x", "schtasks /create /tn x /tr notepad.exe", "npm start", "deno eval 'console.log(1)'", "wmic process call create notepad"]) {
+    assert.equal(decideBash(c), null, c);
+  }
+  for (const c of ["iex 'Get-Date'", "Write-Output 'a'+'b'", "New-ScheduledTaskAction -Execute notepad.exe", "Get-WmiObject -List Win32_Pro*", "iex 'Write-Output c++'"]) {
+    assert.equal(decidePs(c), null, c);
+  }
+});
+
+test("#308 edge: wrappers, cmd's %X%, a scheduled task's run-time program and malformed launchers", () => {
+  for (const c of ["env cmd /c start scripts/lanes/post-review.mjs owner success ok --pr 16", "cmd /c start %X%", "timeout 5 schtasks /create /tn x /tr $C", "iex 'a' + 'b'"]) {
+    assert.equal((c.startsWith("iex") ? decidePs : decideBash)(c, grant())?.decision, "deny", c);
+  }
+  for (const c of ["cmd /c", "start", "schtasks /create /tr", "deno eval", "echo cmd /c start $X"]) assert.equal(decideBash(c), null, c);
+  assert.equal(WMI_REASON.endsWith(DENY_REASON), true);
+});

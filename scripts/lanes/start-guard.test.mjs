@@ -2043,3 +2043,195 @@ test("#194 edge: <<\\EOF reads like <<'EOF', and a live body is still walked", (
   assert.equal(decideFor(bash('git commit -m "$(cat <<EOF\nplain $HOME text\nEOF\n)"')).decision, "deny");
   assert.equal(decideFor(bash("bash <<\\EOF\nnode scripts/lanes/start.mjs 12\nEOF")).decision, "deny");
 });
+
+// --- #308: remaining launchers, wildcard and glob names, deno eval and joined iex strings ----------------------------
+
+// The launchers of #308 criterion 1 with a program named only at run time; approve-guard.test.mjs checks the same list.
+const LAUNCHERS_308 = [
+  "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$c}",
+  "Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $c",
+  "$p = [powershell]::Create(); $p.AddCommand($c).Invoke()",
+  "[PowerShell]::Create().AddScript($c).Invoke()",
+  "schtasks /create /tn x /tr $c",
+  "schtasks.exe /Create /TN x /TR $c /SC ONCE /ST 00:00",
+  "Register-ScheduledTask -TaskName x -Action (New-ScheduledTaskAction -Execute $c)",
+  "Register-ScheduledTask -TaskName x -Action $a",
+  "New-ScheduledTaskAction -Execute node -Argument $a",
+  "Start-Job -FilePath $f",
+];
+
+test("#308 criterion 1: each remaining PowerShell launcher with a computed name is denied, with or without a grant", () => {
+  for (const c of LAUNCHERS_308) {
+    assert.equal(decideFor(ps(c))?.decision, "deny", c);
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", `${c} (grant)`);
+  }
+  // The same launchers naming a lane script or claude --bg are read as that run.
+  for (const c of [
+    "schtasks /create /tn x /tr 'node scripts/lanes/start.mjs 12 14'",
+    "New-ScheduledTaskAction -Execute node -Argument 'scripts/lanes/start.mjs 12 14'",
+    "[powershell]::Create().AddCommand('node').AddArgument('scripts/lanes/start.mjs').Invoke()",
+  ]) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+  assert.deepEqual(decideFor(ps("schtasks /create /tn x /tr 'node scripts/lanes/queue.mjs'")), deny(QUEUE_DENY_REASON));
+  assert.deepEqual(decideFor(ps(`New-ScheduledTaskAction -Execute claude -Argument '${BG} x'`)), deny(BG_DENY_REASON));
+  // Through the Bash tool too.
+  assert.equal(decideFor(bash('schtasks /create /tn x /tr "$C"'))?.decision, "deny");
+  assert.deepEqual(decideFor(bash("schtasks /create /tn x /tr 'node scripts/lanes/queue.mjs'")), deny(QUEUE_DENY_REASON));
+});
+
+test("#308 criterion 2: cmd /c start <script>.mjs through either tool is read as a run of that script", () => {
+  for (const tool of [bash, ps]) {
+    for (const c of ["cmd /c start scripts/lanes/start.mjs 12 14", 'cmd /c start "" scripts/lanes/start.mjs 12 14', "cmd.exe /C start /b scripts/lanes/start.mjs 12 14", 'cmd /c "start scripts/lanes/start.mjs 12 14"']) {
+      assert.deepEqual(decideFor(tool(c), grant()), deny(DENY_REASON), c);
+    }
+    for (const c of ["cmd /c start scripts/lanes/queue.mjs", "cmd /c scripts/lanes/queue.mjs", "cmd /k start /min scripts/lanes/queue.mjs"]) {
+      assert.deepEqual(decideFor(tool(c)), deny(QUEUE_DENY_REASON), c);
+    }
+  }
+  // An unquoted Windows path keeps its backslashes in PowerShell, and Git Bash's own start runs the file too.
+  assert.deepEqual(decideFor(ps("cmd /c start scripts\\lanes\\queue.mjs")), deny(QUEUE_DENY_REASON));
+  assert.deepEqual(decideFor(bash("start scripts/lanes/queue.mjs")), deny(QUEUE_DENY_REASON));
+  assert.deepEqual(decideFor(bash(`cmd /c start claude ${BG} x`)), deny(BG_DENY_REASON));
+});
+
+test("#308 criterion 3: a glob script word that could match start.mjs or queue.mjs is denied", () => {
+  for (const c of ["node scripts/lanes/st*.mjs 12 14", "node scripts/lanes/[s]tart.mjs 12 14", "node scripts/lanes/star?.mjs 12 14", "node scripts/lanes/{x,s}tart.mjs 12 14", "scripts/lanes/st*.mjs 12 14"]) {
+    assert.deepEqual(decideFor(bash(c), grant()), deny(DENY_REASON), c);
+  }
+  for (const c of ["node scripts/lanes/q*.mjs", "node scripts/lanes/que?e.mjs", "node scripts/lanes/[q]ueue.mjs", "bun run scripts/lanes/q*.mjs"]) {
+    assert.deepEqual(decideFor(bash(c)), deny(QUEUE_DENY_REASON), c);
+  }
+});
+
+test("#308 criterion 3: a PowerShell program named by a wildcard that could match claude is denied, and a WMI class wildcard with Create", () => {
+  for (const c of [`cl*.exe ${BG} x`, `& 'C:\\tools\\cl*.exe' ${BG} x`, `c?aude ${BG} x`, `& "C:\\tools\\[c]laude.exe" ${BG} x`]) {
+    assert.deepEqual(decideFor(ps(c)), deny(BG_DENY_REASON), c);
+  }
+  assert.equal(decideFor(ps(`Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='cl*.exe ${BG} x'}`))?.decision, "deny");
+  for (const c of [
+    "Get-WmiObject -List Win32_Pro* | ForEach-Object { $_.Create($c) }",
+    "(Get-WmiObject -List Win32_Pro*).Create($c)",
+    "(Get-WmiObject -List Win32_Pro*).Create('notepad')",
+    "(Get-CimClass -ClassName Win32_[P]rocess).Create($c)",
+  ]) {
+    assert.deepEqual(decideFor(ps(c)), deny(WMI_DENY_REASON), c);
+  }
+});
+
+test("#308 criterion 4: deno eval is read like node -e, and an unparenthesised +-joined iex string is denied", () => {
+  for (const js of ["import('./scripts/lanes/st' + 'art.mjs')", "import('./scripts/lanes/start.mjs')"]) {
+    assert.deepEqual(decideFor(bash(`deno eval "${js}"`)), decideFor(bash(`node -e "${js}"`)), js);
+    assert.equal(decideFor(bash(`deno eval "${js}"`))?.decision, "deny", js);
+  }
+  assert.deepEqual(decideFor(bash(`deno eval --quiet "import('./scripts/lanes/qu' + 'eue.mjs')"`)), deny(QUEUE_DENY_REASON));
+  assert.equal(decideFor(bash('deno eval "console.log(1 + 1)"')), null);
+  for (const c of ["iex 'cla'+'ude --b'+'g'", "Invoke-Expression 'cla'+'ude --b'+'g'", 'iex "node scripts/lanes/st"+"art.mjs 12"', "iex 'cla' + 'ude --b' + 'g'"]) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+});
+
+test("#308 criterion 5: read-only and launch-free commands still get no decision", () => {
+  for (const c of ["Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine", 'git commit -m "add sal column"', "gh pr merge 16 --auto", "Get-ChildItem *.md"]) {
+    assert.equal(decideFor(ps(c)), null, c);
+  }
+  for (const c of ['git commit -m "add sal column"', "gh pr merge 16 --auto"]) assert.equal(decideFor(bash(c)), null, c);
+});
+
+test("#308 edge: globs that cannot match a lane script or claude, and launchers of harmless programs, get no decision", () => {
+  for (const c of [
+    "node --test scripts/lanes/*.test.mjs",
+    "node --test scripts/lanes/start-guard.test.mjs",
+    "node scripts/lanes/re*.mjs full 308",
+    "ls scripts/lanes/st*.mjs",
+    "cmd /c start notepad",
+    "cmd /c dir",
+    "schtasks /query /tn x",
+    "npm start",
+    "deno eval 'console.log(\"start\")'",
+  ]) {
+    assert.equal(decideFor(bash(c)), null, c);
+  }
+  for (const c of ["Get-ChildItem cl*", "Get-ChildItem .cl* -Force", "Get-WmiObject -List Win32_Pro*", "iex 'Get-Date'", "Write-Output 'a'+'b'", "iex 'Write-Output c++'"]) {
+    assert.equal(decideFor(ps(c)), null, c);
+  }
+});
+
+test("#308 edge: start's valued options, a path that looks like an option, wrappers and cmd's %X% still read the program", () => {
+  for (const c of [
+    "cmd /c start /d C:\\work scripts/lanes/queue.mjs",
+    "start /c/work/lanes/scripts/lanes/queue.mjs",
+    "env cmd /c start scripts/lanes/queue.mjs",
+    "timeout 5 cmd /c start scripts/lanes/queue.mjs",
+    "A=1 nohup schtasks /create /tn x /tr scripts/lanes/queue.mjs",
+  ]) {
+    assert.deepEqual(decideFor(bash(c)), deny(QUEUE_DENY_REASON), c);
+  }
+  for (const c of ["cmd /c start %X%", "cmd /c %X%", "cmd /c start !X!"]) assert.equal(decideFor(bash(c))?.decision, "deny", c);
+  // Printing the words runs nothing.
+  assert.equal(decideFor(bash("echo cmd /c start scripts/lanes/queue.mjs")), null);
+});
+
+test("#308 edge: a +-joined string piped into iex and a scheduled job's run-time file are denied (test-hunter round 1)", () => {
+  for (const c of [`'cla'+'ude ${BG} x' | Invoke-Expression`, `'cla' + 'ude ${BG} x' | iex`, "Register-ScheduledJob -Name x -FilePath $f", "Set-ScheduledJob -Name x -FilePath $f"]) {
+    assert.equal(decideFor(ps(c))?.decision, "deny", c);
+  }
+  assert.equal(decideFor(ps("'Get-' + 'Date' | Write-Output")), null);
+});
+
+test("#308 edge: start options after a title, cmd's call, glued /c, //c and find -exec launchers (security review round 1)", () => {
+  for (const c of [
+    'cmd /c start "t" /b scripts/lanes/queue.mjs',
+    'start "t" /wait scripts/lanes/queue.mjs',
+    'start /wait "t" /b scripts/lanes/queue.mjs',
+    "cmd /c start /affinity 1 scripts/lanes/queue.mjs",
+    "cmd /c call scripts/lanes/queue.mjs",
+    "cmd /cscripts/lanes/queue.mjs",
+    "cmd //c start scripts/lanes/queue.mjs",
+    "start //b scripts/lanes/queue.mjs",
+    "find . -exec cmd /c start scripts/lanes/queue.mjs ;",
+    "find . -exec env cmd /c start scripts/lanes/queue.mjs ;",
+  ]) {
+    assert.deepEqual(decideFor(bash(c)), deny(QUEUE_DENY_REASON), c);
+  }
+  assert.deepEqual(decideFor(ps('cmd /c start "t" /b scripts/lanes/queue.mjs')), deny(QUEUE_DENY_REASON));
+  // cmd's other options are no /c.
+  for (const c of ["cmd /d /q dir", "cmd /v:on"]) assert.equal(decideFor(bash(c)), null, c);
+});
+
+test("#308 edge: a WMI method named at run time, a class wildcard behind a cast and a Create on a computed type (security review round 1)", () => {
+  for (const c of [
+    "Invoke-CimMethod -ClassName Win32_Process -MethodName $m -Arguments @{CommandLine=$c}",
+    "Invoke-CimMethod -ClassName Win32_Process -MethodName ($n+'ate') -Arguments @{CommandLine=$c}",
+    "[wmiclass]'Win32_Proc*' | % { $_.Create($c) }",
+  ]) {
+    assert.deepEqual(decideFor(ps(c)), deny(WMI_DENY_REASON), c);
+  }
+  assert.equal(decideFor(ps("[type]'powershell' | % { $_::Create() }"))?.decision, "deny");
+  assert.equal(decideFor(ps("Invoke-CimMethod -ClassName Win32_Process -MethodName GetOwner")), null);
+});
+
+test("#308 edge: a run of stars decides in bounded time, through the script word and the WMI reader (security review round 2)", () => {
+  const started = Date.now();
+  assert.deepEqual(decideFor(bash(`${"*".repeat(40)}.mjs`)), deny(QUEUE_DENY_REASON));
+  assert.equal(decideFor(ps(`create ${"*".repeat(40)}]a`)), null);
+  // cmd expands %…% at run time: a program it names that way fails closed, quickly.
+  assert.equal(decideFor(bash(`cmd /c ${"%".repeat(10000)}`))?.decision, "deny");
+  assert.ok(Date.now() - started < 1000, `took ${Date.now() - started} ms`);
+});
+
+test("#308 edge: malformed launchers and a brace expansion too large to check", () => {
+  for (const c of ["cmd /c", "cmd", "start", "schtasks /create /tr", "deno eval", "New-ScheduledTaskAction", "cmd /c start"]) {
+    assert.equal(decideFor(bash(c)), null, c);
+  }
+  // Too many expansions to check counts as a match, so the script word fails closed.
+  const huge = "{a,b}".repeat(11);
+  assert.deepEqual(decideFor(bash(`node scripts/lanes/${huge}.mjs`)), deny(QUEUE_DENY_REASON));
+  assert.equal(decideFor(bash(`ls scripts/lanes/${huge}.mjs`)), null);
+});
+
+test("#308 edge: exactly 1024 brace expansions are still checked (boundary), and none of them names a lane script", () => {
+  const atLimit = "{a,b}".repeat(10);
+  assert.equal(decideFor(bash(`node scripts/lanes/${atLimit}.mjs`)), null);
+  assert.deepEqual(decideFor(bash(`node scripts/lanes/${"{,}".repeat(9)}{start,x}.mjs`)), deny(DENY_REASON));
+});

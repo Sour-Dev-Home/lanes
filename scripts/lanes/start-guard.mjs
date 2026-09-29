@@ -32,7 +32,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isAutomatedInput, powershellAsBash, preToolUseOutput } from "./approve-guard.mjs";
 import {
-  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, SHELL_RE, basename, feedsShell, lex, plainLiteralSubstitution, readGrant,
+  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, SHELL_RE, basename, dequoted, feedsShell, launchedCommands, lex, mayExpandTo,
+  readGrant, scriptSubcommand, withoutLiteralSubstitutions, wmiProcessCreate,
 } from "./shell-lex.mjs";
 
 // start.mjs reads the grant with the guard's own reader.
@@ -62,6 +63,18 @@ const NODE_RE =/^(node|nodejs|bun|deno)(\.exe)?$/i;
 // has dropped a Windows path's backslashes. Not after a dot, so a `~/.claude` directory is no claude.
 const CLAUDE_RE = /(?<!\.)claude(-code)?(\.exe|\.cmd|\.ps1)?$/i;
 const BG_FLAG_RE = /^--(bg|background)(=.*)?$/;
+// What a glob word is matched against (#308): the script names, and every name CLAUDE_RE reads as claude.
+const START_NAMES = ["start.mjs"];
+const QUEUE_NAMES = ["queue.mjs"];
+const CLAUDE_NAMES = ["claude", "claude-code"].flatMap((n) => [n, `${n}.exe`, `${n}.cmd`, `${n}.ps1`]);
+/**
+ * True when a word is claude: its end matches CLAUDE_RE, or its last path component after any `=` is a glob that could
+ * match claude (`cl*.exe`, `C:\tools\c?aude`, `CommandLine=cl*`), which PowerShell resolves as a program name (#308).
+ */
+const isClaude = (w) => {
+  const b = basename(w);
+  return CLAUDE_RE.test(b) || mayExpandTo(b.slice(b.lastIndexOf("=") + 1), CLAUDE_NAMES);
+};
 const MAX_DEPTH = 4;
 
 
@@ -104,20 +117,7 @@ export function onUserPromptSubmit(input, now = Date.now()) {
 // Every command is lexed in shell-lex.mjs's bodies shape; its words shape is approve-guard.mjs's.
 const lexBodies = (cmd) => lex(cmd, { bodies: true });
 const unliteral = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, QUOTED_TICK);
-// Text with every quote, backslash and backtick dropped (PowerShell's curly quotes too), for the checks that read raw
-// text: a name split by quoting, as in st"art.mjs or --"bg", reads whole (#61, like #62 in approve-guard.mjs).
-const dequoted = (s) => s.replace(new RegExp(`['"\\\\\`‘-„${LIT_TICK}${QUOTED_TICK}]`, "g"), "");
-
-/** `cmd` without its literal `$(cat <<'D' … D)` substitutions, for the raw-text checks: their text is only data. */
-function withoutLiteralSubstitutions(cmd) {
-  let out = "";
-  for (let i = 0; i < cmd.length; i += 1) {
-    const lit = cmd[i] === "$" ? plainLiteralSubstitution(cmd, i) : null;
-    if (lit) i = lit.end;
-    else out += cmd[i];
-  }
-  return out;
-}
+// dequoted and withoutLiteralSubstitutions, the raw-text readers, live in shell-lex.mjs beside the WMI reader (#308).
 
 const VAR_REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
 // What is left of a word after substitution that could still expand to anything.
@@ -218,7 +218,13 @@ const EVAL_PROGRAM_RE = /^(node|nodejs|bun)(\.exe)?$/i;
 function evalScripts(words) {
   const scripts = new Map();
   const at = words.findIndex((w) => !ASSIGN_RE.test(w));
-  if (at === -1 || !EVAL_PROGRAM_RE.test(basename(words[at]))) return scripts;
+  if (at === -1) return scripts;
+  // `deno eval [options] <code>` (#308): any word after its options may be the code, so each is read as JavaScript.
+  if (scriptSubcommand(words, at) === "eval") {
+    for (let i = at + 2; i < words.length; i += 1) if (!words[i].startsWith("-")) scripts.set(i, words[i]);
+    return scripts;
+  }
+  if (!EVAL_PROGRAM_RE.test(basename(words[at]))) return scripts;
   let afterFlag = false;
   for (let i = at + 1; i < words.length; i += 1) {
     const w = words[i];
@@ -270,6 +276,9 @@ function walk(cmd, depth, visit, onOpaque, onEval) {
     });
     // What a command piped into a shell prints may be its arguments (echo, printf): read them as one live script (#246).
     if (piped && words.length > 1) nested(unliteralLive(words.slice(1).join(" ")));
+    // What cmd /c, start, schtasks /tr or a scheduled-task cmdlet starts is a command line of its own (#308), also
+    // when find -exec or xargs runs the launcher.
+    if (!dataOnly) for (const line of launchedCommands(words)) nested(line);
   };
   for (const [k, words] of resolveSegments(lexed.segments).entries()) {
     scan(words, lexed.stdin[k], feedsShell(lexed.segments, lexed.pipes, k));
@@ -406,6 +415,8 @@ function startInvocations(cmd, typed) {
         if (!counts(i)) return;
         // Unquoted `scripts\lanes\start.mjs` loses its backslashes in the lexer, as in bash: match the word's end.
         if (START_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i))) out.push({ issues: undefined, standalone: false });
+        // A glob that could expand to start.mjs, as the command word or node's script (#308).
+        else if (mayExpandTo(w, START_NAMES) && (i === 0 || scripts.has(i))) out.push({ issues: undefined, standalone: false });
         // The command word, or a word node could run as its script, that still holds `$` or a backtick could expand to start.mjs.
         else if (UNRESOLVED_RE.test(w) && (i === 0 || scripts.has(i))) out.push({ issues: undefined, standalone: false });
       });
@@ -457,6 +468,7 @@ function scanQueueInvocations(command) {
       plain.forEach((w, i) => {
         if (!counts(i)) return;
         if (QUEUE_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i))) found = true;
+        else if (mayExpandTo(w, QUEUE_NAMES) && (i === 0 || scripts.has(i))) found = true;
         else if (UNRESOLVED_RE.test(w) && (i === 0 || scripts.has(i))) {
           if (names) found = true;
           else unresolved = true;
@@ -488,7 +500,7 @@ function scanBgLaunches(command) {
     cmd,
     0,
     (words) => {
-      const at = words.findIndex((w) => CLAUDE_RE.test(basename(w)));
+      const at = words.findIndex(isClaude);
       // After claude, a word that still holds `$` or a backtick could expand to --bg: fail closed.
       if (at !== -1 && words.slice(at + 1).some((w) => BG_FLAG_RE.test(w) || UNRESOLVED_RE.test(w))) found = true;
       // `$C --bg`, `claude$X --bg`, `$C --$F`, backticks: a command word that could be claude, with a flag that could be --bg.
@@ -554,15 +566,6 @@ function encodedScripts(cmd) {
     () => {},
   );
   return { scripts, unresolved };
-}
-
-/**
- * True when a call creates a process through WMI or CIM (#316): it names Win32_Process, or runs wmic's `process`, with
- * a `create`. Read on the text with quotes, `+`, whitespace and literal messages dropped, so 'Win32'+'_Process' reads whole.
- */
-function wmiCreate(text) {
-  const flat = dequoted(withoutLiteralSubstitutions(text)).replace(/[\s+()]/g, "").toLowerCase();
-  return /create/.test(flat) && (/win32_process/.test(flat) || (/wmic/.test(flat) && /process/.test(flat)));
 }
 
 /** A grant names either issues or one auto form, never both. */
@@ -655,7 +658,7 @@ function decide(input, grant, now, depth) {
   const found = startInvocations(command, typed);
   // A WMI/CIM process creation's literal command line was read above; one built at run time could be anything (#316).
   // For the PowerShell tool a hashtable or expression reads as `$` in the Bash text, so that is where it is looked for.
-  if (found.length === 0) return wmiCreate(typed) && UNRESOLVED_RE.test(command) ? { decision: "deny", reason: WMI_DENY_REASON } : null;
+  if (found.length === 0) return wmiProcessCreate(typed) && UNRESOLVED_RE.test(command) ? { decision: "deny", reason: WMI_DENY_REASON } : null;
   if (found.every((f) => f.unparsed)) return { decision: "deny", reason: PARSE_DENY_REASON };
   const deny = { decision: "deny", reason: DENY_REASON };
   if (found.length !== 1 || !found[0].standalone) return deny;
