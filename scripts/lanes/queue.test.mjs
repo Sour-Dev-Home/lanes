@@ -590,6 +590,42 @@ test("edge: 1000+ open issues is a read failure naming the count, retried next t
   assert.ok(run.out.some((l) => /1000\+ open issues: too many to plan from, retrying next tick/.test(l)), run.out.join("\n"));
 });
 
+// --- #344: queue-launched lanes get the Git POSIX tools first on PATH, as /start lanes do (#337). ---
+
+// Runs one launch of issue 1 and returns the options each `claude --bg` call received.
+async function launchOptions(withLaunchEnv) {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  const seen = [];
+  const claude = run.deps.claude;
+  run.deps.claude = (args, opts) => {
+    if (args[0] !== "agents") seen.push(opts);
+    return claude(args, opts);
+  };
+  if (withLaunchEnv) run.deps.launchEnv = withLaunchEnv;
+  assert.equal(await main([], run.deps), 0);
+  return { seen, out: run.out };
+}
+
+test("#344: a launch passes the env from deps.launchEnv to claude --bg and prints its note", async () => {
+  const { seen, out } = await launchOptions(() => ({ env: { PATH: "adjusted" }, note: "PATH not adjusted: git not found" }));
+  assert.deepEqual(seen.map((o) => o.env), [{ PATH: "adjusted" }]);
+  assert.equal(seen[0].cwd, "/repo");
+  assert.equal(out.filter((l) => l.endsWith(" #1: PATH not adjusted: git not found")).length, 1, out.join("\n"));
+});
+
+test("#344: edge: an adjusted env with no note prints no PATH line", async () => {
+  const { out } = await launchOptions(() => ({ env: { PATH: "adjusted" }, note: null }));
+  assert.ok(!out.some((l) => /PATH not adjusted/.test(l)), out.join("\n"));
+});
+
+test("#344: edge: with no launchEnv (other platforms) claude gets no env option and inherits", async () => {
+  const { seen } = await launchOptions(null);
+  assert.equal(seen.length, 1);
+  assert.ok(!("env" in seen[0]), "no env key");
+});
+
 // --- #251: queue-launched lanes get the reaper /start starts (ADR 0010). ---
 
 const reapScript = join("/repo", "scripts", "lanes", "reap.mjs");
