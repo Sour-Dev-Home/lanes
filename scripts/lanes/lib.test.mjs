@@ -775,3 +775,95 @@ test("edge: parseValidation throws a named error for malformed validate lines", 
     assert.throws(() => parseValidation(bad), (e) => e.name === "ValidationParseError" && /validate/.test(e.message), bad);
   }
 });
+
+// #380, ADR 0015: the owner-path exemption for a diff owner-diff.mjs proved additive.
+const ownerCfg = compileConfig({
+  requiredChecks: ["verify"],
+  paths: {
+    skip: ["^docs/"],
+    contract: ["^contracts/"],
+    sensitive: ["^scripts/lanes/", "^lanes\\.config\\.json$"],
+    ui: [],
+    owner: ["^lanes\\.config\\.json$", "^scripts/lanes/workflow\\.test\\.mjs$", "^scripts/lanes/gate\\.mjs$"],
+  },
+});
+const PIN_FILES = ["lanes.config.json", "scripts/lanes/workflow.test.mjs"];
+const pinHead = "b".repeat(40);
+const passed = (names) => names.map((r) => ({ context: reviewContext(r), state: "success", description: "ok", created_at: "2026-09-29T10:00:00Z", creator: human }));
+const praised = (names, sha = pinHead) => names.map((reviewer) => ({ reviewer, sha, verdict: { verdict: "success", findings: [] } }));
+const pinPr = (over = {}) => {
+  const files = over.files ?? PIN_FILES;
+  const names = requiredReviewers("full", classifyFiles(files, ownerCfg));
+  return { ...quickPr, issueLabels: ["tier:full", "ready"], headSha: pinHead, files, config: ownerCfg, statuses: passed(names), verdicts: praised(names), ...over };
+};
+const pinReviewers = requiredReviewers("full", classifyFiles(PIN_FILES, ownerCfg));
+
+test("gateDecision clears the owner-only-path wait for an additive diff of the pin files with every reviewer passed", () => {
+  assert.equal(gateDecision(pinPr()).description, "waiting on owner (/approve) (owner-only path)");
+  const d = gateDecision(pinPr({ ownerDiff: "additive" }));
+  assert.equal(d.state, "success");
+  assert.equal(d.description, "unattended-eligible (tier:full), reviews in");
+  for (const files of [["lanes.config.json"], ["scripts/lanes/workflow.test.mjs"]]) {
+    assert.equal(gateDecision(pinPr({ files, ownerDiff: "additive" })).state, "success", files[0]);
+  }
+});
+
+test("gateDecision keeps the owner wait when an additive diff also changes a third file", () => {
+  for (const extra of ["scripts/lanes/gate.mjs", "docs/a.md", "src/a.ts"]) {
+    const d = gateDecision(pinPr({ files: [...PIN_FILES, extra], ownerDiff: "additive" }));
+    assert.equal(d.state, "pending", extra);
+    assert.match(d.description, /^waiting on owner \(\/approve\) \(owner-only path\)/, extra);
+  }
+});
+
+test("gateDecision keeps the owner wait for an additive diff whose reviewer failed or is missing", () => {
+  const [first, ...rest] = pinReviewers;
+  assert.ok(rest.length > 0);
+  const failing = praised(pinReviewers).map((v) => (v.reviewer === first ? { ...v, verdict: { verdict: "failure", findings: [] } } : v));
+  assert.equal(gateDecision(pinPr({ ownerDiff: "additive", verdicts: failing })).description, `waiting on owner (/approve) (verdict from ${first} is not success)`);
+  assert.equal(gateDecision(pinPr({ ownerDiff: "additive", verdicts: praised(rest) })).description, `waiting on owner (/approve) (no verdict for head from ${first})`);
+  // A verdict for an older commit is no verdict for the head.
+  assert.equal(gateDecision(pinPr({ ownerDiff: "additive", verdicts: praised(pinReviewers, "c".repeat(40)) })).stage, "owner");
+  // A review status missing or failed on the head never reaches the owner stage, exempt or not.
+  assert.equal(gateDecision(pinPr({ ownerDiff: "additive", statuses: passed(rest) })).description, `waiting for review/${first}`);
+  const failed = passed(pinReviewers).map((s, i) => (i === 0 ? { ...s, state: "failure" } : s));
+  assert.equal(gateDecision(pinPr({ ownerDiff: "additive", statuses: failed })).state, "failure");
+});
+
+test("gateDecision keeps the owner wait for an additive diff whose Needs the owner is not nothing", () => {
+  const prBody = quickPr.prBody.replace("## Needs the owner\nnothing", "## Needs the owner\nDecide whether this pin belongs here.");
+  assert.equal(gateDecision(pinPr({ ownerDiff: "additive", prBody })).description, "waiting on owner (/approve) (needs the owner)");
+});
+
+test("gateDecision is unchanged when ownerDiff is absent or anything but the string additive", () => {
+  const today = gateDecision(pinPr());
+  for (const ownerDiff of [undefined, null, "", "needs owner", "Additive", " additive", "additive ", true, 1, ["additive"], { additive: true }]) {
+    assert.deepEqual(gateDecision(pinPr({ ownerDiff })), today, String(ownerDiff));
+  }
+});
+
+test("edge: the owner-path exemption compares file names exactly, never after normalising them", () => {
+  for (const odd of ["./lanes.config.json", "Lanes.config.json", "scripts\\lanes\\workflow.test.mjs", "scripts/lanes/../lanes/workflow.test.mjs"]) {
+    const d = gateDecision(pinPr({ files: [PIN_FILES[0], odd], statuses: passed(pinReviewers), verdicts: praised(pinReviewers), ownerDiff: "additive" }));
+    assert.equal(d.stage, "owner", odd);
+  }
+});
+
+test("edge: a rename into a pin file still lists its old name, which keeps the owner wait", () => {
+  const d = gateDecision(pinPr({ files: ["scripts/lanes/gate.mjs", "lanes.config.json"], ownerDiff: "additive" }));
+  assert.equal(d.description, "waiting on owner (/approve) (owner-only path)");
+});
+
+test("edge: the owner-path exemption never applies where the tier requires no reviewer", () => {
+  const skipCfg = compileConfig({
+    requiredChecks: ["verify"],
+    paths: { skip: ["^lanes\\.config\\.json$", "\\.test\\.mjs$"], contract: [], sensitive: [], ui: [], owner: ["^lanes\\.config\\.json$", "^scripts/lanes/workflow\\.test\\.mjs$"] },
+  });
+  const d = gateDecision({ ...quickPr, issueLabels: ["tier:skip", "ready"], files: PIN_FILES, config: skipCfg, ownerDiff: "additive" });
+  assert.equal(d.description, "waiting on owner (/approve) (owner-only path)");
+});
+
+test("edge: an additive diff with an unfixed important finding still waits on the owner for that finding", () => {
+  const verdicts = praised(pinReviewers).map((v, i) => (i === 0 ? { ...v, verdict: { verdict: "success", findings: [{ severity: "important", fixed: false }] } } : v));
+  assert.match(gateDecision(pinPr({ ownerDiff: "additive", verdicts })).description, /^waiting on owner \(\/approve\) \(unfixed important finding from /);
+});
