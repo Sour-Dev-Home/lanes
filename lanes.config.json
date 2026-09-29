@@ -41,7 +41,7 @@
       },
       {
         "id": "install",
-        "paths": ["scripts/lanes/install.", "scripts/lanes/upgrade.", "scripts/lanes/new-project.", "scripts/lanes/setup-repo.", "scripts/lanes/notify-hook.", "scripts/lanes/release."],
+        "paths": ["scripts/lanes/install.", "scripts/lanes/upgrade.", "scripts/lanes/new-project.", "scripts/lanes/setup-repo.", "scripts/lanes/notify-hook.", "scripts/lanes/release.", "scripts/lanes/adopter-smoke."],
         "imports": ["lib", "preflight"]
       }
     ],
