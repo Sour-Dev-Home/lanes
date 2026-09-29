@@ -148,6 +148,27 @@ test("criterion 4: INDEX.md lists every script that runs a child process", () =>
   for (const p of spawning) assert.ok(i.includes(p), `${p} imports node:child_process but INDEX.md does not list it`);
 });
 
+// One path per bullet, sorted, so two lanes adding different scripts touch different lines and merge cleanly.
+test("criterion 5: the child-process list is one path per bullet, sorted by path", () => {
+  const lines = index().split("\n");
+  const start = lines.findIndex((l) => l.startsWith("Scripts that import `node:child_process`"));
+  assert.ok(start >= 0, "INDEX.md has no child-process list heading");
+  const bullets = [];
+  for (const l of lines.slice(start + 1)) {
+    if (l.trim() === "" && bullets.length === 0) continue;
+    if (!l.startsWith("- ")) break;
+    bullets.push(l);
+  }
+  assert.ok(bullets.length > 0, "the child-process list has no bullets");
+  const paths = bullets.map((b) => {
+    const m = /^- `(scripts\/[^`\s]+\.mjs)`(?: \([^)]*\))?$/.exec(b);
+    assert.ok(m, `not exactly one path per bullet: ${b}`);
+    return m[1];
+  });
+  assert.deepEqual(paths, [...paths].sort(), "child-process list is not sorted by path");
+  assert.equal(new Set(paths).size, paths.length, "child-process list has a duplicate");
+});
+
 // Regression: the trip-wire above scans repo source with a regex, not a parser. It must not go blind just because a
 // future script imports node:child_process with single quotes instead of this repo's usual double quotes.
 test("edge: importsChildProcess matches single- and double-quoted imports alike", () => {
