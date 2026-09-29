@@ -12,7 +12,7 @@
 // The parsing, the case list and the defect classifier are pure and tested without a browser.
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { delimiter, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -143,7 +143,10 @@ function measureInPage(requiredSelectors) {
   }
   const required = [];
   for (const sel of requiredSelectors) {
-    for (const el of document.querySelectorAll(sel)) required.push({ selector: sel, text: el.textContent || "" });
+    const found = document.querySelectorAll(sel);
+    for (const el of found) required.push({ selector: sel, text: el.textContent || "" });
+    // A task row is always present in the fixture, so a selector with no match is a field that was dropped.
+    if (!found.length && sel.startsWith("#tasks")) required.push({ selector: sel, text: "" });
   }
   return { elements, required };
 }
@@ -161,9 +164,15 @@ function serve(dashboardDir, snapshotText) {
     }
     const file = resolve(root, "." + (path === "/" ? "/index.html" : path));
     if (!file.startsWith(root + "/") && !file.startsWith(root + "\\")) return (res.writeHead(403), res.end());
-    if (!existsSync(file)) return (res.writeHead(404), res.end());
-    res.writeHead(200, { "content-type": TYPES[extname(file)] || "application/octet-stream" });
-    res.end(readFileSync(file));
+    try {
+      if (!statSync(file).isFile()) throw new Error("not a file");
+      const body = readFileSync(file);
+      res.writeHead(200, { "content-type": TYPES[extname(file)] || "application/octet-stream" });
+      res.end(body);
+    } catch {
+      res.writeHead(404);
+      res.end();
+    }
   });
   return new Promise((ok) => {
     server.listen(0, "127.0.0.1", () => ok({ url: `http://127.0.0.1:${server.address().port}/`, close: () => server.close() }));
@@ -175,9 +184,13 @@ function loadPlaywright() {
   for (const dir of (process.env.PATH || "").split(delimiter)) {
     if (!/node_modules[\\/]\.bin$/.test(dir)) continue;
     const modules = dirname(dir);
-    if (existsSync(join(modules, "playwright", "package.json"))) return createRequire(join(modules, "x.js"))("playwright");
+    const manifest = join(modules, "playwright", "package.json");
+    if (!existsSync(manifest)) continue;
+    // A repo-local playwright of another version must not stand in for the pinned one.
+    if (JSON.parse(readFileSync(manifest, "utf8")).version !== PLAYWRIGHT_PACKAGE.split("@")[1]) continue;
+    return createRequire(join(modules, "x.js"))("playwright");
   }
-  throw new Error("the playwright package is not on the PATH npx set up");
+  throw new Error(`${PLAYWRIGHT_PACKAGE} is not on the PATH npx set up`);
 }
 
 async function measure(options) {
@@ -225,6 +238,10 @@ function launch(argv) {
   env.npm_config_ignore_scripts = "true";
   env[CHILD_ENV] = "1";
   const file = fileURLToPath(import.meta.url);
+  if (process.platform === "win32" && !SAFE_ARG.test(file)) {
+    console.error("cannot start: the script path has characters a Windows shell could expand");
+    return 2;
+  }
   const args = ["--yes", "-p", PLAYWRIGHT_PACKAGE, "node", file, ...argv];
   // npx is a .cmd shim on Windows, which spawn cannot start without a shell. Every argument passed the SAFE_ARG check.
   const r =

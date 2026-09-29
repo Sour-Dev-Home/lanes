@@ -100,6 +100,26 @@ test("classify: a required field rendered empty", () => {
   ]);
 });
 
+test("classify: boundary: one past the 1px tolerance is a defect (clip, overlap, viewport, height)", () => {
+  assert.equal(run([box({ overflowX: "hidden", scrollWidth: 102 })]).length, 1);
+  assert.equal(run([box({ overflowY: "hidden", scrollHeight: 21 })]).length, 0);
+  assert.equal(run([box({ overflowY: "hidden", scrollHeight: 22 })]).length, 1);
+  const a = box({ id: 1, selector: "a", rect: { left: 0, right: 50, top: 0, bottom: 20 } });
+  const at = box({ id: 2, selector: "b", rect: { left: 49, right: 90, top: 0, bottom: 20 } });
+  const past = box({ id: 3, selector: "c", rect: { left: 48, right: 90, top: 0, bottom: 20 } });
+  assert.equal(run([a, at]).length, 0);
+  assert.equal(run([a, past]).length, 1);
+  assert.equal(run([box({ rect: { left: 276, right: 376, top: 0, bottom: 20 } })]).length, 0);
+  assert.equal(run([box({ rect: { left: 277, right: 377, top: 0, bottom: 20 } })]).length, 1);
+  assert.equal(run([box({ rect: { left: -1, right: 99, top: 0, bottom: 20 } })]).length, 0);
+});
+
+test("classify: edge: several defects of different kinds are all reported, in kind order", () => {
+  const e = box({ id: 1, overflowX: "hidden", scrollWidth: 300, rect: { left: 300, right: 500, top: 0, bottom: 20 } });
+  const kinds = run([e], [{ selector: "x", text: "" }]).map((d) => d.kind);
+  assert.deepEqual(kinds, ["text-clipped", "outside-viewport", "required-empty"]);
+});
+
 test("classify: edge: no elements at all gives no defects", () => {
   assert.deepEqual(run([]), []);
 });
