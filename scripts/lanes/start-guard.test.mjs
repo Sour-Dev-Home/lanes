@@ -2452,6 +2452,30 @@ test("#404 criterion 11: creating or pushing a v* tag is denied from any session
   }
 });
 
+// --- #424: run-time tag names, --repo=, update-ref, git aliases, gh release create, bash -c long options -------------
+
+test("#424 criteria 1-3: a run-time tag name, --repo= push, update-ref, a -c alias and gh release create are denied", () => {
+  for (const cmd of [
+    'git tag "$V"', "git tag ${V:-v1}", 'git tag "$(cat VERSION)"', 'git push origin "$V"', "git push origin ${V:-v1}", 'git push origin "refs/tags/$V"',
+    "git push --repo=origin v1", "git push --repo origin v1", "git update-ref refs/tags/v1 HEAD", "git -c alias.t=tag t v1", "gh release create v1.0.0",
+    "git status && gh release create v2 --notes x",
+  ]) {
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(TAG_DENY_REASON), cmd);
+    assert.deepEqual(decideFor(ps(cmd)), deny(TAG_DENY_REASON), `${cmd} (PowerShell)`);
+  }
+  for (const cmd of ["git push --repo=origin issue-424-x", "git update-ref refs/heads/x HEAD", "gh release view v1.0.0", 'git push origin "$SHA":refs/heads/main']) {
+    assert.equal(decideFor(bash(cmd)), null, cmd);
+  }
+});
+
+test("#424 criterion 4: bash -c with --rcfile or --init-file before the script reads the script, not the value", () => {
+  for (const cmd of ['bash -c --init-file x "$X"', 'bash --init-file x -c "$X"', 'bash -c --rcfile x -- "$X"']) {
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(RUNTIME_TEXT_DENY_REASON), cmd);
+  }
+  // The value is no script: a lanes script named there is only an rc file's name, the script after it still runs.
+  assert.deepEqual(decideFor(bash("bash -c --init-file x 'node scripts/lanes/start.mjs 1'")), deny(DENY_REASON));
+});
+
 test("#404 criterion 12: a read-only search whose pattern names a lanes script gets no decision", () => {
   for (const cmd of [
     'grep -n "queue.mjs" .claude/commands/night.md', "rg start.mjs docs", "grep -rn 'queue.mjs\\|start.mjs' .claude/commands",

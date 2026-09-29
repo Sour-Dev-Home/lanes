@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CAT_HEREDOC_RE, HEREDOC_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, ansiCString, dequoted, heredocOperator, launchedCommands, lex, literalSubstitution, mark,
-  mayBeNode, mayExpandTo, plainLiteralSubstitution, readGrant, readHeredoc, releaseTagCommand, runsRuntimeText, skipRedirectTarget, unmark, wmiProcessCreate,
+  mayBeNode, mayExpandTo, plainLiteralSubstitution, readGrant, readHeredoc, releaseTagCommand, runsRuntimeText, shellTextIndexes, skipRedirectTarget, unmark, wmiProcessCreate,
 } from "./shell-lex.mjs";
 
 const source = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
@@ -592,6 +592,91 @@ test("#404 criterion 11 (test-hunter): a branch named tag, a tag read or removal
     assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
   }
   assert.equal(releaseTagCommand(lex("git push origin tag v1")[0]), true);
+});
+
+// --- #424: run-time tag names, --repo=, update-ref, git aliases, gh release create, bash -c long options -------------
+
+// The run-time tag and ref forms #424 names, each a v* tag the guards cannot read until the shell runs.
+const RUNTIME_TAG_CMDS = [
+  'git tag "$V"', "git tag ${V:-v1}", 'git tag "$(cat VERSION)"', "git tag `cat VERSION`", 'git tag -a "$V" -m x', 'git push origin "$V"',
+  'git push origin "$(cat VERSION)"', "git push origin ${V:-v1}", 'git push origin "refs/tags/$V"', 'git push origin "HEAD:$V"', 'git push origin tag "$V"',
+];
+
+test("#424 criterion 1: a tag or push refspec named only at run time is a release tag", () => {
+  for (const cmd of RUNTIME_TAG_CMDS) assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  // A source known only at run time pushed to a literal branch names no tag; a single-quoted `$` is literal text.
+  for (const cmd of ['git push origin "$SHA":refs/heads/main', "git tag -l \"$P\"", "git tag -d \"$V\"", "git tag 'x$V'", "git push \"$R\" main"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+  }
+});
+
+test("#424 criterion 2: with --repo given, the first positional word is a refspec, not the remote", () => {
+  for (const cmd of ["git push --repo=origin v1", "git push --repo origin v1", "git push --repo=origin refs/tags/v1", "git push --repo=origin HEAD:refs/tags/v2"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of ["git push --repo=origin main", "git push --repo origin issue-424-x"]) assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+});
+
+test("#424 criterion 3: update-ref to a v* tag, a -c alias that expands to tag or push, and gh release create are release tags", () => {
+  for (const cmd of [
+    "git update-ref refs/tags/v1 HEAD", "git update-ref -m x refs/tags/v1 HEAD", 'git update-ref "refs/tags/$V" HEAD', "git update-ref --stdin",
+    "git -c alias.t=tag t v1", "git -c alias.p=push p origin v1", "git -c 'alias.t=tag -a' t v1 -m x", "git -c alias.t=push t --tags",
+    "git -c 'alias.t=!git tag v1' t", "git --config-env alias.t=X t v1", "git -c \"alias.t=$A\" t v1",
+    "gh release create v1.0.0", "gh release create v1.0.0 --notes x", "gh release create --title t v1.0.0", "gh release new v2", 'gh release create "$V"',
+    "gh release create -R o/r v1",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of [
+    "git update-ref refs/heads/main HEAD", "git update-ref -d refs/tags/v1", "git -c alias.t=tag t -l", "git -c alias.s=status s", "git -c alias.t=tag s v1",
+    "gh release view v1.0.0", "gh release list", "gh release create x1", "gh pr create --title v1",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+  }
+});
+
+test("#424 edge: alias case, glued --config-env, recursive aliases, gh with no tag, and a forced run-time refspec", () => {
+  for (const cmd of [
+    "git -c alias.T=tag t v1", "git -c alias.t=tag T v1", "git --config-env=alias.t=X t v1", "gh release create", "gh release create --notes x",
+    'git push origin "+$V"', "git -c alias.a=b -c alias.b=tag a v1",
+    // An alias that names itself (git refuses it) fails closed at the depth cap rather than recursing without end.
+    "git -c alias.a=a a", "git -c alias.a=b -c alias.b=a a",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of ["git -c alias.t=tag", "git -c alias.a=b -c alias.b=status a", "gh", "git", 'git push origin "$SHA":main', "git -c alias.t= t v1"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+  }
+});
+
+test("#424 hunt: an alias shadowing a built-in is ignored by git, so it hides nothing; the alias depth cap is a boundary", () => {
+  for (const cmd of ["git -c alias.tag=log tag v1", "git -c alias.push=status push origin v1", "git -c alias.update-ref=log update-ref refs/tags/v1 HEAD"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  const chain = (n) => `git ${Array.from({ length: n }, (_, k) => `-c alias.a${k}=${k + 1 < n ? `a${k + 1}` : "status"}`).join(" ")} a0`;
+  assert.equal(releaseTagCommand(lex(chain(7))[0]), false, "7 aliases deep, ending in status");
+  assert.equal(releaseTagCommand(lex(chain(9))[0]), true, "past the cap fails closed");
+});
+
+test("#424 security review: gh release's own --repo before create, a -m value of -d, and --config-env push.followTags", () => {
+  for (const cmd of [
+    "gh release --repo o/r create v1", "gh release -R o/r create v1", "gh release -Ro/r create v1", "gh release --repo=o/r new v1",
+    "git update-ref -m -d refs/tags/v1 HEAD", "git --config-env=push.followTags=X push", "git --config-env push.followTags=X push origin main",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of ["gh release --repo o/r view v1", "gh release -R o/r list", "git update-ref -m x -d refs/tags/v1"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+  }
+});
+
+test("#424 criterion 4: a shell's -c skips --rcfile and --init-file with their value to reach the script", () => {
+  for (const cmd of ['bash -c --rcfile x "$S"', 'bash -c --init-file x "$S"', 'bash --init-file x -c "$S"', 'bash -c --rcfile x -- "$S"']) {
+    assert.deepEqual([...shellTextIndexes(lex(cmd)[0])], [lex(cmd)[0].length - 1], cmd);
+    assert.equal(runsRuntimeText(lex(cmd)[0]), true, cmd);
+  }
+  // The value itself is no script: a run-time rc file with a literal script is no run-time text.
+  assert.equal(runsRuntimeText(lex('bash -c --init-file "$F" true')[0]), false);
 });
 
 test("#404 criterion 13 (test-hunter): $ENV:Path is a PowerShell variable read whatever its case", () => {
