@@ -211,8 +211,9 @@ const isSessionStep = (step) => step.cmd === "claude" && (step.args[0] === "rm" 
 // `waitStopped(id)`, when given, runs after each successful `claude stop`, so the `claude rm` that follows finds the
 // session gone; `sleep(ms)`, when given, lets a failed `claude rm` be retried once after RM_RETRY_MS (#179).
 // `recordCost(id, issue)`, when given, records the session's token usage (lane-cost.mjs) right after its log is saved;
-// a throw is reported and never stops the removal.
-export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, recordCost, removeDir, waitStopped, sleep, dryRun = false }) {
+// a throw is reported and never stops the removal. `unmark(issue)`, when given, removes the issue's `lane:running`
+// label once its lane is removed (ADR 0014); a throw is reported in the result and never fails the removal.
+export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, recordCost, removeDir, waitStopped, sleep, unmark, dryRun = false }) {
   return plan.map((entry) => {
     const base = { branch: entry.branch, issue: entry.issue, pr: entry.pr, closed: entry.closed, orphan: entry.orphan, files: entry.files };
     if (entry.skip) return { ...base, status: "skipped", skip: entry.skip };
@@ -286,6 +287,14 @@ export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, recor
         } catch {
           // A wait that breaks must not fail a stop that worked; the `claude rm` retry covers a session still exiting.
         }
+      }
+    }
+    // ADR 0014: the lane is gone, so its `lane:running` mark goes too. A failure is reported and never fails the removal.
+    if (unmark && Number.isInteger(entry.issue)) {
+      try {
+        unmark(entry.issue);
+      } catch (err) {
+        ran.push(`lane:running not removed (${errorText(err, { args: [] })})`);
       }
     }
     return { ...base, status: "removed", ran };
@@ -589,13 +598,14 @@ const DEFAULT_DEPS = {
  * @returns {string[]}
  */
 export function cleanupMerged({ dryRun = false, deps = {} } = {}) {
-  const { load, run, stillThere, sessionEnded: ended, saveLog, recordCost: costed, removeDir, waitStopped: waited, sleep } = { ...DEFAULT_DEPS, ...deps };
+  const { load, run, stillThere, sessionEnded: ended, saveLog, recordCost: costed, removeDir, waitStopped: waited, sleep, unmark: unmarked } = { ...DEFAULT_DEPS, ...deps };
   const inputs = load ? load() : loadCleanupInputs(undefined, run);
   const isEnded = ended ?? ((id) => sessionEnded(id, { sessions: inputs.sessions, run }));
   const save = saveLog ?? (inputs.root ? (id, issue) => saveSessionLog(id, issue, { run, root: inputs.root }) : undefined);
   const record = costed ?? (inputs.root ? (id, issue) => recordSessionCost(id, issue, inputs) : undefined);
   const waitStopped = waited ?? ((id) => waitForStop(id, { run, sleep }));
-  return render(runCleanup(planCleanup(inputs), { dryRun, run, stillThere, sessionEnded: isEnded, saveLog: save, recordCost: record, removeDir, waitStopped, sleep })).split("\n");
+  const unmark = unmarked ?? ((n) => run("gh", ["issue", "edit", String(n), "--remove-label", "lane:running"]));
+  return render(runCleanup(planCleanup(inputs), { dryRun, run, stillThere, sessionEnded: isEnded, saveLog: save, recordCost: record, removeDir, waitStopped, sleep, unmark })).split("\n");
 }
 
 function main(argv = process.argv.slice(2)) {
