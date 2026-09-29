@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PATH_PATTERNS } from "./preflight.mjs";
@@ -67,7 +67,7 @@ test("the build runs snapshot.mjs, then the PII check on snapshot.json, then upl
 
 test("every action is pinned to a commit SHA", () => {
   const uses = [...raw.matchAll(/uses: (\S+)@(\S+)( # v\d+)?/g)];
-  assert.equal(uses.length, 4);
+  assert.equal(uses.length, 5);
   for (const [line, , ref, comment] of uses) assert.ok(/^[0-9a-f]{40}$/.test(ref) && comment, line);
 });
 
@@ -75,17 +75,44 @@ test("the PII step gets its patterns from the secret, and scans snapshot.json fo
   assert.match(buildJob, /PII_PATTERNS: \$\{\{ secrets\.PII_PATTERNS \}\}/);
   const listed = buildJob.match(/printf '%s\\n' ((?:'[^']*' ?)+) > "\$PATHS"/)[1].match(/'([^']*)'/g).map((s) => s.slice(1, -1));
   assert.deepEqual(listed, PATH_PATTERNS);
-  assert.match(buildJob, /scan\(\) \{ grep -n -iF -f "\$1" _site\/snapshot\.json \|\| \[ \$\? -eq 1 \]; \}/);
-  assert.match(buildJob, /\n {10}scan "\$PII" > "\$OUT"\n {10}scan "\$PATHS" >> "\$OUT"\n/);
+  assert.match(buildJob, /scan\(\) \{ grep -n -iF -f "\$1" "\$2" \|\| \[ \$\? -eq 1 \]; \}/);
+  assert.match(buildJob, /for FILE in snapshot\.json lane-metrics\.json; do\n/);
+  assert.match(buildJob, /\n {12}scan "\$PII" "_site\/\$FILE" > "\$OUT"\n {12}scan "\$PATHS" "_site\/\$FILE" >> "\$OUT"\n/);
 });
 
-// The step's script, run against a throwaway _site/snapshot.json.
+// #297: lane-metrics.json is built once per UTC day (cached), published in the same site, through the same check.
+test("lane-metrics.json is restored from an actions/cache entry keyed by the UTC date, and built only on a miss", () => {
+  assert.match(buildJob, /echo "day=\$\(date -u \+%F\)" >> "\$GITHUB_OUTPUT"/);
+  assert.match(buildJob, /id: metrics-cache\n {8}uses: actions\/cache@[0-9a-f]{40}\n {8}with:\n {10}path: _site\/lane-metrics\.json\n {10}key: lane-metrics-\$\{\{ steps\.prepare\.outputs\.day \}\}\n/);
+  assert.match(buildJob, /if: steps\.metrics-cache\.outputs\.cache-hit != 'true'\n {8}run: node scripts\/lanes\/lane-metrics\.mjs --public --days 30 --out _site\/lane-metrics\.json /);
+  const at = (needle) => buildJob.indexOf(needle);
+  assert.ok(at("actions/cache@") < at("lane-metrics.mjs") && at("lane-metrics.mjs") < at("PII_PATTERNS"), "restore, build, then check");
+});
+
+test("the check runs on both files, before the one upload of _site", () => {
+  const checkStep = buildJob.match(/- name: Check snapshot\.json and lane-metrics\.json[\s\S]*?\n {6}- uses: actions\/upload-pages-artifact/)[0];
+  assert.match(checkStep, /for FILE in snapshot\.json lane-metrics\.json/);
+  assert.equal((buildJob.match(/upload-pages-artifact@/g) ?? []).length, 1);
+});
+
+test("the metrics build adds no permissions, uses the default token, and no other workflow deploys Pages", () => {
+  assert.equal((buildJob.match(/permissions:/g) ?? []).length, 1);
+  assert.doesNotMatch(buildJob, /: write/);
+  const metricsStep = buildJob.match(/- name: Build the lane metrics[\s\S]*?\n {6}- name: Build the snapshot/)[0];
+  assert.match(metricsStep, /GH_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.doesNotMatch(metricsStep, /secrets\./);
+  const deployers = readdirSync(".github/workflows").filter((f) => /\.ya?ml$/.test(f) && /deploy-pages/.test(readFileSync(join(".github/workflows", f), "utf8")));
+  assert.deepEqual(deployers, ["dashboard.yml"]);
+});
+
+// The step's script, run against a throwaway _site/snapshot.json (and lane-metrics.json when given).
 const piiScript = buildJob.match(/- name: Check snapshot\.json[\s\S]*?run: \|\n([\s\S]*?)\n {6}- uses:/)[1].replace(/^ {10}/gm, "");
-function runCheck(snapshot, secret) {
+function runCheck(snapshot, secret, metrics) {
   const dir = mkdtempSync(join(tmpdir(), "dashboard-yml-"));
   try {
     mkdirSync(join(dir, "_site"));
     writeFileSync(join(dir, "_site", "snapshot.json"), snapshot);
+    if (metrics !== undefined) writeFileSync(join(dir, "_site", "lane-metrics.json"), metrics);
     // A bash that cannot see the folder (WSL's, say) or has no GNU grep is "not available", not a pass.
     const probe = spawnSync("bash", ["-c", "test -s _site/snapshot.json && grep -iF -f /dev/null _site/snapshot.json; test $? -le 1"], { cwd: dir });
     if (probe.error || probe.status !== 0) return undefined;
@@ -129,6 +156,32 @@ test("the PII step fails on a private pattern, case-insensitively, and never pri
   assert.equal(result.status, 1);
   assert.doesNotMatch(result.out, /codename/i);
   assert.deepEqual(result.hits, ["snapshot.json:2"]);
+});
+
+test("the PII step scans lane-metrics.json too, naming that file, and passes it when clean", (t) => {
+  const clean1 = runCheck(clean(), "Internal-Codename", "{}\n");
+  if (skipNoBash(t, clean1)) return;
+  assert.equal(clean1.status, 0, clean1.out);
+  const path = runCheck(clean(), "", `{\n  "x": ${WIN}\n}\n`);
+  assert.equal(path.status, 1);
+  assert.deepEqual(path.hits, []);
+  assert.match(path.out, /^lane-metrics\.json:2$/m);
+  const secret = runCheck(clean(), "Internal-Codename", `{\n  "x": "internal-codename"\n}\n`);
+  assert.equal(secret.status, 1);
+  assert.doesNotMatch(secret.out, /codename/i);
+});
+
+test("edge: an absent lane-metrics.json is fine, an empty one fails closed, and both files can fail together", (t) => {
+  const absent = runCheck(clean(), "");
+  if (skipNoBash(t, absent)) return;
+  assert.equal(absent.status, 0);
+  const empty = runCheck(clean(), "", "");
+  assert.equal(empty.status, 1);
+  assert.match(empty.out, /lane-metrics\.json is empty/);
+  const both = runCheck(`{\n  "a": ${NIX}\n}\n`, "", `{\n  "b": ${NIX}\n}\n`);
+  assert.match(both.out, /^snapshot\.json:2$/m);
+  assert.match(both.out, /^lane-metrics\.json:2$/m);
+  assert.equal(both.status, 1);
 });
 
 test("edge: a secret saved with CRLF line endings still matches", (t) => {

@@ -40,24 +40,46 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-      - name: Build the snapshot
+      - name: Prepare the site folder
+        id: prepare
         run: |
           mkdir _site
           if [ -d dashboard ]; then cp -R dashboard/. _site/; fi
-          node scripts/lanes/snapshot.mjs --out _site/snapshot.json
+          echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - name: Restore today's lane metrics
+        # Lane metrics change slowly and cost many API reads, so they are built once per UTC day and reused by the
+        # 5-minute runs. The saved copy already passed the check below (a failed job saves nothing).
+        id: metrics-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: _site/lane-metrics.json
+          key: lane-metrics-${{ steps.prepare.outputs.day }}
+      - name: Build the lane metrics
+        # A failure here must not stall the snapshot; the check below treats an absent lane-metrics.json as fine.
+        if: steps.metrics-cache.outputs.cache-hit != 'true'
+        run: node scripts/lanes/lane-metrics.mjs --public --days 30 --out _site/lane-metrics.json || echo "::warning::lane-metrics.mjs failed; publishing without lane-metrics.json."
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-      - name: Check snapshot.json for PII or hardcoded local paths
-        # The same checks as security.yml, on the one file that gets published. Patterns come from the PII_PATTERNS
+      - name: Build the snapshot
+        run: node scripts/lanes/snapshot.mjs --out _site/snapshot.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+      - name: Check snapshot.json and lane-metrics.json for PII or hardcoded local paths
+        # The same checks as security.yml, on the files that get published. Patterns come from the PII_PATTERNS
         # repository SECRET (one fixed string per line), never a variable. Only line numbers are printed, never text.
         env:
           PII_PATTERNS: ${{ secrets.PII_PATTERNS }}
         run: |
           set -e
-          # Fail closed: a missing snapshot or a grep that cannot run must never read as "no hits".
+          # Fail closed: a missing snapshot, an empty lane-metrics.json or a grep that cannot run must never read as "no hits".
           if [ ! -s _site/snapshot.json ]; then
             echo "::error::_site/snapshot.json is missing or empty; not deploying."
+            exit 1
+          fi
+          if [ -e _site/lane-metrics.json ] && [ ! -s _site/lane-metrics.json ]; then
+            echo "::error::_site/lane-metrics.json is empty; not deploying."
             exit 1
           fi
           PII=$(mktemp)
@@ -69,15 +91,20 @@ jobs:
             echo "::warning::PII_PATTERNS secret is not available; only checking for local paths."
           fi
           # grep exits 1 for "no match" (fine) and 2 for an error (fatal under set -e).
-          scan() { grep -n -iF -f "$1" _site/snapshot.json || [ $? -eq 1 ]; }
-          scan "$PII" > "$OUT"
-          scan "$PATHS" >> "$OUT"
-          HITS=$(cut -d: -f1 "$OUT" | sort -un)
-          if [ -n "$HITS" ]; then
-            echo "$HITS" | sed 's/^/snapshot.json:/'
-            echo "::error::Possible PII or hardcoded-path leak in snapshot.json at the lines above; not deploying."
-            exit 1
-          fi
+          scan() { grep -n -iF -f "$1" "$2" || [ $? -eq 1 ]; }
+          FAILED=0
+          for FILE in snapshot.json lane-metrics.json; do
+            if [ ! -e "_site/$FILE" ]; then continue; fi
+            scan "$PII" "_site/$FILE" > "$OUT"
+            scan "$PATHS" "_site/$FILE" >> "$OUT"
+            HITS=$(cut -d: -f1 "$OUT" | sort -un)
+            if [ -n "$HITS" ]; then
+              echo "$HITS" | sed "s/^/$FILE:/"
+              echo "::error::Possible PII or hardcoded-path leak in $FILE at the lines above; not deploying."
+              FAILED=1
+            fi
+          done
+          exit $FAILED
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: _site
