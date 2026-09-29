@@ -38,6 +38,14 @@ files with Edit, not Write.
    from a missing entry; the file is gitignored and its entries never go into a PR, issue or commit) to `.lanes/logs/path-$ARGUMENTS.txt`,
    notify `lanes #$ARGUMENTS: shell PATH broken`, report that line and stop. Never prefix commands with `export PATH=…` or
    change PATH to work around missing tools.
+3b. Resuming (#444): when the session's cwd is already an `issue-$ARGUMENTS-*` worktree (the queue relaunched a lane
+    whose session died after it opened its PR), skip step 3's worktree creation, branch rename and setup, but still
+    run the `command -v` check. Run `gh pr list --head <branch> --state open --json number,headRefOid`, then
+    `git status --short` and `git log origin/<branch>..HEAD --oneline`. If the worktree is dirty or holds commits the
+    PR does not have, stop and report it, since a resume never builds over unsaved work. Otherwise skip steps 4 to 6
+    for anything already committed and go straight to what the PR still lacks: read `lanes/gate` as step 7 does, run
+    only the reviewers it waits for or whose verdict failed, post them with `post-review.mjs`, fix a failing CI check,
+    and finish with step 7's report. Never open a second PR.
 4. Read the issue's Interface contract and Scope. Touch nothing out of scope. If the contract is wrong or missing,
    stop and file a new task issue for the contract instead of inventing one.
 4b. Practice (the project skills, agent-skills): build in thin vertical slices with `incremental-implementation` and

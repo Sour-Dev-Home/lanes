@@ -698,8 +698,27 @@ test("edge: a contract path (not in Scope) overlaps an open PR's files and a run
   assert.deepEqual(main(["1"], viaRunning.deps).lines, ["#1: refused: overlaps running #9 on b.mjs"]);
 });
 
-test("edge: a requested issue that already has an open PR is refused as in flight, not as overlapping its own PR", () => {
+// #444: an open PR with no live session is a dead lane, and /start says how to resume it.
+test("#444: an issue with an open PR and no session is refused as a dead lane, naming the queue", () => {
   const { deps, launches } = fakes({ issues: { 1: { body: form({ scope: "In: `a.mjs`." }) } }, prs: [prFor(1, "a.mjs")] });
+  const { code, lines } = main(["1"], deps);
+  assert.equal(code, 1);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^#1: refused: already in flight: dead lane with open PR #\d+ and no live session; run the queue \(node scripts\/lanes\/queue\.mjs\)/);
+  assert.equal(launches.length, 0);
+});
+
+test("#444: edge: an open PR whose newest session is idle is a dead lane, and a blocked one is not", () => {
+  const base = { issues: { 1: { body: form({ scope: "In: `a.mjs`." }) } }, prs: [prFor(1, "a.mjs")] };
+  const cwd = "/repo/.claude/worktrees/issue-1-x";
+  const idle = fakes({ ...base, sessions: [{ kind: "background", status: "idle", cwd }] });
+  assert.match(main(["1"], idle.deps).lines[0], /dead lane with open PR/);
+  const blocked = fakes({ ...base, sessions: [{ kind: "background", status: "idle", state: "blocked", cwd }] });
+  assert.deepEqual(main(["1"], blocked.deps).lines, ["#1: refused: already in flight"]);
+});
+
+test("edge: a requested issue that already has an open PR is refused as in flight, not as overlapping its own PR", () => {
+  const { deps, launches } = fakes({ issues: { 1: { body: form({ scope: "In: `a.mjs`." }) } }, prs: [prFor(1, "a.mjs")], sessions: [{ kind: "background", status: "busy", cwd: "/repo/.claude/worktrees/issue-1-x" }] });
   const { code, lines } = main(["1"], deps);
   assert.equal(code, 1);
   assert.deepEqual(lines, ["#1: refused: already in flight"]);
