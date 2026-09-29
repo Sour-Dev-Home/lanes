@@ -34,7 +34,9 @@ export function parseWorktrees(text) {
     .filter((lines) => lines[0]?.startsWith("worktree "))
     .map((lines, i) => {
       const value = (key) => lines.find((l) => l.startsWith(`${key} `))?.slice(key.length + 1);
-      const tree = { path: value("worktree"), branch: value("branch")?.replace(/^refs\/heads\//, "") ?? null, head: value("HEAD"), main: i === 0 };
+      const base = { path: value("worktree"), branch: value("branch")?.replace(/^refs\/heads\//, "") ?? null, head: value("HEAD"), main: i === 0 };
+      // git marks an entry whose folder is missing `prunable` (#399).
+      const tree = lines.some((l) => l === "prunable" || l.startsWith("prunable ")) ? { ...base, gone: true } : base;
       const lock = lines.find((l) => l === "locked" || l.startsWith("locked "));
       return lock === undefined ? tree : { ...tree, locked: lock.slice("locked ".length) };
     });
@@ -139,7 +141,7 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
     const done = laneDone(prs.filter((p) => p.headRefName === w.branch), w.head, closedIssues.has(issue));
     if (done.skip) plan.push({ ...entry, skip: done.skip });
     else if (w.main) plan.push({ ...entry, skip: "checked out in the main worktree" });
-    else if (w.dirty === null) plan.push({ ...entry, skip: "cannot read worktree status" });
+    else if (w.dirty === null && !w.gone) plan.push({ ...entry, skip: "cannot read worktree status" });
     else if (w.dirty) plan.push({ ...entry, skip: "dirty worktree" });
     else if (sessionsHere.some(unreadableId)) plan.push({ ...entry, skip: UNREADABLE_SKIP });
     else if (sessionsHere.some(stillWorking)) plan.push({ ...entry, skip: "session still working" });
@@ -155,7 +157,9 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
       }
       // `claude rm` may already have removed the worktree, so these run only if their target is still there.
       if (w.path && pid) steps.push({ cmd: "git", args: ["worktree", "unlock", w.path], onlyIf: { path: w.path } });
-      if (w.path) steps.push({ cmd: "git", args: ["worktree", "remove", w.path], onlyIf: { path: w.path } });
+      // A vanished folder leaves git's entry behind, which would refuse `branch -D`; prune drops only such entries.
+      if (w.path && w.gone) steps.push({ cmd: "git", args: ["worktree", "prune"] });
+      else if (w.path) steps.push({ cmd: "git", args: ["worktree", "remove", w.path], onlyIf: { path: w.path } });
       steps.push({ cmd: "git", args: ["branch", "-D", w.branch], onlyIf: { branch: w.branch } });
       plan.push({ ...entry, ...doneAs(done), steps });
     }
@@ -244,14 +248,26 @@ export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, recor
       return removeDir(step.args[0]);
     };
     const fail = (step, error) => ({ ...base, status: "failed", ran, failedStep: formatStep(step), error });
+    // #399: what someone else (a reaper, the owner) had already removed, reported instead of a failure.
+    const already = [];
+    const gone = (kind) => already.includes(kind) || already.push(kind);
+    const ourRm = () => ran.some((s) => s.startsWith("claude rm"));
     for (const step of entry.steps) {
-      if (step.onlyIf && !stillThere(step.onlyIf)) continue;
+      if (step.onlyIf && !stillThere(step.onlyIf)) {
+        // After our own `claude rm` a missing folder or branch is that command's doing, not someone else's.
+        if (step.cmd === "git" && step.args[1] !== "unlock" && !ourRm()) gone(step.onlyIf.path ? "worktree" : "branch");
+        continue;
+      }
       // A claimant cleared below may be one of this worktree's own sessions; it is gone already.
       if (isRm(step) && ran.includes(formatStep(step))) continue;
       if (isSessionStep(step)) logFirst(step.args[1]);
       try {
         exec(step);
       } catch (err) {
+        if (isSessionStep(step) && /No job matching/i.test(errorOutput(err))) {
+          gone("session");
+          continue;
+        }
         const claimant = isRm(step) && sessionEnded ? CLAIMED.exec(errorOutput(err))?.[1] : undefined;
         if (!claimant && isRm(step) && sleep) {
           // The session may still be exiting; one more try shortly after usually finds it gone.
@@ -281,6 +297,7 @@ export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, recor
         }
       }
       ran.push(formatStep(step));
+      if (step.cmd === "git" && step.args[1] === "prune") gone("worktree");
       if (isStop(step) && waitStopped) {
         try {
           waitStopped(step.args[1]);
@@ -297,7 +314,7 @@ export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, recor
         ran.push(`lane:running not removed (${errorText(err, { args: [] })})`);
       }
     }
-    return { ...base, status: "removed", ran };
+    return { ...base, status: "removed", ran, ...(already.length ? { already } : {}) };
   });
 }
 
@@ -329,7 +346,8 @@ export function render(results) {
       if (r.status === "skipped") return r.orphan && r.files > 0 ? `${name} ${r.skip}` : `skipped ${name}: ${r.skip}`;
       if (r.status === "planned") return `would remove ${name}: ${r.ran.join("; ")}`;
       if (r.status === "failed") return `failed ${name} at ${r.failedStep}: ${r.error}`;
-      return `removed ${name}: ${r.ran.join("; ") || "nothing left to remove"}`;
+      const said = r.already?.length ? `${r.already.slice(0, -1).join(", ")}${r.already.length > 1 ? " and " : ""}${r.already.at(-1)} already removed` : "";
+      return `removed ${name}: ${[...r.ran, ...(said ? [said] : [])].join("; ") || "nothing left to remove"}`;
     })
     .join("\n");
 }
@@ -388,7 +406,10 @@ export function loadCleanupInputs(rootArg, run = sh) {
   const onBranch = new Set(trees.map((t) => t.branch));
   const worktrees = trees.map((t) => {
     const lane = LANE_BRANCH.test(t.branch ?? "") && !t.main;
-    const tree = { ...t, dirty: lane ? porcelain(t.path, sh) : false, ...(lane ? { unpushed: unpushedCount(t.branch, sh) } : {}) };
+    // A lane folder that no longer exists cannot be dirty (#399); git's `prunable` mark or a failed read of a missing folder says so.
+    const read = lane && !t.gone ? porcelain(t.path, sh) : false;
+    const vanished = lane && (t.gone || (read === null && !existsSync(t.path)));
+    const tree = { ...t, ...(vanished ? { gone: true } : {}), dirty: vanished ? false : lane ? read : false, ...(lane ? { unpushed: unpushedCount(t.branch, sh) } : {}) };
     const pid = lockPid(t.locked);
     return pid ? { ...tree, lockRunning: pidRunning(pid) } : tree;
   });
