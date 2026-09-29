@@ -16,7 +16,10 @@
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { lex, mark, ORIGINAL, RUNS_ON_EXPANSION_RE, unmark } from "./shell-lex.mjs";
+import { lex, mark, ORIGINAL, readGrant, RUNS_ON_EXPANSION_RE, unmark } from "./shell-lex.mjs";
+
+// post-review.mjs reads the grant with the guard's own reader.
+export { readGrant } from "./shell-lex.mjs";
 
 export const GRANT_TTL_MS = 15 * 60 * 1000;
 export const DENY_REASON = "owner approval only from /approve <N> in this session";
@@ -1006,21 +1009,6 @@ export function decidePreToolUse(input, grantOrLookup, now = Date.now()) {
   return { decision: "allow", reason: `owner approval from /approve ${grant.pr} in this session` };
 }
 
-/** One grant file, parsed: null when it does not exist, { unreadable: true } when it cannot be read or parsed. */
-export function readGrant(file) {
-  let text;
-  try {
-    text = readFileSync(file, "utf8");
-  } catch (e) {
-    return e.code === "ENOENT" ? null : { unreadable: true };
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { unreadable: true };
-  }
-}
-
 /**
  * The path of a grant file in `dir` holding a fresh grant for `pr` (from any session), or null. A missing directory, an
  * unreadable file or a file that is not *.json counts as no grant.
@@ -1040,7 +1028,8 @@ export function findFreshGrant(dir, pr, now = Date.now()) {
   return null;
 }
 
-const preToolUseOutput = (decision, reason) => JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: decision, permissionDecisionReason: reason } });
+/** A PreToolUse hook's answer, as printed (shared with start-guard.mjs). */
+export const preToolUseOutput = (decision, reason) => JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: decision, permissionDecisionReason: reason } });
 
 /** One hook call: `event` is user-prompt-submit or pre-tool-use, `raw` the hook's stdin. Returns what to print. */
 export function runHook(event, raw, { dir, now = Date.now() }) {
