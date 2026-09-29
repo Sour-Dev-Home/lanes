@@ -150,7 +150,7 @@ const metricsSchema = JSON.parse(readFileSync("contracts/review-metrics.schema.j
 
 /**
  * The JSON Schema subset the contracts use (type, enum, const, minimum, pattern, maxLength, items, required,
- * properties, additionalProperties, plus local `$ref` to `#/$defs/<name>`). A keyword outside it makes the schema throw, so it can never pass unchecked.
+ * properties, additionalProperties as false or a schema, propertyNames, plus local `$ref` to `#/$defs/<name>`). A keyword outside it makes the schema throw, so it can never pass unchecked.
  */
 const KNOWN_KEYWORDS = new Set(["$schema", "$id", "title", "description", "type", "enum", "const", "minimum", "maximum", "pattern", "maxLength", "items", "required", "properties", "additionalProperties", "propertyNames", "$defs", "$ref"]);
 function schemaAccepts(schema, value, root = schema) {
@@ -574,10 +574,10 @@ test("the lock schema rejects an absolute path, a .. path, a short hash and an e
 });
 
 test("edge: lock paths with a drive letter, backslash, empty segment or trailing slash are rejected", () => {
-  for (const p of ["C:/x", "c:\\x", "\\x", "a\\b", "a//b", "a/", "a/..", "..", "", "./../x", "x:y"]) {
+  for (const p of ["C:/x", "c:\\x", "\\x", "a\\b", "a//b", "a/", "a/..", "..", "", "./../x", "x:y", "xy:z", "f:stream", ".", "./a", "a/./b", "a/.. ", "a/...", "a. /b", "a\0b", "a\nb", "a\n../b", "a\tb"]) {
     assert.equal(schemaAccepts(lockSchema, lock({ [p]: HASH })), false, JSON.stringify(p));
   }
-  for (const p of ["a", "..a/b", "a/..b", ".gitattributes", "a/.hidden/b", "xy:z"]) {
+  for (const p of ["a", "..a/b", "a/..b", ".gitattributes", "a/.hidden/b", "a b/c d.txt"]) {
     assert.equal(schemaAccepts(lockSchema, lock({ [p]: HASH })), true, JSON.stringify(p));
   }
 });
