@@ -45,7 +45,7 @@ test("edge: no arguments, URLs, flags and repeated paths", () => {
 });
 
 test("issuePaths drops an email, a backslash path, a drive letter, a leading / and a .. segment", () => {
-  const dropped = ["me@example.com", "docs/me@example.com", "src\\a.mjs", "C:/Users/x/a.mjs", "c:a.mjs", "/etc/passwd", "/home/u/a.mjs", "../a.mjs", "a/../b.mjs", "a/../"];
+  const dropped = ["me@example.com", "docs/me@example.com", "src\\a.mjs", "C:/work/a.mjs", "c:a.mjs", "/etc/passwd", "/srv/a.mjs", "../a.mjs", "a/../b.mjs", "a/../", "file:///C:/work/a.mjs", "file://x/y", "~/a.mjs", "%USERPROFILE%/a.mjs", "$HOME/a.mjs"];
   for (const token of dropped) {
     assert.deepEqual(issuePaths({ contract: `\`${token}\``, scope: `In: ${token}` }), [], token);
   }
