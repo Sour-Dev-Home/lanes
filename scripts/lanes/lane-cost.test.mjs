@@ -48,7 +48,8 @@ test("edge: sessionUsage counts messages with no id separately and ignores synth
 });
 
 test("projectFolder replaces every non-alphanumeric character", () => {
-  assert.equal(projectFolder("C:\\Users\\Me\\my.repo"), "C--Users-Me-my-repo");
+  assert.equal(projectFolder("D:\\work\\my.repo"), "D--work-my-repo");
+  assert.equal(projectFolder("/srv/my.repo"), "-srv-my-repo");
 });
 
 const lane = { issue: 7, tier: "full", sessionId: "abc-123", startedAt: Date.UTC(2026, 8, 1), root: "/r/x", now: () => Date.UTC(2026, 8, 2), home: "/h" };
