@@ -1,10 +1,13 @@
 // /status and the nightly digest: what waits on the owner, what is in flight, what is ready, what merged.
 // Usage: node scripts/lanes/status.mjs [--since 24h] [--json] [--waiting]
 import { execFileSync } from "node:child_process";
-import { dirname } from "node:path";
+import { statSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GATE_CONTEXT, parseIssueForm, parsePrBody, reviewContext } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
+import { projectFolder } from "./lane-cost.mjs";
 import { claimedPaths } from "./pick.mjs";
 
 const ISSUE_LIMIT = 1000;
@@ -103,6 +106,11 @@ const normalPath = (p) => {
 // Issue N → `{ id, state, waiting }` for each background session whose cwd is inside a worktree of `repoRoot`
 // named `issue-<N>-…`, or bare `issue-<N>` (#134). Two sessions on one issue: the most recently started wins.
 export function laneSessions(agents, repoRoot) {
+  return new Map([...latestLaneAgents(agents, repoRoot)].map(([n, { agent: a }]) => [n, { id: a.id, state: a.state, waiting: a.state === PROMPT_STATE && a.waitingFor === PROMPT_WAITING_FOR }]));
+}
+
+// Issue N → `{ startedAt, agent }`, the raw `claude agents --json` entry of the lane session on that issue.
+function latestLaneAgents(agents, repoRoot) {
   const root = `${normalPath(repoRoot)}/`;
   const found = new Map();
   for (const a of agents) {
@@ -113,9 +121,36 @@ export function laneSessions(agents, repoRoot) {
     if (!number) continue;
     const previous = found.get(Number(number));
     if (previous && previous.startedAt > (a.startedAt ?? 0)) continue;
-    found.set(Number(number), { startedAt: a.startedAt ?? 0, id: a.id, state: a.state, waiting: a.state === PROMPT_STATE && a.waitingFor === PROMPT_WAITING_FOR });
+    found.set(Number(number), { startedAt: a.startedAt ?? 0, agent: a });
   }
-  return new Map([...found].map(([n, { startedAt, ...s }]) => [n, s]));
+  return found;
+}
+
+export const STALLED_MINUTES = 30;
+const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+// Issue N → whole minutes since the transcript of its busy lane session was last written, for those at or past
+// STALLED_MINUTES. The transcript is found the way lane-cost.mjs finds it (the root's project folder, then the
+// session's own cwd's); only its modification time is read. A missing or unreadable transcript, or a session that is
+// idle or waiting on a prompt, leaves the lane out. Never throws.
+export function stalledLanes(agents, repoRoot, { home = homedir(), now = Date.now(), mtime = (f) => statSync(f).mtimeMs } = {}) {
+  const out = new Map();
+  for (const [n, { agent: a }] of latestLaneAgents(agents, repoRoot)) {
+    if (a.status !== "busy" && a.state !== "working") continue;
+    if (typeof a.sessionId !== "string" || !SAFE_SESSION_ID.test(a.sessionId)) continue;
+    for (const folder of new Set([repoRoot, a.cwd].map(projectFolder))) {
+      let modified;
+      try {
+        modified = mtime(join(home, ".claude", "projects", folder, `${a.sessionId}.jsonl`));
+      } catch {
+        continue;
+      }
+      const minutes = Math.floor((now - modified) / 60_000);
+      if (Number.isFinite(minutes) && minutes >= STALLED_MINUTES) out.set(n, minutes);
+      break;
+    }
+  }
+  return out;
 }
 
 const runClaudeAgents = () => execFileSync("claude", ["agents", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
@@ -183,15 +218,18 @@ export function loadLaneBranches(run = git) {
 
 const withSession = (item, session) => {
   if (!session) return item;
-  const note = session.waiting ? `waiting on a prompt: claude attach ${session.id}` : [item.note, `session ${session.id}`].filter(Boolean).join(" — ");
-  return { ...item, note, session: { id: session.id, state: session.state } };
+  const stalled = session.stalledMin !== undefined && !session.waiting;
+  const note = session.waiting ? `waiting on a prompt: claude attach ${session.id}` : [item.note, stalled && `stalled ${session.stalledMin} min`, `session ${session.id}`].filter(Boolean).join(" — ");
+  return { ...item, note, session: { id: session.id, state: session.state, ...(stalled && { stalledMin: session.stalledMin }) } };
 };
 
 // `issues` is every open issue (with body); only those labelled `ready` are listed, the rest only block.
 // `mergeQueue` is the output of mergeQueueEntries (null or missing: no merge queue); `gateDescriptions` that of
 // gateDescriptions (missing: the rollup's own descriptions only). `sessions` and `sessionsUnavailable` come from
 // loadSessions (missing: no sessions). `laneBranches` is the output of laneBranches (missing: no branches known).
-export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map(), sessions = new Map(), sessionsUnavailable, laneBranches = new Map(), branchesUnavailable }) {
+export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map(), sessions: loaded = new Map(), stalled = new Map(), sessionsUnavailable, laneBranches = new Map(), branchesUnavailable }) {
+  // `stalled` is the output of stalledLanes (issue N → minutes silent).
+  const sessions = new Map([...loaded].map(([n, s]) => [n, stalled.has(n) ? { ...s, stalledMin: stalled.get(n) } : s]));
   const out = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
   const taken = new Set();
   const queuePosition = new Map((mergeQueue ?? []).map((e) => [e.number, e.position]));
@@ -295,9 +333,16 @@ export function waitingApprovals(prs, summary) {
   return out;
 }
 
-export function renderWaiting(waiting) {
-  if (!waiting.length) return "none";
-  return waiting.map((w) => `#${w.number} ${w.title}\n  Needs the owner: ${w.needs}\n  Contract changes: ${w.contract}\n  Files changed: ${w.files}`).join("\n\n");
+// The lanes in flight whose session is busy but has written nothing for STALLED_MINUTES or more; they need the owner too.
+export function stalledItems(summary) {
+  return summary.inFlight.filter((i) => i.session?.stalledMin !== undefined);
+}
+
+export function renderWaiting(waiting, stalled = []) {
+  if (!waiting.length && !stalled.length) return "none";
+  const approvals = waiting.map((w) => `#${w.number} ${w.title}\n  Needs the owner: ${w.needs}\n  Contract changes: ${w.contract}\n  Files changed: ${w.files}`);
+  const lines = stalled.map((s) => `#${s.number} ${plain(s.title ?? "")} — stalled ${s.session.stalledMin} min: claude attach ${plain(String(s.session.id))}`);
+  return [...approvals, ...(lines.length ? [lines.join("\n")] : [])].join("\n\n");
 }
 
 // The `/approve N M K` line for the owner to paste: at most 10 numbers, empty when there are none.
@@ -321,6 +366,8 @@ async function main(argv = process.argv.slice(2)) {
   const hours = Number(/^(\d+)h$/.exec(sinceLabel)?.[1]);
   if (!hours) throw new Error("--since takes hours, for example 12h");
   const since = new Date(Date.now() - hours * 3600_000).toISOString().slice(0, 19);
+  const repoRoot = dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
+  let rawAgents;
   const reply = gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${STATUS_QUERY}`]);
   const data = {
     prs: gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefName,files"]),
@@ -329,14 +376,17 @@ async function main(argv = process.argv.slice(2)) {
     mergeQueue: mergeQueueEntries(reply),
     gateDescriptions: gateDescriptions(reply),
     // Lanes run in worktrees of the main checkout, so the root is the common git dir's parent, not --show-toplevel.
-    ...loadSessions(dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim())),
+    ...loadSessions(repoRoot, () => (rawAgents = runClaudeAgents())),
     ...loadLaneBranches(),
   };
+  try {
+    data.stalled = stalledLanes(JSON.parse(rawAgents), repoRoot);
+  } catch {}
   // A blocker missing from a truncated list would read as closed, so refuse rather than list a blocked issue as ready.
   if (data.issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
   const summary = summarize(data);
   if (argv.includes("--waiting")) {
-    console.log(renderWaiting(waitingApprovals(data.prs, summary)));
+    console.log(renderWaiting(waitingApprovals(data.prs, summary), stalledItems(summary)));
     return;
   }
   // Only a hint: when cleanup.mjs is not installed or its inputs cannot be read, /status stays silent rather than failing.

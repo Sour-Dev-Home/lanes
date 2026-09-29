@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
-import { approveLine, gateDescriptions, laneBranches, laneSessions, loadLaneBranches, loadSessions, mergeQueueEntries, render, renderWaiting, summarize, waitingApprovals } from "./status.mjs";
+import { approveLine, gateDescriptions, laneBranches, laneSessions, loadLaneBranches, loadSessions, mergeQueueEntries, render, renderWaiting, stalledItems, stalledLanes, summarize, waitingApprovals } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -796,4 +796,62 @@ test("approveLine lists at most 10 numbers and is empty for none", () => {
   assert.equal(numbers.length, 12);
   assert.equal(approveLine(numbers), "/approve 1 2 3 4 5 6 7 8 9 10");
   assert.equal(approveLine([]), "");
+});
+
+// Stalled: a busy session whose transcript has not been written for 30 minutes or more (#338).
+const NOW = 10_000_000_000;
+const ago = (min) => NOW - min * 60_000;
+const stalledOf = (agents, mtime) => stalledLanes(agents, ROOT, { home: "H", now: NOW, mtime });
+
+test("stalled: a fresh transcript carries no marker", () => {
+  assert.equal(stalledOf([agent("aaaa0001", wt("issue-10-x"))], () => ago(5)).size, 0);
+});
+
+test("stalled: a 45-minute-old transcript of a busy session is marked and shown in /status and --waiting", () => {
+  const agents = [agent("aaaa0001", wt("issue-10-x"))];
+  const stalled = stalledOf(agents, () => ago(45));
+  assert.deepEqual([...stalled], [[10, 45]]);
+  const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions: laneSessions(agents, ROOT), stalled });
+  assert.equal(s.inFlight[0].note, "stalled 45 min — session aaaa0001");
+  assert.equal(s.inFlight[0].session.stalledMin, 45);
+  assert.equal(renderWaiting([], stalledItems(s)), "#10 issue 10 — stalled 45 min: claude attach aaaa0001");
+  assert.match(renderWaiting([{ number: 7, title: "t", needs: "n", contract: "c", files: 1 }], stalledItems(s)), /Files changed: 1\n\n#10 .* stalled 45 min/);
+});
+
+test("stalled: a missing or unreadable transcript never fails and adds no marker", () => {
+  for (const code of ["ENOENT", "EACCES"]) {
+    const mtime = () => { throw Object.assign(new Error("x"), { code }); };
+    assert.equal(stalledOf([agent("aaaa0001", wt("issue-10-x"))], mtime).size, 0);
+  }
+  const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions: laneSessions([agent("aaaa0001", wt("issue-10-x"))], ROOT), stalled: new Map() });
+  assert.equal(s.inFlight[0].note, "session aaaa0001");
+});
+
+test("stalled: an idle session with an old transcript is not stalled", () => {
+  assert.equal(stalledOf([agent("aaaa0001", wt("issue-10-x"), { status: "idle", state: "blocked" })], () => ago(300)).size, 0);
+});
+
+test("edge: a session waiting on a prompt is not shown as stalled", () => {
+  const agents = [waitingAgent("aaaa0001", wt("issue-10-x"))];
+  const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions: laneSessions(agents, ROOT), stalled: new Map([[10, 90]]) });
+  assert.equal(s.waitingOnOwner[0].note, "waiting on a prompt: claude attach aaaa0001");
+  assert.equal(stalledItems(s).length, 0);
+});
+
+test("edge: stalled boundary, unsafe session id, and the fallback to the session's own folder", () => {
+  assert.equal(stalledOf([agent("aaaa0001", wt("issue-10-x"))], () => ago(30)).size, 1);
+  assert.equal(stalledOf([agent("aaaa0001", wt("issue-10-x"))], () => ago(29.9)).size, 0);
+  assert.equal(stalledOf([{ ...agent("aaaa0001", wt("issue-10-x")), sessionId: "../x" }], () => ago(90)).size, 0);
+  assert.equal(stalledOf([{ ...agent("aaaa0001", wt("issue-10-x")), sessionId: undefined }], () => ago(90)).size, 0);
+  const seen = [];
+  const mtime = (f) => {
+    seen.push(f);
+    if (seen.length === 1) throw Object.assign(new Error("x"), { code: "ENOENT" });
+    return ago(60);
+  };
+  assert.deepEqual([...stalledOf([agent("aaaa0001", wt("issue-10-x"))], mtime)], [[10, 60]]);
+  assert.equal(seen.length, 2);
+  assert.notEqual(seen[0], seen[1]);
+  assert.equal(stalledOf([agent("aaaa0001", wt("issue-10-x"))], () => Number.NaN).size, 0);
+  assert.equal(renderWaiting([], []), "none");
 });
