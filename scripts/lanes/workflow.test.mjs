@@ -809,16 +809,34 @@ test("health.md step 8 hands the same advisor spawn the week's merged files with
   assert.match(s, /not a second subagent/);
 });
 
-// #282: the worktree starts on its issue-N branch; EnterWorktree with `name` would make worktree-<name> and force a rename
-test("lane.md step 3 creates the worktree with git worktree add -b issue-$ARGUMENTS- and enters it by EnterWorktree path", () => {
-  const step3 = laneStep(3);
-  assert.ok(step3.includes("git worktree add -b issue-$ARGUMENTS-<short-slug> .claude/worktrees/issue-$ARGUMENTS-<short-slug> origin/main"));
-  assert.match(step3, /EnterWorktree tool's `path` parameter/);
-  assert.doesNotMatch(step3, /EnterWorktree tool when available/);
+// #354: entering by `path` prompts the owner and leaves the session cwd at the repo root; `name` does neither
+test("lane.md step 3 creates the worktree with the EnterWorktree tool's `name` (issue-$ARGUMENTS-<short-slug>)", () => {
+  const step3 = laneStep(3).replace(/\s+/g, " ");
+  assert.match(step3, /EnterWorktree tool's `name` parameter set to `issue-\$ARGUMENTS-<short-slug>`/);
 });
 
-test("lane.md step 3 never tells the lane to rename a branch", () => {
-  assert.doesNotMatch(laneStep(3), /git branch -m|rename/i);
+test("lane.md step 3 renames the branch with the single command git branch -m issue-$ARGUMENTS-<short-slug> before any other work", () => {
+  const step3 = laneStep(3).replace(/\s+/g, " ");
+  assert.equal(step3.split("git branch -m").length - 1, 1);
+  assert.ok(step3.includes("`git branch -m issue-$ARGUMENTS-<short-slug>`"));
+  assert.match(step3, /before any other work/);
+  assert.ok(step3.indexOf("git branch -m") < step3.indexOf("npm run setup"));
+});
+
+test("lane.md keeps git worktree add -b as the fallback outside Claude Code and never enters a worktree by path", () => {
+  const text = readFileSync(".claude/commands/lane.md", "utf8").replace(/\s+/g, " ");
+  const step3 = laneStep(3).replace(/\s+/g, " ");
+  assert.match(step3, /Outside Claude Code \(no EnterWorktree\)/);
+  assert.ok(step3.includes("git worktree add -b issue-$ARGUMENTS-<short-slug> .claude/worktrees/issue-$ARGUMENTS-<short-slug> origin/main"));
+  assert.doesNotMatch(text, /EnterWorktree[^.]*`path`/);
+  assert.doesNotMatch(text, /enter it with the EnterWorktree/);
+});
+
+test("lane.md step 3 runs npm run setup, then the POSIX tools check, in the worktree", () => {
+  const step3 = laneStep(3);
+  const setup = step3.indexOf("npm run setup");
+  const check = step3.indexOf("command -v head ls wc grep");
+  assert.ok(setup > -1 && check > setup);
 });
 
 // #327: guidance on how to read and wait, so lanes and reviewers take fewer turns

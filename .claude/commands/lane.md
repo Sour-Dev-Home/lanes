@@ -25,10 +25,13 @@ files with Edit, not Write.
 2. Run `node scripts/lanes/blockers.mjs $ARGUMENTS`, and stop and report its line on any non-zero exit (1: a
    blocker is open; 2: the blockers cannot be checked, which also stops the lane). A refusal in
    step 1 or 2 notifies `lanes #$ARGUMENTS: cannot start: <reason>`.
-3. `git fetch origin`, then create the worktree on branch `issue-$ARGUMENTS-<short-slug>` from `origin/main` with
-   `git worktree add -b issue-$ARGUMENTS-<short-slug> .claude/worktrees/issue-$ARGUMENTS-<short-slug> origin/main`,
-   and enter it with the EnterWorktree tool's `path` parameter when available (otherwise `cd` into it). Do not call
-   EnterWorktree with `name`: it creates a `worktree-<name>` branch. Run `npm run setup` in it.
+3. `git fetch origin`, then create and enter the worktree with the EnterWorktree tool's `name` parameter set to
+   `issue-$ARGUMENTS-<short-slug>` (this needs no permission prompt and makes the session's cwd the worktree). It
+   creates branch `worktree-issue-$ARGUMENTS-<short-slug>`, so rename it in one command, before any other work:
+   `git branch -m issue-$ARGUMENTS-<short-slug>`. Outside Claude Code (no EnterWorktree), create the worktree from
+   `origin/main` instead with
+   `git worktree add -b issue-$ARGUMENTS-<short-slug> .claude/worktrees/issue-$ARGUMENTS-<short-slug> origin/main`
+   and `cd` into it. Run `npm run setup` in it.
    Then run `command -v head ls wc grep` as its own command. If any is missing, write the PATH shape (the number of PATH
    entries and whether `/usr/bin` and `/mingw64/bin` are present, never the full PATH) to `.lanes/logs/path-$ARGUMENTS.txt`,
    notify `lanes #$ARGUMENTS: shell PATH broken`, report that line and stop. Never prefix commands with `export PATH=…` or
