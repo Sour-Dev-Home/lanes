@@ -1985,3 +1985,39 @@ test("#316 criterion 3: ordinary commands that launch nothing still get no decis
     assert.equal(decideFor(ps(c)), null, c);
   }
 });
+
+// --- #318: node -p/--print takes an optional script, so `node -p -e '<script>'` reads the word after -e ---------------
+
+const PRINT_SCRIPTS = [
+  [`import("./scripts/lanes/start.mjs")`, DENY_REASON],
+  [`import("./scripts/lanes/queue.mjs")`, QUEUE_DENY_REASON],
+  [`require("child_process").spawn("claude", ["${BG}"])`, BG_DENY_REASON],
+];
+
+test("#318 criteria 1-2: node -p -e, --print -e and -pe scripts are read as JavaScript, in Bash and PowerShell", () => {
+  for (const [js, reason] of PRINT_SCRIPTS) {
+    for (const c of [`node -p -e '${js}'`, `node --print -e '${js}'`, `node -pe '${js}'`]) {
+      assert.deepEqual(decideFor(bash(c), grant()), { decision: "deny", reason }, c);
+      assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+    }
+  }
+});
+
+test("#318 edge: -p before --eval, a flag between, a script starting with -, -p last, and harmless -p scripts", () => {
+  for (const [js, reason] of PRINT_SCRIPTS) {
+    for (const c of [
+      `node -p --eval '${js}'`,
+      `node -p --eval='${js}'`,
+      `node --print --input-type=commonjs -e '${js}'`,
+      `node -p '-${js}'`,
+      `node --print '!${js}'`,
+    ]) {
+      assert.deepEqual(decideFor(bash(c), grant()), { decision: "deny", reason }, c);
+      assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+    }
+  }
+  for (const c of ["node -p", "node --print", "node -p -e 'console.log(1)'", "node -p '1 + 1'", "node -p -e", "node --print -- x.js"]) {
+    assert.equal(decideFor(bash(c)), null, c);
+    assert.equal(decideFor(ps(c)), null, c);
+  }
+});

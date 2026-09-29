@@ -452,12 +452,16 @@ function programWords(words) {
 // A node -e script's text as names are looked for in it: quotes, `+` and whitespace dropped, so "st" + "art.mjs" reads whole.
 const jsNames = (js) => js.replace(new RegExp(`["'\`+\\s${LIT_TICK}]`, "g"), "");
 
-const EVAL_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-pe"]);
+const EVAL_FLAGS = new Set(["-e", "--eval", "-pe"]);
+// -p/--print take an optional script: in `node -p -e '<script>'` the script is the word after -e (#318).
+const PRINT_FLAGS = new Set(["-p", "--print"]);
 const EVAL_PROGRAM_RE = /^(node|nodejs|bun)(\.exe)?$/i;
 
 /**
  * The indexes of the words that `node -e`/`--eval`/`-p`/`--print` (or bun's) runs as JavaScript, with their text, when
  * node is the command word itself. Behind a wrapper (env, timeout, eval) they are read as shell text, as before #89.
+ * The word after -p/--print is read as a script even when it starts with `-` (`-require(…)` is JavaScript too), but
+ * such a word is also still read as a flag, so `-p -e '<script>'` reads the script after -e.
  */
 function evalScripts(words) {
   const scripts = new Map();
@@ -471,6 +475,9 @@ function evalScripts(words) {
     else if (EVAL_FLAGS.has(w)) {
       if (i + 1 < words.length) scripts.set(i + 1, words[i + 1]);
       i += 1;
+    } else if (PRINT_FLAGS.has(w)) {
+      if (i + 1 < words.length) scripts.set(i + 1, words[i + 1]);
+      if (!words[i + 1]?.startsWith("-")) i += 1;
     } else if (w.startsWith("-")) afterFlag = !w.includes("=");
     else if (afterFlag) afterFlag = false;
     else break;
