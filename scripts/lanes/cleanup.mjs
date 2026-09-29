@@ -116,15 +116,17 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
   // A `lane-<N>` session belongs to issue N's worktree whatever cwd it reports (a lane that entered its worktree by
   // path can still report the repository root, #341), so that worktree is never removed under it.
   for (const s of sessions) {
-    if (placed.has(s) || !laneNamed(s)) continue;
+    if (!laneNamed(s)) continue;
     const w = worktrees.find((x) => x.path && !x.main && Number(LANE_BRANCH.exec(x.branch ?? "")?.[1]) === s.issue);
-    if (!w) continue;
+    if (!w || sessionOf.get(w)?.includes(s)) continue;
+    // One already placed by its cwd in another issue's worktree stays there too, and is stopped only once.
     placed.add(s);
     if (!sessionOf.has(w)) sessionOf.set(w, []);
     sessionOf.get(w).push(s);
   }
 
   const plan = [];
+  const stopped = new Set();
   for (const w of worktrees) {
     const issue = Number(LANE_BRANCH.exec(w.branch ?? "")?.[1]);
     if (!issue) continue;
@@ -146,7 +148,11 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
     else if (lockAlive && !holder) plan.push({ ...entry, skip: `locked by running pid ${pid}` });
     else {
       const steps = [];
-      for (const s of sessionsHere) steps.push(...sessionSteps(s, s.alive === true || s === holder));
+      for (const s of sessionsHere) {
+        if (stopped.has(s)) continue;
+        stopped.add(s);
+        steps.push(...sessionSteps(s, s.alive === true || s === holder));
+      }
       // `claude rm` may already have removed the worktree, so these run only if their target is still there.
       if (w.path && pid) steps.push({ cmd: "git", args: ["worktree", "unlock", w.path], onlyIf: { path: w.path } });
       if (w.path) steps.push({ cmd: "git", args: ["worktree", "remove", w.path], onlyIf: { path: w.path } });

@@ -321,6 +321,12 @@ test("edge: an orphan lane folder is not removed while a lane-<N> session for it
   assert.match(plan.find((e) => e.orphan).skip, /session s338 is in it/);
 });
 
+test("edge: a working lane-<N> session whose cwd is inside another issue's worktree still blocks issue N's worktree (#341)", () => {
+  const named = { id: "s11", cwd: `${ROOT}/.claude/worktrees/issue-10-x`, issue: 11, status: "busy", state: "working", name: "lane-11" };
+  const plan = planCleanup({ worktrees: [main, wt("issue-10-x"), wt("issue-11-y")], sessions: [named], prs: [merged("issue-11-y")] });
+  assert.equal(plan.find((e) => e.issue === 11).skip, "session still working");
+});
+
 test("edge: empty inputs plan nothing", () => {
   assert.deepEqual(planCleanup({ worktrees: [], sessions: [], prs: [] }), []);
   assert.deepEqual(planCleanup({}), []);
