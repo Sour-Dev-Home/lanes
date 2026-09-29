@@ -21,8 +21,8 @@
           "title": { "description": "The issue title, control characters removed and cut to 200 characters. GitHub-sourced text: render it as text, never as HTML.", "type": "string", "maxLength": 200 },
           "tier": { "description": "The issue's tier label, or unknown when it has none.", "enum": ["skip", "quick", "full", "unknown"] },
           "stage": {
-            "description": "status.mjs's stage vocabulary for an issue with a pull request; ready, blocked, not-ready and already met for one without.",
-            "enum": ["ready", "blocked", "not-ready", "already met", "starting", "failing", "contract", "owner", "gate", "review", "queued"]
+            "description": "status.mjs's stage vocabulary for an issue with a pull request; ready, blocked, not-ready and already met for one without. running is an open issue with the lane:running label and no pull request yet (ADR 0014).",
+            "enum": ["ready", "blocked", "not-ready", "already met", "starting", "failing", "contract", "owner", "gate", "review", "queued", "running"]
           },
           "blockedBy": {
             "description": "What holds the issue or its pull request up. reason is the lanes/gate description verbatim for gate waits.",
@@ -86,6 +86,19 @@
         "properties": {
           "from": { "type": "integer", "minimum": 1 },
           "to": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "overlaps": {
+      "description": "Every pair of open ready or running issues whose Scope paths overlap (soft paths excluded), the check pick.mjs and status.mjs run (ADR 0014). a < b, so a pair appears once; contracts.test.mjs enforces the order, which a schema cannot. No file path is published. Optional until snapshot.mjs emits it.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["a", "b"],
+        "additionalProperties": false,
+        "properties": {
+          "a": { "description": "The lower issue number.", "type": "integer", "minimum": 1 },
+          "b": { "description": "The higher issue number.", "type": "integer", "minimum": 1 }
         }
       }
     }
