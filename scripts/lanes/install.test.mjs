@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { install, MANIFEST, publicFromArgs, repoIsPublic } from "./install.mjs";
@@ -259,4 +260,92 @@ test("edge: --public and --private on the command line decide before gh is asked
   assert.equal(publicFromArgs(["dir", "--private"], never), false);
   assert.throws(() => publicFromArgs(["dir", "--public", "--private"], never), /not both/);
   assert.equal(publicFromArgs(["dir"], () => '{"isPrivate":false}'), true);
+});
+
+// The lock (ADR 0016): lanes.lock.json, checked against contracts/lanes-lock.schema.json's own patterns.
+const lockSchema = JSON.parse(readFileSync("contracts/lanes-lock.schema.json", "utf8"));
+const sha = (f) => createHash("sha256").update(readFileSync(f)).digest("hex");
+const tmp = () => mkdtempSync(path.join(tmpdir(), "lanes-lock-"));
+function validLock(lock) {
+  const d = lockSchema.$defs;
+  assert.deepEqual(Object.keys(lock).sort(), ["files", "version"]);
+  assert.match(lock.version, new RegExp(d.semver.pattern));
+  for (const [p, h] of Object.entries(lock.files)) {
+    assert.match(p, new RegExp(d.repoPath.pattern), p);
+    assert.match(h, new RegExp(d.sha256.pattern), p);
+  }
+}
+const readLock = (target) => JSON.parse(readFileSync(path.join(target, "lanes.lock.json"), "utf8"));
+
+test("package.json has a semver version and CHANGELOG.md has an entry for it", () => {
+  const { version } = JSON.parse(readFileSync("package.json", "utf8"));
+  assert.match(version, /^\d+\.\d+\.\d+/);
+  assert.match(readFileSync("CHANGELOG.md", "utf8"), new RegExp(`^## \\[?${version.replaceAll(".", "\\.")}\\]?`, "m"));
+});
+
+test("a fresh install writes a lock with the package version and the sha256 of every file written", () => {
+  const target = tmp();
+  install(".", target, { isPublic: true });
+  const lock = readLock(target);
+  validLock(lock);
+  assert.equal(lock.version, JSON.parse(readFileSync("package.json", "utf8")).version);
+  assert.deepEqual(Object.keys(lock.files).sort(), MANIFEST.filter((f) => f !== "lanes.config.json").sort());
+  for (const [p, h] of Object.entries(lock.files)) assert.equal(h, sha(path.join(target, p)), p);
+});
+
+test("the lock never lists itself or lanes.config.json", () => {
+  const target = tmp();
+  install(".", target);
+  const files = Object.keys(readLock(target).files);
+  assert.ok(!files.includes("lanes.lock.json") && !files.includes("lanes.config.json"));
+});
+
+test("a pre-existing file is kept and not recorded in the lock", () => {
+  const target = tmp();
+  mkdirSync(path.join(target, "scripts/lanes"), { recursive: true });
+  writeFileSync(path.join(target, "scripts/lanes/gate.mjs"), "// mine\n");
+  install(".", target);
+  const lock = readLock(target);
+  validLock(lock);
+  assert.ok(!("scripts/lanes/gate.mjs" in lock.files));
+  assert.ok("scripts/lanes/lib.mjs" in lock.files);
+  assert.equal(readFileSync(path.join(target, "scripts/lanes/gate.mjs"), "utf8"), "// mine\n");
+});
+
+test("--force records the overwritten file with the shipped hash and rewrites the lock", () => {
+  const target = tmp();
+  mkdirSync(path.join(target, "scripts/lanes"), { recursive: true });
+  writeFileSync(path.join(target, "scripts/lanes/gate.mjs"), "// mine\n");
+  install(".", target);
+  install(".", target, { force: true });
+  const lock = readLock(target);
+  validLock(lock);
+  assert.equal(lock.files["scripts/lanes/gate.mjs"], sha("scripts/lanes/gate.mjs"));
+});
+
+test("edge: a second install without --force leaves an existing lock untouched", () => {
+  const target = tmp();
+  install(".", target);
+  const lockPath = path.join(target, "lanes.lock.json");
+  writeFileSync(lockPath, '{"version":"9.9.9","files":{}}\n');
+  install(".", target);
+  assert.equal(readFileSync(lockPath, "utf8"), '{"version":"9.9.9","files":{}}\n');
+});
+
+test("edge: a private install records the .disabled dashboard workflow under the path it wrote", () => {
+  const target = tmp();
+  install(".", target, { isPublic: false });
+  const { files } = readLock(target);
+  assert.equal(files[".github/workflows/dashboard.yml.disabled"], sha(".github/workflows/dashboard.yml"));
+  assert.ok(!(".github/workflows/dashboard.yml" in files));
+});
+
+test("edge: a lock with no files written (everything kept) is still valid", () => {
+  const target = tmp();
+  install(".", target);
+  rmSync(path.join(target, "lanes.lock.json"));
+  install(".", target);
+  const lock = readLock(target);
+  validLock(lock);
+  assert.deepEqual(lock.files, {});
 });
