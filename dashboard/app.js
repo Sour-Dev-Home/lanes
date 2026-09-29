@@ -291,6 +291,141 @@ function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
+// The metrics panel (lane-metrics.json, contracts/lane-metrics.schema.json). Medians, counts and rates only.
+var METRIC_BLOCKS = ["rework", "scopeDrift", "ownerTime", "concurrency", "friction", "delivery", "review"];
+
+function isObject(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+function validAggregate(a) {
+  return isObject(a) && METRIC_BLOCKS.every(function (k) {
+    return isObject(a[k]);
+  });
+}
+
+// A shape check only: enough that rendering cannot throw. Anything else hides the panel.
+function validMetrics(report) {
+  if (!validAggregate(report) || report.schemaVersion !== 1 || typeof report.public !== "boolean") return false;
+  if (!Array.isArray(report.review.tiers)) return false;
+  if (report.split === undefined) return true;
+  return Array.isArray(report.split) && report.split.every(function (s) {
+    return isObject(s) && typeof s.date === "string" && validAggregate(s.before) && validAggregate(s.after) && Array.isArray(s.before.review.tiers) && Array.isArray(s.after.review.tiers);
+  });
+}
+
+function num(v, digits) {
+  return typeof v === "number" && Number.isFinite(v) ? String(Math.round(v * Math.pow(10, digits)) / Math.pow(10, digits)) : "–";
+}
+
+function pct(v) {
+  return typeof v === "number" && Number.isFinite(v) ? Math.round(v * 100) + "%" : "–";
+}
+
+function med(stat, unit) {
+  var s = isObject(stat) ? stat : {};
+  var m = num(s.median, 1);
+  return (m === "–" ? m : m + unit) + " (n=" + num(s.count, 0) + ")";
+}
+
+// [label, value] rows for one aggregate block.
+function metricRows(a) {
+  return [
+    ["Lead time (median)", num(a.delivery.leadTimeHoursMedian, 1) === "–" ? "–" : num(a.delivery.leadTimeHoursMedian, 1) + " h"],
+    ["Rework: PRs with a gate failure", num(a.rework.prsWithGateFailure, 0) + " of " + num(a.rework.prs, 0)],
+    ["Rework: pushes after open", med(a.rework.pushesAfterOpen, "")],
+    ["Scope drift: PRs outside scope", pct(a.scopeDrift.driftRate) + " (" + num(a.scopeDrift.prsWithDrift, 0) + " of " + num(a.scopeDrift.prs, 0) + ")"],
+    ["Scope drift: files outside scope", med(a.scopeDrift.filesOutsideScope, "")],
+    ["Owner wait", med(a.ownerTime.waitHours, " h")],
+    ["Friction: PRs with a CI rerun", num(a.friction.prsWithRerun, 0) + " (" + num(a.friction.ciReruns, 0) + " reruns)"],
+    ["Friction: stuck queue", med(a.friction.stuckQueueMinutes, " min")]
+  ];
+}
+
+function table(doc, label, headers, rows) {
+  var t = el(doc, "table", "metrics-table");
+  t.setAttribute("aria-label", label);
+  var thead = el(doc, "thead");
+  var head = el(doc, "tr");
+  headers.forEach(function (h) {
+    var th = el(doc, "th", "", h);
+    th.setAttribute("scope", "col");
+    head.appendChild(th);
+  });
+  thead.appendChild(head);
+  t.appendChild(thead);
+  rows.forEach(function (r) {
+    var tr = el(doc, "tr");
+    r.forEach(function (cell, i) {
+      var c = el(doc, i ? "td" : "th", "", cell);
+      if (!i) c.setAttribute("scope", "row");
+      tr.appendChild(c);
+    });
+    t.appendChild(tr);
+  });
+  return t;
+}
+
+// Returns true when it rendered, false (and renders nothing) for a report that is not the contract's shape.
+function renderMetrics(doc, box, report) {
+  if (!validMetrics(report)) return false;
+  box.appendChild(el(doc, "p", "muted", "Last " + num((report.window || {}).days, 0) + " days: medians and counts, not causes."));
+  box.appendChild(table(doc, "Lane metrics", ["Metric", "Value"], metricRows(report)));
+  var tiers = report.review.tiers.filter(isObject);
+  if (tiers.length) {
+    box.appendChild(el(doc, "h3", "", "Per tier"));
+    box.appendChild(
+      table(
+        doc,
+        "Metrics per tier",
+        ["Tier", "Review runs", "Real findings", "Runs with none"],
+        tiers.map(function (t) {
+          return [t.tier, num(t.runs, 0), num(t.realFindings, 0), pct(t.noRealFindingShare)];
+        })
+      )
+    );
+  }
+  (report.split || []).forEach(function (s) {
+    box.appendChild(el(doc, "h3", "", "Before and after " + s.date));
+    var after = metricRows(s.after);
+    box.appendChild(
+      table(
+        doc,
+        "Before and after " + s.date,
+        ["Metric", "Before", "After"],
+        metricRows(s.before).map(function (r, i) {
+          return [r[0], r[1], after[i][1]];
+        })
+      )
+    );
+  });
+  return true;
+}
+
+// Fetches lane-metrics.json beside snapshot.json. Any failure hides the panel and touches nothing else.
+function loadMetrics(doc, fetcher) {
+  var section = doc.getElementById("metrics");
+  var box = doc.getElementById("metrics-body");
+  if (!section || !box) return Promise.resolve();
+  var hide = function () {
+    section.hidden = true;
+  };
+  return (fetcher || fetch)("lane-metrics.json", { cache: "no-store" })
+    .then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    })
+    .then(function (report) {
+      clear(box);
+      if (renderMetrics(doc, box, report)) section.hidden = false;
+      else hide();
+    })
+    .catch(function () {
+      clear(box);
+      hide();
+    });
+}
+
 function render(doc, snapshot, now) {
   var issues = snapshot.issues || [];
   doc.getElementById("generated").textContent = formatGenerated(snapshot.generatedAt);
@@ -323,6 +458,7 @@ function load(doc) {
     .catch(function (err) {
       doc.getElementById("generated").textContent = "Could not load snapshot.json: " + err.message;
     });
+  loadMetrics(doc);
 }
 
 if (typeof document !== "undefined") {
@@ -334,5 +470,5 @@ if (typeof document !== "undefined") {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { POLL_MS: POLL_MS, STALE_MS: STALE_MS, STAGES: STAGES, formatGenerated: formatGenerated, staleNote: staleNote, stageOf: stageOf, renderLegend: renderLegend, renderTask: renderTask, approveLine: approveLine, renderWaiting: renderWaiting, criticalPath: criticalPath, renderGraph: renderGraph };
+  module.exports = { POLL_MS: POLL_MS, STALE_MS: STALE_MS, STAGES: STAGES, formatGenerated: formatGenerated, staleNote: staleNote, stageOf: stageOf, renderLegend: renderLegend, renderTask: renderTask, approveLine: approveLine, renderWaiting: renderWaiting, criticalPath: criticalPath, renderGraph: renderGraph, validMetrics: validMetrics, renderMetrics: renderMetrics, loadMetrics: loadMetrics };
 }
