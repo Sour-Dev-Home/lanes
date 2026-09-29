@@ -64,7 +64,10 @@ export function ansiCString(cmd, i) {
   if (end >= cmd.length) throw new Error("unterminated $'");
   const inner = cmd.slice(i + 2, end);
   const bytes = [];
-  const text = (s) => bytes.push(...utf8.encode(s));
+  // Byte by byte: spreading a long run into push() would overflow the call's argument limit.
+  const text = (s) => {
+    for (const b of utf8.encode(s)) bytes.push(b);
+  };
   for (let j = 0; j < inner.length; ) {
     if (inner[j] !== "\\") {
       const next = inner.indexOf("\\", j);

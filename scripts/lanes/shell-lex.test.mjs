@@ -375,6 +375,8 @@ test("#310 edge: $'…' octal, control, \\e, \\U, a NUL cutting the rest, an unk
   assert.equal(read("$'a\\x00b'"), "a");
   assert.equal(read("$'\\q\\xg\\u'"), "\\q\\xg\\u");
   assert.equal(read("$'\\\"\\?\\a\\b\\f\\r\\v'"), "\"?\x07\b\f\r\v");
+  // A long string reads whole (no argument-limit overflow).
+  assert.equal(read(`$'${"a".repeat(500_000)}'`).length, 500_000);
   // Raw bytes read as UTF-8, as bash writes them out: \xe2\x80\xa8 is U+2028.
   assert.equal(read("$'\\xe2\\x80\\xa8'"), " ");
 });
@@ -386,6 +388,15 @@ test("#310 edge: an unterminated $'…' throws, and a private-use character it s
   const [seg] = lex("bash -c $'\\ue000(x)'");
   assert.equal(unmark(seg[2]).includes("$"), false);
   assert.equal(lex("echo $'\\ue024'", { bodies: true }).segments[0][1].includes(LIT_DOLLAR), false);
+});
+
+test("#310 test-hunter edge: a marker spelled as UTF-8 bytes, and a \\u / \\U out of range or a surrogate, read as U+FFFD", () => {
+  const read = (s) => ansiCString(s, 0)?.text;
+  // \xee\x80\x80 and \356\200\200 are U+E000 in UTF-8, a marker character: it must not survive.
+  assert.equal(read("$'\\xee\\x80\\x80'"), "�");
+  assert.equal(read("$'\\356\\200\\200'"), "�");
+  assert.equal(read("$'\\U00110000\\ud800'"), "��");
+  assert.equal(unmark(lex("bash -c $'\\xee\\x80\\x80(x)'")[0][2]).includes("$"), false);
 });
 
 test("#310 edge: $'…' inside double quotes is not ANSI-C, and a redirection target skips a $'…' holding \\'", () => {
