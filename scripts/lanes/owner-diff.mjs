@@ -128,7 +128,9 @@ function workflowChange(before, after) {
   if (error) return `${WORKFLOW} cannot be read safely: ${error}`;
   if (!topLevelAt) return `${WORKFLOW} additions do not start at the top level`;
   // A script reads these as comments and a module does not, so the parser check below could disagree with the file.
-  if (/<!--|-->/.test(after.slice(before.length))) return `${WORKFLOW} additions hold an HTML-like comment marker`;
+  // JavaScript's markers are exactly "<!--" and "-->" (Annex B), so plain substring checks, not an HTML filter.
+  const addedText = after.slice(before.length);
+  if (addedText.includes("<!--") || addedText.includes("-->")) return `${WORKFLOW} additions hold an HTML-like comment marker`;
   const added = tokens.filter((t) => t.start >= before.length && t.type !== "comment");
   if (added.length === 0) return `${WORKFLOW} adds no test block`;
   let i = 0;
