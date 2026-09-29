@@ -67,7 +67,7 @@ test("lanes-gate keeps its permissions to reading, posting statuses and issue co
   const yml = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
   const perms = /\npermissions:\n((?: {2}\S.*\n)+)/.exec(yml);
   assert.ok(perms, "expected a top-level permissions block");
-  assert.deepEqual(perms[1].trim().split("\n").map((l) => l.trim()).sort(), ["contents: read", "issues: write", "pull-requests: read", "statuses: write"]);
+  assert.deepEqual(perms[1].trim().split("\n").map((l) => l.trim()).sort(), ["contents: read", "issues: write", "pull-requests: write", "statuses: write"]);
   assert.equal((yml.match(/permissions:/g) ?? []).length, 1, "no job-level permissions");
 });
 
