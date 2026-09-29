@@ -255,6 +255,17 @@ test("edge: unterminated, unbalanced or ambiguous text needs the owner", () => {
   needsOwner(appended('test("a", () => {\n  const \\u0061 = 1;\n});\n'), /backslash/);
 });
 
+// Security review: `of` is a legal name in a module and `#return` a legal private name, so a `/` after either can be
+// a division. Read as a regex, it would hide "} ); code();" that JavaScript runs at import.
+test("edge: a '/' after `of` is ambiguous and needs the owner", () => {
+  needsOwner(appended('test("b", () => { const of = 10; const y = of / 2 ; } ); globalThis.evil = 1; // } );\n'), /ambiguous/);
+});
+
+test("edge: a '/' after a keyword used as a private or member name is a division", () => {
+  needsOwner(appended('test("b", () => { class A { #return = 1; m() { return this.#return / 2 ; } } ); globalThis.evil = 1; // } } );\n'));
+  additive(appended('test("b", () => {\n  class A { #return = 4; m() { return this.#return / 2; } }\n  const o = { typeof: 4 };\n  const n = o.typeof / 2;\n});\n'));
+});
+
 test("edge: a CRLF file with a block appended is additive", () => {
   const crlf = baseTests.replace(/\n/g, "\r\n");
   additive(workflow(crlf + newBlock.replace(/\n/g, "\r\n"), crlf));
@@ -263,4 +274,13 @@ test("edge: a CRLF file with a block appended is additive", () => {
 test("edge: the real workflow.test.mjs reads cleanly, so appending a block to it is additive", () => {
   const real = readFileSync(WORKFLOW, "utf8");
   additive(workflow(real + newBlock, real));
+});
+
+// test-hunter: a line comment ends at U+2028 in JavaScript, so code after it runs at import.
+test("edge: a line separator ends a comment, so code after it needs the owner", () => {
+  needsOwner(appended('test("b", () => { // a  }); globalThis.evil = 1; test("c", () => {\n});\n'));
+});
+
+test("edge: nested templates and a backslash-newline string continuation stay inside their block", () => {
+  additive(appended('test("b", () => {\n  const a = `${`}`}`;\n  const s = "x\\\ny";\n});\n'));
 });

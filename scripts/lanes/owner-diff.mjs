@@ -160,8 +160,10 @@ function testBlockEnd(tokens, i) {
 
 // ---- tokenizer ---------------------------------------------------------------------------------------------------
 
-// Words after which `/` starts a regular expression rather than a division.
-const REGEX_AFTER_WORD = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await"]);
+// Words after which `/` starts a regular expression rather than a division. All are reserved in a module, so none can
+// be a variable. `of` is not reserved (`const of = 1` is legal), so a `/` after it is ambiguous and refused.
+const REGEX_AFTER_WORD = new Set(["return", "typeof", "instanceof", "in", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await"]);
+const AMBIGUOUS_BEFORE_SLASH = new Set(["of"]);
 const RESERVED = new Set([...REGEX_AFTER_WORD, "async", "function", "class", "const", "let", "var", "this", "super", "import", "export", "if", "for", "while", "switch", "try", "catch", "finally", "with", "debugger", "default", "break", "continue", "extends", "true", "false", "null"]);
 const OPEN = { "(": ")", "[": "]", "{": "}" };
 const CLOSE = new Set([")", "]", "}"]);
@@ -250,8 +252,11 @@ export function scan(text, cut = -1) {
       if (why) return fail(why);
     } else if (c === "/") {
       const { t, before } = lastSignificant();
-      const afterWord = t?.type === "ident" && REGEX_AFTER_WORD.has(t.value) && !isPunct(before, ".") && !isPunct(before, "?.");
+      // A word after ".", "?." or "#" is a property or private name, never a keyword.
+      const isName = isPunct(before, ".") || isPunct(before, "?.") || isPunct(before, "#");
+      const afterWord = t?.type === "ident" && REGEX_AFTER_WORD.has(t.value) && !isName;
       if (t && (isPunct(t, ")") || isPunct(t, "}") || isPunct(t, "++") || isPunct(t, "--"))) return fail("ambiguous '/'");
+      if (t?.type === "ident" && AMBIGUOUS_BEFORE_SLASH.has(t.value) && !isName) return fail("ambiguous '/'");
       // After a value (a name, literal or closed "]") it divides; after an operator, "${" or nothing it starts a regex.
       const division =
         isPunct(t, "]") ||
