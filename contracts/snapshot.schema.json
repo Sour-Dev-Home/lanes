@@ -4,7 +4,7 @@
   "title": "Dashboard snapshot",
   "description": "The aggregates-only snapshot.json that scripts/lanes/snapshot.mjs builds and .github/workflows/dashboard.yml publishes to GitHub Pages (ADR 0012). Numbers, titles, stages, check and reviewer names and times only: no logins, emails, bodies or comments. contracts.test.mjs checks a built snapshot against this file field by field.",
   "type": "object",
-  "required": ["version", "generatedAt", "issues", "edges"],
+  "required": ["version", "generatedAt", "issues", "edges", "overlaps"],
   "additionalProperties": false,
   "properties": {
     "version": { "description": "The snapshot shape's version.", "const": 0 },
@@ -90,7 +90,7 @@
       }
     },
     "overlaps": {
-      "description": "Every pair of open ready or running issues whose Scope paths overlap (soft paths excluded), the check pick.mjs and status.mjs run (ADR 0014). a < b, so a pair appears once; contracts.test.mjs enforces the order, which a schema cannot. No file path is published. Optional until snapshot.mjs emits it.",
+      "description": "Every pair of open ready or running issues whose Scope paths overlap (soft paths excluded), the check pick.mjs and status.mjs run (ADR 0014). a < b, so a pair appears once; contracts.test.mjs enforces the order, which a schema cannot. No file path is published. Always present, an empty list when nothing overlaps.",
       "type": "array",
       "items": {
         "type": "object",

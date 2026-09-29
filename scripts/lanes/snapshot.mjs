@@ -7,6 +7,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GATE_CONTEXT, parseIssueForm, parseVerdictComment } from "./lib.mjs";
+import { issuePaths, pathsOverlap } from "./paths.mjs";
+import { RUNNING_LABEL, START_DEFAULTS, startConfig } from "./start.mjs";
 import { STATUS_QUERY, gateDescriptions, mergeQueueEntries, prStage } from "./status.mjs";
 
 const ISSUE_LIMIT = 1000;
@@ -83,7 +85,7 @@ function prBlockers(stage, note) {
  * `issues` every open issue with body and labels; `mergeQueue` and `gateDescriptions` are the outputs of status.mjs's
  * mergeQueueEntries and gateDescriptions.
  */
-export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), generatedAt }) {
+export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), softPaths = START_DEFAULTS.softPaths, generatedAt }) {
   const queuePosition = new Map(mergeQueue.map((e) => [e.number, e.position]));
   const prOf = new Map();
   // A fork's PR is stranger-controlled (its check names are whatever its workflow calls them, and "Fixes #N" is free),
@@ -112,14 +114,39 @@ export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: 
       const criteria = verdictCriteria(currentVerdicts(pr.comments, item.pr.headSha), item.pr.headSha);
       if (criteria.length) item.criteria = criteria;
     } else {
-      item.stage = labels.includes("needs-owner") ? "already met" : labels.includes("ready") ? (openBlockers.length ? "blocked" : "ready") : "not-ready";
+      item.stage = labels.includes("needs-owner")
+        ? "already met"
+        : labels.includes(RUNNING_LABEL)
+          ? "running"
+          : labels.includes("ready")
+            ? openBlockers.length
+              ? "blocked"
+              : "ready"
+            : "not-ready";
       item.blockedBy = openBlockers.map((b) => ({ kind: "issue", ref: `#${b}`, reason: `blocked by #${b}` }));
     }
     out.issues.push(item);
     for (const b of blockedByOf.get(issue.number)) if (listedNumbers.has(b)) out.edges.push({ from: b, to: issue.number });
   }
   out.edges.sort((a, b) => a.from - b.from || a.to - b.to);
+  out.overlaps = overlapPairs(issues, prOf, softPaths);
   return out;
+}
+
+/**
+ * Every pair (a < b) of open ready or running issues without a PR whose Scope paths overlap, soft paths left out, the
+ * check pick.mjs runs. Only the issue numbers leave here, never a path.
+ */
+function overlapPairs(issues, prOf, softPaths) {
+  const soft = softPaths.map((s) => (s instanceof RegExp ? s : new RegExp(s)));
+  const claims = issues
+    .filter((i) => !prOf.has(i.number) && i.labels?.some((l) => l.name === "ready" || l.name === RUNNING_LABEL))
+    .map((i) => ({ number: i.number, paths: issuePaths(parseIssueForm(i.body ?? "").fields).filter((p) => !soft.some((re) => re.test(p))) }))
+    .filter((c) => c.paths.length)
+    .sort((a, b) => a.number - b.number);
+  const pairs = [];
+  for (let i = 0; i < claims.length; i++) for (let j = i + 1; j < claims.length; j++) if (pathsOverlap(claims[i].paths, claims[j].paths)) pairs.push({ a: claims[i].number, b: claims[j].number });
+  return pairs;
 }
 
 function fileArg(argv, flag) {
@@ -165,11 +192,23 @@ export function writeSnapshot(snapshot, file) {
 
 const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 }));
 
+// start.softPaths of the lanes.config.json in the working directory; the defaults when there is none.
+function configuredSoftPaths() {
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync("lanes.config.json", "utf8"));
+  } catch (err) {
+    if (err.code === "ENOENT") return startConfig(undefined).softPaths;
+    throw err;
+  }
+  return startConfig(raw).softPaths;
+}
+
 function main(argv = process.argv.slice(2)) {
   const out = parseOutArg(argv);
   const from = parseFromArg(argv);
   if (from) {
-    const snapshot = buildSnapshot(parseInput(readFileSync(from, "utf8")));
+    const snapshot = buildSnapshot({ ...parseInput(readFileSync(from, "utf8")), softPaths: configuredSoftPaths() });
     if (out) writeSnapshot(snapshot, out);
     else console.log(JSON.stringify(snapshot, null, 2));
     return;
@@ -181,7 +220,7 @@ function main(argv = process.argv.slice(2)) {
   const prs = gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,isCrossRepository,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefOid,comments"]);
   // Same reason as issues: a PR cut off the list would leave its issue showing a wrong stage.
   if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to list every issue's real stage`);
-  const snapshot = buildSnapshot({ prs, issues, mergeQueue: mergeQueueEntries(reply), gateDescriptions: gateDescriptions(reply), generatedAt: new Date().toISOString() });
+  const snapshot = buildSnapshot({ prs, issues, mergeQueue: mergeQueueEntries(reply), gateDescriptions: gateDescriptions(reply), softPaths: configuredSoftPaths(), generatedAt: new Date().toISOString() });
   if (out) writeSnapshot(snapshot, out);
   else console.log(JSON.stringify(snapshot, null, 2));
 }
