@@ -37,8 +37,13 @@ You are the planner. The idea: $ARGUMENTS
    Interface contract naming a path that the contract issue's Scope contains. Do this before showing the draft, so `issue-contract.mjs` never has to refuse
    the issue after it is filed. With no `modules` key, skip this.
    Scope must also hold the files the criteria force a lane to change, or the lane edits files outside it (as #82 did).
-   With a module map, for each new file a draft names, check that the module map in `lanes.config.json` claims it, and
-   add the `lanes.config.json` entry to Scope when it doesn't. Always grep the existing tests for strings the draft
+   With a module map, when drafted issues name new files the map does not claim, the draft adds one "Module map:
+   register the plan's new files" issue (tier skip), placed right after the ADR issue (or first when there is none).
+   Its only criterion is adding each new file's prefix (for example `scripts/lanes/release.`) to the named module's
+   `paths` in `lanes.config.json`, with nothing else in the PR. Every issue that creates one of those files lists it
+   under "Blocked by" and puts `lanes.config.json` under Scope "Out" unless the issue changes other keys there. An
+   issue that changes anything else in `lanes.config.json` (a new config key, `paths.owner`, `start.*`) still adds
+   `lanes.config.json` to its Scope "In". Always grep the existing tests for strings the draft
    changes (a permission, env name, pinned text), and add each test that pins one to Scope.
    For each new issue, propose blockers among the open issues and PRs from step 2 whose Scope, Interface contract or
    goal overlaps it (for a PR, its changed files against the new issue's Scope). Put them in a separate table, one
@@ -47,7 +52,7 @@ You are the planner. The idea: $ARGUMENTS
    (step 2 lists only open ones; re-check any number you name). Follow each proposed link through the "Blocked by"
    lines of the issues it points to, and flag any link that would make a cycle instead of proposing it silently.
 6. Show the owner the draft: the ADR line, then the ADR's "Decisions for the owner" (if any), then one line per issue
-   (title, tier, blocked by), then the "Blocked by existing" table and the near-overlaps, then the path. Stop and
+   (title, tier, blocked by; the module-map issue is one of them), then the "Blocked by existing" table and the near-overlaps, then the path. Stop and
    wait. Do not create anything on GitHub until the owner approves, and apply every edit the owner asks for to the
    draft first.
 7. After approval, create the issues in order, the ADR issue first, with `gh issue create --title "<title>"

@@ -601,12 +601,33 @@ test("plan-issues.md step 5 checks open issues for the same files before draftin
 });
 
 // #203: Scope must include the files the criteria force a lane to change (#82 missed both kinds).
-test("plan-issues.md step 5 checks each new file against the module map and adds the lanes.config.json entry to Scope", () => {
-  const step = draftStep();
-  assert.match(step, /for each new file a draft names, check that the module map in `lanes\.config\.json` claims it/);
-  assert.match(step, /add the `lanes\.config\.json` entry to Scope when it doesn't/);
-  // edge: with no map there is nothing to claim a file, so the check is conditional on a map.
-  assert.match(step, /With a module map, for each new file a draft names/);
+test("plan-issues.md step 5 registers a plan's new files in one up-front module-map issue, blocks the creators on it and keeps lanes.config.json out of their Scope", () => {
+  const step = draftStep().replace(/\s+/g, " ");
+  assert.match(step, /adds one "Module map: register the plan's new files" issue \(tier skip\)/);
+  assert.match(step, /placed right after the ADR issue \(or first when there is none\)/);
+  assert.match(step, /Its only criterion is adding each new file's prefix \(for example `scripts\/lanes\/release\.`\) to the named module's `paths` in `lanes\.config\.json`, with nothing else in the PR/);
+  assert.match(step, /Every issue that creates one of those files lists it under "Blocked by"/);
+  assert.match(step, /puts `lanes\.config\.json` under Scope "Out" unless the issue changes other keys there/);
+  // the existing rule for other edits is unchanged.
+  assert.match(step, /changes anything else in `lanes\.config\.json` \(a new config key, `paths\.owner`, `start\.\*`\) still adds `lanes\.config\.json` to its Scope "In"/);
+});
+
+test("plan-issues.md step 5 applies the module-map issue rule only with a module map", () => {
+  const step = draftStep().replace(/\s+/g, " ");
+  // edge: with no map there is nothing to claim a file, so the rule is conditional on a map.
+  assert.match(step, /With a module map, when drafted issues name new files the map does not claim/);
+  assert.ok(
+    step.indexOf("Module map: register") > step.indexOf("With a module map, when drafted issues name new files"),
+    "the module-map issue rule must sit inside the with-a-map clause",
+  );
+});
+
+test("plan-issues.md step 6 lists the module-map issue in the draft's issue table", () => {
+  const md = planIssues();
+  const at = md.search(/^\d+\. Show the owner the draft/m);
+  assert.ok(at >= 0, "expected a `Show the owner the draft` step");
+  const step = md.slice(at).split(/^\d+\. /m)[1].replace(/\s+/g, " ");
+  assert.match(step, /the module-map issue is one of them/);
 });
 
 test("plan-issues.md step 5 greps the existing tests for strings the draft changes and adds each pinning test to Scope", () => {
