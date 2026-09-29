@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, UNRESOLVED_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, grantPath, grantRefusal, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, readGrant, runHook } from "./start-guard.mjs";
+import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, UNRESOLVED_DENY_REASON, WMI_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, grantPath, grantRefusal, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, readGrant, runHook } from "./start-guard.mjs";
 import { AUTOMATED_INPUT_PREFIXES } from "./approve-guard.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
@@ -1839,5 +1839,136 @@ test("#61 edge (security review round 4): a slash after a bound name, and a case
   ]) {
     assert.deepEqual(decideFor(bash(`node -e '${js}'`), grant()), { decision: "deny", reason: DENY_REASON }, js);
     assert.equal(decideFor(ps(`node -e '${js}'`), grant())?.decision, "deny", js);
+  }
+});
+
+// --- #316: WMI/CIM process creation, and a Bash call's pwsh -EncodedCommand ---------------------------------------
+
+test("#316 criterion 1: claude --bg through WMI or CIM process creation is denied, with each launcher", () => {
+  for (const c of [
+    `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='claude ${BG} x'}`,
+    `Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList 'claude ${BG} x'`,
+    `wmic process call create 'claude ${BG} x'`,
+  ]) {
+    assert.deepEqual(decideFor(ps(c), grant()), { decision: "deny", reason: BG_DENY_REASON }, c);
+    assert.equal(decideFor(bash(c), grant())?.decision, "deny", c);
+  }
+  // The same calls naming start.mjs were already denied.
+  for (const c of [
+    "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='node scripts/lanes/start.mjs 12 14'}",
+    "Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList 'node scripts/lanes/start.mjs 12 14'",
+    "wmic process call create 'node scripts/lanes/start.mjs 12 14'",
+  ]) {
+    assert.equal(decideFor(ps(c), grant())?.decision, "deny", c);
+  }
+});
+
+test("#316 criterion 2: a Bash call's pwsh -e, -enc or -EncodedCommand of a start.mjs or claude --bg command is denied", () => {
+  for (const flag of ["-e", "-enc", "-EncodedCommand"]) {
+    for (const shell of ["pwsh", "powershell", "powershell.exe"]) {
+      assert.deepEqual(decideFor(bash(`${shell} ${flag} ${encodedPs(`claude ${BG} x`)}`), grant()), { decision: "deny", reason: BG_DENY_REASON }, `${shell} ${flag} bg`);
+      // Even the plain start.mjs run with a grant: only the plain command itself is ever allowed.
+      assert.deepEqual(decideFor(bash(`${shell} ${flag} ${encodedPs(START)}`), grant()), { decision: "deny", reason: DENY_REASON }, `${shell} ${flag} start`);
+    }
+  }
+  // Through the PowerShell tool it was already denied.
+  assert.equal(decideFor(ps(`pwsh -e ${encodedPs(`claude ${BG} x`)}`), grant())?.decision, "deny");
+});
+
+test("#316 edge: other WMI/CIM forms, a Windows path and a Bash call's powershell -Command are denied", () => {
+  for (const c of [
+    `icim Win32_Process Create @{CommandLine='claude ${BG} x'}`,
+    `Get-CimClass Win32_Process | Invoke-CimMethod -MethodName Create -Arguments @{CommandLine='claude ${BG} x'}`,
+    `$a = @{CommandLine='claude ${BG} x'}; Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments $a`,
+    `([wmiclass]'Win32_Process').Create('claude ${BG} x')`,
+    `Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList 'C:\\tools\\claude.exe ${BG} x'`,
+    `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='C:\\tools\\claude.exe ${BG} x'}`,
+  ]) {
+    assert.deepEqual(decideFor(ps(c), grant()), { decision: "deny", reason: BG_DENY_REASON }, c);
+  }
+  assert.equal(decideFor(bash(`powershell -Command "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='claude ${BG} x'}"`))?.decision, "deny");
+});
+
+test("#316 edge: a WMI/CIM process creation whose command line is built at run time is denied", () => {
+  for (const c of [
+    "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$env:C}",
+    "Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $env:C",
+    "Invoke-CimMethod -ClassName ('Win32'+'_Process') -MethodName Create -Arguments @{CommandLine=$c}",
+    "([wmiclass]'Win32_Process').Create($env:C)",
+    "wmic process call create $env:C",
+    // A hashtable reads as run time even when literal: no session needs WMI to start a program.
+    "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='notepad'}",
+  ]) {
+    assert.deepEqual(decideFor(ps(c)), { decision: "deny", reason: WMI_DENY_REASON }, c);
+  }
+  for (const c of ['wmic process call create "$C"', "wmic /node:host process call create $C"]) assert.deepEqual(decideFor(bash(c)), { decision: "deny", reason: WMI_DENY_REASON }, c);
+});
+
+test("#316 edge: reading processes, a message naming WMI, a .claude directory and a literal wmic run get no decision", () => {
+  for (const c of [
+    `Get-CimInstance Win32_Process | Where-Object CommandLine -like '*${BG}*'`,
+    "Invoke-CimMethod -ClassName Win32_Process -MethodName GetOwner",
+    "wmic process call create notepad",
+  ]) {
+    assert.equal(decideFor(ps(c)), null, c);
+  }
+  for (const c of [
+    "gh pr create --title 'Deny Invoke-CimMethod Win32_Process Create' --body-file x.md",
+    `grep -rn -- ${BG} ~/.claude`,
+    `rg ${BG} .claude`,
+    "wmic process call create notepad",
+  ]) {
+    assert.equal(decideFor(bash(c)), null, c);
+  }
+});
+
+test("#316 edge: every -EncodedCommand spelling and wrapper is decoded; other flags and harmless scripts are not denied", () => {
+  const bg = encodedPs(`claude ${BG} x`);
+  for (const c of [
+    `pwsh -ec ${bg}`,
+    `pwsh -en ${bg}`,
+    `pwsh -E ${bg}`,
+    `pwsh --encodedcommand ${bg}`,
+    `powershell.exe /e ${bg}`,
+    `pwsh -EncodedCommand:${bg}`,
+    `pwsh -NoProfile -NonInteractive -e ${bg}`,
+    `/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -e ${bg}`,
+    `env pwsh -e ${bg}`,
+    `bash -c "pwsh -e ${bg}"`,
+    `find . -name x -exec pwsh -e ${bg} ';'`,
+    `E=${bg}; pwsh -e $E`,
+    `pwsh -e ${encodedPs(`pwsh -e ${bg}`)}`,
+    `pwsh -e ${encodedPs(`bash -c 'claude ${BG} x'`)}`,
+  ]) {
+    assert.deepEqual(decideFor(bash(c), grant()), { decision: "deny", reason: BG_DENY_REASON }, c);
+  }
+  assert.deepEqual(decideFor(bash(`pwsh -e ${encodedPs("node scripts/lanes/queue.mjs")}`)), { decision: "deny", reason: QUEUE_DENY_REASON });
+  // A script known only at run time could be anything.
+  for (const c of ["pwsh -e $X", 'pwsh -e "$(cat enc.txt)"']) assert.deepEqual(decideFor(bash(c)), { decision: "deny", reason: UNRESOLVED_DENY_REASON }, c);
+  // Unreadable decoded PowerShell fails closed on the names, as the PowerShell tool does.
+  assert.equal(decideFor(bash(`pwsh -e ${encodedPs("node 'scripts/lanes/start.mjs 5")}`))?.decision, "deny");
+  for (const c of [
+    `pwsh -e ${encodedPs("Get-Date")}`,
+    "pwsh -e not_base64!",
+    "pwsh -e",
+    "pwsh -ExecutionPolicy Bypass -File build.ps1",
+    "pwsh -ep Bypass -NoProfile -Command Get-Date",
+    `echo -e ${bg}`,
+    `node -e ${encodedPs("x")}`,
+  ]) {
+    assert.equal(decideFor(bash(c), grant()), null, c);
+  }
+});
+
+test("#316 edge: -EncodedCommand scripts nested past the depth limit are denied", () => {
+  let script = "Get-Date";
+  for (let i = 0; i < 6; i += 1) script = `pwsh -e ${encodedPs(script)}`;
+  assert.equal(decideFor(bash(script))?.decision, "deny");
+});
+
+test("#316 criterion 3: ordinary commands that launch nothing still get no decision", () => {
+  for (const c of ['git commit -m "add sal column"', "gh pr merge 72 --auto"]) {
+    assert.equal(decideFor(bash(c)), null, c);
+    assert.equal(decideFor(ps(c)), null, c);
   }
 });
