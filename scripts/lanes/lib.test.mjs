@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adrGoverns, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { adrGoverns, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -869,3 +869,81 @@ test("edge: an additive diff with an unfixed important finding still waits on th
   const verdicts = praised(pinReviewers).map((v, i) => (i === 0 ? { ...v, verdict: { verdict: "success", findings: [{ severity: "important", fixed: false }] } } : v));
   assert.match(gateDecision(pinPr({ ownerDiff: "additive", verdicts })).description, /^waiting on owner \(\/approve\) \(unfixed important finding from /);
 });
+
+// ---- #462: reviewers from config (ADR 0018) ----
+
+const modConfig = compileConfig({
+  requiredChecks: ["verify"],
+  paths: { skip: ["^docs/"], contract: ["^contracts/"], sensitive: ["^scripts/lanes/"], ui: [] },
+  modules: {
+    entries: [
+      { id: "perf", paths: ["src/hot/"], imports: [], reviewers: ["test-hunter-extra"] },
+      { id: "none", paths: ["src/plain/"], imports: [] },
+      { id: "dup", paths: ["src/dup/"], imports: [], reviewers: ["test-hunter"] },
+    ],
+  },
+});
+const noCls = { skipOnly: false, contract: false, sensitive: false, ui: false, adr: [], architecture: false };
+
+// modules.mjs checks each configured reviewer's .claude/agents/<name>.md against the cwd, so run in a temp repo.
+function inAgentRepo(fn) {
+  const dir = mkdtempSync(join(tmpdir(), "lanes-462-"));
+  const prev = process.cwd();
+  try {
+    mkdirSync(join(dir, ".claude", "agents"), { recursive: true });
+    for (const n of ["test-hunter-extra", "test-hunter"]) writeFileSync(join(dir, ".claude", "agents", `${n}.md`), `---\nname: ${n}\n---\n`);
+    process.chdir(dir);
+    fn();
+  } finally {
+    process.chdir(prev);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("requiredReviewers adds each changed module's configured reviewers after the built-in ones, at quick and full", () => inAgentRepo(() => {
+  for (const tier of ["quick", "full"]) {
+    assert.deepEqual(requiredReviewers(tier, noCls, ["src/hot/a.js"], modConfig.modules), ["test-hunter", "test-hunter-extra"]);
+  }
+  assert.deepEqual(requiredReviewers("skip", noCls, ["src/hot/a.js"], modConfig.modules), []);
+  assert.deepEqual(requiredReviewers("full", noCls, ["src/other.js"], modConfig.modules), ["test-hunter"]);
+}));
+
+test("a config can never remove a built-in reviewer", () => inAgentRepo(() => {
+  const cls = { ...noCls, sensitive: true, contract: true };
+  for (const f of ["src/plain/x.js", "src/dup/x.js"]) {
+    const got = requiredReviewers("full", cls, [f], modConfig.modules);
+    assert.deepEqual(got, ["test-hunter", "security-reviewer", "architecture-advisor"], f);
+  }
+}));
+
+test("edge: requiredReviewers without files or modules is the built-in list", () => {
+  assert.deepEqual(requiredReviewers("full", noCls), ["test-hunter"]);
+  assert.deepEqual(requiredReviewers("full", noCls, ["src/hot/a.js"], undefined), ["test-hunter"]);
+});
+
+test("reviewerNames is the built-in four plus configured names, never owner", () => {
+  assert.deepEqual(reviewerNames(modConfig), [...REVIEWERS, "test-hunter-extra"]);
+  assert.deepEqual(reviewerNames(config), REVIEWERS);
+  assert.deepEqual(reviewerNames(undefined), REVIEWERS);
+  const withOwner = { modules: { entries: [{ id: "x", paths: ["x/"], imports: [], reviewers: ["owner"] }] } };
+  assert.ok(!reviewerNames(withOwner).includes("owner"));
+});
+
+test("parseVerdictComment accepts exactly the names it is given", () => {
+  const body = (r) => `<!-- lanes:verdict ${r} -->\n\`\`\`json\n{"reviewer":"${r}","verdict":"success"}\n\`\`\``;
+  const names = reviewerNames(modConfig);
+  assert.equal(parseVerdictComment(body("test-hunter-extra"), names)?.reviewer, "test-hunter-extra");
+  assert.equal(parseVerdictComment(body("test-hunter-extra")), null);
+  assert.equal(parseVerdictComment(body("owner"), names), null);
+  assert.equal(parseVerdictComment(body("test-hunter"), names)?.reviewer, "test-hunter");
+});
+
+test("REUSABLE_REVIEWERS stays the built-in three", () => inAgentRepo(() => {
+  assert.deepEqual([...REUSABLE_REVIEWERS], ["test-hunter", "security-reviewer", "architecture-advisor"]);
+  assert.ok(!reusableReviewers({ issueLabels: ["tier:full"], files: ["src/hot/a.js"], statuses: [], config: modConfig }).includes("test-hunter-extra"));
+}));
+
+test("reviewersReport prints a configured reviewer for a diff in its module", () => inAgentRepo(() => {
+  assert.equal(reviewersReport("full", ["src/hot/a.js"], modConfig), "test-hunter\ntest-hunter-extra");
+  assert.equal(reviewersReport("full", ["src/plain/a.js"], modConfig), "test-hunter");
+}));

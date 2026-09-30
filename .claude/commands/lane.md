@@ -77,7 +77,9 @@ files with Edit, not Write.
    "critical"|"important"|"minor", "file", "line", "summary", "fixed" }] }`. The test-hunter and ui-reviewer assess
    every criterion by its 1-based index. When `reviewers.mjs` also prints `ADRs: NNNN, ...`, the diff touches files
    those accepted ADRs govern: give the architecture-advisor each one's path (`docs/adr/NNNN-*.md`) to review
-   against. Run each reviewer in the foreground, so its result carries its figures. When a reviewer's verdict
+   against. A name `reviewers.mjs` prints that is not one of the four is a configured reviewer (ADR 0018): spawn it
+   by that agent name (`.claude/agents/<name>.md`) with the issue's criteria and no vendored checklist, and require
+   the same JSON verdict. Run each reviewer in the foreground, so its result carries its figures. When a reviewer's verdict
    arrives, post it in that same turn, and never end a turn to wait for a completion notice: the notice does not wake
    an idle session (#465), so a lane that waits for it hangs. After each reviewer subagent returns, add `"metrics": { "tier", "minutes", "tokens" }` to its verdict,
    only from figures already in hand: taking tokens and duration from the Agent tool's result (rounded to 0.1 minute), and the tier from the issue; for
