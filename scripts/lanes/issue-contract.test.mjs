@@ -1,4 +1,5 @@
 // scripts/lanes/issue-contract.test.mjs
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { blockerDiff, issuePlan, main, MARKER, MAX_BLOCKERS } from "./issue-contract.mjs";
@@ -378,4 +379,45 @@ test("edge: each bad validate: form is reported with its criterion index; a plai
   assert.match(p.comment, /criterion 2: `validate: attempts must be 1 to 10/);
   assert.match(p.comment, /criterion 3: `validate: regex needs a capture group/);
   assert.doesNotMatch(p.comment, /criterion 4/);
+});
+
+// #453: a tier skip whose Scope names a path the gate would not treat as skip-only is refused at filing time.
+const skipConfig = JSON.parse(readFileSync("lanes.config.json", "utf8"));
+const skipBody = (scope) => body.replace("\ns\n", `\n${scope}\n`).replace(/full\n$/, "skip\n");
+
+test("a skip issue naming a sensitive path (CLAUDE.md) is not ready and the comment names the path", () => {
+  const p = issuePlan(skipBody("In scope: CLAUDE.md. Out of scope: nothing."), ["ready"], true, skipConfig);
+  assert.deepEqual(p.add, []);
+  assert.deepEqual(p.remove, ["ready"]);
+  assert.match(p.comment, /`CLAUDE\.md`/);
+  assert.match(p.comment, /quick or full/);
+});
+
+test("a skip issue naming an owner-only non-skip path is not ready", () => {
+  const p = issuePlan(skipBody("In scope: scripts/lanes/gate.mjs."), [], true, skipConfig);
+  assert.deepEqual(p.add, []);
+  assert.match(p.comment, /scripts\/lanes\/gate\.mjs/);
+});
+
+test("a skip issue naming only skip-only paths still gets ready", () => {
+  const p = issuePlan(skipBody("In scope: docs/history/x.md, docs/adr/0001-a.md. Out of scope: scripts/lanes/lib.mjs."), [], true, skipConfig);
+  assert.deepEqual(p.add, ["tier:skip", "ready"]);
+});
+
+test("edge: without a config a skip issue is not checked; a quick issue is never checked", () => {
+  assert.deepEqual(issuePlan(skipBody("In scope: CLAUDE.md."), [], true).add, ["tier:skip", "ready"]);
+  const quick = skipBody("In scope: CLAUDE.md.").replace(/skip\n$/, "quick\n");
+  assert.deepEqual(issuePlan(quick, [], true, skipConfig).add, ["tier:quick", "ready"]);
+});
+
+test("edge: a backtick in a scope token cannot break out of the code span in the comment", () => {
+  const p = issuePlan(skipBody("In scope: `a`b`c/x.js` and [t](//h/x)/y.js"), [], true, skipConfig);
+  assert.deepEqual(p.add, []);
+  const listed = p.comment.split("\n").filter((l) => l.startsWith("- "));
+  assert.ok(listed.length > 0);
+  for (const l of listed) assert.match(l, /^- `[\w./\\-]+`$/);
+});
+
+test("edge: a skip issue with no path in its Scope is not refused", () => {
+  assert.deepEqual(issuePlan(skipBody("nothing to change"), [], true, skipConfig).add, ["tier:skip", "ready"]);
 });

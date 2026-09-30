@@ -3,19 +3,30 @@
 // Run by .github/workflows/issue-contract.yml. Inputs: REPO, ISSUE_NUMBER, ISSUE_BODY, ISSUE_LABELS_JSON, ISSUE_AUTHOR,
 // GH_TOKEN.
 import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { authorCanWrite, parseIssueForm, parseSections, parseValidation, ValidationParseError } from "./lib.mjs";
+import { authorCanWrite, classifyFiles, compileConfig, interfacePaths, parseIssueForm, parseSections, parseValidation, ValidationParseError } from "./lib.mjs";
 
 const MAX_VALIDATE_LINE = 500;
 
 export const MARKER = "<!-- lanes:issue-contract -->";
 
 /**
+ * The paths a Scope's "In scope" part names that are not skip-only by the gate's rule (#453), so a tier skip that the
+ * gate would fail is caught when the issue is filed. Anything from "Out of scope" or "Out:" on is not claimed.
+ */
+function nonSkipScopePaths(scope, config) {
+  const inPart = scope.split(/(?<![\w-])Out(?: of scope)?:/i)[0].replace(/^[\s\S]*?(?<![\w-])In(?: scope)?:/i, "");
+  return interfacePaths(inPart).filter((p) => !classifyFiles([p], config).skipOnly);
+}
+
+/**
  * @param {string} body the issue body
  * @param {string[]} labels the issue's current labels
  * @param {boolean} [canWrite] whether the issue author has write, maintain or admin permission; only true trusts
+ * @param {object} [config] lanes.config.json's parsed content; without it a tier skip is not checked against the Scope
  */
-export function issuePlan(body, labels, canWrite) {
+export function issuePlan(body, labels, canWrite, config) {
   if (!/^### Goal\s*$/m.test(String(body ?? "").replace(/\r\n/g, "\n"))) return { isTask: false, add: [], remove: [], comment: "" };
   const r = parseIssueForm(body);
   // ADR 0012: a `validate:` criterion that will not parse would only fail once a lane is running it.
@@ -40,6 +51,17 @@ export function issuePlan(body, labels, canWrite) {
       remove: hadReady ? ["ready"] : [],
       comment: `${MARKER}\n**Task contract incomplete**, so this issue is not ready:\n${r.errors.map((e) => `- ${e}`).join("\n")}`,
     };
+  }
+  if (r.fields.tier === "skip" && config) {
+    const bad = nonSkipScopePaths(r.fields.scope, compileConfig(config));
+    if (bad.length) {
+      return {
+        isTask: true,
+        add: [],
+        remove: hadReady ? ["ready"] : [],
+        comment: `${MARKER}\n**Tier skip does not fit this Scope**, so this issue is not ready: the gate fails a skip PR that changes a path outside the skip paths, or one that is sensitive. Set the tier to quick or full for:\n${bad.map((p) => `- \`${p}\``).join("\n")}`,
+      };
+    }
   }
   const want = `tier:${r.fields.tier}`;
   const laneFiled = labels.includes("lane-filed");
@@ -176,7 +198,7 @@ export function main(env = process.env, run = gh) {
   // Only a task form needs the permission lookup; a plain issue is left alone without an extra API call.
   if (!issuePlan(env.ISSUE_BODY, labels, false).isTask) return;
   const canWrite = authorCanWrite((args) => run(["api", ...args]), repo, env.ISSUE_AUTHOR);
-  const plan = issuePlan(env.ISSUE_BODY, labels, canWrite);
+  const plan = issuePlan(env.ISSUE_BODY, labels, canWrite, existsSync("lanes.config.json") ? JSON.parse(readFileSync("lanes.config.json", "utf8")) : undefined);
   const edit = ["issue", "edit", n, "-R", repo];
   if (plan.add.length) edit.push("--add-label", plan.add.join(","));
   if (plan.remove.length) edit.push("--remove-label", plan.remove.join(","));
