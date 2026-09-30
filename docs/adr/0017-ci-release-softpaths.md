@@ -65,7 +65,17 @@ GitHub identity (ADR 0004/0007), `queue.mjs` never runs inside Claude or on a sc
      that itself pushes a tag: the guards read the names a command runs, not what a program does inside. `release.yml`
      still checks any pushed tag against `main`, `package.json` and `CHANGELOG.md`.
 
-   A subcommand word in argument position is no program (#441): the approve guard reads `watch`, `ssh`, `script` and the
+   What the tag rule also reads since #477 (closing the minor evasions #468's reviews found, #485): an unquoted `$(…)`
+  counts as one run-time word of its statement instead of ending it (`git push $(echo o) --tags`,
+  `gh api $(cat e) -f ref=refs/tags/v1`), the substitution's own commands still being read as before; a shell's `-c` text
+  is read as commands, and xargs's replace string in it, quoted or not, is run-time input (`xargs -I{} sh -c 'git tag
+  {}'`); an ssh remote command known only at run time is shell text of unknown content, denied by both guards like
+  `watch "$C"`; `env -S` and `--split-string` text is split into the words it stands for, and an `env` operand built at
+  run time (`env $(echo GIT_CONFIG_KEY_0=alias.x) git push`) may be a config assignment; and `git fetch --refmap=` into
+  `refs/tags/*` (or a run-time refmap) and `git fetch --stdin` write tags. `gh api graphql -f query=$Q` stays outside the
+  rule (the `createRef` note above): a guard cannot read what a query does.
+
+  A subcommand word in argument position is no program (#441): the approve guard reads `watch`, `ssh`, `script` and the
    other shell-text commands as a program wherever they stand, except as an argument of a program whose words are
    subcommands that never launch a program by name (`gh`, `systemctl`, `terraform` and the like: `gh run watch 123` is
    not one); after `{`, `!`, `then`, `env`, `xargs`, or a launcher such as `npx`, `npm exec` or `docker run`, they still

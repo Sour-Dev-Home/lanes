@@ -2600,3 +2600,45 @@ test("#468 criterion 3: a command with 20000 arguments is read in under a second
   assert.deepEqual(decideFor(bash(`node a.js ${args}; node scripts/lanes/start.mjs 1`)), deny(DENY_REASON));
   assert.ok(Date.now() - start < 1000, `took ${Date.now() - start} ms`);
 });
+
+// --- #477: $(…) and the other run-time tag paths, the WMI check's text, and a quote inside a quoted issue title ---
+
+test("#477 criteria 5-8: a $(…), xargs -I{} sh -c, env -S, env operand, --refmap and --stdin tag path is denied", () => {
+  for (const cmd of [
+    "git push $(echo o) --tags", "gh api $(cat e) -f ref=refs/tags/v1", "echo v1 | xargs -I{} bash -c 'git tag {}'", "echo v1 | xargs -I{} sh -c 'git tag {}'",
+    "env -S 'GIT_CONFIG_KEY_0=$K git push'", "env $(echo GIT_CONFIG_KEY_0=alias.x) git push", "git fetch --refmap=refs/tags/*:refs/tags/* origin", "git fetch --refmap='+refs/heads/*:refs/tags/*' origin",
+    "git fetch --stdin", "bash -c 'git push $(echo o) --tags'",
+  ]) {
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(TAG_DENY_REASON), cmd);
+  }
+  for (const cmd of ["git push $(echo o) --tags", "gh api $(cat e) -f ref=refs/tags/v1", "git fetch --stdin"]) assert.deepEqual(decideFor(ps(cmd)), deny(TAG_DENY_REASON), `${cmd} (PowerShell)`);
+  assert.equal(decideFor(bash("ssh host $CMD"), grant())?.decision, "deny");
+  for (const cmd of ["git push $(echo o) origin main", "echo $(git tag -l)", "git fetch --refmap= origin main", "git fetch origin main"]) assert.equal(decideFor(bash(cmd)), null, cmd);
+});
+
+test("#477 criteria 2-4: text that says create and names a path glob is no WMI process creation, and a real one is denied", () => {
+  const text = "cat > f <<'EOF'\nfix the issue-477-* worktree, created when it was missing\nEOF\ngh issue create --title x --body-file f";
+  assert.equal(decideFor(bash(text)), null);
+  assert.equal(decideFor(bash("ls issue-477-* && gh issue create --title x")), null);
+  for (const cmd of ["wmic process call create $C", "(Get-WmiObject -List Win32_Pro*).Create($c)", "Invoke-CimMethod -ClassName ('Win32'+'_Process') -MethodName Create -Arguments @{CommandLine=$c}"]) {
+    assert.equal(decideFor(bash(cmd))?.decision, "deny", cmd);
+  }
+  assert.deepEqual(decideFor(ps("Invoke-CimMethod -ClassName ('Win32'+'_Process') -MethodName Create -Arguments @{CommandLine=$c}")), deny(WMI_DENY_REASON));
+});
+
+test("#477 criterion 10: a gh issue create title with an apostrophe inside double quotes is allowed; an unterminated quote still fails closed", () => {
+  const title = `gh issue create --title "start.mjs: launch ... with only the App's credentials, fail closed" --body-file f --label model:opus`;
+  assert.equal(decideFor(bash(title)), null);
+  assert.equal(decideFor(bash(title.replace("--title", "-t"))), null);
+  assert.equal(decideFor(bash(`gh pr comment 5 --body "start.mjs isn't run by this" `)), null);
+  assert.deepEqual(decideFor(bash(`bash -c "start.mjs 12 'x"`)), deny(PARSE_DENY_REASON));
+  assert.deepEqual(decideFor(bash(`gh issue create --title "start.mjs: the App's" --body "node scripts/lanes/start.mjs 12"`)), deny(DENY_REASON));
+  assert.deepEqual(decideFor(bash(`gh issue create --title "it's" && echo "start.mjs 'x"`)), deny(PARSE_DENY_REASON));
+  // A live substitution in the same word still runs, so an unlexable word holding one is not skipped (architecture review).
+  for (const cmd of [
+    `gh issue create --title "the App's $(node scripts/lanes/start.mjs 7)" --body-file f`, "gh issue create --title \"the App's `node scripts/lanes/start.mjs 7`\" --body-file f",
+    `gh pr comment 5 --body "it's $(claude --bg x)"`,
+  ]) {
+    assert.equal(decideFor(bash(cmd), grant())?.decision, "deny", cmd);
+  }
+});

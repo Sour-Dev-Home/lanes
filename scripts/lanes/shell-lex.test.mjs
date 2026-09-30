@@ -171,9 +171,9 @@ test("#351 criterion 1: start-guard.mjs has no lexer of its own and calls shell-
   const text = source("start-guard.mjs");
   assert.doesNotMatch(text, /function lex\b/);
   assert.match(text, /import \{[^}]*\blex\b[^}]*\} from "\.\/shell-lex\.mjs"/);
-  assert.match(text, /\blex\([^)]*\{ bodies: true \}\)/);
+  assert.match(text, /\blex\([^)]*\{ bodies: true(, collapse)? \}\)/);
   // Every call asks for start-guard's shape: the words shape would read its commands with approve-guard's rules.
-  for (const call of text.matchAll(/\blex\([^)]*\)/g)) assert.match(call[0], /\{ bodies: true \}/, call[0]);
+  for (const call of text.matchAll(/\blex\([^)]*\)/g)) assert.match(call[0], /\{ bodies: true(, collapse)? \}/, call[0]);
 });
 
 test("#351 criterion 2: readHeredoc, literalSubstitution and readGrant exist once, in shell-lex.mjs, and both guards import from it", () => {
@@ -816,4 +816,76 @@ test("#468 test-hunter: a fetch into tags/v1 (git completes it to refs/tags/) an
   for (const cmd of ["git fetch . HEAD:tags/x", "git fetch . HEAD:heads/v1x", "git fetch origin pull/5/head:pr-5", "gh api repos/o/r/releases/1 -X PATCH -F name=@f"]) {
     assert.equal(tagIn(cmd), false, cmd);
   }
+});
+
+// --- #477: the WMI check reads "create" as a method and a wildcard as a class name; $(…) does not end a tag statement ---
+
+test("#477 criterion 2: a bare or literal-free glob is no Win32_Process class name, and run-time class names still fail closed", () => {
+  for (const t of [
+    "(Get-WmiObject -List Win32_Pro*).Create($c)", "(Get-CimClass -ClassName Win32_[P]rocess).Create($c)", "Invoke-CimMethod -ClassName ('Win32'+'_Process') -MethodName Create",
+    "$c = 'Win32_Process'; Invoke-CimMethod -ClassName $c -MethodName Create", "([wmiclass]'Win32_Pro*').Create($c)", "Invoke-CimMethod -ClassName Win32_?rocess -MethodName Create",
+  ]) {
+    assert.equal(wmiProcessCreate(t), true, t);
+  }
+  for (const t of ["Get-ChildItem * | % { $_.Create(1) }", "issue-477-* created", "gh issue create --body-file f; ls issue-477-*", "Get-WmiObject -List ?? -MethodName Create"]) {
+    assert.equal(wmiProcessCreate(t), false, t);
+  }
+});
+
+test("#477 criterion 3: create counts only as a method or argument of the call, not as text", () => {
+  for (const t of [
+    "$o = [wmiclass]'Win32_Process'; $o.Create($c)", "$o = [wmiclass]'Win32_Process'; $o . Create ($c)", "Invoke-CimMethod Win32_Process -MethodName Create", "Invoke-CimMethod -MethodName 'Cre'+'ate' Win32_Process",
+    "wmic process call create x", "WMIC PROCESS CALL CREATE x", "Invoke-CimMethod -Arguments @{MethodName='Create'} Win32_Process",
+    "[wmiclass]'Win32_Process' | % Create $c", "[wmiclass]'Win32_Process' | ForEach-Object Create calc", "[wmiclass]'Win32_Process' | % -MemberName Create -ArgumentList calc",
+    "$w = [wmiclass]'Win32_Process'; $w.Create.Invoke('calc')", "objWMI.ExecMethod_(\"Create\", p); Win32_Process", "[wmiclass]'Win32_Process'.Create",
+  ]) {
+    assert.equal(wmiProcessCreate(t), true, t);
+  }
+  for (const t of [
+    "echo Win32_Pro* created a process", "echo Win32_Process was creating a thing", "echo Win32_Process was created and creating", "Get-CimInstance Win32_Process | Select Name",
+  ]) {
+    assert.equal(wmiProcessCreate(t), false, t);
+  }
+});
+
+test("#477 criterion 5: an unquoted $(…) is one word of its statement for the tag rules", () => {
+  const tags = (cmd) => lex(cmd, { collapse: true }).some((s) => releaseTagCommand(s));
+  for (const cmd of ["git push $(echo o) --tags", "gh api $(cat e) -f ref=refs/tags/v1", "git push origin $(git rev-parse HEAD):refs/tags/v1", 'git push "$(echo o)" --tags', "git tag $(cat VERSION)"]) assert.equal(tags(cmd), true, cmd);
+  for (const cmd of ["git push $(echo o) origin main", "git tag -l $(echo 'v*')", "echo $(git rev-parse HEAD)", "git push 'o $(x)' main"]) assert.equal(tags(cmd), false, cmd);
+  assert.deepEqual(lex("echo '$(x)' y", { collapse: true }), lex("echo '$(x)' y"));
+  assert.deepEqual(lex("git push $(echo o", { collapse: true }), lex("git push $(echo o"));
+});
+
+test("#477 criterion 6: xargs -I{} with a shell -c script, and ssh with a run-time remote command, are read", () => {
+  for (const cmd of ["xargs -I{} bash -c 'git tag {}'", "xargs -I{} sh -c 'git tag {}'", "xargs -I{} sh -c 'git tag v1 && echo {}'", "xargs -I@ sh -c 'git push origin @'"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of ["xargs -I{} sh -c 'git tag -l {}'", "xargs -I{} sh -c 'echo {}'", "xargs -I{} sh -c 'git log {}'"]) assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+  assert.equal(runsRuntimeText(lex("ssh host $CMD")[0]), true);
+  assert.equal(runsRuntimeText(lex('ssh -p 22 host "$CMD"')[0]), true);
+  assert.equal(runsRuntimeText(lex("ssh host 'echo $HOME'")[0]), false);
+  assert.equal(runsRuntimeText(lex("ssh host ls")[0]), false);
+});
+
+test("#477 criterion 7: env -S and an env operand built at run time set a config key the tag rule cannot read", () => {
+  for (const cmd of ["env -S 'GIT_CONFIG_KEY_0=$K git push'", "env -S'GIT_CONFIG_KEY_0=$K git push'", "env --split-string='GIT_CONFIG_KEY_0=$K git push'", "env -S 'GIT_CONFIG_KEY_0=alias.x git push'", "env -S 'env -S \"GIT_CONFIG_KEY_0=$K git push\"'"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  assert.equal(lex("env $(echo GIT_CONFIG_KEY_0=alias.x) git push", { collapse: true }).some((s) => releaseTagCommand(s)), true);
+  for (const cmd of ["env -S 'FOO=bar git status'", "env -S 'GIT_CONFIG_KEY_0=core.pager git push origin main'", "env -S 'FOO=bar'"]) assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+});
+
+test("#477 criterion 8: git fetch --refmap into refs/tags/* and --stdin write tags", () => {
+  for (const cmd of ["git fetch --refmap=refs/tags/*:refs/tags/* origin", "git fetch --refmap '+refs/heads/*:refs/tags/*' origin", "git fetch --refmap=$M origin", "git fetch --stdin", "git fetch origin --stdin"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of ["git fetch --refmap= origin main", "git fetch --refmap=refs/heads/*:refs/remotes/o/* origin", "git fetch origin main"]) assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+});
+
+test("#477 criterion 10: a gh issue create title with an apostrophe inside double quotes lexes in both shapes; an unterminated quote still throws", () => {
+  const cmd = `gh issue create --title "start.mjs: launch with only the App's credentials" --body-file f`;
+  assert.equal(lex(cmd)[0][4], "start.mjs: launch with only the App's credentials");
+  assert.equal(lex(cmd, { bodies: true }).segments[0][4], "start.mjs: launch with only the App's credentials");
+  assert.throws(() => lex(`echo "App's`));
+  assert.throws(() => lex("echo 'App", { bodies: true }));
 });

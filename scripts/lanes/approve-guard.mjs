@@ -398,6 +398,15 @@ function scan(cmd, depth, out) {
     if (/post-review/i.test(dequoted(cmd))) out.push({ pr: undefined, standalone: false, unparsed: true });
     return;
   }
+  // A `$(…)` ends the statement it stands in, so the words after it read as a command of their own; the tag rules also
+  // read each one as a single run-time word of its statement (`git push $(echo o) --tags`, #477).
+  if (cmd.includes("$(")) {
+    try {
+      if (lex(cmd, { collapse: true }).some((s) => releaseTagCommand(s))) out.push({ pr: undefined, standalone: false, tag: true });
+    } catch {
+      // Read as written above.
+    }
+  }
   // `S=scripts/lanes/post-review.mjs; node $S owner … --pr N` must be caught too: resolve same-command
   // `NAME=value` assignments into later `$NAME`/`${NAME}` references before looking for the script and its args.
   const assigned = segments.map(assignmentIndexes);
