@@ -11,7 +11,7 @@ import { execFileSync } from "node:child_process";
 import { linkSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findFreshGrant, grantDir, isFreshGrant, readGrant } from "./approve-guard.mjs";
+import { configuredReviewers, findFreshGrant, grantDir, isFreshGrant, readGrant } from "./approve-guard.mjs";
 import { parseIssueForm, parsePrBody, REVIEWERS, reviewContext } from "./lib.mjs";
 
 const RESULTS = ["pass", "fail", "not-applicable"];
@@ -19,8 +19,9 @@ const SEVERITIES = ["critical", "important", "minor"];
 /** Reviewers that judge the acceptance criteria themselves, so they must assess every one. */
 const MUST_COVER = ["test-hunter", "ui-reviewer"];
 
-export function buildStatus(reviewer, verdict, summary) {
-  if (![...REVIEWERS, "owner"].includes(reviewer)) throw new Error(`reviewer must be one of ${[...REVIEWERS, "owner"].join(", ")}`);
+/** `names` is the set a session may post (configuredReviewers of the main checkout's config, #463); `owner` is never in it. */
+export function buildStatus(reviewer, verdict, summary, names = REVIEWERS) {
+  if (![...names.filter((n) => n !== "owner"), "owner"].includes(reviewer)) throw new Error(`reviewer must be one of ${[...names.filter((n) => n !== "owner"), "owner"].join(", ")}`);
   if (reviewer === "owner" && verdict !== "success") throw new Error("the owner verdict is only 'success' (approve); to reject, comment on the PR");
   if (reviewer !== "owner" && verdict !== "skipped") throw new Error("a reviewer posts success or failure as a JSON verdict: --file <verdict.json>");
   const text = String(summary ?? "").trim();
@@ -79,10 +80,11 @@ function latestStatusState(run, repo, sha, context) {
   return found ?? null;
 }
 
-export function validateVerdict(v, { criteriaCount }) {
+export function validateVerdict(v, { criteriaCount, names = REVIEWERS }) {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return { ok: false, errors: ["verdict must be a JSON object"], status: null };
   const errors = [];
-  if (!REVIEWERS.includes(v.reviewer)) errors.push(`reviewer must be one of ${REVIEWERS.join(", ")}`);
+  const allowed = names.filter((n) => n !== "owner");
+  if (!allowed.includes(v.reviewer)) errors.push(`reviewer must be one of ${allowed.join(", ")}`);
   if (!["success", "failure"].includes(v.verdict)) errors.push("verdict must be success or failure");
   if (typeof v.summary !== "string" || !v.summary.trim()) errors.push("summary is required");
   let criteria = [];
@@ -134,8 +136,9 @@ export function validateVerdict(v, { criteriaCount }) {
  * The verdict comment (the contract parseVerdictComment in lib.mjs reads back): a marker naming the reviewer and the
  * commit the status was posted on, then the verdict as a JSON fence. Pure, so the round-trip test needs no `gh`.
  */
-export function buildVerdictComment(verdict, sha) {
-  if (!REVIEWERS.includes(verdict?.reviewer)) throw new Error(`reviewer must be one of ${REVIEWERS.join(", ")}`);
+export function buildVerdictComment(verdict, sha, names = REVIEWERS) {
+  const allowed = names.filter((n) => n !== "owner");
+  if (!allowed.includes(verdict?.reviewer)) throw new Error(`reviewer must be one of ${allowed.join(", ")}`);
   if (typeof sha !== "string" || !SHA_RE.test(sha)) throw new Error("the head SHA must be a 40-character hex commit SHA");
   return `<!-- lanes:verdict ${verdict.reviewer} ${sha} -->\n\`\`\`json\n${JSON.stringify(verdict, null, 2)}\n\`\`\``;
 }
@@ -251,14 +254,14 @@ function restoreGrant(marker) {
  * Runs the CLI. `run` stands in for `gh` in tests. With `--file` the verdict comment is posted before the status: the
  * status event re-runs lanes/gate, which must find the comment then (#42). A failed comment throws before any status.
  */
-export function main(argv = process.argv.slice(2), { run = gh, log = console.log, warn = console.warn, grantDir: dir = grantDir(), now = Date.now() } = {}) {
+export function main(argv = process.argv.slice(2), { run = gh, log = console.log, warn = console.warn, grantDir: dir = grantDir(), now = Date.now(), reviewers = configuredReviewers() } = {}) {
   const parsed = parseArgs(argv);
   // #180: the grant is claimed before any gh call, so two racing runs cannot both spend it.
   const marker = !parsed.file && parsed.positional[0] === "owner" ? claimGrant(requireOwnerGrant(parsed.pr, dir, now), parsed.pr) : null;
   let pr;
   let status;
   try {
-    ({ pr, status } = post(parsed, marker !== null, { run, warn }));
+    ({ pr, status } = post(parsed, marker !== null, { run, warn, reviewers }));
   } catch (e) {
     // The status was not written: give the grant back for a retry.
     if (marker) restoreGrant(marker);
@@ -270,7 +273,7 @@ export function main(argv = process.argv.slice(2), { run = gh, log = console.log
 }
 
 /** Everything up to and including the status post. Throws, with nothing posted as the status, on any failure. */
-function post(parsed, owner, { run, warn }) {
+function post(parsed, owner, { run, warn, reviewers }) {
   const pr = JSON.parse(run(["pr", "view", ...(parsed.pr ? [parsed.pr] : []), "--json", "number,headRefOid,body"]));
   if (owner && String(pr.number) !== parsed.pr) throw new Error(`refusing: gh resolved --pr ${parsed.pr} to #${pr.number}`);
   const staleSha = checkSha(parsed.sha, pr.headRefOid);
@@ -283,16 +286,16 @@ function post(parsed, owner, { run, warn }) {
     if (closes === null) throw new Error("the PR body has no 'Closes #N' outside code fences; fix the PR body first");
     const issue = JSON.parse(run(["issue", "view", String(closes), "--json", "body"]));
     const verdict = JSON.parse(readFileSync(parsed.file, "utf8"));
-    const result = validateVerdict(verdict, { criteriaCount: parseIssueForm(issue.body).fields.criteria.length });
+    const result = validateVerdict(verdict, { criteriaCount: parseIssueForm(issue.body).fields.criteria.length, names: reviewers });
     if (!result.ok) throw new Error(`verdict refused:\n- ${result.errors.join("\n- ")}`);
     const flip = flipRefusal(verdict, () => latestStatusState(run, repo, pr.headRefOid, result.status.context));
     if (flip) throw new Error(flip);
     const warning = metricsWarning(verdict);
     if (warning) warn(warning);
     status = result.status;
-    comment = buildVerdictComment(verdict, pr.headRefOid);
+    comment = buildVerdictComment(verdict, pr.headRefOid, reviewers);
   } else {
-    status = buildStatus(...parsed.positional);
+    status = buildStatus(...parsed.positional.slice(0, 3), reviewers);
   }
   if (comment) run(["pr", "comment", String(pr.number), "--body", comment]);
   run(["api", `repos/${repo}/statuses/${pr.headRefOid}`, "-f", `state=${status.state}`, "-f", `context=${status.context}`, "-f", `description=${status.description}`]);

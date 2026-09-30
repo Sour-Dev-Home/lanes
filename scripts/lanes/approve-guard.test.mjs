@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AUTOMATED_INPUT_PREFIXES, DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, WMI_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, readGrant, runHook, TAG_REASON, validGrant } from "./approve-guard.mjs";
+import { AUTOMATED_INPUT_PREFIXES, configuredReviewersFrom, DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, WMI_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, readGrant, runHook, TAG_REASON, validGrant } from "./approve-guard.mjs";
 import { WRAPPERS, automatedInputLeavesTheGrant } from "./shell-lex.fixtures.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
@@ -1697,4 +1697,87 @@ test("#468 criterion 4: gh api with a run-time endpoint, gh release edit --draft
   ]) {
     assert.equal(decideBash(cmd), null, cmd);
   }
+});
+
+// --- configured reviewers (#463, ADR 0018) -------------------------------------------------------------------------
+
+const BUILT_IN = ["test-hunter", "ui-reviewer", "security-reviewer", "architecture-advisor"];
+const reviewerConfig = (reviewers) => JSON.stringify({
+  requiredChecks: ["verify"],
+  paths: { skip: [], contract: [], sensitive: [], ui: [] },
+  modules: { entries: [{ id: "m", paths: ["x/"], imports: [], risk: "normal", reviewers }] },
+});
+const repoWith = (configText) => {
+  const dir = mkdtempSync(join(tmpdir(), "lanes-cfg-"));
+  spawnSync("git", ["init", "-q", dir]);
+  mkdirSync(join(dir, "scripts", "lanes"), { recursive: true });
+  if (configText !== undefined) writeFileSync(join(dir, "lanes.config.json"), configText);
+  return dir;
+};
+const postAs = (r) => ["node", "scripts/lanes/post-review.mjs", r, "--file", "v.json", "--pr", "5"].join(" ");
+
+test("configured reviewer names come from the main checkout's config (#463)", () => {
+  const dir = repoWith(reviewerConfig(["compliance-reviewer"]));
+  try {
+    assert.deepEqual(configuredReviewersFrom(join(dir, "scripts", "lanes")), [...BUILT_IN, "compliance-reviewer"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a worktree reads the main checkout's config, never its own copy (#463)", () => {
+  const dir = repoWith(reviewerConfig(["compliance-reviewer"]));
+  try {
+    const git = (...a) => spawnSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", ...a]);
+    git("commit", "-q", "--allow-empty", "-m", "x");
+    const wt = join(dir, "wt");
+    assert.equal(git("worktree", "add", "-q", "-b", "b", wt).status, 0);
+    mkdirSync(join(wt, "scripts", "lanes"), { recursive: true });
+    writeFileSync(join(wt, "lanes.config.json"), reviewerConfig(["sneaky-reviewer"]));
+    assert.deepEqual(configuredReviewersFrom(join(wt, "scripts", "lanes")), [...BUILT_IN, "compliance-reviewer"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a missing, unreadable or invalid config leaves only the built-in four (#463)", () => {
+  for (const text of [undefined, "{not json", "[]", "{}", JSON.stringify({ requiredChecks: [] })]) {
+    const dir = repoWith(text);
+    try {
+      assert.deepEqual(configuredReviewersFrom(join(dir, "scripts", "lanes")), BUILT_IN, String(text));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a config that lists owner never makes it a configured reviewer (#463)", () => {
+  const dir = repoWith(reviewerConfig(["owner", "compliance-reviewer"]));
+  try {
+    const names = configuredReviewersFrom(join(dir, "scripts", "lanes"));
+    assert.ok(!names.includes("owner"));
+    assert.equal(findOwnerInvocations(postAs("owner"), names).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a config name that is not a plain agent name leaves only the built-in four (#463)", () => {
+  for (const bad of ["Owner", "OWNER", "owner ", "review/owner", "", "9lives", "a_b"]) {
+    const dir = repoWith(reviewerConfig(["compliance-reviewer", bad]));
+    try {
+      assert.deepEqual(configuredReviewersFrom(join(dir, "scripts", "lanes")), BUILT_IN, JSON.stringify(bad));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("the guard lets exactly the allowed reviewer names through (#463)", () => {
+  const allowed = [...BUILT_IN, "compliance-reviewer"];
+  for (const r of allowed) assert.deepEqual(findOwnerInvocations(postAs(r), allowed), [], r);
+  for (const r of ["sneaky-reviewer", "Owner", "compliance"]) assert.equal(findOwnerInvocations(postAs(r), allowed).length, 1, r);
+  assert.equal(findOwnerInvocations(postAs("compliance-reviewer"), BUILT_IN).length, 1);
+  assert.deepEqual(findOwnerInvocations(`cd x && ${postAs("compliance-reviewer")}`, allowed), []);
+  assert.equal(findOwnerInvocations(`cd x && ${postAs("nobody")}`, allowed).length, 1);
 });

@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { grantDirFrom } from "./approve-guard.mjs";
+import { configuredReviewersFrom, grantDirFrom } from "./approve-guard.mjs";
 import { buildStatus, buildVerdictComment, checkSha, claimGrant, main, metricsWarning, parseArgs, requireOwnerGrant, validateVerdict } from "./post-review.mjs";
 
 test("skipped is a success whose description starts with skipped", () => {
@@ -673,4 +673,71 @@ test("edge: an inherited GIT_DIR cannot redirect grantDirFrom", () => {
     if (saved === undefined) delete process.env.GIT_DIR;
     else process.env.GIT_DIR = saved;
   }
+});
+
+// --- configured reviewers (#463, ADR 0018) -------------------------------------------------------------------------
+
+const CONFIGURED = ["test-hunter", "ui-reviewer", "security-reviewer", "architecture-advisor", "compliance-reviewer"];
+const configuredVerdict = () => verdict({ reviewer: "compliance-reviewer", criteria: [], findings: [] });
+
+test("a verdict from a configured reviewer is accepted, and an unknown name is refused (#463)", () => {
+  const v = configuredVerdict();
+  assert.equal(validateVerdict(v, { criteriaCount: 2, names: CONFIGURED }).ok, true);
+  assert.equal(validateVerdict(v, { criteriaCount: 2, names: CONFIGURED }).status.context, "review/compliance-reviewer");
+  assert.match(validateVerdict(v, { criteriaCount: 2 }).errors.join(), /reviewer must be one of/);
+  assert.match(validateVerdict({ ...v, reviewer: "nobody" }, { criteriaCount: 2, names: CONFIGURED }).errors.join(), /reviewer must be one of/);
+  assert.match(validateVerdict({ ...v, reviewer: "owner" }, { criteriaCount: 2, names: [...CONFIGURED, "owner"] }).errors.join(), /reviewer must be one of/);
+});
+
+test("MUST_COVER stays test-hunter and ui-reviewer: a configured reviewer need not assess every criterion (#463)", () => {
+  const v = configuredVerdict();
+  assert.equal(validateVerdict(v, { criteriaCount: 3, names: CONFIGURED }).ok, true);
+  assert.match(validateVerdict({ ...v, reviewer: "ui-reviewer" }, { criteriaCount: 3, names: CONFIGURED }).errors.join(), /all 3 criteria/);
+});
+
+test("the comment and status builders take the configured names, and never owner (#463)", () => {
+  const v = configuredVerdict();
+  assert.ok(buildVerdictComment(v, SHA, CONFIGURED).startsWith(`<!-- lanes:verdict compliance-reviewer ${SHA} -->`));
+  assert.throws(() => buildVerdictComment(v, SHA), /reviewer must be one of/);
+  assert.throws(() => buildVerdictComment({ ...v, reviewer: "owner" }, SHA, [...CONFIGURED, "owner"]), /reviewer must be one of/);
+  assert.equal(buildStatus("compliance-reviewer", "skipped", "no change", CONFIGURED).context, "review/compliance-reviewer");
+  assert.throws(() => buildStatus("compliance-reviewer", "skipped", "x"), /reviewer/);
+  assert.throws(() => buildStatus("nobody", "skipped", "x", CONFIGURED), /reviewer/);
+});
+
+test("main posts a configured reviewer's verdict file and refuses an unknown one (#463)", () => {
+  const gh = fakeGh();
+  main(["--file", verdictFile(configuredVerdict())], { run: gh.run, ...quiet, reviewers: CONFIGURED });
+  assert.deepEqual(gh.writes.map((w) => w.kind), ["comment", "status"]);
+  assert.ok(gh.writes[1].args.includes("context=review/compliance-reviewer"));
+  const again = fakeGh();
+  assert.throws(() => main(["--file", verdictFile(configuredVerdict())], { run: again.run, ...quiet, reviewers: CONFIGURED.slice(0, 4) }), /reviewer must be one of/);
+  assert.deepEqual(again.writes, []);
+});
+
+test("the configured set is read from the main checkout's config, from a worktree path too (#463)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "post-review-cfg-"));
+  execFileSync("git", ["init", "-q", dir]);
+  mkdirSync(join(dir, "scripts", "lanes"), { recursive: true });
+  writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({
+    requiredChecks: ["verify"],
+    paths: { skip: [], contract: [], sensitive: [], ui: [] },
+    modules: { entries: [{ id: "m", paths: ["x/"], imports: [], risk: "normal", reviewers: ["compliance-reviewer"] }] },
+  }));
+  const git = (...a) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", ...a]);
+  git("commit", "-q", "--allow-empty", "-m", "x");
+  const wt = join(dir, "wt");
+  git("worktree", "add", "-q", "-b", "b", wt);
+  mkdirSync(join(wt, "scripts", "lanes"), { recursive: true });
+  writeFileSync(join(wt, "lanes.config.json"), "{}");
+  assert.deepEqual(configuredReviewersFrom(join(wt, "scripts", "lanes")), CONFIGURED);
+});
+
+test("main posts a configured reviewer's skipped status and refuses an unknown name (#463)", () => {
+  const gh = fakeGh();
+  main(["compliance-reviewer", "skipped", "no change"], { run: gh.run, ...quiet, reviewers: CONFIGURED });
+  assert.ok(gh.writes.at(-1).args.includes("context=review/compliance-reviewer"));
+  const again = fakeGh();
+  assert.throws(() => main(["compliance-reviewer", "skipped", "no change"], { run: again.run, ...quiet, reviewers: CONFIGURED.slice(0, 4) }), /reviewer must be one of/);
+  assert.deepEqual(again.writes, []);
 });

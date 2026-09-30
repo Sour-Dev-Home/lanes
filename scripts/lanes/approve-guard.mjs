@@ -17,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadConfig, REVIEWERS, reviewerNames } from "./lib.mjs";
 import { dequoted, launchedCommands, lex, mayBeNode, mayExpandTo, readGrant, releaseTagCommand, RUNS_ON_EXPANSION_RE, runsRuntimeText, scriptSubcommand, unmark, wmiProcessCreate } from "./shell-lex.mjs";
 
 // post-review.mjs reads the grant with the guard's own reader.
@@ -37,7 +38,10 @@ const APPROVE_LIST_RE = /^\/approve((?: [1-9][0-9]{0,8})+)$/;
 export const MAX_APPROVE_PRS = 10;
 const PR_RE = /^[1-9][0-9]{0,8}$/;
 const POST_REVIEW_RE = /post-review(\.mjs)?$/i;
-const NON_OWNER_REVIEWERS = new Set(["test-hunter", "ui-reviewer", "security-reviewer", "architecture-advisor"]);
+// The reviewer names scan() lets through while it runs; set by ownerInvocations, which is synchronous (#463).
+let allowedReviewers = null;
+// A word shaped like a reviewer name; a path or option value in that slot (`git diff -- a/x.mjs b`) is no reviewer.
+const REVIEWER_WORD_RE = /^[A-Za-z0-9_-]+$/;
 const VALUED_FLAGS = new Set(["--file", "--pr", "--sha"]);
 // The only form that may be allowed: the plain command, nothing chained, nested, redirected or substituted.
 const PLAIN_PREFIX = "node scripts/lanes/post-review.mjs owner ";
@@ -527,8 +531,8 @@ function scan(cmd, depth, out) {
         // Scanned as a command of its own.
       } else if (POST_REVIEW_RE.test(w)) {
         const { reviewer, pr } = readPostReviewArgs(plain.slice(i + 1).map((x) => (shell ? unmark(x) : x)));
-        // Fail closed: a reviewer word that could expand to anything counts as the owner.
-        if (reviewer === "owner" || (reviewer !== undefined && /[$`*?[{]/.test(reviewer))) out.push({ pr, standalone: false });
+        // Fail closed: a reviewer word that could expand to anything, or that no configured reviewer carries, counts as the owner.
+        if (reviewer === "owner" || (reviewer !== undefined && (/[$`*?[{]/.test(reviewer) || (REVIEWER_WORD_RE.test(reviewer) && !(allowedReviewers ??= configuredReviewers()).includes(reviewer))))) out.push({ pr, standalone: false });
       } else if ((UNRESOLVED_RE.test(w) || mayExpandToPostReview(w)) && (i === 0 || nodeRange.has(i) || (i >= evalFrom && UNRESOLVED_RE.test(w)))) {
         // The command word, a node option or the script node runs, or text a shell evaluates, that could still expand
         // to post-review.mjs: fail closed.
@@ -544,19 +548,24 @@ function scan(cmd, depth, out) {
  * `unparsed` is set on an entry for a part that could not be parsed and names post-review.
  * @returns {{ pr: string | undefined, standalone: boolean, unparsed?: true }[]}
  */
-export function findOwnerInvocations(command) {
-  return ownerInvocations(String(command ?? ""), String(command ?? ""), SHELL_META_RE);
+export function findOwnerInvocations(command, allowed) {
+  return ownerInvocations(String(command ?? ""), String(command ?? ""), SHELL_META_RE, allowed);
 }
 
 /**
  * findOwnerInvocations of the Bash text `cmd`, where `typed` is the command as the session typed it (the PowerShell
  * text for the PowerShell tool) and `meta` the characters that keep it from being the plain command.
  */
-function ownerInvocations(cmd, typed, meta) {
+function ownerInvocations(cmd, typed, meta, allowed) {
   // No raw-text pre-filter: the name can be split by quotes (pos"t-review.mjs) or matched by a glob, so only the
   // lexed words can tell.
   const out = [];
-  scan(cmd, 0, out);
+  allowedReviewers = allowed?.filter((n) => n !== "owner") ?? null;
+  try {
+    scan(cmd, 0, out);
+  } finally {
+    allowedReviewers = null;
+  }
   // No fallback for an `owner` word next to a `$` anywhere (#140): it denied everyday commands such as
   // `echo "owner $X"`, and post-review.mjs itself refuses the owner's approval without a fresh grant (#81, ADR 0004).
   // Leading/trailing whitespace (a trailing newline the model appends to a Bash command is common) must not turn the
@@ -972,16 +981,41 @@ const PS_META_RE = new RegExp(`[;&|\`$<>(){}@,#%*?[\\]\\n\\r\\\\${String.fromCha
  * a repository, it falls back to the checkout holding `from`.
  */
 export function grantDirFrom(from) {
-  const own = resolve(from, "../../.lanes/approve");
+  return join(mainCheckoutFrom(from), ".lanes", "approve");
+}
+
+/** The main checkout's root, found from `from` as grantDirFrom does (#447); the checkout holding `from` without git. */
+function mainCheckoutFrom(from) {
   try {
     // An inherited GIT_DIR, GIT_COMMON_DIR or GIT_WORK_TREE would redirect the answer, so git reads only `from`.
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.toUpperCase().startsWith("GIT_")));
     const common = execFileSync("git", ["-C", from, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env }).trim();
-    if (common !== "" && basename(common) === ".git") return join(dirname(common), ".lanes", "approve");
+    if (common !== "" && basename(common) === ".git") return dirname(common);
   } catch {
     // git missing or not a repository: the checkout holding this script is the best answer.
   }
-  return own;
+  return resolve(from, "../..");
+}
+
+/**
+ * The reviewer names a session may post (#463, ADR 0018): reviewerNames of the main checkout's lanes.config.json, never a
+ * worktree's copy. A config that is missing, unreadable or invalid leaves the built-in four, and `owner` is never one.
+ */
+export function configuredReviewersFrom(from) {
+  try {
+    const names = reviewerNames(loadConfig(join(mainCheckoutFrom(from), "lanes.config.json"))).filter((n) => n !== "owner");
+    // loadConfig does not check the modules block: a name that is not the agent-name shape (`Owner`, `owner `,
+    // `review/owner`) could alias the owner's status, so one bad name leaves the built-in four.
+    if (!names.every((n) => /^[a-z][a-z0-9-]*$/.test(n))) return [...REVIEWERS];
+    return names;
+  } catch {
+    return [...REVIEWERS];
+  }
+}
+
+/** configuredReviewersFrom for the checkout holding this script. */
+export function configuredReviewers() {
+  return configuredReviewersFrom(fileURLToPath(new URL(".", import.meta.url)));
 }
 
 /** The directory the UserPromptSubmit hook writes grants to: .lanes/approve/ in the main checkout, from any worktree. */
