@@ -658,6 +658,30 @@ test("#424 hunt: an alias shadowing a built-in is ignored by git, so it hides no
   assert.equal(releaseTagCommand(lex(chain(9))[0]), true, "past the cap fails closed");
 });
 
+test("#441 criterion 2: environment config, symbolic-ref, fast-import and gh api writes are release tags", () => {
+  for (const cmd of [
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.followTags GIT_CONFIG_VALUE_0=true git push", "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.t GIT_CONFIG_VALUE_0=tag git t v1",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.t GIT_CONFIG_VALUE_0='!git tag v1' git t", "git_config_key_0=ALIAS.t git t v1", "export GIT_CONFIG_KEY_0=push.followTags",
+    "GIT_CONFIG_PARAMETERS=\"'push.followTags'='true'\" git push", 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="$K" GIT_CONFIG_VALUE_0=tag git t v1',
+    "git symbolic-ref refs/tags/v1 HEAD", 'git symbolic-ref "refs/tags/$V" refs/heads/main', "git symbolic-ref -m x refs/tags/v1 refs/heads/main", "git fast-import", "git -C x fast-import --quiet",
+    "gh api repos/o/r/git/refs -f ref=refs/tags/v1 -f sha=abc", "gh api -X POST repos/o/r/git/refs -fref=refs/tags/v1.0", "gh api repos/o/r/git/refs -f ref=refs/tags/v1 --method=POST",
+    'gh api repos/o/r/git/refs -f ref="refs/tags/$V" -f sha=a', "gh api repos/o/r/git/refs --input body.json", "gh api repos/o/r/git/refs/tags/v1 -X PATCH -f sha=a",
+    "gh api repos/o/r/releases -f tag_name=v1", "gh api repos/o/r/releases -f tag_name=$V",
+    // A query string on the endpoint, a ref read from a file, and a tag path named at run time.
+    "gh api 'repos/o/r/git/refs?x=1' -f ref=refs/tags/v1", "gh api repos/o/r/git/refs -F ref=@f", "gh api repos/o/r/git/refs/tags/$V -X PATCH -f sha=a",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of [
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=x git push origin main", "GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat git log",
+    "git symbolic-ref HEAD", "git symbolic-ref --short HEAD", "git symbolic-ref -d refs/tags/v1", "git symbolic-ref refs/heads/x refs/heads/main",
+    "gh api repos/o/r/git/refs/heads/main", "gh api repos/o/r/git/refs -f ref=refs/heads/x -f sha=a", "gh api repos/o/r/git/refs/tags/v1 -X DELETE", "gh api repos/o/r/git/refs/tags/v1",
+    "gh api repos/o/r/git/refs -X GET", "gh api repos/o/r/releases", "gh api repos/o/r/releases -f tag_name=x1", "gh api repos/o/r/issues -f title=v1", "gh api",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+  }
+});
+
 test("#424 security review: gh release's own --repo before create, a -m value of -d, and --config-env push.followTags", () => {
   for (const cmd of [
     "gh release --repo o/r create v1", "gh release -R o/r create v1", "gh release -Ro/r create v1", "gh release --repo=o/r new v1",
@@ -689,5 +713,31 @@ test("#378 criterion 3: mayBeNode reads node, and a glob that could expand to it
   }
   for (const w of ["ls", "n*y", "nod", "[n]odx", "scripts/lanes/*.test.mjs", "no?e?x", mark("n*de"), ""]) {
     assert.equal(mayBeNode(w), false, w);
+  }
+});
+
+test("#441 test-hunter: env -i, a path or option before symbolic-ref and fast-import still read as tag paths; long gh api or config text stays fast", () => {
+  for (const cmd of ["env -i GIT_CONFIG_KEY_0=alias.t git t v1", "git.exe fast-import", "git -C x symbolic-ref refs/tags/v1 HEAD", "GIT_CONFIG_KEY_10=alias.t git t", "gh api repos/o/r/git/refs -f sha=a -f ref=refs/tags/v1"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  const start = Date.now();
+  for (const cmd of [`gh api repos/o/r/git/refs ${"-f ref=x ".repeat(5000)}`, `GIT_CONFIG_PARAMETERS=${"a.".repeat(20000)} git push`, `gh api ${"-f a=b ".repeat(5000)}x/git/refs`]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false);
+  }
+  assert.ok(Date.now() - start < 2000);
+});
+
+test("#441 final round: query strings, mixed-case config keys, quoted refs and method overrides on gh api are read as the request they make", () => {
+  for (const cmd of [
+    "gh api repos/o/r/git/refs/tags/v1?force=true -X PATCH", 'gh api "repos/o/r/git/refs?x=1" -f ref=refs/tags/V1', "gh api repos/o/r/git/refs -F ref=@f", "gh api repos/o/r/git/refs -X post -f ref=refs/tags/v1",
+    "GIT_CONFIG_KEY_0=ALIAS.t git t v1", "GIT_CONFIG_KEY_0=Push.FollowTags git push", "git symbolic-ref --quiet refs/tags/v1 HEAD", "git -c a=b -C x --no-pager fast-import",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of [
+    "gh api repos/o/r/git/refs -f ref=refs/tags/v1 --method=DELETE", "gh api repos/o/r/git/refs -f ref=refs/tags/v1 -XGET", "gh api repos/o/r/git/refs/tags/v1?x=1", "GIT_CONFIG_KEY_0=push.followTagsX git push",
+    "GIT_CONFIG_KEY_0=alias git push", "git symbolic-ref --short HEAD",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
   }
 });

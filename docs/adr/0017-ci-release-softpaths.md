@@ -30,6 +30,38 @@ GitHub identity (ADR 0004/0007), `queue.mjs` never runs inside Claude or on a sc
    version's section. `start-guard.mjs` and `approve-guard.mjs` deny creating or pushing a `v*` tag from any Claude
    session, under ADR 0004/0007's accepted-risk rule (a bypass is minor, a regression critical); the owner tags from
    their own terminal. No tag ruleset: the shared identity defeats one. Release notes only, no `npm publish`.
+
+   What the guards read as creating or pushing a `v*` tag (`releaseTagCommand` in `shell-lex.mjs`, one rule for both
+   guards, PowerShell text included; #404, #424, #441):
+   - `git tag` naming a `v*` name without a list, delete or verify option; `git push` with `--tags`, `--follow-tags` or
+     `--mirror`, `-c push.followTags`, or a refspec whose destination is `v*`, `refs/tags/v*` or a pattern such as
+     `refs/tags/*`; with `--repo` given, every positional word as a refspec; `git tag`/`git push` names known only at run
+     time (`"$V"`, `$(cat VERSION)`, `${V:-v1}`).
+   - `git update-ref` and `git symbolic-ref` of a `refs/tags/v*` ref (or one named at run time), except with `-d`; `git
+     fast-import`, which writes any ref from its input.
+   - A `-c alias.NAME=…` or `--config-env alias.NAME=…` alias used as the subcommand, read as what it expands to.
+   - Config given by the environment: any `GIT_CONFIG_KEY_n` (or `GIT_CONFIG_PARAMETERS`) naming `push.followTags` or an
+     `alias.…`, in the command or an earlier statement (`export …`). The setting is denied rather than followed.
+   - `gh release create` (or `new`) naming a `v*` tag, one known only at run time, or none; `gh api` writing (POST, PATCH,
+     or any request with body fields) a `git/refs` ref that is `refs/tags/v*` or known only at run time, or a release's
+     `tag_name`.
+   - Where they **fail closed**: `git update-ref --stdin`; a `!` alias, an alias whose value is known only at run time or
+     given through `--config-env`, a chain of aliases deeper than eight; a run-time `GIT_CONFIG_KEY_n` before `git push` or
+     any git command that is not `tag` or `update-ref`; `gh release create` with no tag named; `gh api` with `--input`
+     on `git/refs` or `releases`.
+   - **Outside the rule**, recorded and not guarded: aliases and `push.followTags` from git config files (`~/.gitconfig`,
+     a repository's `.git/config`, `GIT_CONFIG_GLOBAL`): a guard sees the command line, and lanes act as the owner's
+     account under the accepted-risk rule of ADR 0004/0007. Known gaps, not guarded yet: a run-time `GIT_CONFIG_KEY_n` set in an earlier statement (`export GIT_CONFIG_KEY_0=$K`) or behind a launcher, a `-c` key spliced at run time, and tag commands inside nested shell text (`bash -c "git push --tags"`, `ssh h git tag v1`), which the start guard denies and the approve guard scans only for `post-review`; #468 tracks them. Also outside: `gh api graphql` mutations (`createRef`) and creating a tag object through `git/tags`, which makes no ref. A `git config` write is not denied either, nor is a script file
+     that itself pushes a tag: the guards read the names a command runs, not what a program does inside. `release.yml`
+     still checks any pushed tag against `main`, `package.json` and `CHANGELOG.md`.
+
+   A subcommand word in argument position is no program (#441): the approve guard reads `watch`, `ssh`, `script` and the
+   other shell-text commands as a program wherever they stand, except as an argument of a program whose words are
+   subcommands that never launch a program by name (`gh`, `systemctl`, `terraform` and the like: `gh run watch 123` is
+   not one); after `{`, `!`, `then`, `env`, `xargs`, or a launcher such as `npx`, `npm exec` or `docker run`, they still
+   fail closed, and the start guard reads `start.mjs` as a launch only as node's script, the value
+   of a node option before it (`-r`, `--import`), or a `-e` text naming it, not as data to another script
+   (`node lessons.mjs --paths … start.mjs`).
 4. **An adopter smoke test.** `scripts/lanes/adopter-smoke.test.mjs` (module `install`, so affected tests pick it up
    whenever install or upgrade code changes) runs under `npm test`: it git-inits a temp repo, runs `install.mjs`,
    validates `lanes.lock.json` against `contracts/lanes-lock.schema.json` and its hashes, edits one lanes-owned file and
