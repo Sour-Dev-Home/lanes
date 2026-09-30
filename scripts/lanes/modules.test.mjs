@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkModules, importSpecifiers, listFiles, main, MAX_CYCLES, MAX_STEPS, moduleOf } from "./modules.mjs";
+import { checkModules, importSpecifiers, listFiles, main, MAX_CYCLES, MAX_STEPS, moduleOf, reviewersFor } from "./modules.mjs";
 
 // Fixture sources are built with `q` so this file's own text never holds a literal `from "./..."` import it doesn't make.
 const q = (s) => JSON.stringify(s);
@@ -396,4 +396,127 @@ test("edge: moduleOf gives the module lanes.config.json assigns to a real file",
   const config = JSON.parse(readFileSync("lanes.config.json", "utf8"));
   assert.equal(moduleOf("scripts/lanes/modules.mjs", config.modules), "modules");
   assert.equal(moduleOf("scripts/lanes/lessons.mjs", config.modules), "lessons");
+});
+
+// --- Optional per-entry fields and the schema file (ADR 0018, #461) ---
+const entry = (extra) => ({ entries: [{ id: "a", paths: ["src/a/"], imports: [], ...extra }] });
+const schema = JSON.parse(readFileSync(new URL("../../contracts/module-map.schema.json", import.meta.url), "utf8"));
+const config = JSON.parse(readFileSync("lanes.config.json", "utf8"));
+const FIELDS = { reviewers: ["security-reviewer"], contracts: ["contracts/"], owner: true, risk: "sensitive", test: "node --test" };
+
+test("each new field is accepted with a valid value", () => {
+  for (const [k, v] of Object.entries(FIELDS)) assert.equal(moduleOf("src/a/x.mjs", entry({ [k]: v })), "a", k);
+  assert.equal(moduleOf("src/a/x.mjs", entry(FIELDS)), "a");
+  assert.equal(moduleOf("src/a/x.mjs", entry({ risk: "normal" })), "a");
+});
+
+test("a wrong type, unknown key or bad risk is rejected with an error naming the entry", () => {
+  const bad = [
+    { reviewers: "security-reviewer" }, { reviewers: [1] }, { contracts: "c" }, { contracts: [""] }, { owner: "yes" },
+    { risk: "high" }, { risk: true }, { test: 3 }, { test: "" }, { tset: "x" },
+  ];
+  for (const extra of bad) assert.throws(() => moduleOf("src/a/x.mjs", entry(extra)), /entries\[0\]/, JSON.stringify(extra));
+  assert.throws(() => moduleOf("x", { ...entry({}), extras: 1 }), /unknown key "extras"/);
+});
+
+test("a reviewer name must match the pattern, not be owner, and have an agent file", () => {
+  for (const name of ["Bad", "1x", "a b", "owner", "no-such-reviewer", "../x"]) {
+    assert.throws(() => moduleOf("src/a/x.mjs", entry({ reviewers: [name] })), /entries\[0\].*reviewers/, name);
+  }
+  assert.equal(moduleOf("src/a/x.mjs", entry({ reviewers: ["test-hunter", "ui-reviewer"] })), "a");
+});
+
+test("reviewersFor returns the sorted union of reviewers of modules containing the files", () => {
+  const m = { entries: [
+    { id: "a", paths: ["src/a/"], imports: [], reviewers: ["ui-reviewer", "test-hunter"] },
+    { id: "b", paths: ["src/b/"], imports: [], reviewers: ["test-hunter", "security-reviewer"] },
+    { id: "c", paths: ["src/c/"], imports: [] },
+  ] };
+  assert.deepEqual(reviewersFor(["src/a/x.mjs", "src/b/y.mjs", "src/c/z.mjs", "other"], m), ["security-reviewer", "test-hunter", "ui-reviewer"]);
+  assert.deepEqual(reviewersFor(["src/c/z.mjs"], m), []);
+  assert.deepEqual(reviewersFor(["nowhere"], m), []);
+});
+
+test("edge: reviewersFor gives [] with no map, no files, or a map without the field", () => {
+  assert.deepEqual(reviewersFor(["src/a/x.mjs"], undefined), []);
+  assert.deepEqual(reviewersFor(["src/a/x.mjs"], null), []);
+  assert.deepEqual(reviewersFor([], entry({ reviewers: ["test-hunter"] })), []);
+  assert.deepEqual(reviewersFor(["src/a/x.mjs"], config.modules), []);
+});
+
+test("edge: reviewersFor refuses a malformed map", () => {
+  assert.throws(() => reviewersFor(["x"], { entries: "no" }), /entries must be an array/);
+});
+
+test("the schema has no key that removes a reviewer", () => {
+  const props = Object.keys(schema.$defs.entry.properties);
+  assert.deepEqual([...props].sort(), ["contracts", "id", "imports", "owner", "paths", "reviewers", "risk", "test"]);
+  assert.equal(schema.$defs.entry.additionalProperties, false);
+  assert.equal(schema.additionalProperties, false);
+  assert.ok(!props.some((p) => /remove|except|skip|disable|without/i.test(p)));
+});
+
+// A checker for the subset of JSON Schema the map schema uses, so the two definitions are compared by behaviour.
+function conforms(v, s, root = schema) {
+  if (s.$ref) return conforms(v, s.$ref.split("/").slice(1).reduce((o, k) => o[k], root), root);
+  if (s.enum && !s.enum.includes(v)) return false;
+  switch (s.type) {
+    case "string": return typeof v === "string" && (s.minLength === undefined || v.length >= s.minLength) && (!s.pattern || new RegExp(s.pattern).test(v));
+    case "boolean": return typeof v === "boolean";
+    case "array": return Array.isArray(v) && (s.minItems === undefined || v.length >= s.minItems) && v.every((x) => conforms(x, s.items, root));
+    case "object": {
+      if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+      if ((s.required ?? []).some((k) => !(k in v))) return false;
+      return Object.entries(v).every(([k, x]) => s.properties?.[k] ? conforms(x, s.properties[k], root) : s.additionalProperties !== false);
+    }
+    default: return true;
+  }
+}
+const accepts = (m) => { try { moduleOf("x", m); return true; } catch { return false; } };
+
+test("the schema and the validator agree: every schema property is accepted, and every accepted key is in the schema", () => {
+  for (const [k, v] of Object.entries(FIELDS)) {
+    assert.ok(k in schema.$defs.entry.properties, `${k} in schema`);
+    assert.ok(conforms(entry({ [k]: v }), schema) && accepts(entry({ [k]: v })), `${k} valid`);
+  }
+  for (const k of Object.keys(schema.$defs.entry.properties)) assert.ok(k in FIELDS || ["id", "paths", "imports"].includes(k), `${k} has a sample`);
+  assert.deepEqual(Object.keys(schema.properties).sort(), ["allowCycles", "entries"]);
+  // A key the validator accepts but the schema lacks would make the schema reject a valid map.
+  assert.ok(conforms(config.modules, schema) && accepts(config.modules));
+});
+
+test("the schema and the validator agree on invalid samples", () => {
+  const samples = [
+    entry({ reviewers: "x" }), entry({ reviewers: ["Bad"] }), entry({ contracts: [""] }), entry({ owner: 1 }), entry({ risk: "high" }),
+    entry({ test: 1 }), entry({ test: "" }), entry({ unknown: 1 }), { ...entry({}), extras: 1 }, { entries: "no" },
+    { entries: [{ id: "", paths: ["p/"], imports: [] }] }, { entries: [{ id: "a", paths: [], imports: [] }] },
+    { entries: [{ id: "a", paths: ["p/"], imports: "x" }] }, { ...entry({}), allowCycles: [[]] }, { ...entry({}), allowCycles: "no" },
+  ];
+  for (const s of samples) {
+    assert.equal(conforms(s, schema), false, `schema: ${JSON.stringify(s)}`);
+    assert.equal(accepts(s), false, `validator: ${JSON.stringify(s)}`);
+  }
+  // The schema cannot see the filesystem: an unknown agent file is the validator's alone to refuse.
+  assert.equal(accepts(entry({ reviewers: ["no-such-reviewer"] })), false);
+});
+
+// A path is covered when a regex of the list matches it, or the file the prefix names (a `.`-ended prefix stands for `.mjs`).
+const covered = (patterns, prefix) => patterns.some((p) => [prefix, prefix.endsWith("/") ? `${prefix}x.mjs` : `${prefix}mjs`].some((s) => new RegExp(p).test(s)));
+const uncovered = (m, cfg) => (m?.entries ?? []).flatMap((e) => [
+  ...(e.risk === "sensitive" ? e.paths.filter((p) => !covered(cfg.paths.sensitive, p)).map((p) => `${e.id}: ${p} not in paths.sensitive`) : []),
+  ...(e.owner === true ? e.paths.filter((p) => !covered(cfg.paths.owner, p)).map((p) => `${e.id}: ${p} not in paths.owner`) : []),
+]);
+
+test("a module marked risk sensitive or owner true has every path covered by paths.sensitive or paths.owner", () => {
+  assert.deepEqual(uncovered(config.modules, config), []);
+});
+
+test("the coverage check fails for a sensitive or owner module with an uncovered path", () => {
+  const cfg = { paths: { sensitive: ["^scripts/lanes/"], owner: ["^scripts/lanes/lib\\.mjs$"] } };
+  const m = { entries: [
+    { id: "s", paths: ["scripts/lanes/x.", "docs/"], imports: [], risk: "sensitive" },
+    { id: "o", paths: ["scripts/lanes/lib.", "scripts/lanes/other."], imports: [], owner: true },
+    { id: "n", paths: ["docs/"], imports: [], risk: "normal", owner: false },
+  ] };
+  assert.deepEqual(uncovered(m, cfg), ["s: docs/ not in paths.sensitive", "o: scripts/lanes/other. not in paths.owner"]);
 });

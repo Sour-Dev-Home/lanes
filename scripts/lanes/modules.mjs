@@ -10,7 +10,7 @@
 // `paths` are repo-relative path prefixes; the longest matching prefix decides a file's module. `imports` names the
 // other modules it may import from (its own is always allowed). An `allowCycles` entry matches a cycle with exactly
 // those files, in any order; an allowed cycle is still reported, under `allowedCycles`.
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -127,6 +127,8 @@ export function importSpecifiers(src) {
 }
 
 const isStringArray = (v) => Array.isArray(v) && v.every((s) => typeof s === "string");
+const ENTRY_KEYS = new Set(["id", "paths", "imports", "reviewers", "contracts", "owner", "risk", "test"]);
+const REVIEWER_NAME = /^[a-z][a-z0-9-]*$/;
 
 /** Validates the `modules` value of lanes.config.json; throws with the reason. */
 function compileMap(map) {
@@ -145,7 +147,25 @@ function compileMap(map) {
     const outside = e.paths.find((p) => /^([\\/]|[a-z]:)/i.test(p) || p.includes("\\") || p.split("/").includes(".."));
     if (outside !== undefined) throw new Error(`${where}.entries[${n}].paths: "${outside}" must be repo-relative, with / and no ..`);
     if (!isStringArray(e.imports)) throw new Error(`${where}.entries[${n}].imports must be an array of module ids`);
+    const at = `${where}.entries[${n}] ("${e.id}")`;
+    const unknown = Object.keys(e).find((k) => !ENTRY_KEYS.has(k));
+    if (unknown !== undefined) throw new Error(`${at}: unknown key "${unknown}"`);
+    if (e.reviewers !== undefined) {
+      if (!isStringArray(e.reviewers)) throw new Error(`${at}.reviewers must be an array of reviewer names`);
+      for (const r of e.reviewers) {
+        if (!REVIEWER_NAME.test(r) || r === "owner") throw new Error(`${at}.reviewers: "${r}" must match ${REVIEWER_NAME} and not be "owner"`);
+        if (!existsSync(`.claude/agents/${r}.md`)) throw new Error(`${at}.reviewers: "${r}" has no .claude/agents/${r}.md`);
+      }
+    }
+    if (e.contracts !== undefined && (!isStringArray(e.contracts) || e.contracts.some((c) => !c))) {
+      throw new Error(`${at}.contracts must be an array of non-empty path prefixes`);
+    }
+    if (e.owner !== undefined && typeof e.owner !== "boolean") throw new Error(`${at}.owner must be a boolean`);
+    if (e.risk !== undefined && e.risk !== "normal" && e.risk !== "sensitive") throw new Error(`${at}.risk must be "normal" or "sensitive"`);
+    if (e.test !== undefined && (typeof e.test !== "string" || !e.test)) throw new Error(`${at}.test must be a non-empty string`);
   }
+  const extra = Object.keys(map).find((k) => k !== "entries" && k !== "allowCycles");
+  if (extra !== undefined) throw new Error(`${where}: unknown key "${extra}"`);
   for (const e of map.entries) {
     for (const id of e.imports) if (!ids.has(id)) throw new Error(`${where}: module "${e.id}" imports unknown module "${id}"`);
   }
@@ -168,6 +188,18 @@ const entryOf = (prefixes, file) => prefixes.find((p) => file.startsWith(p.prefi
  */
 export function moduleOf(path, map) {
   return entryOf(compileMap(map).prefixes, String(path))?.id ?? null;
+}
+
+/**
+ * The sorted union of `reviewers` of every module whose `paths` contain one of the repo-relative POSIX `files`, or []
+ * with no map or no such field. Config can only add reviewers. Throws on a malformed map.
+ */
+export function reviewersFor(files, map) {
+  if (map === undefined || map === null) return [];
+  const { prefixes } = compileMap(map);
+  const names = new Set();
+  for (const f of files ?? []) for (const r of entryOf(prefixes, String(f))?.reviewers ?? []) names.add(r);
+  return [...names].sort();
 }
 
 // Enumerating every elementary cycle is exponential in the worst case, and source files are written by ordinary

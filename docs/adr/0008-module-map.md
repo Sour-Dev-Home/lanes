@@ -1,5 +1,7 @@
 # 0008: A dependency-free module map bounds imports and gates cross-module issues
 
+Amended by 0018 (optional per-entry fields and a schema file).
+
 Status: accepted
 
 ## Context
