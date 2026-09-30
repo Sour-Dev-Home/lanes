@@ -1,0 +1,54 @@
+# The owner-only paths (lanes.config.json paths.owner; ADRs 0002 and 0019 part 6), one line per pattern, same order.
+# workflow.test.mjs checks that this file and paths.owner cover the same files. It enforces nothing on its own: a
+# ruleset requiring code-owner review does, and that is an owner action in the repository settings.
+
+/scripts/lanes/gate.mjs @SourE-dev
+/scripts/lanes/gate.test.mjs @SourE-dev
+/scripts/lanes/lib.mjs @SourE-dev
+/scripts/lanes/lib.test.mjs @SourE-dev
+/scripts/lanes/approve-guard.mjs @SourE-dev
+/scripts/lanes/approve-guard.test.mjs @SourE-dev
+/scripts/lanes/post-review.mjs @SourE-dev
+/scripts/lanes/post-review.test.mjs @SourE-dev
+/scripts/lanes/issue-contract.mjs @SourE-dev
+/scripts/lanes/issue-contract.test.mjs @SourE-dev
+/scripts/lanes/gate-decision.test.mjs @SourE-dev
+/scripts/lanes/workflow.test.mjs @SourE-dev
+/scripts/gate-workflow.test.mjs @SourE-dev
+/scripts/lanes/contracts.test.mjs @SourE-dev
+/scripts/lanes/start-guard.mjs @SourE-dev
+/scripts/lanes/start-guard.test.mjs @SourE-dev
+/scripts/lanes/shell-lex.mjs @SourE-dev
+/scripts/lanes/shell-lex.test.mjs @SourE-dev
+/scripts/lanes/shell-lex.fixtures.mjs @SourE-dev
+/scripts/lanes/install.mjs @SourE-dev
+/scripts/lanes/install.test.mjs @SourE-dev
+/scripts/lanes/setup-repo.mjs @SourE-dev
+/scripts/lanes/setup-repo.test.mjs @SourE-dev
+/scripts/lanes/new-project.mjs @SourE-dev
+/scripts/lanes/new-project.test.mjs @SourE-dev
+/.claude/settings.json @SourE-dev
+/.github/ @SourE-dev
+/.githooks/ @SourE-dev
+/lanes.config.json @SourE-dev
+/.claude/agents/ @SourE-dev
+/.claude/commands/lane.md @SourE-dev
+/.claude/commands/night.md @SourE-dev
+/.claude/commands/approve.md @SourE-dev
+/docs/adr/ @SourE-dev
+/package.json @SourE-dev
+/package-lock.json @SourE-dev
+pnpm-lock.yaml @SourE-dev
+yarn.lock @SourE-dev
+/vendor/ @SourE-dev
+CLAUDE.md @SourE-dev
+/.gitattributes @SourE-dev
+/lanes.lock.json @SourE-dev
+/scripts/preflight.mjs @SourE-dev
+.env* @SourE-dev
+auth/ @SourE-dev
+secret/ @SourE-dev
+secrets/ @SourE-dev
+/deploy/ @SourE-dev
+/scripts/lanes/owner-diff.mjs @SourE-dev
+/scripts/lanes/owner-diff.test.mjs @SourE-dev
