@@ -73,7 +73,9 @@ GitHub identity (ADR 0004/0007), `queue.mjs` never runs inside Claude or on a sc
   `watch "$C"`; `env -S` and `--split-string` text is split into the words it stands for, and an `env` operand built at
   run time (`env $(echo GIT_CONFIG_KEY_0=alias.x) git push`) may be a config assignment; and `git fetch --refmap=` into
   `refs/tags/*` (or a run-time refmap) and `git fetch --stdin` write tags. `gh api graphql -f query=$Q` stays outside the
-  rule (the `createRef` note above): a guard cannot read what a query does.
+  rule (the `createRef` note above): a guard cannot read what a query does. The WMI check (#316) no longer treats a word
+  made only of glob characters (`*`, `??`) as a possible `Win32_Process`; `(gwmi -Class *).Create($c)` is outside it, as
+  `(gwmi -List).Create($c)` already was, and "create" counts as a whole word, not inside "created" or "creating".
 
   A subcommand word in argument position is no program (#441): the approve guard reads `watch`, `ssh`, `script` and the
    other shell-text commands as a program wherever they stand, except as an argument of a program whose words are

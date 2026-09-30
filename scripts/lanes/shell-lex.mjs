@@ -1067,6 +1067,8 @@ export function readGrant(file) {
   }
 }
 
+const MAX_UNCLOSED = 16;
+
 /** The index of the `)` closing a `$(` whose contents start at `from`, or -1 when it never closes. */
 function substitutionEnd(cmd, from) {
   let depth = 1;
@@ -1088,6 +1090,7 @@ function substitutionEnd(cmd, from) {
  * does not end the statement (#477). One that never closes stays as it is.
  */
 function collapsedSubstitutions(cmd) {
+  let unclosed = 0;
   let out = "";
   let single = false;
   let double = false;
@@ -1100,13 +1103,15 @@ function collapsedSubstitutions(cmd) {
     }
     if (c === "'" && !double) single = !single;
     else if (c === '"' && !single) double = !double;
-    else if (c === "$" && cmd[i + 1] === "(" && !single) {
+    else if (c === "$" && cmd[i + 1] === "(" && !single && unclosed < MAX_UNCLOSED) {
       const end = substitutionEnd(cmd, i + 2);
       if (end !== -1) {
         out += "${LANES_SUBSTITUTION}";
         i = end;
         continue;
       }
+      // Each search that fails scans to the end: after a few, stop, so a run of openers costs bounded time.
+      unclosed += 1;
     }
     out += c;
   }
