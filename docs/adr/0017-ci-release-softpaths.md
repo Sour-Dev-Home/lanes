@@ -51,7 +51,7 @@ GitHub identity (ADR 0004/0007), `queue.mjs` never runs inside Claude or on a sc
      on `git/refs` or `releases`.
    - **Outside the rule**, recorded and not guarded: aliases and `push.followTags` from git config files (`~/.gitconfig`,
      a repository's `.git/config`, `GIT_CONFIG_GLOBAL`): a guard sees the command line, and lanes act as the owner's
-     account under the accepted-risk rule of ADR 0004/0007. Also outside: `gh api graphql` mutations (`createRef`) and creating a tag object through `git/tags`, which makes no ref. A `git config` write is not denied either, nor is a script file
+     account under the accepted-risk rule of ADR 0004/0007. Known gaps, not guarded yet: a run-time `GIT_CONFIG_KEY_n` set in an earlier statement (`export GIT_CONFIG_KEY_0=$K`) or behind a launcher, a `-c` key spliced at run time, and tag commands inside nested shell text (`bash -c "git push --tags"`, `ssh h git tag v1`), which the start guard denies and the approve guard scans only for `post-review`; #468 tracks them. Also outside: `gh api graphql` mutations (`createRef`) and creating a tag object through `git/tags`, which makes no ref. A `git config` write is not denied either, nor is a script file
      that itself pushes a tag: the guards read the names a command runs, not what a program does inside. `release.yml`
      still checks any pushed tag against `main`, `package.json` and `CHANGELOG.md`.
 
