@@ -52,7 +52,7 @@ export function readBlockerReport(body, readState) {
   return blockerReport(blockedBy, states);
 }
 
-const reason = (err) => String(err?.stderr || err?.message || err).trim().split("\n")[0];
+const reason = (err) => String(err?.stderr || err?.message || err).trim().split("\n")[0].replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
 
 /** `run` takes full `gh` arguments and returns stdout; tests pass a fake. Returns the exit code and the line to print. */
 export function main(argv, run = gh) {
@@ -69,9 +69,24 @@ export function main(argv, run = gh) {
   }
 
   // The issues API also answers for a PR, so a PR used as a blocker counts by its own state.
-  const report = readBlockerReport(body, (b) => JSON.parse(run(["api", `repos/{owner}/{repo}/issues/${b}`])).state);
+  // The shared reader drops why a blocker was unreadable, so note it here for the message.
+  const why = new Map();
+  const report = readBlockerReport(body, (b) => {
+    let state;
+    try {
+      state = JSON.parse(run(["api", `repos/{owner}/{repo}/issues/${b}`])).state;
+    } catch (err) {
+      why.set(b, reason(err));
+      throw err;
+    }
+    if (state !== "open" && state !== "closed") why.set(b, `state: ${String(state).replace(/[\u0000-\u001f\u007f-\u009f]/g, "")}`);
+    return state;
+  });
   if (report.error) return cannot(report.error);
-  if (report.unreadable.length) return cannot(`${report.unreadable.map((b) => `#${b}`).join(", ")} not found or unreadable`);
+  if (report.unreadable.length) {
+    const named = report.unreadable.map((b) => `#${b} not found or unreadable${why.get(b) ? ` (${why.get(b)})` : ""}`);
+    return cannot(named.join(", "));
+  }
   if (report.open.length) return { code: 1, message: `#${n}: blocked by ${report.open.map((b) => `#${b} (open)`).join(", ")}` };
   return { code: 0, message: `#${n}: no open blockers` };
 }
