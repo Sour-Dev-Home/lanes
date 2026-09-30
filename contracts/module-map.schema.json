@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "module-map.schema.json",
+  "title": "Lanes module map",
+  "description": "The `modules` value of lanes.config.json (ADRs 0008 and 0018). Strict: no other keys, so a typo is not silently ignored. Config can only add reviewers; no key removes one. scripts/lanes/modules.mjs is the validator; it also checks that each named reviewer has a .claude/agents/<name>.md file and that `imports` names existing modules, which a schema cannot express. modules.test.mjs checks that the two agree.",
+  "type": "object",
+  "required": ["entries"],
+  "additionalProperties": false,
+  "properties": {
+    "entries": { "description": "The modules. The longest matching path prefix decides a file's module.", "type": "array", "items": { "$ref": "#/$defs/entry" } },
+    "allowCycles": {
+      "description": "Import cycles that are tolerated, each as the files in it, in any order.",
+      "type": "array",
+      "items": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": ["id", "paths", "imports"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "description": "Unique, non-empty module id.", "type": "string", "minLength": 1 },
+        "paths": {
+          "description": "Repo-relative path prefixes, with / and no `..`, that the module claims.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "imports": { "description": "Ids of the other modules this one may import from; its own is always allowed.", "type": "array", "items": { "type": "string" } },
+        "reviewers": {
+          "description": "Extra reviewers for a diff that touches the module's paths. Added to the built-in ones, never a replacement. Each has a .claude/agents/<name>.md file; `owner` is not a reviewer.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$", "not": { "const": "owner" } }
+        },
+        "contracts": { "description": "Contract path prefixes the module owns. Data only in phase 1.", "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "owner": { "description": "True marks the module's paths as owner-only. Data only in phase 1; paths.owner stays the enforced list.", "type": "boolean" },
+        "risk": { "description": "Data only in phase 1; paths.sensitive stays the enforced list.", "enum": ["normal", "sensitive"] },
+        "test": { "description": "The module's test command. Data only; nothing executes it in phase 1.", "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
