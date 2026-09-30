@@ -1746,3 +1746,35 @@ test("cleanup.mjs --help and an unknown flag run no git, gh or claude command", 
   assert.equal(bad.stderr.trim(), `unknown argument: --force\n${USAGE}`);
   assert.equal(bad.stdout, "");
 });
+
+test("a worktree whose issue has an open PR on another branch is reported as a leftover, never removed (#476)", () => {
+  const plan = planCleanup({ worktrees: [wt("issue-7-old")], sessions: [], prs: [merged("issue-7-new", { state: "OPEN", number: 91 })] });
+  assert.equal(plan.length, 1);
+  assert.equal(plan[0].steps, undefined);
+  assert.equal(cleanableCount(plan), 0);
+  const text = render(runCleanup(plan, { run() { throw new Error("must not run"); }, stillThere: () => true }));
+  assert.equal(text, "leftover: issue-7-old (issue #7 has PR #91 on issue-7-new); its commits are not in any PR");
+});
+
+test("edge: a merged PR on another branch is a leftover too, and an open one is named before a merged one (#476)", () => {
+  const onlyMerged = planCleanup({ worktrees: [wt("issue-7-old")], prs: [merged("issue-7-new", { number: 92 })] });
+  assert.match(render(runCleanup(onlyMerged, { run() {}, stillThere: () => true })), /^leftover: issue-7-old \(issue #7 has PR #92 on issue-7-new\)/);
+  const both = planCleanup({ worktrees: [wt("issue-7-old")], prs: [merged("issue-7-a", { number: 92 }), merged("issue-7-b", { number: 93, state: "OPEN" })] });
+  assert.equal(both[0].leftover.pr, 93);
+});
+
+test("edge: no PR on any branch, another issue's PR, a closed-unmerged PR, or a working session is no leftover (#476)", () => {
+  const none = planCleanup({ worktrees: [wt("issue-7-old")], prs: [] });
+  const otherIssue = planCleanup({ worktrees: [wt("issue-7-old")], prs: [merged("issue-70-x", { state: "OPEN" })] });
+  const closed = planCleanup({ worktrees: [wt("issue-7-old")], prs: [merged("issue-7-new", { state: "CLOSED" })] });
+  const working = planCleanup({ worktrees: [wt("issue-7-old")], sessions: [session("s7", "issue-7-old", { state: "working" })], prs: [merged("issue-7-new", { state: "OPEN" })] });
+  for (const plan of [none, otherIssue, closed, working]) assert.equal(plan[0].leftover, undefined);
+});
+
+test("a worktree with its own merged PR is still removed when another branch also has a PR (#476)", () => {
+  const [entry] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [], prs: [merged("issue-7-x"), merged("issue-7-y", { number: 91, state: "OPEN" })] });
+  assert.equal(entry.leftover, undefined);
+  assert.ok(entry.steps);
+  const [ok] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [], prs: [merged("issue-7-x"), merged("issue-7-y", { number: 91 })] });
+  assert.ok(ok.steps);
+});
