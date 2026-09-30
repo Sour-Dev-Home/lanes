@@ -52,6 +52,12 @@
    0 after three idle ticks in a row (nothing in flight, nothing to launch); Ctrl-C stops it at any time. Each lane it
    launches gets the same detached reaper `/start` starts (ADR 0010, logged to `.lanes/reap/<N>.log`), so a lane that
    merges after the queue exits is still cleaned up; a reaper that fails to start prints one line and the queue goes on.
+   **The queue stops itself after a lanes merge.** It records the commit its scripts came from at startup; each tick
+   it fetches `origin/main`, and when `scripts/lanes/` or `lanes.config.json` differ from that commit it launches
+   nothing and exits 3 with `lanes scripts changed since the queue started (<old>..<new>): git pull --ff-only, then
+   restart the queue`. Run that, then start the queue again (a running Node process never reloads its scripts, so
+   without this it would keep launching lanes with old guards). A failed fetch prints a line and launches nothing
+   that tick; the queue keeps running and tries again.
 3. **Watch with `/status`**: WAITING ON YOU, IN FLIGHT (each PR's stage), READY TO START, MERGED.
    A `Notification` hook (`scripts/lanes/notify-hook.mjs`) pops a notification when a lane stops at a permission
    prompt or needs input (with the `claude attach <id>` to reach it), or finishes with its PR waiting on you or failing.

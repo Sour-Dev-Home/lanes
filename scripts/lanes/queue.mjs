@@ -4,6 +4,7 @@
 // GitHub and the sessions, cleans up merged lanes and launches, every 3 minutes until it is idle.
 // Usage: node scripts/lanes/queue.mjs, in the owner's own terminal. Exit 0: idle for three ticks in a row.
 // 1: three GitHub reads failed in a row. 2: an argument, a bad lanes.config.json, or run inside Claude (CLAUDECODE).
+// 3: a merge changed the lanes scripts since the queue started (#535): pull and restart.
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -194,6 +195,18 @@ const GATE_QUERY =
 const reason = (err) => String(err?.stderr || err?.message || err).trim().split("\n")[0];
 const stamp = (ms) => new Date(ms).toTimeString().slice(0, 8);
 
+// #535: the paths a running queue has loaded. A directory pathspec ends in a slash so `scripts/lanes-other` never matches.
+export const LOADED_PATHS = ["scripts/lanes/", "lanes.config.json"];
+
+// Fetches origin/main and returns `{ old, now }` when the loaded paths differ between the queue's start commit and it,
+// else null. Throws when the fetch, the ref or the diff cannot be read.
+function scriptsChanged(git, startedAt) {
+  git(["fetch", "--quiet", "origin", "main"]);
+  const now = git(["rev-parse", "origin/main"]).trim();
+  if (now === startedAt) return null;
+  return git(["diff", "--name-only", startedAt, now, "--", ...LOADED_PATHS]).trim() ? { old: startedAt, now } : null;
+}
+
 // One tick's snapshot for planTick. Throws when any part cannot be read, or a list may be truncated.
 function readSnapshot(deps, root) {
   const issues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body,assignees"]));
@@ -317,6 +330,16 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     return 2;
   }
   const { maxLanes, softPaths, models } = settings;
+  // #535: Node loads the lanes scripts once, so the commit they came from is recorded now and compared every tick.
+  let startedAt = null;
+  if (deps.git) {
+    try {
+      startedAt = deps.git(["rev-parse", "HEAD"]).trim();
+    } catch (err) {
+      print(`cannot read the lanes scripts commit: ${reason(err)}`);
+      return 2;
+    }
+  }
   let budgetOver = false;
   let budgetFailed = false;
   let overLane = new Set();
@@ -352,6 +375,21 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       say(`cannot read GitHub or the sessions: ${reason(err)}, retrying next tick`);
       await sleep(TICK_MS);
       continue;
+    }
+    // #535: nothing launches, recovers or resumes with lanes scripts older than origin/main's; a fetch that fails launches nothing.
+    if (deps.git) {
+      let stale;
+      try {
+        stale = scriptsChanged(deps.git, startedAt);
+      } catch (err) {
+        say(`cannot fetch origin/main: ${reason(err)}, launching nothing this tick`);
+        await sleep(TICK_MS);
+        continue;
+      }
+      if (stale) {
+        say(`lanes scripts changed since the queue started (${stale.old.slice(0, 7)}..${stale.now.slice(0, 7)}): git pull --ff-only, then restart the queue`);
+        return 3;
+      }
     }
     const resumes = deps.recovery ? recoverLanes(snapshot, { deps, dir, say, attempted, told }) : [];
     // An issue whose launch failed stays open (its blockers and ranking still count) but is no longer a candidate.
@@ -491,6 +529,7 @@ const DEFAULT_DEPS = {
   launchEnv: localLaunchEnv,
   recovery: DEFAULT_RECOVERY,
   gh: run("gh"),
+  git: (args) => run("git")(args, { cwd: repoRoot() }),
   claude: run("claude"),
   budget: (agents, root, caps) => loadBudget({ root, lanes: liveLanes(agents, root), ...caps }),
   root: repoRoot,
