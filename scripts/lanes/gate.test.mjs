@@ -1333,3 +1333,58 @@ test("a configured reviewer with no agent file posts a lanes/gate failure naming
   assert.match(d.description, /"extra-reviewer" has no \.claude\/agents\/extra-reviewer\.md/);
   assert.ok(posted[0].fields.includes("state=failure"));
 }));
+
+// ADR 0020 parts 2 and 3: under the team profile the configured lane App bot's reviewer output counts.
+const BOT = "lanes-bot[bot]";
+const laneConfig = (profile) =>
+  compileConfig({
+    requiredChecks: ["verify"],
+    paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] },
+    identity: profile === "team" ? { profile, app: { id: 1, installationId: 2, botLogin: BOT } } : { profile },
+  });
+const botStatus = (context) => ({ ...reviewStatus, context, creator: { type: "Bot", login: BOT } });
+
+test("team: a lane-bot verdict comment counts and needs no permission lookup", () => {
+  const { api } = fakeApi(fullRoutes([verdictComment(BOT, "test-hunter")]));
+  assert.equal(evaluatePr(api, "o/r", 5, laneConfig("team")).state, "success");
+});
+
+test("team: a lane-bot review/<reviewer> status counts", () => {
+  const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+  routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`] = [botStatus("review/test-hunter")];
+  const { api } = fakeApi(routes);
+  assert.equal(evaluatePr(api, "o/r", 5, laneConfig("team")).state, "success");
+  // The same status is dropped under solo.
+  assert.notEqual(evaluatePr(fakeApi(routes).api, "o/r", 5, laneConfig("solo")).state, "success");
+});
+
+test("team: a github-actions[bot] verdict comment does not count", () => {
+  const { api } = fakeApi(fullRoutes([verdictComment("github-actions[bot]", "test-hunter")]));
+  assert.equal(evaluatePr(api, "o/r", 5, laneConfig("team")).state, "pending");
+});
+
+test("solo: a lane-bot verdict comment does not count", () => {
+  const { api } = fakeApi(fullRoutes([verdictComment(BOT, "test-hunter")]));
+  assert.equal(evaluatePr(api, "o/r", 5, laneConfig("solo")).state, "pending");
+});
+
+test("edge: a lane-bot comment with a lookalike login does not count under team", () => {
+  const { api } = fakeApi(fullRoutes([verdictComment("Lanes-Bot[bot]", "test-hunter")]));
+  assert.equal(evaluatePr(api, "o/r", 5, laneConfig("team")).state, "pending");
+});
+
+test("team: a lane-bot review/owner status never satisfies the owner stage", () => {
+  const cfg = compileConfig({
+    requiredChecks: ["verify"],
+    paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [], owner: ["^lanes\.config\.json$"] },
+    identity: { profile: "team", app: { id: 1, installationId: 2, botLogin: BOT } },
+  });
+  const routes = ownerDiffRoutes([CONFIG_FILE], {
+    [contentsRoute(CONFIG_FILE, BASE)]: baseConfigText,
+    [contentsRoute(CONFIG_FILE, SHA)]: JSON.stringify({ paths: { owner: ["^x$", "^b$"] } }),
+  });
+  const base = routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`];
+  routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`] = [...base, botStatus("review/owner")];
+  const { api } = fakeApi(routes);
+  assert.equal(evaluatePr(api, "o/r", 5, cfg).description, "waiting on owner (/approve) (owner-only path)");
+});

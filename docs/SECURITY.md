@@ -21,6 +21,12 @@ private channel in a public issue that contains no details.
 | **Untrusted issue text steering a lane** | Invariant I4: an issue a lane filed carries `lane-filed` and never becomes `ready` until the owner removes the label; auto-release was considered and rejected | [0015](adr/0015-owner-input.md), [0008](adr/0008-module-map.md) |
 | **Secrets or personal data in published files** | The `PII_PATTERNS` repository secret feeds a scan (the `security` check and the pre-push `preflight`) for personal data and absolute local paths; the dashboard publisher runs the same check on what it publishes ([ADR 0012](adr/0012-endgame-workflow.md), [0013](adr/0013-lane-metrics.md)); setup is in [USING.md](USING.md) | [0012](adr/0012-endgame-workflow.md), [0013](adr/0013-lane-metrics.md) |
 
+**Who counts as a trusted author.** Two parts ([0020](adr/0020-gate-trusts-the-lane-app-bot.md)): a human with write permission on
+the repository, or, only under the `team` identity profile, the configured App bot (`identity.app.botLogin`, matched
+exactly). The bot counts for reviewer output alone: a `review/<reviewer>` status or a verdict comment for a configured
+reviewer, never `review/owner`, which only a human with write permission can post. Any other bot, such as
+`github-actions[bot]`, counts for nothing, and under `solo` no bot does.
+
 Also in force: required reviews chosen by tier and diff (test-hunter, security-reviewer, ui-reviewer,
 architecture-advisor, each a fresh session), a security reviewer that cites a vendored OWASP source
 ([0009](adr/0009-owasp-cheatsheets.md)), CodeQL, a ruleset with no bypass and no force push (both set up as described in [USING.md](USING.md)), and module boundaries
