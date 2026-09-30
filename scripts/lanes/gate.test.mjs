@@ -1376,7 +1376,7 @@ test("edge: a lane-bot comment with a lookalike login does not count under team"
 test("team: a lane-bot review/owner status never satisfies the owner stage", () => {
   const cfg = compileConfig({
     requiredChecks: ["verify"],
-    paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [], owner: ["^lanes\.config\.json$"] },
+    paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [], owner: ["^lanes\\.config\\.json$"] },
     identity: { profile: "team", app: { id: 1, installationId: 2, botLogin: BOT } },
   });
   const routes = ownerDiffRoutes([CONFIG_FILE], {
