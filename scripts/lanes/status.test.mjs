@@ -1060,6 +1060,14 @@ test("#483: edge: a future-dated line and an overlap with no partner are not cou
   assert.deepEqual(startsReport(text, 7, NOW), ["start decisions, last 7 days: 0 started, 1 skipped for overlap, 0 for the cap, 0 for other reasons"]);
 });
 
+test("#483: edge: the window is inclusive at exactly N days and excludes one millisecond older or newer than now", () => {
+  const at = (ms) => JSON.stringify({ at: new Date(ms).toISOString(), issue: 1, outcome: "started" });
+  assert.match(startsReport(at(NOW - 7 * 86_400_000), 7, NOW)[0], /1 started/);
+  assert.deepEqual(startsReport(at(NOW - 7 * 86_400_000 - 1), 7, NOW), ["no start decisions recorded"]);
+  assert.match(startsReport(at(NOW), 7, NOW)[0], /1 started/);
+  assert.deepEqual(startsReport(at(NOW + 1), 7, NOW), ["no start decisions recorded"]);
+});
+
 test("#483: health.md runs status.mjs --starts 7", async () => {
   const { readFileSync } = await import("node:fs");
   assert.match(readFileSync(new URL("../../.claude/commands/health.md", import.meta.url), "utf8"), /node scripts\/lanes\/status\.mjs --starts 7/);
