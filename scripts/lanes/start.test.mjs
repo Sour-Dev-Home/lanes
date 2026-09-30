@@ -2295,7 +2295,7 @@ test("edge: a refresher whose process never started (no pid) is reported and kee
 test("isLaneGhDir accepts only lanes-gh-<issue>-* directly under the temp folder, and never a link", () => {
   assert.equal(isLaneGhDir("/tmp/lanes-gh-7-AbC123", "/tmp"), true);
   assert.equal(isLaneGhDir("C:\\Temp\\lanes-gh-7-AbC123", "c:/temp/"), true);
-  for (const dir of ["/tmp/lanes-gh-7-", "/tmp/other", "/home/me/.config/gh", "/tmp/x/lanes-gh-7-AbC123", "/tmp/lanes-gh-x-AbC123", "/tmp/lanes-gh-7-../gh", ""]) assert.equal(isLaneGhDir(dir, "/tmp"), false, dir);
+  for (const dir of ["/tmp/lanes-gh-7-", "/tmp/other", "/srv/other/gh", "/tmp/x/lanes-gh-7-AbC123", "/tmp/lanes-gh-x-AbC123", "/tmp/lanes-gh-7-../gh", ""]) assert.equal(isLaneGhDir(dir, "/tmp"), false, dir);
   assert.equal(isLaneGhDir("/tmp/lanes-gh-7-AbC123", "/tmp", () => true), false);
 });
 
