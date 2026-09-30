@@ -60,7 +60,10 @@ export function compileConfig(raw) {
     throw new Error("lanes.config.json: requiredChecks must be a non-empty array");
   }
   // ADR 0018: the optional module map, kept as written; modules.mjs validates it.
-  return raw.modules === undefined ? { requiredChecks, paths } : { requiredChecks, paths, modules: raw.modules };
+  const config = raw.modules === undefined ? { requiredChecks, paths } : { requiredChecks, paths, modules: raw.modules };
+  // ADR 0020 part 1: the validated identity, so the gate can read the configured lane bot; absent when the key is.
+  const identity = parseIdentity(raw.identity);
+  return identity === undefined ? config : { ...config, identity };
 }
 
 export function loadConfig(file = "lanes.config.json") {
@@ -537,8 +540,61 @@ export function isBotStatus(status) {
  * Drops review/* statuses posted by a bot (I3): a PR that adds or edits a workflow can post one with GITHUB_TOKEN in
  * the merge queue, but a real reviewer or the owner always posts review/* by running `gh` as themselves.
  */
-export function trustedStatuses(statuses) {
-  return (Array.isArray(statuses) ? statuses : []).filter((s) => !(String(s?.context ?? "").startsWith("review/") && isBotStatus(s)));
+export function trustedStatuses(statuses, identity = undefined, names = []) {
+  const reviewers = Array.isArray(names) ? names : [];
+  // ADR 0020 part 2: the one exception is the configured lane bot's status for a configured non-owner reviewer. A status
+  // needs creator type Bot as well (isLaneBot matches a comment author, which has no type, on login alone).
+  const laneBot = (s) => {
+    const name = String(s?.context ?? "").slice("review/".length);
+    return s?.creator?.type === "Bot" && isLaneBot(identity, s.creator) && name !== "owner" && reviewers.includes(name);
+  };
+  return (Array.isArray(statuses) ? statuses : []).filter((s) => !(String(s?.context ?? "").startsWith("review/") && isBotStatus(s)) || laneBot(s));
+}
+
+const BOT_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\[bot\]$/;
+
+/**
+ * ADR 0020 part 2: whether `actor` (a status creator or a comment author, `{ login, type? }`) is the lane App bot the
+ * config names. Only under the team profile with `app.botLogin` set, on an exact, case-sensitive login. An actor that
+ * carries a type must have type Bot; a comment author carries none, and the reserved `[bot]` suffix covers that.
+ */
+export function isLaneBot(identity, actor) {
+  const login = identity?.app?.botLogin;
+  if (identity?.profile !== "team" || typeof login !== "string" || login === "") return false;
+  if (actor === null || typeof actor !== "object" || actor.login !== login) return false;
+  return actor.type === undefined || actor.type === "Bot";
+}
+
+/**
+ * The `identity` key (ADR 0019 part 1, ADR 0020 part 1), validated and copied; undefined when the key is missing.
+ * `{ profile: "solo" }` or `{ profile: "team", app: { id, installationId, botLogin } }`; `botLogin` is required under
+ * team and accepted (and never used) under solo. Throws on any other shape.
+ */
+export function parseIdentity(identity) {
+  if (identity === undefined) return undefined;
+  const bad = (what) => new Error(`lanes.config.json: identity ${what}`);
+  if (identity === null || typeof identity !== "object" || Array.isArray(identity)) throw bad("must be an object");
+  const extra = Object.keys(identity).find((k) => k !== "profile" && k !== "app");
+  if (extra !== undefined) throw bad(`has an unknown key ${JSON.stringify(extra)}`);
+  if (identity.profile !== "solo" && identity.profile !== "team") throw bad(`.profile must be "solo" or "team", got ${JSON.stringify(identity.profile)}`);
+  const { app } = identity;
+  if (app === undefined) {
+    if (identity.profile === "team") throw bad(".app { id, installationId, botLogin } is required for the team profile");
+    return { profile: "solo" };
+  }
+  if (app === null || typeof app !== "object" || Array.isArray(app)) throw bad(".app must be an object { id, installationId, botLogin }");
+  if (Object.keys(app).some((k) => k !== "id" && k !== "installationId" && k !== "botLogin")) throw bad(".app may only have id, installationId and botLogin");
+  for (const key of ["id", "installationId"]) {
+    if (!Number.isSafeInteger(app[key]) || app[key] < 1) throw bad(`.app.${key} must be a positive whole number, got ${JSON.stringify(app[key])}`);
+  }
+  const copy = { id: app.id, installationId: app.installationId };
+  if (app.botLogin === undefined) {
+    if (identity.profile === "team") throw bad(".app.botLogin is required for the team profile (the lane App's login, like name[bot])");
+  } else {
+    if (typeof app.botLogin !== "string" || !BOT_LOGIN.test(app.botLogin)) throw bad(`.app.botLogin must be one App login like name[bot], got ${JSON.stringify(app.botLogin)}`);
+    copy.botLogin = app.botLogin;
+  }
+  return { profile: identity.profile, app: copy };
 }
 
 const NEEDS_NOTHING = /^nothing\.?$/i;
@@ -589,7 +645,7 @@ export const REUSABLE_REVIEWERS = Object.freeze(["test-hunter", "security-review
 export function reusableReviewers({ issueLabels, files, statuses, config, adrs = [], interfaceContract = "" }) {
   const tier = tierOf(issueLabels);
   if (tier === null) return [];
-  const latest = latestByContext(trustedStatuses(statuses));
+  const latest = latestByContext(trustedStatuses(statuses, config.identity, reviewerNames(config)));
   return requiredReviewers(tier, classifyFiles(files, config, adrs, interfaceContract), files, config.modules).filter((r) => REUSABLE_REVIEWERS.includes(r) && !latest.has(reviewContext(r)));
 }
 
@@ -638,7 +694,7 @@ export function reuseBlockedBy(reviewer, changedFiles, prFiles, adrs = []) {
  * `{ sha, status }` or a list of them. Defence in depth: each must be a trusted success of a reusable reviewer on a real
  * commit SHA, for a reviewer with no trusted status on the head (`latest`); a reviewer named twice is dropped entirely.
  */
-function acceptReused(reused, latest) {
+function acceptReused(reused, latest, identity, names) {
   const out = new Map();
   const twice = new Set();
   for (const r of Array.isArray(reused) ? reused : reused ? [reused] : []) {
@@ -649,7 +705,7 @@ function acceptReused(reused, latest) {
       !latest.has(r.status.context) &&
       COMMIT_SHA_RE.test(r.sha ?? "") &&
       r.status.state === "success" &&
-      trustedStatuses([r.status]).length === 1;
+      trustedStatuses([r.status], identity, names).length === 1;
     if (!ok) continue;
     if (out.has(name)) twice.add(name);
     out.set(name, { sha: r.sha.toLowerCase(), status: r.status });
@@ -663,7 +719,7 @@ function acceptReused(reused, latest) {
  * review/owner success on a real commit SHA, `same` exactly true or false, and only when the head has no trusted
  * review/owner status of its own (`latest`), whatever its state.
  */
-function acceptOwnerCarry(carry, latest) {
+function acceptOwnerCarry(carry, latest, identity, names) {
   const ok =
     carry !== null &&
     typeof carry === "object" &&
@@ -672,7 +728,7 @@ function acceptOwnerCarry(carry, latest) {
     COMMIT_SHA_RE.test(carry.sha ?? "") &&
     carry.status?.context === reviewContext("owner") &&
     carry.status.state === "success" &&
-    trustedStatuses([carry.status]).length === 1;
+    trustedStatuses([carry.status], identity, names).length === 1;
   return ok ? { sha: carry.sha.toLowerCase(), same: carry.same } : null;
 }
 
@@ -764,8 +820,8 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
   }
   const blocked = blockerStatus(blockers, pr.closes);
   if (blocked) return blocked;
-  const latest = latestByContext(trustedStatuses(statuses));
-  const reuse = acceptReused(reused, latest);
+  const latest = latestByContext(trustedStatuses(statuses, config.identity, reviewerNames(config)));
+  const reuse = acceptReused(reused, latest, config.identity, reviewerNames(config));
   for (const [name, r] of reuse) latest.set(reviewContext(name), r.status);
   const note = reuseNote(reuse);
   const required = requiredReviewers(tier, cls, files, config.modules);
@@ -780,7 +836,7 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
   if (latest.get(reviewContext("owner"))?.state === "success") {
     return { state: "success", description: `approved by owner${note}`, stage: "ready" };
   }
-  const carried = acceptOwnerCarry(ownerCarry, latest);
+  const carried = acceptOwnerCarry(ownerCarry, latest, config.identity, reviewerNames(config));
   if (carried?.same === true) {
     return { state: "success", description: `approved by owner (carried from ${carried.sha.slice(0, 7)})${note}`, stage: "ready" };
   }

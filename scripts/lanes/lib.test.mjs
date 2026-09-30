@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adrGoverns, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { adrGoverns, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -1016,3 +1016,105 @@ test("reviewersReport prints a configured reviewer for a diff in its module", ()
   assert.equal(reviewersReport("full", ["src/hot/a.js"], modConfig), "test-hunter\ntest-hunter-extra");
   assert.equal(reviewersReport("full", ["src/plain/a.js"], modConfig), "test-hunter");
 }));
+
+// #526 (ADR 0020): the configured lane App bot is trusted for reviewer statuses under team, and nothing else.
+const BOT = "sour-dev-lanes[bot]";
+const TEAM_ID = { profile: "team", app: { id: 11, installationId: 22, botLogin: BOT } };
+const botCreator = { type: "Bot", login: BOT };
+const botStatus = (name, creator = botCreator) => ({ context: reviewContext(name), state: "success", description: "ok", created_at: "2026-09-29T10:00:00Z", ...(creator === null ? {} : { creator }) });
+
+test("parseIdentity accepts solo and team shapes and requires botLogin only under team", () => {
+  assert.equal(parseIdentity(undefined), undefined);
+  assert.deepEqual(parseIdentity({ profile: "solo" }), { profile: "solo" });
+  assert.deepEqual(parseIdentity(TEAM_ID), TEAM_ID);
+  assert.deepEqual(parseIdentity({ profile: "solo", app: { id: 1, installationId: 2, botLogin: BOT } }), { profile: "solo", app: { id: 1, installationId: 2, botLogin: BOT } });
+  assert.deepEqual(parseIdentity({ profile: "solo", app: { id: 1, installationId: 2 } }), { profile: "solo", app: { id: 1, installationId: 2 } });
+});
+
+test("parseIdentity rejects bad shapes and bad bot logins", () => {
+  const app = (extra) => ({ profile: "team", app: { id: 1, installationId: 2, ...extra } });
+  const bad = [null, "team", [], {}, { profile: "other" }, { profile: "team" }, { profile: "solo", x: 1 }, { profile: "team", app: null }, { profile: "team", app: { id: 1 } }, { profile: "team", app: { id: "1", installationId: 2, botLogin: BOT } }, { profile: "team", app: { id: 1, installationId: 2, botLogin: BOT, key: "x" } }];
+  for (const identity of bad) assert.throws(() => parseIdentity(identity), /lanes\.config\.json: identity /, JSON.stringify(identity));
+  // edge: team without botLogin, and malformed logins (no suffix, wildcard, list, empty, dash edges, upper-case suffix, too long)
+  assert.throws(() => parseIdentity(app({})), /botLogin/);
+  for (const botLogin of ["lanes", "*[bot]", "github-actions", "", "-a[bot]", "a-[bot]", "a[BOT]", "a b[bot]", ["a[bot]"], 5, null, `${"a".repeat(40)}[bot]`]) {
+    assert.throws(() => parseIdentity(app({ botLogin })), /botLogin/, JSON.stringify(botLogin));
+  }
+  assert.equal(parseIdentity(app({ botLogin: "a[bot]" })).app.botLogin, "a[bot]");
+  // edge: ids at the boundary: 0 and negative are refused, 1 accepted, and a 39-character slug is the longest allowed
+  for (const id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => parseIdentity(app({ id, botLogin: BOT })), /\.app\.id/, String(id));
+    assert.throws(() => parseIdentity(app({ installationId: id, botLogin: BOT })), /\.app\.installationId/, String(id));
+  }
+  assert.equal(parseIdentity({ profile: "team", app: { id: 1, installationId: 1, botLogin: `${"a".repeat(39)}[bot]` } }).app.id, 1);
+});
+
+test("compileConfig exposes a validated identity, leaves it out when absent and throws on an invalid one", () => {
+  const raw = { requiredChecks: ["verify"], paths: { skip: [], contract: [], sensitive: [], ui: [] } };
+  assert.equal("identity" in compileConfig(raw), false);
+  assert.deepEqual(compileConfig({ ...raw, identity: TEAM_ID }).identity, TEAM_ID);
+  assert.throws(() => compileConfig({ ...raw, identity: { profile: "team" } }), /identity/);
+});
+
+test("isLaneBot is true only for team, a set botLogin, the exact login and (for a status) type Bot", () => {
+  assert.equal(isLaneBot(TEAM_ID, botCreator), true);
+  assert.equal(isLaneBot(TEAM_ID, { login: BOT }), true, "a comment author has no type");
+  assert.equal(isLaneBot(TEAM_ID, { type: "User", login: BOT }), false);
+  assert.equal(isLaneBot(TEAM_ID, { type: "Bot", login: "github-actions[bot]" }), false);
+  assert.equal(isLaneBot(TEAM_ID, { type: "Bot", login: BOT.toUpperCase() }), false);
+  assert.equal(isLaneBot(TEAM_ID, undefined), false);
+  assert.equal(isLaneBot(TEAM_ID, null), false);
+  assert.equal(isLaneBot({ profile: "solo", app: { id: 1, installationId: 2, botLogin: BOT } }, botCreator), false);
+  assert.equal(isLaneBot({ profile: "team", app: { id: 1, installationId: 2 } }, botCreator), false);
+  assert.equal(isLaneBot({ profile: "team" }, botCreator), false);
+  assert.equal(isLaneBot(undefined, botCreator), false);
+});
+
+test("trustedStatuses keeps a configured reviewer status from the lane bot and drops everything else from it", () => {
+  const names = ["test-hunter", "security-reviewer"];
+  const kept = botStatus("test-hunter");
+  assert.deepEqual(trustedStatuses([kept], TEAM_ID, names), [kept]);
+  assert.deepEqual(trustedStatuses([botStatus("owner")], TEAM_ID, names), []);
+  // edge: review/owner stays untrusted from the bot even if a caller's reviewer names wrongly include "owner"
+  assert.deepEqual(trustedStatuses([botStatus("owner")], TEAM_ID, [...names, "owner"]), []);
+  assert.deepEqual(trustedStatuses([botStatus("unknown-reviewer")], TEAM_ID, names), []);
+  assert.deepEqual(trustedStatuses([botStatus("test-hunter", { type: "Bot", login: "github-actions[bot]" })], TEAM_ID, names), []);
+  assert.deepEqual(trustedStatuses([botStatus("test-hunter", { type: "Bot", login: "other-app[bot]" })], TEAM_ID, names), []);
+  assert.deepEqual(trustedStatuses([botStatus("test-hunter", { type: "User", login: BOT })], TEAM_ID, names), []);
+  assert.deepEqual(trustedStatuses([botStatus("test-hunter", null)], TEAM_ID, names), []);
+  assert.deepEqual(trustedStatuses([kept], { profile: "solo", app: { id: 1, installationId: 2, botLogin: BOT } }, names), []);
+  assert.deepEqual(trustedStatuses([kept], { profile: "team", app: { id: 1, installationId: 2 } }, names), []);
+  // the new arguments omitted or partial: no bot is trusted
+  assert.deepEqual(trustedStatuses([kept]), []);
+  assert.deepEqual(trustedStatuses([kept], TEAM_ID), []);
+  assert.deepEqual(trustedStatuses([kept], undefined, names), []);
+  // edge: a human status passes either way, a non-review context is never filtered, and non-array input is empty
+  assert.equal(trustedStatuses(passed(["test-hunter"]), TEAM_ID, names).length, 1);
+  const gate = { ...kept, context: "lanes/gate" };
+  assert.deepEqual(trustedStatuses([gate], TEAM_ID, names), [gate]);
+  assert.deepEqual(trustedStatuses(undefined, TEAM_ID, names), []);
+});
+
+test("gateDecision trusts the lane bot's reviewer statuses under team, but never the owner one", () => {
+  const teamCfg = { ...ownerCfg, identity: TEAM_ID };
+  const names = requiredReviewers("full", classifyFiles(PIN_FILES, ownerCfg));
+  const botPassed = names.map((n) => botStatus(n));
+  const args = { ownerDiff: "additive", statuses: botPassed };
+  assert.equal(gateDecision(pinPr({ ...args, config: teamCfg })).state, "success");
+  assert.notEqual(gateDecision(pinPr({ ...args, config: ownerCfg })).state, "success", "no identity: no bot trusted");
+  assert.notEqual(gateDecision(pinPr({ ...args, config: { ...ownerCfg, identity: { profile: "solo" } } })).state, "success");
+  assert.notEqual(gateDecision(pinPr({ ...args, config: { ...ownerCfg, identity: { profile: "team", app: { id: 1, installationId: 2 } } } })).state, "success");
+  // the bot's owner status is not approval
+  const fromBot = gateDecision(pinPr({ files: ["src/a.ts", "lanes.config.json"], config: teamCfg, statuses: [...botPassed, botStatus("owner")] }));
+  assert.notEqual(fromBot.state, "success");
+});
+
+test("gateDecision reuse takes a lane-bot status under team and refuses it otherwise", () => {
+  const sha = "a".repeat(40);
+  const names = requiredReviewers("full", classifyFiles(PIN_FILES, ownerCfg));
+  const others = passed(names.filter((n) => n !== "test-hunter"));
+  const reused = { sha, status: botStatus("test-hunter") };
+  const base = pinPr({ ownerDiff: "additive", statuses: others, verdicts: praised(names).map((v) => (v.reviewer === "test-hunter" ? { ...v, sha } : v)), reused });
+  assert.match(gateDecision({ ...base, config: { ...ownerCfg, identity: TEAM_ID } }).description, /reused test-hunter/);
+  assert.doesNotMatch(gateDecision({ ...base, config: ownerCfg }).description, /reused test-hunter/);
+});
