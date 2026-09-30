@@ -663,6 +663,7 @@ test("#528: edge: a team identity without a valid botLogin exits 2 on the config
     const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
     run.deps.config = () => ({ identity: { profile: "team", app: { id: 1, installationId: 2, ...(botLogin === undefined ? {} : { botLogin }) } } });
     assert.equal(await main([], run.deps), 2, JSON.stringify(botLogin));
+    assert.match(run.out[0], /cannot read lanes\.config\.json: .*botLogin/, JSON.stringify(botLogin));
     assert.deepEqual(run.launched, []);
   }
 });
