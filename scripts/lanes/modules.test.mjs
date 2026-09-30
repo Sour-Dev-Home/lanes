@@ -412,7 +412,7 @@ test("each new field is accepted with a valid value", () => {
 
 test("a wrong type, unknown key or bad risk is rejected with an error naming the entry", () => {
   const bad = [
-    { reviewers: "security-reviewer" }, { reviewers: [1] }, { contracts: "c" }, { contracts: [""] }, { owner: "yes" },
+    { reviewers: "security-reviewer" }, { reviewers: [1] }, { contracts: "c" }, { contracts: [""] }, { contracts: ["../x"] }, { contracts: ["/x"] }, { contracts: ["a\\b"] }, { owner: "yes" },
     { risk: "high" }, { risk: true }, { test: 3 }, { test: "" }, { tset: "x" },
   ];
   for (const extra of bad) assert.throws(() => moduleOf("src/a/x.mjs", entry(extra)), /entries\[0\]/, JSON.stringify(extra));

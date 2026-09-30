@@ -144,7 +144,8 @@ function compileMap(map) {
       throw new Error(`${where}.entries[${n}].paths must be a non-empty array of path prefixes`);
     }
     // main() scans the directories these name, so each must stay inside the repo.
-    const outside = e.paths.find((p) => /^([\\/]|[a-z]:)/i.test(p) || p.includes("\\") || p.split("/").includes(".."));
+    const escapes = (p) => /^([\\/]|[a-z]:)/i.test(p) || p.includes("\\") || p.split("/").includes("..");
+    const outside = e.paths.find(escapes);
     if (outside !== undefined) throw new Error(`${where}.entries[${n}].paths: "${outside}" must be repo-relative, with / and no ..`);
     if (!isStringArray(e.imports)) throw new Error(`${where}.entries[${n}].imports must be an array of module ids`);
     const at = `${where}.entries[${n}] ("${e.id}")`;
@@ -160,6 +161,8 @@ function compileMap(map) {
     if (e.contracts !== undefined && (!isStringArray(e.contracts) || e.contracts.some((c) => !c))) {
       throw new Error(`${at}.contracts must be an array of non-empty path prefixes`);
     }
+    const badContract = e.contracts?.find(escapes);
+    if (badContract !== undefined) throw new Error(`${at}.contracts: "${badContract}" must be repo-relative, with / and no ..`);
     if (e.owner !== undefined && typeof e.owner !== "boolean") throw new Error(`${at}.owner must be a boolean`);
     if (e.risk !== undefined && e.risk !== "normal" && e.risk !== "sensitive") throw new Error(`${at}.risk must be "normal" or "sensitive"`);
     if (e.test !== undefined && (typeof e.test !== "string" || !e.test)) throw new Error(`${at}.test must be a non-empty string`);
