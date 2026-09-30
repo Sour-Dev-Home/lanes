@@ -8,7 +8,7 @@
 // The cap and the soft paths come from the `start` block of lanes.config.json.
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main as checkBlockers } from "./blockers.mjs";
@@ -25,6 +25,50 @@ export const START_DEFAULTS = Object.freeze({
 });
 // #390: the budget config lives in lane-cost.mjs, which the installed status.mjs already imports (start.mjs is not installed).
 export { BUDGET_DEFAULTS, budgetConfig } from "./lane-cost.mjs";
+
+// #483: `.lanes/starts.jsonl` (git-ignored, never posted) holds one line per issue /start or the queue decided on, and
+// only these fields: `at`, `issue`, `outcome` (started | skipped), `reason` (skipped only) and, for an overlap, `with`.
+// No path, title or prompt text, the same rule as costs.jsonl. status.mjs --starts reads it.
+export const START_REASONS = Object.freeze(["overlap", "cap", "blocked", "in-flight", "not-ready", "other"]);
+
+/** Which START_REASONS a skip's text is, and for an overlap the first other issue or PR it names. Pure. */
+export function classifySkip(text) {
+  const why = String(text);
+  const overlap = /^overlaps (?:running )?#(\d+)/.exec(why);
+  if (overlap) return { reason: "overlap", with: Number(overlap[1]) };
+  if (/^cap of \d+ lanes/.test(why)) return { reason: "cap" };
+  if (/^blocked by /.test(why)) return { reason: "blocked" };
+  if (/^already in flight/.test(why)) return { reason: "in-flight" };
+  if (/^(not open|lacks ready|needs-owner|no single tier)/.test(why)) return { reason: "not-ready" };
+  return { reason: "other" };
+}
+
+/** The log lines for one run: `started` issues and `skipped` ones (`{ number, reason }`, the reason as printed). Pure. */
+export function startDecisions({ started = [], skipped = [], at }) {
+  return [
+    ...started.map((issue) => ({ at, issue, outcome: "started" })),
+    ...skipped.map((s) => ({ at, issue: s.number, outcome: "skipped", ...classifySkip(s.reason) })),
+  ];
+}
+
+/** Appends `lines` to `<root>/.lanes/starts.jsonl`; throws only when the file cannot be written. */
+export function appendStarts(root, lines) {
+  if (!lines.length) return;
+  const dir = join(root, ".lanes");
+  mkdirSync(dir, { recursive: true });
+  appendFileSync(join(dir, "starts.jsonl"), lines.map((l) => `${JSON.stringify(l)}\n`).join(""));
+}
+
+// Best-effort: `deps.recordStarts(root, lines)` is absent in tests that do not look at the log, and a failed write is
+// swallowed, so recording never changes a launch.
+function recordDecisions(deps, root, decisions) {
+  try {
+    deps.recordStarts?.(root, decisions);
+  } catch {
+    // The log is evidence for phase 2, not a gate.
+  }
+}
+
 const MAX_LANES_LIMIT = 10;
 // A lane PATH with more entries than this is reported at launch (#416).
 const PATH_NOTE_ABOVE = 60;
@@ -405,7 +449,8 @@ function autoStart(go, deps, { maxLanes, softPaths, models }) {
   }
   const claimed = claimedPaths({ openPrs: prs, runningIssues: openIssues.filter((i) => busy.has(i.number)) });
   const { start, skipped: notPicked } = pickStartable({ candidates, claimed, openIssues, maxLanes, inFlightCount: busy.size, softPaths });
-  const skipLines = [...skipped, ...notPicked].sort((a, b) => a.number - b.number).map((s) => `#${s.number}: skipped: ${s.reason}`);
+  const allSkipped = [...skipped, ...notPicked].sort((a, b) => a.number - b.number);
+  const skipLines = allSkipped.map((s) => `#${s.number}: skipped: ${s.reason}`);
 
   if (!go) {
     const trailer = start.length ? `dry run, nothing launched: /start --auto --go launches the ${start.length} marked would start` : "dry run: nothing to start";
@@ -414,6 +459,7 @@ function autoStart(go, deps, { maxLanes, softPaths, models }) {
   const tiers = new Map(candidates.map((i) => [i.number, tierOf(labelsOf(i))]));
   const labels = new Map(candidates.map((i) => [i.number, labelsOf(i)]));
   const { lines, failed } = launchAll(start, deps, { tiers, models, labels });
+  recordDecisions(deps, deps.root(), startDecisions({ started: start, skipped: allSkipped, at: new Date(deps.now()).toISOString() }));
   return { code: failed ? 1 : 0, lines: [...start.flatMap((n) => lines.get(n)), ...skipLines] };
 }
 
@@ -426,7 +472,7 @@ function autoStart(go, deps, { maxLanes, softPaths, models }) {
  * files, `now()` the time in ms, and optionally `removeGrant(file)`. Returns the exit code and the lines to print,
  * cleanup's first.
  */
-export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig, cleanup: cleanupMerged, spawn, reaperLog, session, grantDir, now: Date.now, launchEnv: localLaunchEnv }) {
+export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig, cleanup: cleanupMerged, spawn, reaperLog, session, grantDir, now: Date.now, launchEnv: localLaunchEnv, recordStarts: appendStarts }) {
   const args = argv.map((a) => String(a).replace(/^#/, ""));
   const auto = args[0] === "--auto";
   if (auto ? args.length > 2 || (args.length === 2 && args[1] !== "--go") : !args.length || args.some((a) => !/^[1-9]\d*$/.test(a))) {
@@ -556,6 +602,7 @@ function startIssues(args, deps, config) {
   const tiers = new Map(issues.filter((i) => i.labels).map((i) => [i.number, tierOf(i.labels)]));
   const labels = new Map(issues.filter((i) => i.labels).map((i) => [i.number, i.labels]));
   const launched = launchAll(launch, deps, { tiers, models: config.models, labels });
+  recordDecisions(deps, deps.root(), startDecisions({ started: launch, skipped: refused, at: new Date(deps.now()).toISOString() }));
   const why = (r) => (r.reason === "already in flight" ? inFlightReason(r.number, prs, sessions) : r.reason);
   const lines = new Map([...refused.map((r) => [r.number, [`#${r.number}: refused: ${why(r)}`]]), ...launched.lines]);
   return { code: refused.length || launched.failed ? 1 : 0, lines: numbers.flatMap((n) => lines.get(n)) };

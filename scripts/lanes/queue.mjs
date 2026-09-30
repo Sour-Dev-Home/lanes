@@ -13,7 +13,7 @@ import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWork
 import { GATE_CONTEXT, laneIssueOf } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
-import { budgetConfig, inFlightIssues, deadLaneSession, launchArgs, localLaunchEnv, markRunning, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
+import { appendStarts, budgetConfig, inFlightIssues, startDecisions, deadLaneSession, launchArgs, localLaunchEnv, markRunning, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
 import { approveLine, formatAge, gateDescriptions, gateSince, liveLanes, prStage, stalledLanes } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
@@ -55,7 +55,7 @@ function refusal(issue, openNumbers) {
  *   softPaths?: (string | RegExp)[],
  * }} input every open issue (`state` defaults to OPEN; closed entries are ignored), every open PR, and the background
  *   sessions from `claude agents --json`; `maxLanes` and `softPaths` default to start.mjs's
- * @returns {{ launch: number[], waiting: { number: number, reason: string }[], idle: boolean, lines: string[] }}
+ * @returns {{ launch: number[], waiting: { number: number, reason: string }[], idle: boolean, lines: string[], skipped: { number: number, reason: string }[] }}
  *   `launch` in priority order; `waiting` by PR number, for lane PRs only
  */
 export function planTick({ issues = [], prs = [], sessions = [], maxLanes = START_DEFAULTS.maxLanes, softPaths = START_DEFAULTS.softPaths, budgetOver = false }) {
@@ -95,7 +95,7 @@ export function planTick({ issues = [], prs = [], sessions = [], maxLanes = STAR
     ...waiting.map((w) => `PR #${w.number}: needs the owner: ${w.reason}`),
     idle ? "idle: nothing in flight, nothing to launch" : `${busy.size} in flight, ${launch.length} to launch, ${waiting.length} waiting on the owner`,
   ];
-  return { launch, waiting, idle, lines };
+  return { launch, waiting, idle, lines, skipped: [...skipped, ...notPicked] };
 }
 
 /**
@@ -312,6 +312,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
   let overLane = new Set();
   const failedLaunches = new Set();
   const waits = new Map();
+  const skipSeen = new Map();
   const firstWaiting = new Map();
   const attempted = new Set();
   const told = new Set();
@@ -373,6 +374,15 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     for (const n of current.keys()) if (!firstWaiting.has(n)) firstWaiting.set(n, now());
     waits.clear();
     for (const [n, r] of current) waits.set(n, r);
+    // #483: a started issue and each skip is logged; a skip is logged again only when its reason changes, not every tick.
+    const decided = startDecisions({ started: plan.launch, skipped: plan.skipped.filter((s) => skipSeen.get(s.number) !== s.reason), at: new Date(now()).toISOString() });
+    skipSeen.clear();
+    for (const s of plan.skipped) skipSeen.set(s.number, s.reason);
+    try {
+      deps.recordStarts?.(dir, decided);
+    } catch {
+      // The log is evidence for phase 2, not a gate.
+    }
     const tierOf = new Map(issues.map((i) => [i.number, labelsOf(i).find((l) => l?.startsWith("tier:"))?.slice("tier:".length)]));
     // #344: as /start does (#337), Windows lanes launch with Git's POSIX tools first on PATH; a note says when not.
     // #444: over the token budget a dead lane waits too. Its marker is written before it launches, so a crash cannot
@@ -476,6 +486,7 @@ const DEFAULT_DEPS = {
   root: repoRoot,
   spawn,
   reaperLog,
+  recordStarts: appendStarts,
   config: () => {
     let text;
     try {

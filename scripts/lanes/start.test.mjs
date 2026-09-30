@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUDGET_DEFAULTS, START_DEFAULTS, budgetConfig, inFlightIssues, launchArgs, launchEnv, main as runStart, markRunning, parseSessionId, planStart, startConfig } from "./start.mjs";
+import { BUDGET_DEFAULTS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, launchEnv, main as runStart, markRunning, parseSessionId, planStart, startConfig } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
@@ -272,7 +272,7 @@ test("parseSessionId returns null when no id is printed", () => {
 const form = ({ scope = "In: `a.mjs`.", blockedBy = "none", contract = "none" } = {}) =>
   ["### Goal", "g", "### Acceptance criteria", "- [ ] a", "### Interface contract", contract, "### Scope", scope, "### Blocked by", blockedBy, "### Tier", "quick"].join("\n\n");
 
-function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config, cleanup = () => [], spawnChild, labelFail = null, labelMissing = false } = {}) {
+function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config, cleanup = () => [], spawnChild, labelFail = null, labelMissing = false, recordFail = false } = {}) {
   const launches = [];
   const labeled = [];
   let labelCreated = false;
@@ -331,7 +331,13 @@ function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut
     calls.push(`cleanup ${JSON.stringify(options)}`);
     return cleanup(options);
   };
-  return { deps: { gh, claude, root: () => "/repo", config: () => config, cleanup: cleanupFake, spawn, reaperLog }, launches, calls, reapers, logs, labeled };
+  // #483: what start.mjs asked to record, as [root, line] pairs; `recordFail` makes every write throw.
+  const recorded = [];
+  const recordStarts = (root, lines) => {
+    if (recordFail) throw new Error("EACCES: cannot write .lanes/starts.jsonl");
+    for (const line of lines) recorded.push([root, line]);
+  };
+  return { deps: { gh, claude, root: () => "/repo", config: () => config, cleanup: cleanupFake, spawn, reaperLog, recordStarts }, launches, calls, reapers, logs, labeled, recorded };
 }
 
 // #164: one detached reaper per launched lane (ADR 0010).
@@ -1927,4 +1933,93 @@ test("the repo's own lanes.config.json carries its budget: a 300M 24-hour cap (#
   const raw = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
   assert.deepEqual(raw.budget, { perNightTokens: 300000000, perLaneTokens: BUDGET_DEFAULTS.perLaneTokens });
   assert.deepEqual(budgetConfig(raw), raw.budget);
+});
+
+// #483: every issue /start decides on is one line of .lanes/starts.jsonl, with only `at`, `issue`, `outcome`, `reason` and `with`.
+test("--auto --go records a started and a skipped line per decided issue with exactly the documented fields", () => {
+  const { deps, recorded } = fakes({ issues: autoIssues(), sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-6-y" }] });
+  assert.equal(main(["--auto", "--go"], deps).code, 0);
+  const by = new Map(recorded.map(([, l]) => [l.issue, l]));
+  assert.ok(recorded.every(([root]) => root === "/repo"));
+  assert.deepEqual(Object.keys(by.get(1)), ["at", "issue", "outcome"]);
+  assert.equal(by.get(1).outcome, "started");
+  assert.match(by.get(1).at, /^\d{4}-\d\d-\d\dT[\d:.]+Z$/);
+  assert.deepEqual(by.get(3), { at: by.get(3).at, issue: 3, outcome: "skipped", reason: "overlap", with: 1 });
+  assert.deepEqual(by.get(6), { at: by.get(6).at, issue: 6, outcome: "skipped", reason: "in-flight" });
+  assert.deepEqual(by.get(5), { at: by.get(5).at, issue: 5, outcome: "skipped", reason: "not-ready" });
+  assert.deepEqual(by.get(7), { at: by.get(7).at, issue: 7, outcome: "skipped", reason: "other" });
+  assert.equal(by.has(4), false, "an issue without the ready label is not decided on");
+  assert.doesNotMatch(JSON.stringify(recorded), /\.mjs|Goal/, "no path, title or body text");
+});
+
+test("the --auto dry run writes nothing", () => {
+  const { deps, recorded } = fakes({ issues: autoIssues(), sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-6-y" }] });
+  assert.equal(main(["--auto"], deps).code, 0);
+  assert.deepEqual(recorded, []);
+});
+
+test("explicit /start N records started and refused issues, with the cap and a missing ready label as reasons", () => {
+  const issues = { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) }, 3: { body: form({ scope: "In: `c.mjs`." }) }, 10: { labels: ["tier:quick"] } };
+  const { deps, recorded } = fakes({ issues, config: { start: { maxLanes: 1 } } });
+  main(["1", "2", "3", "10"], deps);
+  assert.deepEqual(recorded.map(([, l]) => [l.issue, l.outcome, l.reason, l.with]), [
+    [1, "started", undefined, undefined],
+    [2, "skipped", "cap", undefined],
+    [3, "skipped", "cap", undefined],
+    [10, "skipped", "not-ready", undefined],
+  ]);
+});
+
+test("explicit /start N records the overlap partner", () => {
+  const { deps, recorded } = fakes({ issues: { 1: {}, 2: {} } });
+  main(["1", "2"], deps);
+  assert.deepEqual(recorded.map(([, l]) => [l.issue, l.reason, l.with]), [[1, "overlap", 2], [2, "overlap", 1]]);
+});
+
+test("a failed write never changes a launch", () => {
+  const { deps, launches } = fakes({ issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } }, recordFail: true });
+  const { code, lines } = main(["1", "2"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#2 → id2"]);
+  assert.equal(launches.length, 2);
+  const auto = fakes({ issues: autoIssues(), sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-6-y" }], recordFail: true });
+  assert.equal(main(["--auto", "--go"], auto.deps).code, 0);
+  assert.equal(auto.launches.length, 2);
+});
+
+test("edge: classifySkip maps every skip text to one reason and only overlaps carry `with`", () => {
+  const cases = [
+    ["overlaps running #12 on src/a.mjs", { reason: "overlap", with: 12 }],
+    ["overlaps #3, #4", { reason: "overlap", with: 3 }],
+    ["overlaps #7 on src/a.mjs", { reason: "overlap", with: 7 }],
+    ["cap of 8 lanes reached", { reason: "cap" }],
+    ["cap of 8 lanes in flight", { reason: "cap" }],
+    ["blocked by #2 (open)", { reason: "blocked" }],
+    ["already in flight: dead lane", { reason: "in-flight" }],
+    ["lacks ready", { reason: "not-ready" }],
+    ["needs-owner", { reason: "not-ready" }],
+    ["no single tier:* label", { reason: "not-ready" }],
+    ["scope names no paths", { reason: "other" }],
+    ["not found or unreadable", { reason: "other" }],
+    ["", { reason: "other" }],
+  ];
+  for (const [text, want] of cases) assert.deepEqual(classifySkip(text), want, text);
+  assert.deepEqual(startDecisions({ at: "t" }), []);
+});
+
+test("appendStarts appends JSON lines to .lanes/starts.jsonl, writes nothing for no lines, and throws when it cannot write", () => {
+  const root = mkdtempSync(join(tmpdir(), "starts-"));
+  const blocked = mkdtempSync(join(tmpdir(), "starts-"));
+  try {
+    appendStarts(root, []);
+    assert.equal(existsSync(join(root, ".lanes")), false);
+    appendStarts(root, [{ at: "a", issue: 1, outcome: "started" }]);
+    appendStarts(root, [{ at: "b", issue: 2, outcome: "skipped", reason: "cap" }]);
+    assert.deepEqual(readFileSync(join(root, ".lanes", "starts.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l).issue), [1, 2]);
+    writeFileSync(join(blocked, ".lanes"), "a file where the directory should be");
+    assert.throws(() => appendStarts(blocked, [{ at: "a", issue: 1, outcome: "started" }]));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(blocked, { recursive: true, force: true });
+  }
 });

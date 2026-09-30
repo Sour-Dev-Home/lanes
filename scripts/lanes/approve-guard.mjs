@@ -371,7 +371,9 @@ const commandName = (plain) => plain[0]?.split(/[\\/]/).at(-1);
  */
 function scanNested(w, depth, out, shell) {
   const text = unmark(w);
-  if (!/[\s;&|()<>]/.test(text) || !(/post-review/i.test(unquoted(text)) || /[$`*?[{]/.test(shell ? unquoted(text) : w))) return false;
+  // Shell text is scanned whole (#468): a v* tag command inside it (`bash -c "git push --tags"`, `ssh h "git tag v1"`) is
+  // found by the same rule as one typed at the top level.
+  if (!/[\s;&|()<>]/.test(text) || !(shell || /post-review/i.test(unquoted(text)) || /[$`*?[{]/.test(w))) return false;
   scanScript(text, depth, out);
   return true;
 }

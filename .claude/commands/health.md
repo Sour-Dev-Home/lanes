@@ -7,6 +7,8 @@ clean main`, and carry on. If the pull fails, report its error in one line and c
 
 Report, in at most 15 lines:
 1. `node scripts/lanes/status.mjs --since 168h`.
+   Then `node scripts/lanes/status.mjs --starts 7` and include its lines: how often path overlap, the cap or another
+   reason kept an issue from starting, and each overlap pair (the evidence for reopening or dropping ADR 0018 phase 2).
 2. Ready issues older than 7 days and open PRs older than 3 days (`gh issue list` / `gh pr list` with `--json createdAt`).
 3. `gh run list --branch main --workflow verify.yml --limit 5`: is main red right now (`verify` runs on every push).
    Then `gh run list --branch main --status failure --limit 10`: which workflows failed more than once this week.

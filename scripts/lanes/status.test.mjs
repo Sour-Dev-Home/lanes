@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
-import { approveLine, formatAge, gateDescriptions, gateSince, laneBranches, laneSessions, liveLanes, loadLaneBranches, loadSessions, mergeQueueEntries, idleLanes, readBudget, render, renderWaiting, stalledItems, stalledLanes, summarize, waitingApprovals } from "./status.mjs";
+import { approveLine, formatAge, gateDescriptions, gateSince, laneBranches, laneSessions, liveLanes, loadLaneBranches, loadSessions, mergeQueueEntries, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, waitingApprovals } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -1019,4 +1019,56 @@ test("edge: an idle lane is reported on a PR with no gate yet or a gate in anoth
   assert.match(run([]).waitingOnOwner[0].note, /^no lanes\/gate yet — idle 60 min: claude attach aaaa0001$/);
   assert.equal(run([gate("PENDING", "checks still running")]).waitingOnOwner[0].stage, "review");
   assert.doesNotMatch(JSON.stringify(run([gate("FAILURE", "contract broken")])), /idle 60/);
+});
+
+// #483: --starts <days> summarises .lanes/starts.jsonl.
+const dayAgo = (d) => new Date(NOW - d * 86_400_000).toISOString();
+const row = (d, issue, outcome, reason, w) => JSON.stringify({ at: dayAgo(d), issue, outcome, ...(reason ? { reason } : {}), ...(w ? { with: w } : {}) });
+
+test("#483: --starts on an absent or empty log prints no start decisions recorded", () => {
+  assert.deepEqual(startsReport(undefined, 7, NOW), ["no start decisions recorded"]);
+  assert.deepEqual(startsReport("", 7, NOW), ["no start decisions recorded"]);
+  assert.deepEqual(startsReport("\n\n", 7, NOW), ["no start decisions recorded"]);
+});
+
+test("#483: --starts counts the window's started, overlap, cap and other skips, and each overlap pair", () => {
+  const text = [
+    row(1, 1, "started"),
+    row(1, 2, "started"),
+    row(1, 5, "skipped", "overlap", 3),
+    row(2, 3, "skipped", "overlap", 5),
+    row(2, 9, "skipped", "overlap", 4),
+    row(2, 6, "skipped", "cap"),
+    row(2, 7, "skipped", "blocked"),
+    row(3, 8, "skipped", "in-flight"),
+    row(10, 1, "skipped", "overlap", 2),
+  ].join("\n");
+  assert.deepEqual(startsReport(text, 7, NOW), [
+    "start decisions, last 7 days: 2 started, 3 skipped for overlap, 1 for the cap, 2 for other reasons",
+    "  overlap #3 and #5: 2",
+    "  overlap #4 and #9: 1",
+  ]);
+});
+
+test("#483: edge: a log with only old or unreadable lines reports no decisions, and a bad line never stops the summary", () => {
+  assert.deepEqual(startsReport(`${row(30, 1, "started")}\nnot json\n{"at":"never","outcome":"started"}\n[]\nnull`, 7, NOW), ["no start decisions recorded"]);
+  assert.deepEqual(startsReport(`garbage\n${row(0, 1, "started")}\n{"broken`, 7, NOW), ["start decisions, last 7 days: 1 started, 0 skipped for overlap, 0 for the cap, 0 for other reasons"]);
+});
+
+test("#483: edge: a future-dated line and an overlap with no partner are not counted as pairs", () => {
+  const text = `${JSON.stringify({ at: dayAgo(-1), issue: 1, outcome: "started" })}\n${row(1, 2, "skipped", "overlap")}`;
+  assert.deepEqual(startsReport(text, 7, NOW), ["start decisions, last 7 days: 0 started, 1 skipped for overlap, 0 for the cap, 0 for other reasons"]);
+});
+
+test("#483: edge: the window is inclusive at exactly N days and excludes one millisecond older or newer than now", () => {
+  const at = (ms) => JSON.stringify({ at: new Date(ms).toISOString(), issue: 1, outcome: "started" });
+  assert.match(startsReport(at(NOW - 7 * 86_400_000), 7, NOW)[0], /1 started/);
+  assert.deepEqual(startsReport(at(NOW - 7 * 86_400_000 - 1), 7, NOW), ["no start decisions recorded"]);
+  assert.match(startsReport(at(NOW), 7, NOW)[0], /1 started/);
+  assert.deepEqual(startsReport(at(NOW + 1), 7, NOW), ["no start decisions recorded"]);
+});
+
+test("#483: health.md runs status.mjs --starts 7", async () => {
+  const { readFileSync } = await import("node:fs");
+  assert.match(readFileSync(new URL("../../.claude/commands/health.md", import.meta.url), "utf8"), /node scripts\/lanes\/status\.mjs --starts 7/);
 });
