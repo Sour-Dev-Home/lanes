@@ -1,5 +1,5 @@
 // /status and the nightly digest: what waits on the owner, what is in flight, what is ready, what merged.
-// Usage: node scripts/lanes/status.mjs [--since 24h] [--json] [--waiting]
+// Usage: node scripts/lanes/status.mjs [--since 24h] [--json] [--waiting] [--starts <days>]
 import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -399,6 +399,40 @@ export function approveLine(numbers) {
   return numbers.length ? `/approve ${numbers.slice(0, 10).join(" ")}` : "";
 }
 
+/**
+ * #483: the start decisions of the last `days` days, from `.lanes/starts.jsonl` text (start.mjs writes it), as lines.
+ * A line that is not a JSON object with a readable `at`, an `outcome` and a `reason` is ignored. Pure apart from `now`.
+ */
+export function startsReport(text, days, now = Date.now()) {
+  const from = now - days * 86_400_000;
+  let started = 0;
+  const skipped = { overlap: 0, cap: 0, other: 0 };
+  const pairs = new Map();
+  for (const raw of String(text ?? "").split("\n")) {
+    let l;
+    try {
+      l = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    const at = Date.parse(l?.at);
+    if (!(at >= from) || at > now) continue;
+    if (l.outcome === "started") started++;
+    else if (l.outcome === "skipped") {
+      skipped[l.reason === "overlap" || l.reason === "cap" ? l.reason : "other"]++;
+      if (l.reason === "overlap" && Number.isInteger(l.issue) && Number.isInteger(l.with)) {
+        const pair = `#${Math.min(l.issue, l.with)} and #${Math.max(l.issue, l.with)}`;
+        pairs.set(pair, (pairs.get(pair) ?? 0) + 1);
+      }
+    }
+  }
+  if (!started && !skipped.overlap && !skipped.cap && !skipped.other) return ["no start decisions recorded"];
+  return [
+    `start decisions, last ${days} days: ${started} started, ${skipped.overlap} skipped for overlap, ${skipped.cap} for the cap, ${skipped.other} for other reasons`,
+    ...[...pairs].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([pair, n]) => `  overlap ${pair}: ${n}`),
+  ];
+}
+
 const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
 
 // `gh pr --json` has no merge queue field and drops status descriptions, so one GraphQL call fetches both.
@@ -441,6 +475,20 @@ export function readBudget(repoRoot, rawAgents, { readConfig = () => readFileSyn
 }
 
 async function main(argv = process.argv.slice(2)) {
+  const startsIdx = argv.indexOf("--starts");
+  if (startsIdx >= 0) {
+    const days = Number(/^[1-9]\d*$/.test(argv[startsIdx + 1] ?? "") ? argv[startsIdx + 1] : NaN);
+    if (!days) throw new Error("--starts takes a number of days, for example 7");
+    const root = dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
+    let text = "";
+    try {
+      text = readFileSync(join(root, ".lanes", "starts.jsonl"), "utf8");
+    } catch {
+      // Absent or unreadable: reported as no decisions.
+    }
+    for (const line of startsReport(text, days)) console.log(line);
+    return;
+  }
   const sinceIdx = argv.indexOf("--since");
   const sinceLabel = sinceIdx >= 0 ? argv[sinceIdx + 1] : "24h";
   const hours = Number(/^(\d+)h$/.exec(sinceLabel)?.[1]);

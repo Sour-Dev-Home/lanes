@@ -25,10 +25,11 @@ const session = (n) => ({ kind: "background", cwd: `/repo/.claude/worktrees/issu
 const tick = (over = {}) => planTick({ issues: [], prs: [], sessions: [], maxLanes: 3, softPaths: [], ...over });
 
 // Criterion 1
-test("planTick returns { launch, waiting, idle, lines } from plain data", () => {
-  const out = tick({ issues: [issue(1, ["src/a.mjs"])] });
-  assert.deepEqual(Object.keys(out).sort(), ["idle", "launch", "lines", "waiting"]);
+test("planTick returns { launch, waiting, idle, lines, skipped } from plain data", () => {
+  const out = tick({ issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/a.mjs"])] });
+  assert.deepEqual(Object.keys(out).sort(), ["idle", "launch", "lines", "skipped", "waiting"]);
   assert.deepEqual(out.launch, [1]);
+  assert.deepEqual(out.skipped, [{ number: 2, reason: "overlaps #1 on src/a.mjs" }]);
   assert.deepEqual(out.waiting, []);
   assert.equal(out.idle, false);
   assert.ok(Array.isArray(out.lines) && out.lines.every((l) => typeof l === "string"));
@@ -314,7 +315,8 @@ const STAMP = /^\d\d:\d\d:\d\d /;
 
 // A fake GitHub and claude. `world.issues`, `world.prs` and `world.sessions` are read each tick; `onSleep(tickNo)`
 // changes them between ticks. A launch adds a background session in the issue's worktree.
-function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFails = () => false, ghFails = () => false, spawnChild = null, labelFails = () => false } = {}) {
+function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFails = () => false, ghFails = () => false, spawnChild = null, labelFails = () => false, recordFails = false } = {}) {
+  const recorded = [];
   const labeled = [];
   const reapers = [];
   const logs = [];
@@ -372,8 +374,13 @@ function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFai
       onSleep(ticks);
     },
     print: (line) => out.push(line),
+    // #483: what the queue asked to record, as [root, line] pairs; `recordFails` makes every write throw.
+    recordStarts: (root, lines) => {
+      if (recordFails) throw new Error("EACCES");
+      for (const line of lines) recorded.push([root, line]);
+    },
   };
-  return { deps, out, calls, launched, reapers, logs, labeled, ticks: () => ticks };
+  return { deps, out, calls, launched, reapers, logs, labeled, recorded, ticks: () => ticks };
 }
 
 test("CLI: any argument prints a usage line and exits 2 before reading anything", async () => {
@@ -1179,4 +1186,40 @@ test("#444: edge: a marker that cannot be written stops the resume before any la
   assert.equal(await main([], run.deps), 0);
   assert.deepEqual(run.launched, []);
   assert.ok(run.out.some((l) => / #7: recovery failed: disk full$/.test(l)), run.out.join("\n"));
+});
+
+// #483: the queue logs each started issue, and each skip once until its reason changes.
+test("#483: a started issue and a skipped one are recorded with the documented fields, a repeated skip only once", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/b.mjs"], { labels: ["ready"] })], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 3 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  assert.ok(run.ticks() >= 3, "several ticks ran");
+  assert.ok(run.recorded.every(([root]) => root === "/repo"));
+  const lines = run.recorded.map(([, l]) => l);
+  assert.equal(lines.length, 2);
+  assert.deepEqual(lines[0], { at: "2026-09-28T09:00:00.000Z", issue: 1, outcome: "started" });
+  assert.deepEqual(lines[1], { at: "2026-09-28T09:00:00.000Z", issue: 2, outcome: "skipped", reason: "not-ready" });
+});
+
+test("#483: edge: an overlap skip records the other issue, and a changed reason is recorded again", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 2 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  const lines = run.recorded.map(([, l]) => l);
+  assert.deepEqual(lines.map((l) => [l.issue, l.outcome, l.reason, l.with]), [
+    [1, "started", undefined, undefined],
+    [2, "skipped", "overlap", 1],
+    [2, "skipped", "overlap", 1],
+  ]);
+});
+
+test("#483: edge: a failed write never changes a launch", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []), recordFails: true });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [1]);
+  assert.deepEqual(run.recorded, []);
 });
