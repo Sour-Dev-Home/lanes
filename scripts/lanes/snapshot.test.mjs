@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { DEFAULT_SOFT_PATHS, RUNNING_LABEL, buildSnapshot, parseFromArg, parseInput, parseOutArg, verdictCriteria, writeSnapshot } from "./snapshot.mjs";
 import { buildVerdictComment } from "./post-review.mjs";
+import { REVIEWERS } from "./lib.mjs";
 import { STATUS_QUERY } from "./status.mjs";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -166,6 +167,14 @@ test("criteria come from verdicts on the current head: fail beats pass beats not
     { index: 3, result: "not-applicable" },
     { index: 4, result: "pass" },
   ]);
+});
+
+test("a configured reviewer's verdict counts when buildSnapshot is given its name, and is ignored otherwise", () => {
+  const v = verdict("extra-reviewer", [{ index: 1, result: "fail", evidence: "e" }]);
+  const c = { body: `<!-- lanes:verdict extra-reviewer ${SHA} -->\n\`\`\`json\n${JSON.stringify(v)}\n\`\`\``, authorAssociation: "OWNER" };
+  const input = { issues: [issue(1)], prs: [pr(5, { comments: [c] })] };
+  assert.deepEqual(one({ ...input, reviewers: [...REVIEWERS, "extra-reviewer"] }).criteria, [{ index: 1, result: "fail" }]);
+  assert.equal(one(input).criteria, undefined);
 });
 
 test("edge: a verdict on an older head, an unbound one, or from a stranger is ignored", () => {

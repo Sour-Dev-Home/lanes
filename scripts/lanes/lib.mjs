@@ -155,10 +155,23 @@ export function requiredReviewers(tier, cls, files = [], modules = undefined) {
 /** The names a verdict may carry: the built-in reviewers plus every configured one; `owner` is never a reviewer. */
 export function reviewerNames(config) {
   const names = [...REVIEWERS];
-  for (const e of config?.modules?.entries ?? []) {
-    for (const r of e?.reviewers ?? []) if (r !== "owner" && !names.includes(r)) names.push(r);
+  // Tolerant of a malformed map: readers must not crash on it, and moduleMapProblem reports it.
+  const entries = Array.isArray(config?.modules?.entries) ? config.modules.entries : [];
+  for (const e of entries) {
+    const list = Array.isArray(e?.reviewers) ? e.reviewers : [];
+    for (const r of list) if (typeof r === "string" && r !== "owner" && !names.includes(r)) names.push(r);
   }
   return names;
+}
+
+/** Why the config's module map cannot be used (malformed, or a configured reviewer with no agent file), or null. */
+export function moduleMapProblem(config) {
+  try {
+    reviewersFor([], config?.modules);
+    return null;
+  } catch (e) {
+    return String(e?.message ?? e);
+  }
 }
 
 /** What `reviewers.mjs` prints: a skip warning if due, the reviewers (or `none`), then `ADRs: NNNN, ...` if any govern. */
@@ -701,6 +714,8 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
   const pr = parsePrBody(prBody);
   if (pr.closes === null) return fail("PR body must say 'Closes #N' for its task issue");
   if (pr.duplicates.length > 0) return fail(`PR template sections repeated: ${pr.duplicates.join(", ")}`);
+  const mapProblem = moduleMapProblem(config);
+  if (mapProblem !== null) return fail(`module map unusable: ${mapProblem}`);
   const tier = tierOf(labels);
   if (tier === null) return fail(`issue #${pr.closes} needs exactly one tier:skip|quick|full label`);
   // E2: the GitHub issues API also returns pull requests; "Closes #N" must name a real task issue, not a PR.

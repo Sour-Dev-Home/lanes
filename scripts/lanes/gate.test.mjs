@@ -1212,3 +1212,55 @@ test("edge: a PR with no owner-diff files fetches nothing", () => {
   assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
   assert.deepEqual(contentCalls(calls), []);
 });
+
+// ---- #480: configured reviewers (ADR 0018) reach the gate's verdict reader; a bad module map fails clearly ----
+
+const extraConfig = (modules) => compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] }, modules });
+const extraMap = { entries: [{ id: "src", paths: ["src/"], imports: [], reviewers: ["extra-reviewer"] }] };
+const extraStatus = { ...reviewStatus, context: "review/extra-reviewer" };
+
+// modules.mjs checks each configured reviewer's .claude/agents/<name>.md against the cwd.
+function withAgents(names, fn) {
+  const root = mkdtempSync(join(tmpdir(), "lanes-480-"));
+  const prev = process.cwd();
+  try {
+    mkdirSync(join(root, ".claude", "agents"), { recursive: true });
+    for (const n of names) writeFileSync(join(root, ".claude", "agents", `${n}.md`), `---\nname: ${n}\n---\n`);
+    process.chdir(root);
+    return fn();
+  } finally {
+    process.chdir(prev);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+const extraRoutes = (comments, statuses) => ({ ...fullRoutes(comments), [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: statuses });
+
+test("evaluatePr reads a configured reviewer's verdict comment", () => withAgents(["extra-reviewer"], () => {
+  const { api } = fakeApi(extraRoutes([verdictComment("leo", "test-hunter"), verdictComment("leo", "extra-reviewer")], [reviewStatus, extraStatus]));
+  const d = evaluatePr(api, "o/r", 5, extraConfig(extraMap));
+  assert.equal(d.description, "unattended-eligible (tier:full), reviews in");
+}));
+
+test("a required configured reviewer with no verdict leaves the gate pending on waiting for review/<name>", () => withAgents(["extra-reviewer"], () => {
+  const { api, posted } = fakeApi(extraRoutes([verdictComment("leo", "test-hunter")], [reviewStatus]));
+  const d = evaluatePr(api, "o/r", 5, extraConfig(extraMap));
+  assert.equal(d.state, "pending");
+  assert.equal(d.description, "waiting for review/extra-reviewer");
+  assert.equal(descriptionOf(posted[0]), "waiting for review/extra-reviewer");
+}));
+
+test("a malformed module map posts a lanes/gate failure naming the reason, not a crash", () => withAgents([], () => {
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const d = evaluatePr(api, "o/r", 5, extraConfig({ entries: "nope" }));
+  assert.equal(d.state, "failure");
+  assert.match(d.description, /^module map unusable: lanes\.config\.json: modules\.entries must be an array/);
+  assert.ok(posted[0].fields.includes("state=failure"));
+}));
+
+test("a configured reviewer with no agent file posts a lanes/gate failure naming it", () => withAgents([], () => {
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const d = evaluatePr(api, "o/r", 5, extraConfig(extraMap));
+  assert.equal(d.state, "failure");
+  assert.match(d.description, /"extra-reviewer" has no \.claude\/agents\/extra-reviewer\.md/);
+  assert.ok(posted[0].fields.includes("state=failure"));
+}));

@@ -41,6 +41,15 @@ test("readVerdict parses a verdict comment and takes its tier from metrics", () 
   assert.deepEqual(readVerdict(comment(v), "full"), { tier: "quick", reviewer: "test-hunter", verdict: v });
 });
 
+test("readVerdict reads a configured reviewer's verdict only when given its name; collectVerdicts passes names through", () => {
+  const v = verdict("extra-reviewer");
+  assert.deepEqual(readVerdict(comment(v), "full"), { unreadable: true });
+  assert.equal(readVerdict(comment(v), "full", ["extra-reviewer"]).reviewer, "extra-reviewer");
+  const prs = [normalizePr(node([comment(v)]))];
+  assert.deepEqual(collectVerdicts(prs, { now: NOW, days: 7 }), [{ unreadable: true }]);
+  assert.equal(collectVerdicts(prs, { now: NOW, days: 7, names: ["extra-reviewer"] })[0].reviewer, "extra-reviewer");
+});
+
 test("readVerdict falls back to the PR's tier, then unknown, when a verdict has no metrics", () => {
   const v = verdict("security-reviewer");
   assert.equal(readVerdict(comment(v), "full").tier, "full");
