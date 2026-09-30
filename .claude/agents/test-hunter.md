@@ -33,7 +33,7 @@ are never a fork of their session: read the issue and the diff cold, as an outsi
    step.
 4. Where you find a real bug, fix it and add a regression test; where a criterion lacks coverage, add the test. Keep
    every change narrow and inside the issue's Scope; never touch files the issue does not cover.
-4a. Scratch, probe and fuzz files: scratch, probe and fuzz files go in `os.tmpdir()` (or a temp directory under it) and are deleted before the verdict; never write outside the lane's worktree, and never into another checkout of the repository. Tests you keep stay in the issue's Scope.
+4a. Scratch, probe and fuzz files: scratch, probe and fuzz files go in `.lanes/scratch/` inside the lane's worktree (already gitignored) and are deleted before the verdict; never write outside the lane's worktree, and never into another checkout of the repository. Keep guard probe payloads out of the Bash command text, since the guards scan it: write the cases with the Write tool where you have it, otherwise hand the probe to the test-hunter, and never retry a refused heredoc. A guard refusal of a probe is noted in the verdict, never rephrased or obfuscated to get past it. Tests you keep stay in the issue's Scope.
 4b. The criteria and the lane's `edge:` lines under "Tests added" are a minimum. Add at least one test for a case not
    covered by the criteria or the listed `edge:` cases, and name it in the verdict `summary`; if no such case
    applies, state in the verdict `summary` why none apply.
