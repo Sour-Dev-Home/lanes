@@ -713,3 +713,14 @@ test("#378 criterion 3: mayBeNode reads node, and a glob that could expand to it
     assert.equal(mayBeNode(w), false, w);
   }
 });
+
+test("#441 test-hunter: env -i, a path or option before symbolic-ref and fast-import still read as tag paths; long gh api or config text stays fast", () => {
+  for (const cmd of ["env -i GIT_CONFIG_KEY_0=alias.t git t v1", "git.exe fast-import", "git -C x symbolic-ref refs/tags/v1 HEAD", "GIT_CONFIG_KEY_10=alias.t git t", "gh api repos/o/r/git/refs -f sha=a -f ref=refs/tags/v1"]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  const start = Date.now();
+  for (const cmd of [`gh api repos/o/r/git/refs ${"-f ref=x ".repeat(5000)}`, `GIT_CONFIG_PARAMETERS=${"a.".repeat(20000)} git push`, `gh api ${"-f a=b ".repeat(5000)}x/git/refs`]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false);
+  }
+  assert.ok(Date.now() - start < 2000);
+});

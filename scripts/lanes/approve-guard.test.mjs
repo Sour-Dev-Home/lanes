@@ -1621,7 +1621,7 @@ test("#441 criterion 4: a subcommand word in argument position is no shell-text 
   for (const cmd of ["gh run watch 123 --repo o/r --exit-status > /dev/null", 'gh run watch "$RUN" --exit-status', "git log --grep=script", "gh run watch $RUN"]) {
     assert.equal(decideBash(cmd), null, cmd);
   }
-  for (const cmd of ['watch "$C"', 'ssh host "$C"', 'script -c "$C" out', 'env watch "$C"', 'xargs ssh host "$C"', 'sudo -u bob watch "$C"', 'time script -c "$C" out']) {
+  for (const cmd of ['watch "$C"', 'ssh host "$C"', 'script -c "$C" out', 'env watch "$C"', 'xargs ssh host "$C"', 'sudo -u bob watch "$C"', 'time script -c "$C" out', '{ watch "$C"; }', 'if true; then watch "$C"; fi', '! watch "$C"', 'builtin watch "$C"', 'taskset 1 watch "$C"', 'nsenter ssh h "$C"', 'runas watch "$C"']) {
     assert.deepEqual(decideBash(cmd), DENY, cmd);
   }
 });

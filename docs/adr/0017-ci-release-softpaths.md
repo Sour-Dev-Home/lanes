@@ -46,18 +46,19 @@ GitHub identity (ADR 0004/0007), `queue.mjs` never runs inside Claude or on a sc
      or any request with body fields) a `git/refs` ref that is `refs/tags/v*` or known only at run time, or a release's
      `tag_name`.
    - Where they **fail closed**: `git update-ref --stdin`; a `!` alias, an alias whose value is known only at run time or
-     given through `--config-env`, a chain of aliases deeper than eight; a run-time `GIT_CONFIG_KEY_n` before a git
-     command that is not `tag`, `push` or `update-ref`; `gh release create` with no tag named; `gh api` with `--input`
-     on `git/refs`.
+     given through `--config-env`, a chain of aliases deeper than eight; a run-time `GIT_CONFIG_KEY_n` before `git push` or
+     any git command that is not `tag` or `update-ref`; `gh release create` with no tag named; `gh api` with `--input`
+     on `git/refs` or `releases`.
    - **Outside the rule**, recorded and not guarded: aliases and `push.followTags` from git config files (`~/.gitconfig`,
      a repository's `.git/config`, `GIT_CONFIG_GLOBAL`): a guard sees the command line, and lanes act as the owner's
-     account under the accepted-risk rule of ADR 0004/0007. A `git config` write is not denied either, nor is a script file
+     account under the accepted-risk rule of ADR 0004/0007. Also outside: `gh api graphql` mutations (`createRef`) and creating a tag object through `git/tags`, which makes no ref. A `git config` write is not denied either, nor is a script file
      that itself pushes a tag: the guards read the names a command runs, not what a program does inside. `release.yml`
      still checks any pushed tag against `main`, `package.json` and `CHANGELOG.md`.
 
    A subcommand word in argument position is no program (#441): the approve guard reads `watch`, `ssh`, `script` and the
-   other shell-text commands as a program only in command position or after a runner such as `env`, `sudo` or `xargs`
-   (`gh run watch 123` is not one), and the start guard reads `start.mjs` as a launch only as node's script, the value
+   other shell-text commands as a program wherever they stand, except as an argument of a program whose words are
+   subcommands (`gh`, `git`, `docker`, `npm` and the like: `gh run watch 123` is not one); after `{`, `!`, `then`, `env`,
+   `xargs` or any other launcher they still fail closed, and the start guard reads `start.mjs` as a launch only as node's script, the value
    of a node option before it (`-r`, `--import`), or a `-e` text naming it, not as data to another script
    (`node lessons.mjs --paths … start.mjs`).
 4. **An adopter smoke test.** `scripts/lanes/adopter-smoke.test.mjs` (module `install`, so affected tests pick it up

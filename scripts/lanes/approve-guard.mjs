@@ -190,10 +190,10 @@ function asBashText(text, shellName) {
 // Commands that hand their arguments to a shell as text without a -c flag of bash's (#219): watch, ssh, su -c,
 // script -c, flock -c, parallel, tmux, screen. Every argument after one counts as run.
 const SHELL_TEXT_COMMANDS = new Set(["watch", "ssh", "su", "runuser", "script", "flock", "parallel", "tmux", "screen", "sg"]);
-// Words that run the command after them (#441): a SHELL_TEXT_COMMANDS word is a program only in command position or
-// after one of these; anywhere else (`gh run watch 123`) it is an argument. After a runner every later word counts,
-// since a runner's option values (`sudo -u bob watch`) cannot be told from the command.
-const RUNNER_RE = /^(env|exec|command|nohup|time|timeout|nice|sudo|doas|xargs|setsid|stdbuf|ionice|chroot|unbuffer|busybox|strace|ltrace|find)(\.exe)?$/i;
+// Programs whose words after the first are subcommands and options, never a command to run (#441): a
+// SHELL_TEXT_COMMANDS word after one of these as the command word (`gh run watch 123`) is an argument. After anything
+// else (`{`, `!`, `then`, `env`, `taskset 1`, …) it is read as a program, so an unknown launcher fails closed.
+const SUBCOMMAND_HOST_RE = /^(gh|git|docker|podman|kubectl|helm|npm|npx|pnpm|yarn|cargo|go|systemctl|journalctl|terraform|aws|az|gcloud)(\.exe)?$/i;
 // powershell's own options (#404), read past before its command text: those that take no value, those that take the
 // next word, and -Command or -File, after which the rest is the command. Any other option leaves the text unread.
 const PS_BOOLEAN_OPTION_RE = /^[-/](noprofile|nop|nologo|noninteractive|noni|noexit|sta|mta|login|l)$/i;
@@ -449,8 +449,8 @@ function scan(cmd, depth, out) {
     plain.forEach((p, at) => {
       if ((at > 0 && !runsArgs) || at >= evalFrom) return;
       const name = p.split(/[\\/]/).at(-1);
-      const inCommandPosition = at === 0 || plain.slice(0, at).some((w) => RUNNER_RE.test(w.split(/[\\/]/).at(-1)));
-      if (EVAL_RE.test(name) || (SHELL_TEXT_COMMANDS.has(name) && inCommandPosition)) evalFrom = at + 1;
+      const isProgram = at === 0 || !SUBCOMMAND_HOST_RE.test(plain[0].split(/[\\/]/).at(-1));
+      if (EVAL_RE.test(name) || (SHELL_TEXT_COMMANDS.has(name) && isProgram)) evalFrom = at + 1;
       else if (name === "sudo" && plain.some((w, j) => j > at && /^(-[A-Za-z]*[si][A-Za-z]*|--shell|--login)$/.test(w))) evalFrom = at + 1;
       else if (FOREIGN_SHELL_RE.test(name)) {
         evalFrom = at + 1;
