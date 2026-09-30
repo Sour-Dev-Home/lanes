@@ -58,6 +58,24 @@ The list:
 - A test of a module that is not owner-only (for example `contracts.test.mjs`) can be changed without the owner;
   its review is the test-hunter's and the security-reviewer's.
 
+## Amendment (2026-09-30, #493)
+
+The owner's `/approve` (a trusted `review/owner` success on a commit) carries to a later head of the same PR when that
+commit's own diff is byte-identical to the head's own diff, under the same `diffFingerprint` the gate uses to reuse
+reviewer verdicts (three-dot compare against the base branch, so a clean merge from main drops out). The owner then
+does not type `/approve` again after a merge that changed none of the approved change. The rule:
+
+- It applies only when the head has no trusted `review/owner` status of its own, and the gate uses the reuse rules'
+  trust (a bot-posted status never counts) and "no newer status on the head wins" (any trusted `review/owner` status on
+  the head, a failure included, decides instead).
+- A carried approval covers byte-identical approved code only. Any change to the PR's own diff (a conflict resolution,
+  a new commit, a whitespace change) stops it, and the gate says `owner approval was for <short sha>; the PR's own diff
+  changed since: /approve <N>`. A diff that cannot be fetched or compared is never treated as identical.
+- It replaces only the owner's approval. It never makes the gate skip a reviewer: each required reviewer must still
+  have a success on the head (its own or a reused one under its own rules), and unfixed findings still block. Unlike
+  reviewer reuse, it does not look at changes to a reviewer's brief or checklists, since the owner approved code.
+- How the approval is posted (`/approve`, `approve-guard.mjs`, `post-review.mjs`) does not change.
+
 ## Governs
 
 - lanes.config.json

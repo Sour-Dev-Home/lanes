@@ -117,9 +117,59 @@ const COMPARE_FILES_CAP = 300;
  * may be cut short means no reuse for it; a commit list that does not end at the head means no reuse at all.
  */
 export function reusableReviews(api, repo, number, pr, reviewers, { files = [], adrs = [] } = {}) {
+  if (!Array.isArray(reviewers) || reviewers.length === 0) return [];
+  const w = reviewWalk(api, repo, number, pr);
+  if (w === null) return [];
+  const { head, ownDiff, changedSince, statusesAt, walk } = w;
+  const out = [];
+  for (const reviewer of reviewers) {
+    const context = reviewContext(reviewer);
+    try {
+      const sha = walk.find((s) => statusesAt(s).has(context));
+      if (sha === undefined) continue;
+      const status = statusesAt(sha).get(context);
+      if (status.state !== "success" || ownDiff(sha) !== ownDiff(head)) continue;
+      if (reuseBlockedBy(reviewer, changedSince(sha), files, adrs) !== null) continue;
+      out.push({ sha, status });
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
+
+/**
+ * #493, ADR 0002: the owner's approval on an earlier commit of PR `number`, as `{ sha, status, same }` for
+ * `gateDecision`'s `ownerCarry`, or null when there is none to consider. Walks as `reusableReviews` does to the newest
+ * earlier commit with a trusted review/owner status; `same` is whether that commit's own diff has the head's
+ * `diffFingerprint`. Nothing else is checked between the two: an approval covers byte-identical approved code only, so
+ * the reviewers' own inputs (their briefs, checklists, ADRs) do not matter to it. A status that is not a success, any
+ * API error or an empty diff means null (a diff that cannot be compared is never `same`).
+ */
+export function carriedOwnerApproval(api, repo, number, pr) {
+  const w = reviewWalk(api, repo, number, pr);
+  if (w === null) return null;
+  const context = reviewContext("owner");
+  try {
+    const sha = w.walk.find((s) => w.statusesAt(s).has(context));
+    if (sha === undefined) return null;
+    const status = w.statusesAt(sha).get(context);
+    if (status.state !== "success") return null;
+    return { sha, status, same: w.ownDiff(sha) === w.ownDiff(w.head) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The lookups `reusableReviews` and `carriedOwnerApproval` share, or null when they cannot run: the head, each
+ * commit's own diff fingerprint (three-dot compare against the base branch), the files changed since a commit, a
+ * commit's trusted statuses, and the PR's newest `REUSE_WALK` commits before the head, newest first.
+ */
+function reviewWalk(api, repo, number, pr) {
   const head = pr?.head?.sha;
   const base = pr?.base?.ref;
-  if (!SHA.test(head ?? "") || !BASE_REF.test(base ?? "") || !Array.isArray(reviewers) || reviewers.length === 0) return [];
+  if (!SHA.test(head ?? "") || !BASE_REF.test(base ?? "")) return null;
   // Each lookup at most once per gate run, whichever reviewers share a commit.
   const once = (fn) => {
     const seen = new Map();
@@ -145,26 +195,12 @@ export function reusableReviews(api, repo, number, pr, reviewers, { files = [], 
   try {
     const shas = api([`repos/${repo}/pulls/${number}/commits`, "--paginate", "--jq", ".[].sha"]).split("\n").filter(Boolean);
     // A push landed between reading the PR and its commits: decide on the next event instead.
-    if (shas.at(-1) !== head) return [];
+    if (shas.at(-1) !== head) return null;
     walk = shas.slice(-REUSE_WALK).reverse().filter((sha) => sha !== head && SHA.test(sha));
   } catch {
-    return [];
+    return null;
   }
-  const out = [];
-  for (const reviewer of reviewers) {
-    const context = reviewContext(reviewer);
-    try {
-      const sha = walk.find((s) => statusesAt(s).has(context));
-      if (sha === undefined) continue;
-      const status = statusesAt(sha).get(context);
-      if (status.state !== "success" || ownDiff(sha) !== ownDiff(head)) continue;
-      if (reuseBlockedBy(reviewer, changedSince(sha), files, adrs) !== null) continue;
-      out.push({ sha, status });
-    } catch {
-      continue;
-    }
-  }
-  return out;
+  return { head, ownDiff, changedSince, statusesAt, walk };
 }
 
 /**
@@ -238,7 +274,8 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   const statuses = statusesOf(api, repo, pr.head.sha);
   const candidates = reusableReviewers({ issueLabels, files, statuses, config, adrs, interfaceContract });
   const reused = candidates.length > 0 ? reusableReviews(api, repo, number, pr, candidates, { files, adrs }) : [];
-  const decision = gateDecision({
+  const inputs = {
+    prNumber: number,
     prBody: pr.body,
     issueLabels,
     issueState,
@@ -255,7 +292,14 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     reused,
     blockers,
     ownerDiff: ownerDiffFor(api, repo, pr, files),
-  });
+  };
+  let decision = gateDecision(inputs);
+  // #493: an earlier owner approval is only looked for when the gate waits on the owner and the head has no trusted
+  // review/owner status of its own; every other outcome (a reviewer still owed included) is final without it.
+  if (decision.stage === "owner" && !latestByContext(trustedStatuses(statuses)).has(reviewContext("owner"))) {
+    const ownerCarry = carriedOwnerApproval(api, repo, number, pr);
+    if (ownerCarry !== null) decision = gateDecision({ ...inputs, ownerCarry });
+  }
   return { pr, decision };
 }
 

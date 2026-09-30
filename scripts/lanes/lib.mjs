@@ -658,6 +658,24 @@ function acceptReused(reused, latest) {
   return out;
 }
 
+/**
+ * #493: the `ownerCarry` `gateDecision` trusts, as `{ sha, status, same }`, or null. Defence in depth: a trusted
+ * review/owner success on a real commit SHA, `same` exactly true or false, and only when the head has no trusted
+ * review/owner status of its own (`latest`), whatever its state.
+ */
+function acceptOwnerCarry(carry, latest) {
+  const ok =
+    carry !== null &&
+    typeof carry === "object" &&
+    typeof carry.same === "boolean" &&
+    !latest.has(reviewContext("owner")) &&
+    COMMIT_SHA_RE.test(carry.sha ?? "") &&
+    carry.status?.context === reviewContext("owner") &&
+    carry.status.state === "success" &&
+    trustedStatuses([carry.status]).length === 1;
+  return ok ? { sha: carry.sha.toLowerCase(), same: carry.same } : null;
+}
+
 /** `, reused <reviewer>[+<reviewer>...] from <sha7>` per reviewed commit, in the order first reused. */
 function reuseNote(reuse) {
   const bySha = new Map();
@@ -706,9 +724,13 @@ function blockerStatus(blockers, closes) {
  * reviewer, and brings along that reviewer's verdict for its `sha`. `interfaceContract` (#241) is the issue's Interface
  * contract text; a path it names that the diff changes requires the architecture-advisor. `ownerDiff` (#380, ADR 0015)
  * is owner-diff.mjs's verdict on the diff: only the string "additive" can clear the owner-only-path wait, and only
- * under `ownerPathExempt`'s conditions; the other reasons to wait on the owner still apply.
+ * under `ownerPathExempt`'s conditions; the other reasons to wait on the owner still apply. `ownerCarry` (#493, ADR
+ * 0002) is the owner's approval on an earlier commit, `{ sha, status, same }`, where `same` says that commit's own diff
+ * has the head's `diffFingerprint`: only `same === true` counts as the owner's approval, and only once every required
+ * reviewer has passed on the head; otherwise it only changes what the gate says while it waits on the owner, and
+ * `prNumber` names the PR in the `/approve` line.
  */
-export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, ownerDiff = null }) {
+export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, ownerDiff = null, ownerCarry = null, prNumber = null }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
@@ -758,7 +780,17 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
   if (latest.get(reviewContext("owner"))?.state === "success") {
     return { state: "success", description: `approved by owner${note}`, stage: "ready" };
   }
-  const waitOwner = (reason) => ({ state: "pending", description: `waiting on owner (/approve) (${reason})${note}`, stage: "owner" });
+  const carried = acceptOwnerCarry(ownerCarry, latest);
+  if (carried?.same === true) {
+    return { state: "success", description: `approved by owner (carried from ${carried.sha.slice(0, 7)})${note}`, stage: "ready" };
+  }
+  const waitOwner = (reason) => ({
+    state: "pending",
+    description: carried
+      ? `owner approval was for ${carried.sha.slice(0, 7)}; the PR's own diff changed since: /approve ${prNumber ?? ""}`.trimEnd()
+      : `waiting on owner (/approve) (${reason})${note}`,
+    stage: "owner",
+  });
   // ADR 0002: the files that decide what gets checked and who approves always need the owner, at every tier. A
   // sensitive path only adds the security-reviewer (requiredReviewers); it no longer sends a PR to the owner.
   if (cls.owner && !ownerPathExempt(ownerDiff, files, required)) return waitOwner("owner-only path");

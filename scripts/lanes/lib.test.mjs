@@ -711,6 +711,56 @@ test("edge: gateDecision ignores a reused status when the head has its own trust
   assert.equal(d.description, "review/test-hunter is failure");
 });
 
+// #493: an earlier owner approval carried to the head when the PR's own diff is byte-identical
+const ownerOk = { ...hunterOk, context: "review/owner" };
+const OWNED = "c".repeat(40);
+const needsOwnerPr = { ...quickPr, prBody: quickPr.prBody.replace("## Needs the owner\nnothing", "## Needs the owner\ndecide x"), statuses: [hunterOk] };
+
+test("gateDecision counts a carried owner approval as the owner's approval of the head", () => {
+  const d = gateDecision({ ...needsOwnerPr, ownerCarry: { sha: OWNED, status: ownerOk, same: true }, prNumber: 9 });
+  assert.equal(d.state, "success");
+  assert.equal(d.description, "approved by owner (carried from ccccccc)");
+  assert.equal(d.stage, "ready");
+});
+
+test("gateDecision says the diff changed when the carried approval's diff no longer matches", () => {
+  const d = gateDecision({ ...needsOwnerPr, ownerCarry: { sha: OWNED, status: ownerOk, same: false }, prNumber: 9 });
+  assert.equal(d.state, "pending");
+  assert.equal(d.description, "owner approval was for ccccccc; the PR's own diff changed since: /approve 9");
+});
+
+test("gateDecision never lets a carried approval skip a reviewer the head still owes", () => {
+  const d = gateDecision({ ...needsOwnerPr, statuses: [], ownerCarry: { sha: OWNED, status: ownerOk, same: true }, prNumber: 9 });
+  assert.equal(d.description, "waiting for review/test-hunter");
+});
+
+test("gateDecision lets the head's own owner status win over a carried approval", () => {
+  const failed = gateDecision({ ...needsOwnerPr, statuses: [hunterOk, { ...ownerOk, state: "failure" }], ownerCarry: { sha: OWNED, status: ownerOk, same: true }, prNumber: 9 });
+  assert.match(failed.description, /^waiting on owner/);
+  const own = gateDecision({ ...needsOwnerPr, statuses: [hunterOk, ownerOk], ownerCarry: { sha: OWNED, status: ownerOk, same: true }, prNumber: 9 });
+  assert.equal(own.description, "approved by owner");
+});
+
+test("edge: gateDecision refuses a carried approval that is not a trusted owner success on a real SHA", () => {
+  for (const ownerCarry of [
+    { sha: OWNED, status: { ...ownerOk, creator: { type: "Bot", login: "github-actions[bot]" } }, same: true },
+    { sha: OWNED, status: { ...ownerOk, state: "failure" }, same: true },
+    { sha: OWNED, status: { ...ownerOk, context: "review/test-hunter" }, same: true },
+    { sha: "not-a-sha", status: ownerOk, same: true },
+    { sha: OWNED, status: ownerOk },
+    { sha: OWNED, status: ownerOk, same: "true" },
+  ]) {
+    assert.match(gateDecision({ ...needsOwnerPr, ownerCarry, prNumber: 9 }).description, /^waiting on owner \(\/approve\)/, JSON.stringify(ownerCarry));
+  }
+});
+
+test("edge: a stale carried approval changes only the wording, never the state", () => {
+  const d = gateDecision({ ...needsOwnerPr, ownerCarry: { sha: OWNED, status: ownerOk, same: false } });
+  assert.equal(d.state, "pending");
+  assert.equal(d.stage, "owner");
+  assert.match(d.description, /^owner approval was for ccccccc; the PR's own diff changed since: \/approve/);
+});
+
 test("edge: diffFingerprint keeps a hunk boundary: one hunk split in two is a different diff", () => {
   const one = "diff --git a/b.js b/b.js\n--- a/b.js\n+++ b/b.js\n@@ -1,2 +1,2 @@\n-x\n+y\n-p\n+q\n";
   const two = "diff --git a/b.js b/b.js\n--- a/b.js\n+++ b/b.js\n@@ -1,1 +1,1 @@\n-x\n+y\n@@ -9,1 +9,1 @@\n-p\n+q\n";
