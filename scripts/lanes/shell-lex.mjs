@@ -958,6 +958,12 @@ function releaseTagAt(words, depth) {
     const ref = rest.find((w, k) => !w.startsWith("-") && !UPDATE_REF_VALUED.has(rest[k - 1]));
     return ref !== undefined && (TAG_REF_RE.test(unmark(ref)) || runtimeRef(ref));
   }
+  // A subcommand known only at run time (`git $(echo tag) v1`) may be any of the commands read here, or nothing at all
+  // (`git $(true) push --tags`): it is read as each in turn with the words after it, so one with no tag or push words
+  // (`git $(echo log)`) stays allowed (#511).
+  if (sub !== undefined && LIVE_RE.test(sub)) {
+    return depth >= MAX_ALIAS_DEPTH || [null, "tag", "push", "update-ref", "fetch"].some((c) => releaseTagAt([...words.slice(0, i), ...(c === null ? [] : [c]), ...rest], depth + 1));
+  }
   // An unreadable config key may be an alias for anything but the commands read above.
   if (unknownKey && sub !== undefined && !["tag", "push", "update-ref"].includes(sub)) return true;
   if (unknownKey && sub === "push") return true;

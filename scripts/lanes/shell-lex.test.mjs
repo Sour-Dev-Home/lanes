@@ -857,6 +857,16 @@ test("#477 criterion 5: an unquoted $(…) is one word of its statement for the 
   assert.deepEqual(lex("git push $(echo o", { collapse: true }), lex("git push $(echo o"));
 });
 
+test("#511 criteria 1-2: a git subcommand known only at run time is read as tag and push; one with no tag or push words stays allowed", () => {
+  const tags = (cmd) => lex(cmd, { collapse: true }).some((s) => releaseTagCommand(s));
+  for (const cmd of ["git $(echo tag) v1", "git $(true) push --tags", "git $V tag v1", "git `echo tag` v1", "git $(true) push origin v1", "git -C . $(echo tag) v1"]) assert.equal(tags(cmd), true, cmd);
+  // edge: a run-time subcommand that might be update-ref or fetch reads as they do.
+  for (const cmd of ["git $(echo update-ref) refs/tags/v1 HEAD", "git $(echo fetch) --refmap=refs/tags/*:refs/tags/* origin"]) assert.equal(tags(cmd), true, cmd);
+  for (const cmd of ["git $(echo log)", "git log $(echo a)", "git $(echo log) -5", "git $V status", "git $(true) push origin main"]) assert.equal(tags(cmd), false, cmd);
+  // edge: a run-time subcommand followed by a v* word may be `tag v1`, whatever the substitution prints.
+  assert.equal(tags("git $(echo log) v1"), true);
+});
+
 test("#477 criterion 6: xargs -I{} with a shell -c script, and ssh with a run-time remote command, are read", () => {
   for (const cmd of ["xargs -I{} bash -c 'git tag {}'", "xargs -I{} sh -c 'git tag {}'", "xargs -I{} sh -c 'git tag v1 && echo {}'", "xargs -I@ sh -c 'git push origin @'"]) {
     assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
