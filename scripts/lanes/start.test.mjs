@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { START_DEFAULTS, budgetConfig, inFlightIssues, launchArgs, launchEnv, main as runStart, markRunning, parseSessionId, planStart, startConfig } from "./start.mjs";
+import { BUDGET_DEFAULTS, START_DEFAULTS, budgetConfig, inFlightIssues, launchArgs, launchEnv, main as runStart, markRunning, parseSessionId, planStart, startConfig } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
@@ -1923,8 +1923,8 @@ test("edge: budgetConfig names the key for a non-positive, non-integer or non-nu
   for (const bad of [null, [], "x", 3]) assert.throws(() => budgetConfig({ budget: bad }), /budget must be an object/);
 });
 
-test("the repo's own lanes.config.json carries the default budget", () => {
+test("the repo's own lanes.config.json carries its budget: a 300M 24-hour cap (#490) and the default per-lane cap", () => {
   const raw = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
-  assert.deepEqual(raw.budget, { perNightTokens: 100000000, perLaneTokens: 15000000 });
+  assert.deepEqual(raw.budget, { perNightTokens: 300000000, perLaneTokens: BUDGET_DEFAULTS.perLaneTokens });
   assert.deepEqual(budgetConfig(raw), raw.budget);
 });
