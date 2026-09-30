@@ -12,13 +12,17 @@
    Faster: `/start <issue> [<issue> ...]` checks each issue the way `/lane` does and launches the rest as background
    sessions named `lane-<issue>` with `claude --bg --name lane-<issue> "/lane <issue>"`, printing `#<issue> → <id>`
    for `claude attach` or `claude logs`. It refuses, with the reason, an issue that is not open, lacks `ready` or one
-   `tier:*` label, carries `needs-owner`, has an open blocker or is already in flight; both issues of a pair whose paths overlap (pick one and run `/start` again); and anything past
+   `tier:*` label, carries `needs-owner`, is assigned to anyone (see below), has an open blocker or is already in flight; both issues of a pair whose paths overlap (pick one and run `/start` again); and anything past
    `start.maxLanes` in `lanes.config.json` (8) lanes in flight, counting open `issue-*` PRs and running sessions.
    `/start --auto` picks for you: it prints which ready issues it would start and why it skips each of the rest (a
    blocker, an overlap with another pick or with files running work already touches, the cap), and launches nothing.
    `/start --auto --go` recomputes that plan and launches exactly its picks; the paths in `start.softPaths` (this file
    and `README.md` by default) never count as overlaps, for `/start <N...>` either.
    Owner only: a lane or a schedule never runs it.
+   Claiming an issue (#522): when the owner session files a Task issue it will do itself, it assigns it in the same
+   call (`gh issue create --assignee @me ...`). The queue, `/start --auto` and `/start <N>` skip or refuse an issue
+   with any assignee, with the reason `assigned to <login>`, so no lane races the owner session. Removing `ready`
+   does not claim it: the gate refuses a PR whose issue is not `ready`.
    `start.models` (optional) picks each lane's model by its issue's tier: it maps `skip`, `quick` and `full` to a
    model name, and `/start` adds `--model <name>` to that tier's launches. A tier left
    out runs on your default model. This repository sets all three tiers to `sonnet`: issues are scoped

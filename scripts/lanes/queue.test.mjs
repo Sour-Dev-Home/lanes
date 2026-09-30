@@ -1291,3 +1291,30 @@ test("#483: edge: a failed write never changes a launch", async () => {
   assert.deepEqual(run.launched.map((l) => l.n), [1]);
   assert.deepEqual(run.recorded, []);
 });
+
+// #522: the owner claims an issue it will do itself by assigning it; the queue never launches a lane on it.
+test("an assigned ready issue is skipped with the assignee's login, not launched", () => {
+  const out = tick({ issues: [{ ...issue(1, ["src/a.mjs"]), assignees: [{ login: "owner" }] }, issue(2, ["src/b.mjs"])] });
+  assert.deepEqual(out.launch, [2]);
+  assert.ok(out.lines.some((l) => l === "#1: skipped: assigned to owner"));
+});
+
+test("edge: an unassigned issue (empty assignees) is launched as before", () => {
+  const out = tick({ issues: [{ ...issue(1, ["src/a.mjs"]), assignees: [] }, issue(2, ["src/b.mjs"])] });
+  assert.deepEqual(out.launch, [1, 2]);
+});
+
+test("edge: a malformed assignees field still claims the issue (fail closed)", () => {
+  for (const assignees of [[{}], [null], "owner", { login: "owner" }]) {
+    const out = tick({ issues: [{ ...issue(1, ["src/a.mjs"]), assignees }] });
+    assert.deepEqual(out.launch, []);
+    assert.ok(out.lines.some((l) => l.startsWith("#1: skipped: assigned to ")));
+  }
+});
+
+test("edge: several assignees are all named, and an assigned issue without ready is not listed", () => {
+  const out = tick({ issues: [{ ...issue(1, ["src/a.mjs"]), assignees: [{ login: "a" }, { login: "b" }] }, { ...issue(2, ["src/b.mjs"], { labels: ["tier:quick"] }), assignees: [{ login: "a" }] }] });
+  assert.deepEqual(out.launch, []);
+  assert.ok(out.lines.some((l) => l === "#1: skipped: assigned to a, b"));
+  assert.ok(!out.lines.some((l) => l.startsWith("#2:")));
+});
