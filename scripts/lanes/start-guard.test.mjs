@@ -2664,3 +2664,31 @@ test("#477 criterion 10: a gh issue create title with an apostrophe inside doubl
     assert.equal(decideFor(bash(cmd), grant())?.decision, "deny", cmd);
   }
 });
+
+// --- #502: queue.mjs and start.mjs named as data ------------------------------------------------------------------------
+
+test("#502 criteria 1-3: queue.mjs or start.mjs named only as data is allowed; a run of either is still denied", () => {
+  for (const name of ["queue.mjs", "start.mjs"]) {
+    const p = `scripts/lanes/${name}`;
+    for (const cmd of [
+      `node scripts/lanes/lessons.mjs --paths ${p} scripts/lanes/${name.replace(".mjs", ".test.mjs")}`,
+      `node scripts/lanes/lessons.mjs --check --paths ${p}`,
+      `node scripts/lanes/lessons.mjs ${p}`, `grep -ln "${name} runs only in the owner's own terminal" scripts/lanes/*.mjs`,
+      `git diff ${p}`, `cat ${p}`, `ls ${p}`, `echo ${p}`,
+    ]) {
+      assert.equal(decideFor(bash(cmd), grant()), null, cmd);
+    }
+    for (const cmd of [`node ${p}`, `bash -c 'node ${p}'`, `X=${p}; node $X`, `node -r ${p} x.mjs`, `node --import ${p} x.mjs`, `env node ${p}`]) {
+      assert.equal(decideFor(bash(cmd), grant())?.decision, "deny", cmd);
+    }
+  }
+});
+
+test("#502 edge: node's own script word and options before it still count for queue.mjs; data after another script does not", () => {
+  for (const cmd of ["node --stack-size 500 scripts/lanes/queue.mjs", "node -- scripts/lanes/queue.mjs", "node -r x -r scripts/lanes/queue.mjs y.js"]) {
+    assert.equal(findQueueInvocations(cmd), true, cmd);
+  }
+  for (const cmd of ["node lessons.mjs -- scripts/lanes/queue.mjs", "node x/lessons.mjs scripts/lanes/queue.mjs", "node lessons.mjs --paths a b scripts/lanes/queue.mjs"]) {
+    assert.equal(findQueueInvocations(cmd), false, cmd);
+  }
+});

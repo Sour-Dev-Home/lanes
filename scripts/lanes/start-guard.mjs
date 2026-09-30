@@ -508,6 +508,16 @@ function commandWords(words, stdin) {
 }
 
 /**
+ * True when word `i` is data for the script node runs, not something node runs: node is the command word, the script
+ * word before `i` is not itself node-like (`node node -ArgumentList …`, how a PowerShell launcher reads, leaves the rest
+ * unknown), and `i` is neither a script candidate nor an option before the script (`-r x`, `--import=x`).
+ */
+function isScriptData(plain, nodeAt, scripts, i) {
+  const scriptEnd = Math.max(-1, ...scripts);
+  return nodeAt === 0 && !mayBeNode(plain[Math.min(...scripts)] ?? "") && !scripts.has(i) && !(plain[i].startsWith("-") && (scripts.size === 0 || i < scriptEnd));
+}
+
+/**
  * Every run of `start.mjs` in a Bash command: the script as the command itself, or as an argument of node, including
  * runs behind env, chains, subshells or `bash -c`. `standalone` is true only for the plain
  * `node scripts/lanes/start.mjs <N ...>` (with its `issues`) or `node scripts/lanes/start.mjs --auto [--go]` (with its
@@ -532,9 +542,7 @@ function startInvocations(cmd, typed) {
       // up to there.
       // Only when node is the command word itself: behind another program (`rg --pre node x start.mjs`) node's arguments
       // are not known.
-      const scriptEnd = Math.max(-1, ...scripts);
-      // A script word that is itself node (`node node -ArgumentList …`, how a PowerShell launcher reads) leaves the rest unknown.
-      const isNodeData = (i) => nodeAt === 0 && !mayBeNode(plain[Math.min(...scripts)] ?? "") && !scripts.has(i) && !(plain[i].startsWith("-") && (scripts.size === 0 || i < scriptEnd));
+      const isNodeData = (i) => isScriptData(plain, nodeAt, scripts, i);
       plain.forEach((w, i) => {
         if (!counts(i)) return;
         // Unquoted `scripts\lanes\start.mjs` loses its backslashes in the lexer, as in bash: match the word's end.
@@ -591,7 +599,8 @@ function scanQueueInvocations(command) {
       const names = plain.some((w) => /queue\.mjs/i.test(w)) || (namesAnywhere && plain.some(fromInput));
       plain.forEach((w, i) => {
         if (!counts(i)) return;
-        if (QUEUE_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i))) found = true;
+        // A word after node's script is that script's data (`node lessons.mjs --paths … queue.mjs`, #502), as for start.mjs.
+        if (QUEUE_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i && !isScriptData(plain, nodeAt, scripts, i)))) found = true;
         else if (mayExpandTo(w, QUEUE_NAMES) && (i === 0 || scripts.has(i))) found = true;
         else if (UNRESOLVED_RE.test(w) && (i === 0 || scripts.has(i))) {
           if (names) found = true;
