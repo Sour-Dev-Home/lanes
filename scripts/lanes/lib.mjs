@@ -19,7 +19,8 @@ const LANE_FOLDER = /^issue-(\d+)(?:-.*)?$/;
  * cwd `claude agents --json` reports (a lane that entered its worktree by path can still report the repository
  * root), so the name wins. Otherwise the issue comes from the `issue-<N>` or `issue-<N>-<slug>` worktree folder in
  * the cwd: the one directly under the last `.claude/worktrees`, whatever lane-shaped folders sit above it or below
- * it; a cwd with no `.claude/worktrees` falls back to its first lane-shaped folder.
+ * it; a cwd with no `.claude/worktrees` falls back to its first lane-shaped folder. A session with any other non-empty
+ * name is never a lane (#494); only an unnamed session uses the cwd fallback.
  * @param {{ kind?: string, name?: string, cwd?: string } | null} session a `claude agents --json` entry, or
  *   cleanup.mjs's `sessionsFrom` output (which has no `kind`)
  * @returns {number | null}
@@ -28,6 +29,8 @@ export function laneIssueOf(session) {
   if (!session || typeof session !== "object" || (session.kind !== undefined && session.kind !== "background")) return null;
   const named = typeof session.name === "string" ? Number(LANE_NAME.exec(session.name)?.[1]) : NaN;
   if (Number.isSafeInteger(named)) return named;
+  // #494: a session with any other name (the owner session, a coordinator) is never a lane, whatever its cwd.
+  if (typeof session.name === "string" && session.name !== "") return null;
   if (typeof session.cwd !== "string") return null;
   const segs = session.cwd.split(/[\\/]+/);
   const at = segs.findLastIndex((seg, i) => seg === "worktrees" && segs[i - 1] === ".claude");

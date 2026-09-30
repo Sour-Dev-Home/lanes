@@ -21,7 +21,9 @@ test("laneIssueOf reads the lane-<N> name first, then an issue-<N> folder in the
   const cwd = "C:\\repo\\.claude\\worktrees\\issue-12-slug";
   assert.equal(laneIssueOf({ kind: "background", name: "lane-338", cwd: "C:\\repo" }), 338);
   assert.equal(laneIssueOf({ kind: "background", name: "lane-5", cwd }), 5, "the name wins over the folder");
-  assert.equal(laneIssueOf({ kind: "background", name: "reactapps-dc", cwd }), 12);
+  assert.equal(laneIssueOf({ kind: "background", name: "reactapps-dc", cwd }), null, "a session with another name never maps (#494)");
+  assert.equal(laneIssueOf({ kind: "background", name: "owner-session catch-up", cwd }), null);
+  assert.equal(laneIssueOf({ kind: "background", name: "", cwd }), 12, "an empty name is no name");
   assert.equal(laneIssueOf({ kind: "background", cwd }), 12);
   assert.equal(laneIssueOf({ kind: "background", cwd: "C:\\repo\\.claude\\worktrees\\issue-7" }), 7);
   assert.equal(laneIssueOf({ name: "lane-9", cwd: "C:\\repo" }), 9, "a session with no kind (sessionsFrom output) still counts");
