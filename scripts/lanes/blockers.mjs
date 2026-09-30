@@ -52,7 +52,9 @@ export function readBlockerReport(body, readState) {
   return blockerReport(blockedBy, states);
 }
 
-const reason = (err) => String(err?.stderr || err?.message || err).trim().split("\n")[0].replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+// Printable text only: control, format (bidi overrides) and line-separator characters are dropped, and the length is capped.
+const printable = (s) => String(s).replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "").slice(0, 200);
+const reason = (err) => printable(String(err?.stderr || err?.message || err).trim().split("\n")[0]);
 
 /** `run` takes full `gh` arguments and returns stdout; tests pass a fake. Returns the exit code and the line to print. */
 export function main(argv, run = gh) {
@@ -79,7 +81,7 @@ export function main(argv, run = gh) {
       why.set(b, reason(err));
       throw err;
     }
-    if (state !== "open" && state !== "closed") why.set(b, `state: ${String(state).replace(/[\u0000-\u001f\u007f-\u009f]/g, "")}`);
+    if (state !== "open" && state !== "closed") why.set(b, `state: ${printable(state)}`);
     return state;
   });
   if (report.error) return cannot(report.error);

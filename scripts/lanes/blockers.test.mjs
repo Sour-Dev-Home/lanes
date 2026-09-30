@@ -138,6 +138,15 @@ test("edge: control characters in a read error are stripped and each unreadable 
   assert.equal(r.message, "#15: cannot check blockers: #3 not found or unreadable (bad[31m thing)");
 });
 
+test("edge: bidi overrides and line separators are stripped and a long error is capped", () => {
+  const run = (args) => {
+    if (args[0] === "issue") return JSON.stringify({ body: form("#3") });
+    throw new Error(`a‮b c${"x".repeat(500)}`);
+  };
+  const r = main(["15"], run);
+  assert.equal(r.message, `#15: cannot check blockers: #3 not found or unreadable (abc${"x".repeat(197)})`);
+});
+
 test("edge: an unreadable blocker exits 2 even when another blocker is open", () => {
   const gh = fakeGh({ bodies: { 15: form("#3, #99") }, states: { 3: "open" } });
   assert.equal(main(["15"], gh.run).code, 2);
