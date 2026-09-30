@@ -138,8 +138,11 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
     const lockAlive = Boolean(pid) && w.lockRunning !== false;
     // A running lock held by one of this worktree's own idle sessions is released by stopping that session.
     const holder = lockAlive ? sessionsHere.find((s) => s.pid === pid) : undefined;
-    const done = laneDone(prs.filter((p) => p.headRefName === w.branch), w.head, closedIssues.has(issue));
-    if (done.skip) plan.push({ ...entry, skip: done.skip });
+    const own = prs.filter((p) => p.headRefName === w.branch);
+    const done = laneDone(own, w.head, closedIssues.has(issue));
+    const other = own.length === 0 && !w.main && !sessionsHere.some(stillWorking) ? otherLanePr(prs, issue, w.branch) : undefined;
+    if (other) plan.push({ ...entry, leftover: { folder: folderOf(w), pr: other.number, branch: other.headRefName }, skip: "leftover" });
+    else if (done.skip) plan.push({ ...entry, skip: done.skip });
     else if (w.main) plan.push({ ...entry, skip: "checked out in the main worktree" });
     else if (w.dirty === null && !w.gone) plan.push({ ...entry, skip: "cannot read worktree status" });
     else if (w.dirty) plan.push({ ...entry, skip: "dirty worktree" });
@@ -190,6 +193,15 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
   return plan;
 }
 
+// The issue's open or merged lane PR on a branch other than `branch` (an open one first), or undefined. A worktree
+// whose own branch has no PR but whose issue does has commits no PR carries (#476).
+function otherLanePr(prs, issue, branch) {
+  const others = prs.filter((p) => p.headRefName !== branch && Number(LANE_BRANCH.exec(p.headRefName ?? "")?.[1]) === issue);
+  return others.find((p) => p.state === "OPEN") ?? others.find((p) => p.state === "MERGED");
+}
+
+const folderOf = (w) => (w.path ? normalPath(w.path).split("/").at(-1) : w.branch);
+
 const doneAs = (done) => (done.closed ? { closed: true } : { pr: done.pr });
 
 export const cleanableCount = (plan) => plan.filter((e) => e.steps).length;
@@ -219,7 +231,7 @@ const isSessionStep = (step) => step.cmd === "claude" && (step.args[0] === "rm" 
 // label once its lane is removed (ADR 0014); a throw is reported in the result and never fails the removal.
 export function runCleanup(plan, { run, stillThere, sessionEnded, saveLog, recordCost, removeDir, waitStopped, sleep, unmark, dryRun = false }) {
   return plan.map((entry) => {
-    const base = { branch: entry.branch, issue: entry.issue, pr: entry.pr, closed: entry.closed, orphan: entry.orphan, files: entry.files };
+    const base = { branch: entry.branch, issue: entry.issue, pr: entry.pr, closed: entry.closed, orphan: entry.orphan, files: entry.files, leftover: entry.leftover };
     if (entry.skip) return { ...base, status: "skipped", skip: entry.skip };
     if (dryRun) return { ...base, status: "planned", ran: entry.steps.map(formatStep) };
     const ran = [];
@@ -343,6 +355,7 @@ export function render(results) {
     .map((r) => {
       const done = r.pr ? ` (PR #${r.pr})` : r.closed ? ` (issue #${r.issue} closed)` : "";
       const name = r.orphan ? `orphan folder ${r.orphan}` : `${r.branch ?? `#${r.issue} session`}${done}`;
+      if (r.leftover) return `leftover: ${r.leftover.folder} (issue #${r.issue} has PR #${r.leftover.pr} on ${r.leftover.branch}); its commits are not in any PR`;
       if (r.status === "skipped") return r.orphan && r.files > 0 ? `${name} ${r.skip}` : `skipped ${name}: ${r.skip}`;
       if (r.status === "planned") return `would remove ${name}: ${r.ran.join("; ")}`;
       if (r.status === "failed") return `failed ${name} at ${r.failedStep}: ${r.error}`;

@@ -887,6 +887,17 @@ test("lane.md keeps git worktree add -b as the fallback outside Claude Code and 
   assert.doesNotMatch(text, /enter it with the EnterWorktree/);
 });
 
+// #476: an existing issue-<N> worktree is resumed, never duplicated; entering it by path prompts the owner, so the
+// lane stops and notifies instead (the #354/#366 finding, which this pins as the chosen wording).
+test("lane.md step 3 lists worktrees first and stops for an existing or several issue worktrees instead of making a second", () => {
+  const step3 = laneStep(3);
+  assert.ok(step3.indexOf("git worktree list") > -1 && step3.indexOf("git worktree list") < step3.indexOf("`name` parameter"));
+  assert.match(step3, /never make a second one/);
+  assert.match(step3, /notify `lanes #\$ARGUMENTS: resume the existing worktree`/);
+  assert.match(step3, /several worktrees for the issue/);
+  assert.match(laneText().replace(/\s+/g, " "), /3b\. Resuming \(#444, #476\)[^]*Never open a second PR/);
+});
+
 test("lane.md step 3 runs npm run setup, then the POSIX tools check, in the worktree", () => {
   const step3 = laneStep(3);
   const setup = step3.indexOf("npm run setup");
