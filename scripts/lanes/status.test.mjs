@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
-import { approveLine, formatAge, gateDescriptions, gateSince, laneBranches, laneSessions, liveLanes, loadLaneBranches, loadSessions, mergeQueueEntries, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, waitingApprovals } from "./status.mjs";
+import { approveLine, formatAge, gateDescriptions, gateSince, laneBranches, laneSessions, liveLanes, loadLaneBranches, loadSessions, mergeQueueEntries, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, trustedRollups, waitingApprovals } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -1071,4 +1071,32 @@ test("#483: edge: the window is inclusive at exactly N days and excludes one mil
 test("#483: health.md runs status.mjs --starts 7", async () => {
   const { readFileSync } = await import("node:fs");
   assert.match(readFileSync(new URL("../../.claude/commands/health.md", import.meta.url), "utf8"), /node scripts\/lanes\/status\.mjs --starts 7/);
+});
+
+const ctx = (context, login, type = "Bot", state = "SUCCESS") => ({ context, state, creator: login === null ? null : { login, __typename: type } });
+const replyWith = (number, contexts) => ({ data: { repository: { pullRequests: { nodes: [{ number, commits: { nodes: [{ commit: { status: { contexts } } }] } }] } } } });
+const review = (name) => ({ __typename: "StatusContext", context: `review/${name}`, state: "SUCCESS" });
+const team = { identity: { profile: "team", app: { id: 1, installationId: 2, botLogin: "lanes-bot[bot]" } }, modules: { entries: [] } };
+const waiting = (prs, reply, config) => summarize({ prs: trustedRollups(prs, reply, config), issues: [], merged: [] }).waitingOnOwner.map((i) => i.number);
+const owing = () => [gate("PENDING", "waiting on owner (/approve)"), review("owner")];
+
+test("a bot review/owner (lane bot or github-actions[bot]) leaves the PR WAITING ON YOU; the owner's own moves it", () => {
+  for (const login of ["lanes-bot[bot]", "github-actions[bot]"]) {
+    assert.deepEqual(waiting([pr(8, owing())], replyWith(8, [ctx("review/owner", login)]), team), [8], login);
+  }
+  assert.deepEqual(waiting([pr(8, owing())], replyWith(8, [ctx("review/owner", "someone", "User")]), team), []);
+});
+
+test("edge: a review/owner whose creator cannot be read, or a PR missing from the reply, is untrusted", () => {
+  assert.deepEqual(waiting([pr(8, owing())], replyWith(8, [ctx("review/owner", null)]), team), [8]);
+  assert.deepEqual(waiting([pr(8, owing())], undefined, team), [8]);
+});
+
+test("a lane-bot reviewer status counts under team and not under solo; other checks are kept", () => {
+  const prs = [pr(8, [gate("PENDING", "x"), review("test-hunter")])];
+  const reply = replyWith(8, [ctx("review/test-hunter", "lanes-bot[bot]")]);
+  const names = (config) => trustedRollups(prs, reply, config)[0].statusCheckRollup.map((c) => c.context);
+  assert.deepEqual(names(team), ["lanes/gate", "review/test-hunter"]);
+  assert.deepEqual(names({ identity: { profile: "solo" }, modules: { entries: [] } }), ["lanes/gate"]);
+  assert.deepEqual(names({ modules: { entries: [] } }), ["lanes/gate"]);
 });
