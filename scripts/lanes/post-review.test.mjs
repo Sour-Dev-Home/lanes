@@ -732,3 +732,12 @@ test("the configured set is read from the main checkout's config, from a worktre
   writeFileSync(join(wt, "lanes.config.json"), "{}");
   assert.deepEqual(configuredReviewersFrom(join(wt, "scripts", "lanes")), CONFIGURED);
 });
+
+test("main posts a configured reviewer's skipped status and refuses an unknown name (#463)", () => {
+  const gh = fakeGh();
+  main(["compliance-reviewer", "skipped", "no change"], { run: gh.run, ...quiet, reviewers: CONFIGURED });
+  assert.ok(gh.writes.at(-1).args.includes("context=review/compliance-reviewer"));
+  const again = fakeGh();
+  assert.throws(() => main(["compliance-reviewer", "skipped", "no change"], { run: again.run, ...quiet, reviewers: CONFIGURED.slice(0, 4) }), /reviewer must be one of/);
+  assert.deepEqual(again.writes, []);
+});
