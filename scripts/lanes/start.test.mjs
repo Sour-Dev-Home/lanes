@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUDGET_DEFAULTS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, launchEnv, main as runStart, markRunning, parseSessionId, planStart, startConfig } from "./start.mjs";
+import { BUDGET_DEFAULTS, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, isLaneGhDir, launchEnv, main as runStart, makeRemint, markRunning, parseSessionId, planStart, refreshArgs, refreshLoop, startConfig, teamLaneEnv } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
@@ -2022,4 +2022,294 @@ test("appendStarts appends JSON lines to .lanes/starts.jsonl, writes nothing for
     rmSync(root, { recursive: true, force: true });
     rmSync(blocked, { recursive: true, force: true });
   }
+});
+
+// #499: the team profile (ADR 0019 parts 1, 3 and 4).
+const TEAM = { profile: "team", app: { id: 11, installationId: 22 } };
+
+test("startConfig accepts an identity: missing or solo is solo, team needs numeric app ids", () => {
+  assert.equal("identity" in startConfig({}), false);
+  assert.deepEqual(startConfig({ identity: { profile: "solo" } }).identity, { profile: "solo" });
+  assert.deepEqual(startConfig({ identity: TEAM }).identity, TEAM);
+});
+
+test("startConfig refuses any other identity shape with a clear error", () => {
+  for (const identity of [null, "team", [], {}, { profile: "other" }, { profile: "team" }, { profile: "team", app: { id: 1 } }, { profile: "team", app: { id: "1", installationId: 2 } }, { profile: "team", app: { id: 0, installationId: 2 } }, { profile: "team", app: { id: 1, installationId: 2, key: "x" } }, { profile: "team", app: null }, { profile: "solo", x: 1 }]) {
+    assert.throws(() => startConfig({ identity }), /lanes\.config\.json: identity /, JSON.stringify(identity));
+  }
+});
+
+test("teamLaneEnv removes the credentials and points gh and git at the lane's own files", () => {
+  const env = { PATH: "/bin", HOME: "/h", LANES_APP_KEY_FILE: "/k", GH_TOKEN: "t", GITHUB_TOKEN: "t", GH_ENTERPRISE_TOKEN: "t", GH_CONFIG_DIR: "/owner", github_token: "t", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "store", GIT_CONFIG_PARAMETERS: "'a=b'", GIT_ASKPASS: "x", SSH_ASKPASS: "x", GCM_INTERACTIVE: "1" };
+  const out = teamLaneEnv(env, { ghDir: "/lane/gh", emptyConfig: "/lane/empty" });
+  assert.deepEqual(out, { PATH: "/bin", HOME: "/h", GH_CONFIG_DIR: "/lane/gh", GIT_CONFIG_GLOBAL: "/lane/empty", GIT_CONFIG_SYSTEM: "/lane/empty", GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "", GIT_CONFIG_KEY_1: "credential.helper", GIT_CONFIG_VALUE_1: "!gh auth git-credential", GIT_TERMINAL_PROMPT: "0" });
+  assert.equal(env.GH_TOKEN, "t", "the input is not mutated");
+});
+
+// A team launch with every side effect faked: what was minted, where, what claude got, what the refresher was given.
+function teamRun({ env = {}, key = "/keys/app.pem", unreadable = false, mintFail = null, dirFail = false, noRepo = false, identity = TEAM, launchFail = [], spawnChild } = {}) {
+  const f = fakes({ issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } }, launchFail, config: { identity }, spawnChild });
+  const made = [];
+  const removed = [];
+  const minted = [];
+  const claudeEnvs = [];
+  const team = {
+    keyFile: () => key,
+    readable: () => {
+      if (unreadable) throw new Error("EACCES: /keys/app.pem");
+    },
+    repo: () => {
+      if (noRepo) throw new Error("gh: not a repo");
+      return "lanes";
+    },
+    makeDir: (n) => {
+      if (dirFail) throw new Error("EACCES: /tmp/x");
+      made.push(n);
+      return { dir: `/tmp/lane-${n}`, emptyConfig: `/tmp/lane-${n}/empty` };
+    },
+    removeDir: (dir) => removed.push(dir),
+    mintInto: (args) => {
+      minted.push(args);
+      if (mintFail) throw new Error(mintFail);
+    },
+  };
+  const claude = (args, opts) => {
+    if (args[0] !== "agents") claudeEnvs.push(opts.env);
+    return f.deps.claude(args, opts);
+  };
+  const deps = { ...f.deps, claude, team, launchEnv: () => ({ env: { PATH: "/bin", ...env }, note: null }) };
+  return { ...f, deps, made, removed, minted, claudeEnvs };
+}
+
+test("team: each lane gets a scrubbed environment and its own minted config directory", () => {
+  const t = teamRun({ env: { GH_TOKEN: "owner", LANES_APP_KEY_FILE: "/keys/app.pem", GITHUB_TOKEN: "owner" } });
+  const { code, lines } = main(["1", "2"], t.deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#2 → id2"]);
+  assert.deepEqual(t.minted, [1, 2].map((n) => ({ issue: n, appId: 11, installationId: 22, repo: "lanes", dir: `/tmp/lane-${n}` })));
+  assert.equal(t.claudeEnvs.length, 2);
+  for (const [i, env] of t.claudeEnvs.entries()) {
+    assert.equal(env.GH_CONFIG_DIR, `/tmp/lane-${i + 1}`);
+    assert.equal(env.GIT_CONFIG_GLOBAL, `/tmp/lane-${i + 1}/empty`);
+    assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+    assert.equal(env.GIT_CONFIG_VALUE_1, "!gh auth git-credential");
+    for (const k of ["LANES_APP_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"]) assert.equal(k in env, false, k);
+    assert.equal(JSON.stringify(env).includes("/keys/app.pem"), false);
+  }
+});
+
+test("team: a refresher is spawned beside each lane, detached, with the app ids and the lane's directory and no key", () => {
+  const t = teamRun();
+  main(["1"], t.deps);
+  const refresher = t.reapers.filter((r) => r.args.includes("--refresh-token"));
+  assert.equal(refresher.length, 1);
+  assert.deepEqual(refresher[0].args, [join("/repo", "scripts", "lanes", "start.mjs"), "--refresh-token", "--issue", "1", "--session", "id1", "--dir", "/tmp/lane-1", "--app", "11", "--installation", "22", "--repo", "lanes"]);
+  assert.equal(refresher[0].options.detached, true);
+  assert.equal(refresher[0].child.unrefed, true);
+  assert.equal(JSON.stringify(refresher[0].args).includes("app.pem"), false);
+  assert.equal(t.reapers.filter((r) => r.args.includes("--session") && !r.args.includes("--refresh-token")).length, 1, "the reaper still starts too");
+});
+
+test("team: a refresher that cannot start is reported and keeps the launch", () => {
+  const t = teamRun({
+    spawnChild: (cmd, args) => {
+      if (args.includes("--refresh-token")) throw new Error("spawn EPERM");
+      return { pid: 1, on() {}, unref() {} };
+    },
+  });
+  const { code, lines } = main(["1"], t.deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#1: token refresher not started: spawn EPERM"]);
+});
+
+for (const [name, opts, step] of [
+  ["no key file configured", { key: null }, "LANES_APP_KEY_FILE is not set"],
+  ["an unreadable key file", { unreadable: true }, "key file unreadable"],
+  ["an unknown repository", { noRepo: true }, "repository name unknown"],
+  ["a config directory that cannot be made", { dirFail: true }, "could not create the lane's config directory"],
+  ["a failed mint", { mintFail: "app-token: request to GitHub failed with status 401" }, "token mint failed: app-token: request to GitHub failed with status 401"],
+]) {
+  test(`team fails closed on ${name}: nothing launches and the owner's environment is never used`, () => {
+    const t = teamRun({ ...opts, env: { GH_TOKEN: "owner" } });
+    const { code, lines } = main(["1"], t.deps);
+    assert.equal(code, 1);
+    assert.deepEqual(lines, [`#1: launch failed: team profile: ${step}`]);
+    assert.equal(t.launches.length, 0);
+    assert.equal(t.claudeEnvs.length, 0);
+    assert.equal(t.reapers.length, 0);
+    assert.equal(t.labeled.length, 0);
+  });
+}
+
+test("edge: a failed mint removes the lane's directory, and a failing lane does not stop the next", () => {
+  const t = teamRun();
+  let calls = 0;
+  const mintInto = (a) => {
+    t.minted.push(a);
+    if (++calls === 1) throw new Error("app-token: request to GitHub failed");
+  };
+  const { code, lines } = main(["1", "2"], { ...t.deps, team: { ...t.deps.team, mintInto } });
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ["#1: launch failed: team profile: token mint failed: app-token: request to GitHub failed", "#2 → id2"]);
+  assert.deepEqual(t.removed, ["/tmp/lane-1"]);
+});
+
+test("edge: a claude launch that fails under team removes the lane's directory and starts no refresher", () => {
+  const t = teamRun({ launchFail: [1] });
+  const { code } = main(["1"], t.deps);
+  assert.equal(code, 1);
+  assert.deepEqual(t.removed, ["/tmp/lane-1"]);
+  assert.equal(t.reapers.length, 0);
+});
+
+test("edge: team with no team support in deps fails closed", () => {
+  const t = teamRun();
+  const { team, ...rest } = t.deps;
+  const { code, lines } = main(["1"], rest);
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ["#1: launch failed: team profile: not supported here"]);
+  assert.equal(t.launches.length, 0);
+});
+
+test("solo identity launches exactly as before: no team calls, the environment passed through unchanged", () => {
+  const t = teamRun({ identity: { profile: "solo" }, env: { GH_TOKEN: "owner" } });
+  const { code, lines } = main(["1"], t.deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1"]);
+  assert.deepEqual(t.claudeEnvs[0], { PATH: "/bin", GH_TOKEN: "owner" });
+  assert.equal(t.minted.length + t.made.length, 0);
+  assert.equal(t.reapers.some((r) => r.args.includes("--refresh-token")), false);
+});
+
+// The refresher loop: re-mints each interval and exits once the lane's session is gone or idle.
+function loopRun({ sessionsSeq, remintFail = [] }) {
+  const events = [];
+  let tick = 0;
+  return {
+    events,
+    run: () =>
+      refreshLoop({
+        session: "s1",
+        intervalMs: REFRESH_MS,
+        sessions: () => {
+          const s = sessionsSeq[Math.min(tick - 1, sessionsSeq.length - 1)];
+          if (s instanceof Error) throw s;
+          return s;
+        },
+        remint: async () => {
+          events.push("remint");
+          if (remintFail.includes(tick - 1)) throw new Error("app-token: request to GitHub failed");
+        },
+        sleep: async (ms) => {
+          events.push(`sleep ${ms}`);
+          tick += 1;
+        },
+        log: (line) => events.push(`log ${line}`),
+      }),
+  };
+}
+
+test("refresher: waits an interval, re-mints while the session lives, and exits when it is gone", async () => {
+  const busy = [{ id: "s1", status: "busy" }];
+  const { events, run } = loopRun({ sessionsSeq: [busy, busy, []] });
+  assert.equal(await run(), "session ended");
+  const every = `sleep ${REFRESH_MS}`;
+  assert.deepEqual(events, [every, "remint", every, "remint", every]);
+  assert.equal(REFRESH_MS, 45 * 60 * 1000);
+});
+
+test("refresher: an idle session (not blocked) counts as ended, a blocked one as alive", async () => {
+  assert.equal(await loopRun({ sessionsSeq: [[{ id: "s1", status: "idle" }]] }).run(), "session ended");
+  const { events, run } = loopRun({ sessionsSeq: [[{ id: "s1", status: "idle", state: "blocked" }], []] });
+  await run();
+  assert.deepEqual(events.filter((e) => e === "remint"), ["remint"]);
+});
+
+test("edge: a session list that cannot be read keeps the refresher alive and re-minting", async () => {
+  const { events, run } = loopRun({ sessionsSeq: [new Error("claude: agents failed"), []] });
+  assert.equal(await run(), "session ended");
+  assert.equal(events.filter((e) => e === "remint").length, 1);
+});
+
+test("edge: a failed re-mint is logged without secrets and the next interval tries again", async () => {
+  const busy = [{ id: "s1", status: "busy" }];
+  const { events, run } = loopRun({ sessionsSeq: [busy, busy, []], remintFail: [0] });
+  await run();
+  assert.deepEqual(events.filter((e) => e.startsWith("log")), ["log token refresh failed: app-token: request to GitHub failed"]);
+  assert.equal(events.filter((e) => e === "remint").length, 2);
+});
+
+test("the refresher rewrites the lane's hosts.yml through the injected app-token functions", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "refresh-"));
+  try {
+    const written = [];
+    const remint = makeRemint({
+      args: { app: 11, installation: 22, repo: "lanes", dir },
+      keyFile: () => "/keys/app.pem",
+      readFile: () => "PEM",
+      mint: async (a) => {
+        written.push(a);
+        return { token: "ghs_new", expiresAt: "2026-10-01T00:00:00Z" };
+      },
+      writeHosts: (d, token) => written.push([d, token]),
+    });
+    await remint();
+    assert.deepEqual(written, [{ appId: 11, installationId: 22, keyPem: "PEM", repo: "lanes" }, [dir, "ghs_new"]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("edge: a re-mint with no key file set or an unreadable one fails by step and never mints or writes", async () => {
+  for (const [keyFile, readFile, step] of [
+    [() => undefined, () => "PEM", /LANES_APP_KEY_FILE is not set/],
+    [() => "/k", () => { throw new Error("EACCES: /k"); }, /^Error: key file unreadable$/],
+  ]) {
+    const calls = [];
+    const remint = makeRemint({ args: { app: 1, installation: 2, repo: "r", dir: "/d" }, keyFile, readFile, mint: async () => calls.push("mint"), writeHosts: () => calls.push("write") });
+    await assert.rejects(remint(), (err) => step.test(err.message) || step.test(String(err)));
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("edge: team with a throwing step outside the named ones, or a failing cleanup, still fails closed", () => {
+  const t = teamRun();
+  const boom = main(["1"], { ...t.deps, team: { ...t.deps.team, keyFile: () => { throw new Error("secret /keys/app.pem"); } } });
+  assert.equal(boom.code, 1);
+  assert.deepEqual(boom.lines, ["#1: launch failed: team profile: unexpected error"]);
+  const t2 = teamRun({ mintFail: "app-token: nope" });
+  const r = main(["1"], { ...t2.deps, team: { ...t2.deps.team, removeDir: () => { throw new Error("EBUSY"); } } });
+  assert.equal(r.code, 1);
+  assert.deepEqual(r.lines, ["#1: launch failed: team profile: token mint failed: app-token: nope"]);
+});
+
+test("edge: a refresher whose process never started (no pid) is reported and keeps the launch", () => {
+  const t = teamRun({
+    spawnChild: (cmd, args) => (args.includes("--refresh-token") ? { pid: undefined, on() {}, unref() {} } : { pid: 1, on() {}, unref() {} }),
+  });
+  const { code, lines } = main(["1"], t.deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#1: token refresher not started: no process started"]);
+});
+
+test("isLaneGhDir accepts only lanes-gh-<issue>-* directly under the temp folder, and never a link", () => {
+  assert.equal(isLaneGhDir("/tmp/lanes-gh-7-AbC123", "/tmp"), true);
+  assert.equal(isLaneGhDir("C:\\Temp\\lanes-gh-7-AbC123", "c:/temp/"), true);
+  for (const dir of ["/tmp/lanes-gh-7-", "/tmp/other", "/srv/other/gh", "/tmp/x/lanes-gh-7-AbC123", "/tmp/lanes-gh-x-AbC123", "/tmp/lanes-gh-7-../gh", ""]) assert.equal(isLaneGhDir(dir, "/tmp"), false, dir);
+  assert.equal(isLaneGhDir("/tmp/lanes-gh-7-AbC123", "/tmp", () => true), false);
+});
+
+test("teamLaneEnv also drops ssh agent, ssh command and other token and host variables", () => {
+  const out = teamLaneEnv({ PATH: "p", SSH_AUTH_SOCK: "s", GIT_SSH: "a", GIT_SSH_COMMAND: "b", GITHUB_PERSONAL_ACCESS_TOKEN: "t", GH_HOST: "h", GH_REPO: "r" }, { ghDir: "/g", emptyConfig: "/e" });
+  for (const k of ["SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND", "GITHUB_PERSONAL_ACCESS_TOKEN", "GH_HOST", "GH_REPO"]) assert.equal(k in out, false, k);
+  assert.equal(out.PATH, "p");
+});
+
+test("refreshArgs parses the refresher's command line and refuses anything malformed", () => {
+  const ok = ["--issue", "1", "--session", "s1", "--dir", "/d", "--app", "11", "--installation", "22", "--repo", "lanes"];
+  assert.deepEqual(refreshArgs(ok), { issue: 1, session: "s1", dir: "/d", app: 11, installation: 22, repo: "lanes", once: false });
+  assert.equal(refreshArgs([...ok, "--once"]).once, true);
+  assert.equal(refreshArgs(ok.slice(2)), null);
+  assert.equal(refreshArgs(ok.map((a) => (a === "11" ? "x" : a))), null);
+  assert.equal(refreshArgs([...ok, "--bogus", "1"]), null);
 });

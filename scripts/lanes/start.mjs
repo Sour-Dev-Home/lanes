@@ -8,9 +8,11 @@
 // The cap and the soft paths come from the `start` block of lanes.config.json.
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { accessSync, appendFileSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { mintInstallationToken, writeGhHosts } from "./app-token.mjs";
 import { main as checkBlockers } from "./blockers.mjs";
 import { cleanupMerged } from "./cleanup.mjs";
 import { TIERS, laneIssueOf, parseIssueForm } from "./lib.mjs";
@@ -81,10 +83,38 @@ const ISSUE_LIMIT = 1000;
  * The `start` block of a parsed lanes.config.json, each missing key (or the whole block) filled from START_DEFAULTS.
  * Throws when maxLanes is not a whole number from 1 to 10, softPaths is not an array of valid regex strings, or
  * models is not an object mapping tiers (skip, quick, full) to model names.
- * @returns {{ maxLanes: number, softPaths: string[], models: { skip?: string, quick?: string, full?: string } }}
+ * It also carries `identity` (ADR 0019 part 1) when the file sets one: `{ profile: "solo" }` or
+ * `{ profile: "team", app: { id, installationId } }`; a missing key leaves it out, which is solo. Throws on any other shape.
+ * @returns {{ maxLanes: number, softPaths: string[], models: { skip?: string, quick?: string, full?: string }, identity?: { profile: "solo" | "team", app?: { id: number, installationId: number } } }}
  */
 export function startConfig(raw) {
-  const start = raw?.start;
+  const identity = startIdentity(raw?.identity);
+  const config = startBlock(raw?.start);
+  return identity ? { ...config, identity } : config;
+}
+
+// identity, validated and copied; undefined when the key is missing.
+function startIdentity(identity) {
+  if (identity === undefined) return undefined;
+  const bad = (what) => new Error(`lanes.config.json: identity ${what}`);
+  if (identity === null || typeof identity !== "object" || Array.isArray(identity)) throw bad("must be an object");
+  const extra = Object.keys(identity).find((k) => k !== "profile" && k !== "app");
+  if (extra !== undefined) throw bad(`has an unknown key ${JSON.stringify(extra)}`);
+  if (identity.profile !== "solo" && identity.profile !== "team") throw bad(`.profile must be "solo" or "team", got ${JSON.stringify(identity.profile)}`);
+  const { app } = identity;
+  if (app === undefined) {
+    if (identity.profile === "team") throw bad(".app { id, installationId } is required for the team profile");
+    return { profile: "solo" };
+  }
+  if (app === null || typeof app !== "object" || Array.isArray(app)) throw bad(".app must be an object { id, installationId }");
+  if (Object.keys(app).some((k) => k !== "id" && k !== "installationId")) throw bad(".app may only have id and installationId");
+  for (const key of ["id", "installationId"]) {
+    if (!Number.isSafeInteger(app[key]) || app[key] < 1) throw bad(`.app.${key} must be a positive whole number, got ${JSON.stringify(app[key])}`);
+  }
+  return { profile: identity.profile, app: { id: app.id, installationId: app.installationId } };
+}
+
+function startBlock(start) {
   if (start === undefined) return { maxLanes: START_DEFAULTS.maxLanes, softPaths: [...START_DEFAULTS.softPaths], models: {} };
   if (start === null || typeof start !== "object" || Array.isArray(start)) throw new Error("lanes.config.json: start must be an object");
   // A key present as null is a typo, not an absent key, so only a missing key takes the default.
@@ -185,6 +215,178 @@ export function localLaunchEnv() {
     out = execFileSync("git", ["--exec-path"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch {}
   return launchEnv(process.env, process.platform, out);
+}
+
+// ADR 0019 part 3: what a team lane never inherits. Matched case-insensitively, as Windows environment names are.
+const TEAM_SCRUBBED = [/^LANES_APP_KEY_FILE$/i, /^GH_TOKEN$/i, /^GITHUB_TOKEN$/i, /^GH_ENTERPRISE_TOKEN$/i, /^GITHUB_ENTERPRISE_TOKEN$/i, /^GH_CONFIG_DIR$/i, /^GIT_CONFIG_/i, /^GIT_ASKPASS$/i, /^SSH_ASKPASS$/i, /^GIT_TERMINAL_PROMPT$/i, /^GIT_CREDENTIAL/i, /^GCM_/i, /^GITHUB_PERSONAL_ACCESS_TOKEN$/i, /^SSH_AUTH_SOCK$/i, /^GIT_SSH(_COMMAND)?$/i, /^GH_HOST$/i, /^GH_REPO$/i];
+
+/** Whether `dir` is a lane directory `makeDir` creates: `lanes-gh-<issue>-*` directly under the OS temp folder, not a link. */
+export function isLaneGhDir(dir, tmp, isLink = () => false) {
+  const parts = String(dir).split(/[\\/]+/).filter(Boolean);
+  const base = parts.pop() ?? "";
+  const parent = String(dir).slice(0, String(dir).length - base.length).replace(/[\\/]+$/, "");
+  const norm = (p) => String(p).replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+  return /^lanes-gh-[1-9]\d*-[A-Za-z0-9]+$/.test(base) && norm(parent) === norm(tmp) && !isLink(dir);
+}
+
+/**
+ * ADR 0019 parts 3 and 4: the environment a team lane launches with. Credentials and git credential settings are
+ * removed, `GH_CONFIG_DIR` is the lane's own directory (holding the minted token), git reads an empty config file, and
+ * the only credential helper is `gh auth git-credential`. Never mutates `env`.
+ * @param {Record<string, string | undefined>} env
+ * @param {{ ghDir: string, emptyConfig: string }} lane
+ */
+export function teamLaneEnv(env, { ghDir, emptyConfig }) {
+  const kept = Object.fromEntries(Object.entries(env).filter(([k]) => !TEAM_SCRUBBED.some((re) => re.test(k))));
+  return {
+    ...kept,
+    GH_CONFIG_DIR: ghDir,
+    GIT_CONFIG_GLOBAL: emptyConfig,
+    GIT_CONFIG_SYSTEM: emptyConfig,
+    // The first, empty value resets any helper list; the second is the only helper.
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "credential.helper",
+    GIT_CONFIG_VALUE_0: "",
+    GIT_CONFIG_KEY_1: "credential.helper",
+    GIT_CONFIG_VALUE_1: "!gh auth git-credential",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+}
+
+// Launcher side of the team profile for lane n: checks the key, makes the lane's directory and mints into it. Returns
+// `{ env, dir, repo }`, or `{ failed: <step> }` with the directory removed: it never falls back to the owner's environment.
+// `deps.team` (keyFile, readable, repo, makeDir, removeDir, mintInto) is absent where team is not supported.
+function prepareTeam(n, identity, deps, baseEnv) {
+  const team = deps.team;
+  if (!team) return { failed: "not supported here" };
+  let repo;
+  try {
+    const keyFile = team.keyFile();
+    if (!keyFile) return { failed: "LANES_APP_KEY_FILE is not set" };
+    try {
+      team.readable(keyFile);
+    } catch {
+      return { failed: "key file unreadable" };
+    }
+    try {
+      repo = team.repo();
+    } catch {
+      return { failed: "repository name unknown" };
+    }
+    let lane;
+    try {
+      lane = team.makeDir(n);
+    } catch {
+      return { failed: "could not create the lane's config directory" };
+    }
+    try {
+      team.mintInto({ issue: n, appId: identity.app.id, installationId: identity.app.installationId, repo, dir: lane.dir });
+    } catch (err) {
+      removeQuietly(team, lane.dir);
+      return { failed: `token mint failed: ${reason(err)}` };
+    }
+    return { env: teamLaneEnv(baseEnv, { ghDir: lane.dir, emptyConfig: lane.emptyConfig }), dir: lane.dir, repo };
+  } catch {
+    return { failed: "unexpected error" };
+  }
+}
+
+function removeQuietly(team, dir) {
+  try {
+    team.removeDir(dir);
+  } catch {
+    // A leftover temp directory holds only an expiring token.
+  }
+}
+
+/** How often the refresher re-mints: installation tokens last an hour (ADR 0019 part 4). */
+export const REFRESH_MS = 45 * 60 * 1000;
+
+/**
+ * The refresher's loop: each interval, end when the lane's session is gone (or idle and not blocked, as the reaper
+ * counts it), else re-mint into the lane's hosts.yml. A session list that cannot be read, or a failed re-mint, is logged
+ * and tried again next interval; the old token stays valid until it expires.
+ * @param {{ session: string, intervalMs: number, sessions: () => { id?: string, status?: string, state?: string }[], remint: () => Promise<void>, sleep: (ms: number) => Promise<void>, log: (line: string) => void }} o
+ * @returns {Promise<string>} why it ended
+ */
+export async function refreshLoop({ session, intervalMs, sessions, remint, sleep, log }) {
+  for (;;) {
+    await sleep(intervalMs);
+    let list = null;
+    try {
+      list = sessions();
+    } catch (err) {
+      log(`session list not read: ${reason(err)}`);
+    }
+    if (list) {
+      const mine = list.find((s) => s?.id === session);
+      if (!mine || (mine.status === "idle" && mine.state !== "blocked")) return "session ended";
+    }
+    try {
+      await remint();
+    } catch (err) {
+      log(`token refresh failed: ${reason(err)}`);
+    }
+  }
+}
+
+/** The one re-mint step: reads the key file, mints a token for this repo and rewrites the lane's hosts.yml. */
+export function makeRemint({ args, keyFile, readFile, mint, writeHosts }) {
+  return async () => {
+    const file = keyFile();
+    if (!file) throw new Error("LANES_APP_KEY_FILE is not set");
+    let keyPem;
+    try {
+      keyPem = readFile(file);
+    } catch {
+      throw new Error("key file unreadable");
+    }
+    const { token } = await mint({ appId: args.app, installationId: args.installation, keyPem, repo: args.repo });
+    writeHosts(args.dir, token);
+  };
+}
+
+/** Parses the refresher's command line (after `--refresh-token`), or null when it is malformed. */
+export function refreshArgs(argv) {
+  const opts = {};
+  let once = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === "--once") {
+      once = true;
+      continue;
+    }
+    if (!["--issue", "--session", "--dir", "--app", "--installation", "--repo"].includes(argv[i]) || argv[i] in opts || argv[i + 1] === undefined) return null;
+    opts[argv[i]] = argv[(i += 1)];
+  }
+  const whole = (v) => /^[1-9]\d*$/.test(v ?? "");
+  if (!whole(opts["--issue"]) || !whole(opts["--app"]) || !whole(opts["--installation"]) || !opts["--session"] || !opts["--dir"] || !/^[A-Za-z0-9._-]+$/.test(opts["--repo"] ?? "")) return null;
+  return { issue: Number(opts["--issue"]), session: opts["--session"], dir: opts["--dir"], app: Number(opts["--app"]), installation: Number(opts["--installation"]), repo: opts["--repo"], once };
+}
+
+// Spawns lane n's owner-side refresher, detached and unref'd like the reaper, logging to the same per-issue log. It is a
+// node process, not a claude session, so it is never counted as a lane (#494). Returns null or the line saying why not.
+function startRefresher(n, id, team, identity, deps, root) {
+  let log;
+  try {
+    log = deps.reaperLog(root, n);
+    const child = deps.spawn(
+      process.execPath,
+      [join(root, "scripts", "lanes", "start.mjs"), "--refresh-token", "--issue", String(n), "--session", id, "--dir", team.dir, "--app", String(identity.app.id), "--installation", String(identity.app.installationId), "--repo", team.repo],
+      { cwd: root, detached: true, stdio: ["ignore", log.fd, log.fd], windowsHide: true },
+    );
+    child.on("error", () => {});
+    if (child.pid === undefined) return `#${n}: token refresher not started: no process started`;
+    child.unref();
+    return null;
+  } catch (err) {
+    return `#${n}: token refresher not started: ${reason(err)}`;
+  } finally {
+    try {
+      log?.close();
+    } catch {
+      // The child holds its own copy of the log's descriptor.
+    }
+  }
 }
 
 /** The session id from `claude --bg` output (`backgrounded · <id>`), or null when none was printed. Colour is ignored. */
@@ -390,29 +592,43 @@ export function reaperLog(root, n) {
 // Launches each issue from the repository root, one attempt each, on its tier's model (`tiers`: issue → tier), and
 // starts a reaper for each lane that returned a session id. Returns issue → lines, and whether any launch failed.
 // `labels` (issue → label names) supplies the model:opus override; an ignored model:* label is logged once.
-function launchAll(numbers, deps, { tiers, models, labels }) {
+function launchAll(numbers, deps, { tiers, models, labels, identity }) {
   const lines = new Map();
   let failed = false;
   const root = numbers.length ? deps.root() : null;
   const { env, note: envNote } = numbers.length && deps.launchEnv ? deps.launchEnv() : { env: undefined, note: null };
+  const team = identity?.profile === "team";
   for (const n of numbers) {
     const { opus, ignored } = modelLabels(labels.get(n));
     // A label name is untrusted text: control characters (ANSI escapes, newlines) become `?` in the log line.
     const notes = ignored.map((l) => `#${n}: ignored label ${l.replace(/[\x00-\x1f\x7f-\x9f]/g, "?")}`);
     if (envNote) notes.push(`#${n}: ${envNote}`);
+    // ADR 0019: under team a lane launches with only the App's credentials, or not at all.
+    let lane = null;
+    if (team) {
+      lane = prepareTeam(n, identity, deps, env ?? process.env);
+      if (lane.failed) {
+        lines.set(n, [...notes, `#${n}: launch failed: team profile: ${lane.failed}`]);
+        failed = true;
+        continue;
+      }
+    }
+    const launchEnvFor = lane ? lane.env : env;
     // One attempt only: a launch that printed no id may still have started, and a retry could start it twice.
     let id = null;
     let why = "no session id in output";
     try {
-      id = parseSessionId(deps.claude(launchArgs(n, { tier: tiers.get(n), models, opus }), env ? { cwd: root, env } : { cwd: root }));
+      id = parseSessionId(deps.claude(launchArgs(n, { tier: tiers.get(n), models, opus }), launchEnvFor ? { cwd: root, env: launchEnvFor } : { cwd: root }));
     } catch (err) {
       why = reason(err);
     }
     if (id) {
       const reaperFailed = startReaper(n, id, deps, root);
+      const refresherFailed = lane ? startRefresher(n, id, lane, identity, deps, root) : null;
       const marked = markRunning(n, deps);
-      lines.set(n, [...notes, `#${n} → ${id}`, ...(reaperFailed ? [reaperFailed] : []), ...(marked.includes(": label not set: ") ? [marked] : [])]);
+      lines.set(n, [...notes, `#${n} → ${id}`, ...(reaperFailed ? [reaperFailed] : []), ...(refresherFailed ? [refresherFailed] : []), ...(marked.includes(": label not set: ") ? [marked] : [])]);
     } else {
+      if (lane) removeQuietly(deps.team, lane.dir);
       lines.set(n, [...notes, `#${n}: launch failed: ${why}, not retried`]);
       failed = true;
     }
@@ -422,7 +638,7 @@ function launchAll(numbers, deps, { tiers, models, labels }) {
 
 // --auto: every ready issue is checked the way /lane does, then pickStartable chooses among the rest against the
 // paths open PRs change and running lanes claim. Prints the plan; launches it only with `go`.
-function autoStart(go, deps, { maxLanes, softPaths, models }) {
+function autoStart(go, deps, { maxLanes, softPaths, models, identity }) {
   let prs, sessions, inFlight, openIssues;
   try {
     ({ prs, sessions, inFlight } = readInFlight(deps, "number,headRefName,files"));
@@ -458,7 +674,7 @@ function autoStart(go, deps, { maxLanes, softPaths, models }) {
   }
   const tiers = new Map(candidates.map((i) => [i.number, tierOf(labelsOf(i))]));
   const labels = new Map(candidates.map((i) => [i.number, labelsOf(i)]));
-  const { lines, failed } = launchAll(start, deps, { tiers, models, labels });
+  const { lines, failed } = launchAll(start, deps, { tiers, models, labels, identity });
   recordDecisions(deps, deps.root(), startDecisions({ started: start, skipped: allSkipped, at: new Date(deps.now()).toISOString() }));
   return { code: failed ? 1 : 0, lines: [...start.flatMap((n) => lines.get(n)), ...skipLines] };
 }
@@ -472,7 +688,7 @@ function autoStart(go, deps, { maxLanes, softPaths, models }) {
  * files, `now()` the time in ms, and optionally `removeGrant(file)`. Returns the exit code and the lines to print,
  * cleanup's first.
  */
-export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig, cleanup: cleanupMerged, spawn, reaperLog, session, grantDir, now: Date.now, launchEnv: localLaunchEnv, recordStarts: appendStarts }) {
+export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig, cleanup: cleanupMerged, spawn, reaperLog, session, grantDir, now: Date.now, launchEnv: localLaunchEnv, recordStarts: appendStarts, team }) {
   const args = argv.map((a) => String(a).replace(/^#/, ""));
   const auto = args[0] === "--auto";
   if (auto ? args.length > 2 || (args.length === 2 && args[1] !== "--go") : !args.length || args.some((a) => !/^[1-9]\d*$/.test(a))) {
@@ -601,7 +817,7 @@ function startIssues(args, deps, config) {
   const { launch, refused } = planStart({ issues, inFlight, overlaps, running: (n) => runningOverlap.get(n) ?? null, maxLanes: config.maxLanes });
   const tiers = new Map(issues.filter((i) => i.labels).map((i) => [i.number, tierOf(i.labels)]));
   const labels = new Map(issues.filter((i) => i.labels).map((i) => [i.number, i.labels]));
-  const launched = launchAll(launch, deps, { tiers, models: config.models, labels });
+  const launched = launchAll(launch, deps, { tiers, models: config.models, labels, identity: config.identity });
   recordDecisions(deps, deps.root(), startDecisions({ started: launch, skipped: refused, at: new Date(deps.now()).toISOString() }));
   const why = (r) => (r.reason === "already in flight" ? inFlightReason(r.number, prs, sessions) : r.reason);
   const lines = new Map([...refused.map((r) => [r.number, [`#${r.number}: refused: ${why(r)}`]]), ...launched.lines]);
@@ -628,7 +844,73 @@ function readConfig() {
   return JSON.parse(text);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// ADR 0019: the real team-profile steps, all on the owner's side. `mintInto` runs this file's `--refresh-token --once`
+// in a child so the launch stays synchronous; the child reads the key from the owner's own environment.
+const selfPath = fileURLToPath(import.meta.url);
+const team = {
+  keyFile: () => process.env.LANES_APP_KEY_FILE,
+  readable: (file) => accessSync(file, fsConstants.R_OK),
+  repo: () => gh(["repo", "view", "--json", "name", "--jq", ".name"]).trim(),
+  // A fresh directory under the OS temp folder: outside the repository and every worktree, owner-only where modes exist.
+  makeDir: (n) => {
+    const dir = mkdtempSync(join(tmpdir(), `lanes-gh-${n}-`));
+    const emptyConfig = join(dir, "empty.gitconfig");
+    writeFileSync(emptyConfig, "");
+    return { dir, emptyConfig };
+  },
+  removeDir: (dir) => rmSync(dir, { recursive: true, force: true }),
+  mintInto: ({ issue, appId, installationId, repo, dir }) => {
+    execFileSync(process.execPath, [selfPath, "--refresh-token", "--once", "--issue", String(issue), "--session", "mint-only", "--dir", dir, "--app", String(appId), "--installation", String(installationId), "--repo", repo], {
+      env: process.env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 60_000,
+    });
+  },
+};
+
+// `--refresh-token`: the owner-side refresher (or, with --once, a single mint). Not grant-gated: it only rewrites the
+// lane's own hosts.yml from the owner's key file, and it prints a failure's step only, never the key or a token.
+async function runRefresher(argv) {
+  const args = refreshArgs(argv);
+  if (!args) {
+    console.error("usage: start.mjs --refresh-token --issue <N> --session <id> --dir <dir> --app <id> --installation <id> --repo <name> [--once]");
+    return 2;
+  }
+  if (!isLaneGhDir(args.dir, tmpdir(), (d) => lstatSync(d).isSymbolicLink())) {
+    console.error("refusing: --dir is not a lane config directory");
+    return 2;
+  }
+  const remint = makeRemint({ args, keyFile: () => process.env.LANES_APP_KEY_FILE, readFile: (file) => readFileSync(file, "utf8"), mint: mintInstallationToken, writeHosts: writeGhHosts });
+  if (args.once) {
+    try {
+      await remint();
+      return 0;
+    } catch (err) {
+      console.error(reason(err));
+      return 1;
+    }
+  }
+  const log = (line) => console.log(`${new Date().toISOString()} #${args.issue}: ${line}`);
+  const why = await refreshLoop({
+    session: args.session,
+    intervalMs: REFRESH_MS,
+    sessions: () => {
+      const agents = JSON.parse(execFileSync("claude", ["agents", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, windowsHide: true }));
+      if (!Array.isArray(agents)) throw new Error("not a list");
+      return agents;
+    },
+    remint,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    log,
+  });
+  log(`refresher exits: ${why}`);
+  return 0;
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === "--refresh-token") {
+  process.exitCode = await runRefresher(process.argv.slice(3));
+} else if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { code, lines } = main(process.argv.slice(2));
   for (const line of lines) console.log(line);
   process.exitCode = code;
