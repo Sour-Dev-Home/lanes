@@ -88,8 +88,9 @@ of this (`prStage`, `gateDescriptions`, `mergeQueueEntries`, `laneSessions`, `op
 - Aggregates only: the snapshot holds numbers, titles, stages, check and reviewer names, and times. No logins, emails,
   bodies or comments. The publishing job runs the repository's PII and local-path check on `snapshot.json` and fails
   instead of deploying when it matches.
-- `.github/workflows/dashboard.yml`: triggers on `issues`, `status`, `merge_group`, `push` to the default branch, and a
-  5-minute cron. No `pull_request` and no `pull_request_target`; the job checks out the default branch's own code only.
+- `.github/workflows/dashboard.yml`: triggers on `issues`, `status`, `push` to the default branch, and a
+  5-minute cron. Amended by #475: `merge_group` was dropped, since github-pages only accepts deploys from main and every
+  merge-queue run failed at `deploy` (and could cancel a good publish). No `pull_request` and no `pull_request_target`; the job checks out the default branch's own code only.
   It deploys with `actions/upload-pages-artifact` and `actions/deploy-pages`: `permissions: pages: write` and
   `id-token: write` in that job only, `contents: read` elsewhere. No branch receives commits.
   `concurrency: { group: dashboard-publish, cancel-in-progress: true }`, since only the freshest snapshot matters.
