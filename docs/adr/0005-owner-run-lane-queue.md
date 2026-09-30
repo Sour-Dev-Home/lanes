@@ -50,6 +50,19 @@ never blocks a launch. `status.mjs` stays read-only.
   (#5).
 - Every `/start` now also lists PRs and sessions for cleanup; a failure there never turns into a refused launch.
 
+## Amendment (2026-09-30, #448)
+
+A queue resume of a dead lane (#444) relaunches a lane whose session died after it opened its PR. That resume does
+not count against `start.maxLanes` and does not go through `pickStartable`, because its PR already counts as in
+flight and its files are already claimed by that PR. This is acceptable because a resume adds no new claim on files:
+it finishes work that is already counted, so the cap and the Scope-path overlap check have nothing new to protect.
+
+Phase 2 of ADR 0018 (#459) will replace the Scope-path scheduler of ADRs 0005 and 0006 with per-module locks; this
+note describes the scheduler as it stands until then.
+
+`/start --auto` names a dead lane with the same text `/start <N>` prints (`already in flight: dead lane with open PR
+#<PR> and no live session; ...`), from one shared function, and a live lane still prints `already in flight`.
+
 ## Governs
 
 - scripts/lanes/queue.mjs
