@@ -201,7 +201,8 @@ export function reviewersFor(files, map) {
   if (map === undefined || map === null) return [];
   const { prefixes } = compileMap(map);
   const names = new Set();
-  for (const f of files ?? []) for (const r of entryOf(prefixes, String(f))?.reviewers ?? []) names.add(r);
+  // Every module with a matching prefix counts, not only the longest: config can only add reviewers, never fewer.
+  for (const f of files ?? []) for (const p of prefixes) if (String(f).startsWith(p.prefix)) for (const r of p.entry.reviewers ?? []) names.add(r);
   return [...names].sort();
 }
 

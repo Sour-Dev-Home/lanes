@@ -426,6 +426,20 @@ test("a reviewer name must match the pattern, not be owner, and have an agent fi
   assert.equal(moduleOf("src/a/x.mjs", entry({ reviewers: ["test-hunter", "ui-reviewer"] })), "a");
 });
 
+test("edge: owner is refused as a reviewer even when an owner.md agent file exists", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mm-owner-"));
+  const cwd = process.cwd();
+  try {
+    mkdirSync(join(dir, ".claude", "agents"), { recursive: true });
+    writeFileSync(join(dir, ".claude", "agents", "owner.md"), "x");
+    process.chdir(dir);
+    assert.throws(() => moduleOf("src/a/x.mjs", entry({ reviewers: ["owner"] })), /entries\[0\].*owner/);
+  } finally {
+    process.chdir(cwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("reviewersFor returns the sorted union of reviewers of modules containing the files", () => {
   const m = { entries: [
     { id: "a", paths: ["src/a/"], imports: [], reviewers: ["ui-reviewer", "test-hunter"] },
@@ -435,6 +449,15 @@ test("reviewersFor returns the sorted union of reviewers of modules containing t
   assert.deepEqual(reviewersFor(["src/a/x.mjs", "src/b/y.mjs", "src/c/z.mjs", "other"], m), ["security-reviewer", "test-hunter", "ui-reviewer"]);
   assert.deepEqual(reviewersFor(["src/c/z.mjs"], m), []);
   assert.deepEqual(reviewersFor(["nowhere"], m), []);
+});
+
+test("edge: reviewersFor counts every module with a matching prefix, not only the longest", () => {
+  const m = { entries: [
+    { id: "outer", paths: ["src/"], imports: [], reviewers: ["ui-reviewer"] },
+    { id: "inner", paths: ["src/core/"], imports: [], reviewers: ["test-hunter"] },
+  ] };
+  assert.deepEqual(reviewersFor(["src/core/x.mjs"], m), ["test-hunter", "ui-reviewer"]);
+  assert.deepEqual(reviewersFor(["src/other.mjs"], m), ["ui-reviewer"]);
 });
 
 test("edge: reviewersFor gives [] with no map, no files, or a map without the field", () => {
