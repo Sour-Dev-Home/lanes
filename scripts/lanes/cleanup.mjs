@@ -148,6 +148,9 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
     else if (w.dirty) plan.push({ ...entry, skip: "dirty worktree" });
     else if (sessionsHere.some(unreadableId)) plan.push({ ...entry, skip: UNREADABLE_SKIP });
     else if (sessionsHere.some(stillWorking)) plan.push({ ...entry, skip: "session still working" });
+    // #494: a session that does not map to this issue (the owner session, a coordinator) is never stopped or removed,
+    // and the worktree under it stays.
+    else if (sessionsHere.some((s) => s.issue !== issue)) plan.push({ ...entry, skip: `session ${sessionsHere.find((s) => s.issue !== issue).id} is in it` });
     else if (done.closed && !Number.isInteger(w.unpushed)) plan.push({ ...entry, skip: "cannot read unpushed commits" });
     else if (done.closed && w.unpushed > 0) plan.push({ ...entry, skip: `${plural(w.unpushed, "commit")} not on any remote` });
     else if (lockAlive && !holder) plan.push({ ...entry, skip: `locked by running pid ${pid}` });
