@@ -2025,12 +2025,22 @@ test("appendStarts appends JSON lines to .lanes/starts.jsonl, writes nothing for
 });
 
 // #499: the team profile (ADR 0019 parts 1, 3 and 4).
-const TEAM = { profile: "team", app: { id: 11, installationId: 22 } };
+const TEAM = { profile: "team", app: { id: 11, installationId: 22, botLogin: "sour-dev-lanes[bot]" } };
 
 test("startConfig accepts an identity: missing or solo is solo, team needs numeric app ids", () => {
   assert.equal("identity" in startConfig({}), false);
   assert.deepEqual(startConfig({ identity: { profile: "solo" } }).identity, { profile: "solo" });
   assert.deepEqual(startConfig({ identity: TEAM }).identity, TEAM);
+});
+
+test("startConfig requires a valid botLogin under team (#528)", () => {
+  const app = { id: 1, installationId: 2 };
+  assert.throws(() => startConfig({ identity: { profile: "team", app } }), /lanes\.config\.json: identity .*botLogin/);
+  for (const botLogin of ["", "sour", "a[bot]x", "-a[bot]", "a b[bot]", 5, null]) {
+    assert.throws(() => startConfig({ identity: { profile: "team", app: { ...app, botLogin } } }), /lanes\.config\.json: identity .*botLogin/, JSON.stringify(botLogin));
+  }
+  const ok = { profile: "team", app: { ...app, botLogin: "a[bot]" } };
+  assert.deepEqual(startConfig({ identity: ok }).identity, ok);
 });
 
 test("startConfig refuses any other identity shape with a clear error", () => {

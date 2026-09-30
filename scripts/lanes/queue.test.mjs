@@ -619,7 +619,7 @@ test("edge: a bad lanes.config.json exits 2 before any tick", async () => {
 test("#512: the team profile refuses before any read or launch, and says why", async () => {
   const { main } = await import("./queue.mjs");
   const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
-  run.deps.config = () => ({ identity: { profile: "team", app: { id: 1, installationId: 2 } } });
+  run.deps.config = () => ({ identity: { profile: "team", app: { id: 1, installationId: 2, botLogin: "sour-dev-lanes[bot]" } } });
   assert.equal(await main([], run.deps), 2);
   assert.equal(run.out.length, 1);
   assert.match(run.out[0], /team/);
@@ -651,8 +651,19 @@ test("#512: edge: a mistyped profile (Team, team with a space) never launches", 
   const { main } = await import("./queue.mjs");
   for (const profile of ["Team", "team ", "TEAM", ""]) {
     const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
-    run.deps.config = () => ({ identity: { profile, app: { id: 1, installationId: 2 } } });
+    run.deps.config = () => ({ identity: { profile, app: { id: 1, installationId: 2, botLogin: "sour-dev-lanes[bot]" } } });
     assert.equal(await main([], run.deps), 2, JSON.stringify(profile));
+    assert.deepEqual(run.launched, []);
+  }
+});
+
+test("#528: edge: a team identity without a valid botLogin exits 2 on the config error, not a launch", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const botLogin of [undefined, "nobot", ""]) {
+    const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+    run.deps.config = () => ({ identity: { profile: "team", app: { id: 1, installationId: 2, ...(botLogin === undefined ? {} : { botLogin }) } } });
+    assert.equal(await main([], run.deps), 2, JSON.stringify(botLogin));
+    assert.match(run.out[0], /cannot read lanes\.config\.json: .*botLogin/, JSON.stringify(botLogin));
     assert.deepEqual(run.launched, []);
   }
 });
