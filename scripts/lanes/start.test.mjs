@@ -2327,6 +2327,17 @@ test("/start <N> refuses an assigned issue and launches nothing for it", () => {
   assert.equal(launches.length, 0);
 });
 
+test("edge: /start <N> and --auto treat an assignee entry with no login as a claim", () => {
+  const one = fakes({ issues: { 1: { assignees: [{}] } } });
+  const { lines } = main(["1"], one.deps);
+  assert.ok(lines.some((l) => l.includes("assigned to unknown")));
+  assert.equal(one.launches.length, 0);
+  const auto = fakes({ issues: { 1: { assignees: [null] } } });
+  auto.deps.gh = ((inner) => (args) => (args[0] === "api" ? JSON.stringify({ state: "open" }) : inner(args)))(auto.deps.gh);
+  assert.ok(main(["--auto", "--go"], auto.deps).lines.includes("#1: skipped: assigned to unknown"));
+  assert.equal(auto.launches.length, 0);
+});
+
 test("--auto skips an assigned ready issue with the same reason", () => {
   const { deps, launches } = fakes({ issues: { 1: { assignees: [{ login: "owner" }] } } });
   deps.gh = ((inner) => (args) => (args[0] === "api" ? JSON.stringify({ state: "open" }) : inner(args)))(deps.gh);

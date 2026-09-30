@@ -436,6 +436,13 @@ export function inFlightIssues({ prs, sessions, finished = [] }) {
   return [...found].sort((a, b) => a - b);
 }
 
+// #522: gh's `assignees` as logins. An entry with no readable login still counts as a claim, and a non-list value is
+// one too: fail closed, never read a malformed field as unassigned.
+function assigneeLogins(raw) {
+  if (raw === undefined || raw === null) return [];
+  return (Array.isArray(raw) ? raw : [null]).map((a) => a?.login || "unknown");
+}
+
 // The first reason this issue cannot start on its own, or null. `blockers` is blockers.mjs's `{ code, message }`.
 function refusal(issue) {
   if (issue.error) return issue.error;
@@ -652,7 +659,7 @@ function autoStart(go, deps, { maxLanes, softPaths, models, identity }) {
   }
 
   const labelsOf = (issue) => (issue.labels ?? []).map((l) => l.name);
-  const loginsOf = (issue) => (issue.assignees ?? []).map((a) => a.login).filter(Boolean);
+  const loginsOf = (issue) => assigneeLogins(issue.assignees);
   const ready = openIssues.filter((i) => labelsOf(i).includes("ready"));
   if (!ready.length) return { code: 0, lines: ["no ready issues to start"] };
 
@@ -810,7 +817,7 @@ function startIssues(args, deps, config) {
       const hit = skipped.find((s) => s.reason.startsWith("overlaps running "));
       if (hit) runningOverlap.set(n, hit.reason);
     }
-    issues.push({ number: n, state: view.state, labels: (view.labels ?? []).map((l) => l.name), assignees: (view.assignees ?? []).map((a) => a.login).filter(Boolean), blockers: checkBlockers([String(n)], deps.gh) });
+    issues.push({ number: n, state: view.state, labels: (view.labels ?? []).map((l) => l.name), assignees: assigneeLogins(view.assignees), blockers: checkBlockers([String(n)], deps.gh) });
   }
   // Soft paths never count, as in pickStartable for --auto.
   const soft = config.softPaths.map((s) => new RegExp(s));

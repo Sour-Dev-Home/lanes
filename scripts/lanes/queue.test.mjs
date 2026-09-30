@@ -1304,6 +1304,14 @@ test("edge: an unassigned issue (empty assignees) is launched as before", () => 
   assert.deepEqual(out.launch, [1, 2]);
 });
 
+test("edge: a malformed assignees field still claims the issue (fail closed)", () => {
+  for (const assignees of [[{}], [null], "owner", { login: "owner" }]) {
+    const out = tick({ issues: [{ ...issue(1, ["src/a.mjs"]), assignees }] });
+    assert.deepEqual(out.launch, []);
+    assert.ok(out.lines.some((l) => l.startsWith("#1: skipped: assigned to ")));
+  }
+});
+
 test("edge: several assignees are all named, and an assigned issue without ready is not listed", () => {
   const out = tick({ issues: [{ ...issue(1, ["src/a.mjs"]), assignees: [{ login: "a" }, { login: "b" }] }, { ...issue(2, ["src/b.mjs"], { labels: ["tier:quick"] }), assignees: [{ login: "a" }] }] });
   assert.deepEqual(out.launch, []);
