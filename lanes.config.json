@@ -9,12 +9,12 @@
   },
   "modules": {
     "entries": [
-      { "id": "preflight", "paths": ["scripts/preflight.", "scripts/security-workflow."], "imports": [] },
-      { "id": "modules", "paths": ["scripts/lanes/modules.", "scripts/lanes/affected-tests.", "contracts/module-map."], "imports": [] },
-      { "id": "structure", "paths": ["scripts/lanes/structure-report."], "imports": ["modules"] },
-      { "id": "lessons", "paths": ["scripts/lanes/lessons."], "imports": ["modules"] },
-      { "id": "lib", "paths": ["scripts/lanes/lib.", "scripts/lanes/validate."], "imports": ["modules"] },
-      { "id": "vendor", "paths": ["scripts/lanes/vendor."], "imports": [] },
+      { "id": "preflight", "paths": ["scripts/preflight.", "scripts/security-workflow."], "imports": [], "risk": "normal" },
+      { "id": "modules", "paths": ["scripts/lanes/modules.", "scripts/lanes/affected-tests.", "contracts/module-map."], "imports": [], "contracts": ["contracts/module-map."], "risk": "normal" },
+      { "id": "structure", "paths": ["scripts/lanes/structure-report."], "imports": ["modules"], "risk": "sensitive" },
+      { "id": "lessons", "paths": ["scripts/lanes/lessons."], "imports": ["modules"], "risk": "sensitive" },
+      { "id": "lib", "paths": ["scripts/lanes/lib.", "scripts/lanes/validate."], "imports": ["modules"], "risk": "sensitive" },
+      { "id": "vendor", "paths": ["scripts/lanes/vendor."], "imports": [], "risk": "sensitive" },
       {
         "id": "gate",
         "paths": [
@@ -23,7 +23,9 @@
           "scripts/lanes/workflow.", "scripts/gate-workflow.", "scripts/dashboard-workflow.", "scripts/dashboard.", "scripts/dashboard-visual.",
           "scripts/lanes/owner-diff."
         ],
-        "imports": ["lib", "preflight"]
+        "imports": ["lib", "preflight"],
+        "contracts": ["contracts/dashboard-visual."],
+        "risk": "normal"
       },
       {
         "id": "queue",
@@ -32,17 +34,23 @@
           "scripts/lanes/queue.", "scripts/lanes/cleanup.", "scripts/lanes/reap.", "scripts/lanes/lifecycle.",
           "scripts/lanes/snapshot.", "scripts/lanes/lane-cost.", "scripts/lanes/consolidate."
         ],
-        "imports": ["lib", "gate"]
+        "imports": ["lib", "gate"],
+        "contracts": ["contracts/snapshot."],
+        "risk": "sensitive"
       },
       {
         "id": "metrics",
         "paths": ["scripts/lanes/delivery-metrics.", "scripts/lanes/review-metrics.", "scripts/lanes/lane-metrics.", "scripts/lanes/diff-coverage.", "scripts/lanes/graphql-lib."],
-        "imports": ["lib", "queue"]
+        "imports": ["lib", "queue"],
+        "contracts": ["contracts/review-metrics.", "contracts/lane-metrics."],
+        "risk": "sensitive"
       },
       {
         "id": "install",
         "paths": ["scripts/lanes/install.", "scripts/lanes/upgrade.", "scripts/lanes/new-project.", "scripts/lanes/setup-repo.", "scripts/lanes/notify-hook.", "scripts/lanes/release.", "scripts/lanes/adopter-smoke."],
-        "imports": ["lib", "preflight"]
+        "imports": ["lib", "preflight"],
+        "contracts": ["contracts/lanes-lock."],
+        "risk": "sensitive"
       }
     ],
     "allowCycles": []
