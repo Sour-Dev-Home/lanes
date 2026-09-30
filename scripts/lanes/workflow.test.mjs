@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { PATH_PATTERNS } from "../preflight.mjs";
 
 test("lanes-gate always runs the default branch's scripts, never the PR's", () => {
@@ -962,3 +963,32 @@ for (const agent of ["security-reviewer", "test-hunter"]) {
     assert.ok(md.includes(PROBE_RULE), `${agent}.md lacks the probe-payload rule`);
   });
 }
+
+// A CODEOWNERS pattern as a regex, for the gitignore-style forms .github/CODEOWNERS uses: a leading or inner slash
+// anchors it to the root, a trailing slash matches a directory's contents, `*` stays within one path segment, and a
+// pattern that names a directory also covers everything under it.
+function codeownersRegex(pattern) {
+  const dir = pattern.endsWith("/");
+  const core = pattern.replace(/^\/|\/$/g, "");
+  const anchored = pattern.startsWith("/") || core.includes("/");
+  const body = core.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*");
+  return new RegExp(`${anchored ? "^" : "(^|/)"}${body}${dir ? "/" : "(/|$)"}`);
+}
+
+// ADR 0019 part 6: CODEOWNERS lists exactly the owner-only paths, so a native code-owner review covers what /approve does (#520).
+test("CODEOWNERS covers exactly the files paths.owner covers", () => {
+  const entries = readFileSync(".github/CODEOWNERS", "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+  for (const e of entries) assert.match(e, /^\S+ @SourE-dev$/, `CODEOWNERS line not owned by the owner alone: ${e}`);
+  const owners = entries.map((e) => codeownersRegex(e.split(" ")[0]));
+  const owner = JSON.parse(readFileSync("lanes.config.json", "utf8")).paths.owner.map((s) => new RegExp(s));
+  const tracked = execFileSync("git", ["ls-files"], { encoding: "utf8" }).split("\n").filter(Boolean);
+  const samples = [".env.local", "x/.env", "a/auth/x.js", "secret/x", "secrets/x", "deploy/x", "sub/CLAUDE.md", "sub/yarn.lock", "sub/pnpm-lock.yaml", "package-lock.json", "lanes.lock.json"];
+  for (const f of samples) assert.ok(owner.some((r) => r.test(f)), `sample ${f} is not an owner path; update the samples`);
+  const paths = [...tracked, ...samples];
+  for (const f of paths) {
+    assert.equal(owners.some((r) => r.test(f)), owner.some((r) => r.test(f)), `CODEOWNERS and paths.owner disagree on ${f}`);
+  }
+  // Every entry on both sides is exercised, so a typo in one no path reaches cannot hide: add a sample for a new one.
+  entries.forEach((e, i) => assert.ok(paths.some((f) => owners[i].test(f)), `no tracked file or sample reaches CODEOWNERS entry ${e}; add a sample`));
+  owner.forEach((r) => assert.ok(paths.some((f) => r.test(f)), `no tracked file or sample reaches paths.owner ${r.source}; add a sample`));
+});
