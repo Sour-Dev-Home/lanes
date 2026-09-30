@@ -2,6 +2,7 @@
   "requiredChecks": ["verify", "security", "lanes/gate"],
   "metrics": { "mainWorkflow": "verify.yml", "fragmentsDir": null },
   "budget": { "perNightTokens": 300000000, "perLaneTokens": 15000000 },
+  "identity": { "profile": "team", "app": { "id": 5140388, "installationId": 166641484, "botLogin": "sour-dev-lanes[bot]" } },
   "start": {
     "maxLanes": 8,
     "softPaths": ["^docs/USING\\.md$", "^README\\.md$", "^lanes\\.config\\.json$"],

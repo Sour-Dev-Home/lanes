@@ -804,7 +804,8 @@ test("lanes.config.json has the start block with maxLanes 8 and the two soft pat
   const raw = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
   assert.equal(raw.start.maxLanes, 8);
   assert.deepEqual(raw.start.softPaths, ["^docs/USING\\.md$", "^README\\.md$", "^lanes\\.config\\.json$"]);
-  assert.deepEqual(startConfig(raw), raw.start);
+  const { identity: _team, ...start } = startConfig(raw); // identity is pinned by the #537 test
+  assert.deepEqual(start, raw.start);
 });
 
 test("startConfig falls back to the defaults when the start block or a key is missing", () => {
@@ -867,7 +868,8 @@ test("docs/USING.md documents start.models", () => {
 // Extra, not from criteria or a listed edge case: this repository's actual lanes.config.json, run through main()
 // end to end (not a hand-built fixture), launches each tier on the model criterion 3 requires.
 test("edge: main launches on the models from this repository's own lanes.config.json", () => {
-  const config = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
+  // The repo's team identity (#537) is left out: this test is about models, and the team launch has its own tests.
+  const { identity: _team, ...config } = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
   const issues = {
     1: { labels: ["ready", "tier:skip"], body: form({ scope: "In: `a.mjs`." }) },
     2: { labels: ["ready", "tier:quick"], body: form({ scope: "In: `b.mjs`." }) },
@@ -1933,6 +1935,13 @@ test("the repo's own lanes.config.json carries its budget: a 300M 24-hour cap (#
   const raw = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
   assert.deepEqual(raw.budget, { perNightTokens: 300000000, perLaneTokens: BUDGET_DEFAULTS.perLaneTokens });
   assert.deepEqual(budgetConfig(raw), raw.budget);
+});
+
+test("the repo's own lanes.config.json runs the team profile with the lanes App (#537, ADR 0019 and 0020)", () => {
+  const raw = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
+  const identity = { profile: "team", app: { id: 5140388, installationId: 166641484, botLogin: "sour-dev-lanes[bot]" } };
+  assert.deepEqual(raw.identity, identity);
+  assert.deepEqual(startConfig(raw).identity, identity);
 });
 
 // #483: every issue /start decides on is one line of .lanes/starts.jsonl, with only `at`, `issue`, `outcome`, `reason` and `with`.
