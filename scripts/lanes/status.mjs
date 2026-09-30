@@ -156,16 +156,29 @@ function latestLaneAgents(agents, repoRoot) {
 }
 
 export const STALLED_MINUTES = 30;
+// PR stages where the lane still owes something: a failing check to fix, or a reviewer's verdict to post.
+const OWED_STAGES = new Set(["starting", "failing", "gate", "review"]);
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 // Issue N → whole minutes since the transcript of its busy lane session was last written, for those at or past
 // STALLED_MINUTES. The transcript is found the way lane-cost.mjs finds it (the root's project folder, then the
 // session's own cwd's); only its modification time is read. A missing or unreadable transcript, or a session that is
 // idle or waiting on a prompt, leaves the lane out. Never throws.
-export function stalledLanes(agents, repoRoot, { home = homedir(), now = Date.now(), mtime = (f) => statSync(f).mtimeMs } = {}) {
+export function stalledLanes(agents, repoRoot, opts = {}) {
+  return silentLanes(agents, repoRoot, (a) => a.status === "busy" || a.state === "working", opts);
+}
+
+// Issue N → whole minutes of silence for the lane sessions that are idle (not busy, not waiting on a prompt) and
+// silent for STALLED_MINUTES or more. `summarize` reports one only while its open PR still owes a review or check
+// (#465): an idle lane whose PR owes nothing has simply finished.
+export function idleLanes(agents, repoRoot, opts = {}) {
+  return silentLanes(agents, repoRoot, (a) => a.status === "idle" && a.waitingFor !== PROMPT_WAITING_FOR, opts);
+}
+
+function silentLanes(agents, repoRoot, wanted, { home = homedir(), now = Date.now(), mtime = (f) => statSync(f).mtimeMs } = {}) {
   const out = new Map();
   for (const [n, { agent: a }] of latestLaneAgents(agents, repoRoot)) {
-    if (a.status !== "busy" && a.state !== "working") continue;
+    if (!wanted(a)) continue;
     if (typeof a.sessionId !== "string" || !SAFE_SESSION_ID.test(a.sessionId)) continue;
     for (const folder of new Set([repoRoot, a.cwd].map(projectFolder))) {
       let modified;
@@ -248,6 +261,7 @@ export function loadLaneBranches(run = git) {
 const withSession = (item, session) => {
   if (!session) return item;
   const stalled = session.stalledMin !== undefined && !session.waiting;
+  if (stalled && session.idle) return { ...item, note: `${item.note} — idle ${session.stalledMin} min: claude attach ${session.id}`, session: { id: session.id, state: session.state, stalledMin: session.stalledMin } };
   const note = session.waiting ? `waiting on a prompt: claude attach ${session.id}` : [item.note, stalled && `stalled ${session.stalledMin} min`, `session ${session.id}`].filter(Boolean).join(" — ");
   return { ...item, note, session: { id: session.id, state: session.state, ...(stalled && { stalledMin: session.stalledMin }) } };
 };
@@ -256,7 +270,7 @@ const withSession = (item, session) => {
 // `mergeQueue` is the output of mergeQueueEntries (null or missing: no merge queue); `gateDescriptions` that of
 // gateDescriptions (missing: the rollup's own descriptions only). `sessions` and `sessionsUnavailable` come from
 // loadSessions (missing: no sessions). `laneBranches` is the output of laneBranches (missing: no branches known).
-export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map(), sessions: loaded = new Map(), stalled = new Map(), sessionsUnavailable, laneBranches = new Map(), branchesUnavailable }) {
+export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map(), sessions: loaded = new Map(), stalled = new Map(), idle: idleLanesFound = new Map(), sessionsUnavailable, laneBranches = new Map(), branchesUnavailable }) {
   // `stalled` is the output of stalledLanes (issue N → minutes silent).
   const sessions = new Map([...loaded].map(([n, s]) => [n, stalled.has(n) ? { ...s, stalledMin: stalled.get(n) } : s]));
   const out = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
@@ -265,15 +279,19 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
   for (const pr of prs) {
     const refs = (pr.closingIssuesReferences ?? []).map((ref) => ref.number);
     for (const n of refs) taken.add(n);
-    const session = refs.map((n) => sessions.get(n)).find(Boolean);
+    let session = refs.map((n) => sessions.get(n)).find(Boolean);
     const { stage, note } = prStage(pr, queuePosition.get(pr.number), gateDescriptions.get(pr.number));
+    // An idle lane whose PR still owes a review or check has hung (#465): it waits on the owner like a stalled one.
+    const idleMin = refs.map((n) => idleLanesFound.get(n)).find((m) => m !== undefined);
+    const hung = session && !session.waiting && idleMin !== undefined && OWED_STAGES.has(stage);
+    if (hung) session = { ...session, stalledMin: idleMin, idle: true };
     const needs = (parsePrBody(pr.body).sections["needs the owner"] ?? "").trim();
     const item = { number: pr.number, title: pr.title, stage, note };
     // A prompt still needs the owner; a gate waiting on a reviewer does not, whatever the body asks for. An
     // approval already given only clears a /approve ask (the gate's own "waiting on owner" stage, or a "needs the
     // owner" note that asks for /approve) — an unrelated need (e.g. "pick a name for the package") still surfaces.
     const asksForApprove = /\/approve\b/i.test(needs);
-    if (session?.waiting || stage === "conflict") out.waitingOnOwner.push(withSession(item, session));
+    if (session?.waiting || hung || stage === "conflict") out.waitingOnOwner.push(withSession(item, session));
     else if (stage === "gate") out.inFlight.push(withSession(item, session));
     else if (stage === "owner") (ownerApproved(pr) ? out.inFlight : out.waitingOnOwner).push(withSession(item, session));
     else if (needs && !/^nothing\b/i.test(needs)) {
@@ -366,7 +384,7 @@ export function waitingApprovals(prs, summary, since = new Map(), now = Date.now
 
 // The lanes in flight whose session is busy but has written nothing for STALLED_MINUTES or more; they need the owner too.
 export function stalledItems(summary) {
-  return summary.inFlight.filter((i) => i.session?.stalledMin !== undefined);
+  return [...summary.inFlight, ...summary.waitingOnOwner].filter((i) => i.session?.stalledMin !== undefined);
 }
 
 export function renderWaiting(waiting, stalled = []) {
@@ -442,7 +460,9 @@ async function main(argv = process.argv.slice(2)) {
     ...loadLaneBranches(),
   };
   try {
-    data.stalled = stalledLanes(JSON.parse(rawAgents), repoRoot);
+    const agents = JSON.parse(rawAgents);
+    data.stalled = stalledLanes(agents, repoRoot);
+    data.idle = idleLanes(agents, repoRoot);
   } catch {}
   const budget = readBudget(repoRoot, rawAgents);
   // A blocker missing from a truncated list would read as closed, so refuse rather than list a blocked issue as ready.
