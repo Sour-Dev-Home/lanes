@@ -25,7 +25,6 @@ const RESUMABLE_STAGES = new Set(["failing", "starting", "gate"]);
 const labelsOf = (issue) => (issue.labels ?? []).map((l) => (typeof l === "string" ? l : l?.name));
 const isOpen = (issue) => (issue.state ?? "OPEN") === "OPEN";
 const branchIssue = (pr) => Number(String(pr.headRefName ?? "").match(/^issue-(\d+)-/)?.[1] ?? NaN);
-const sessionIssue = (s) => Number(String(s.cwd ?? "").match(/(?:^|[\\/])issue-(\d+)-[^\\/]*(?:[\\/]|$)/)?.[1] ?? NaN);
 
 // Why a lane PR waits on the owner, or null, from status.mjs's stage. The gate's description falls back to
 // `gateDescription`, which `gh pr list` leaves out of the rollup.
@@ -64,7 +63,7 @@ export function planTick({ issues = [], prs = [], sessions = [], maxLanes = STAR
   const lanePrs = prs.filter((pr) => Number.isInteger(branchIssue(pr)));
   // A session is a leftover once its issue has closed and it has no open PR; cleanup removes it.
   const withPr = new Set(lanePrs.map(branchIssue));
-  const finished = sessions.map(sessionIssue).filter((n) => Number.isInteger(n) && !openNumbers.has(n) && !withPr.has(n));
+  const finished = sessions.map(laneIssueOf).filter((n) => Number.isInteger(n) && !openNumbers.has(n) && !withPr.has(n));
   const inFlight = inFlightIssues({ prs, sessions, finished });
   const busy = new Set(inFlight);
 

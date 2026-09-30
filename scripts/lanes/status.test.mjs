@@ -452,7 +452,7 @@ test("render puts a heuristic disclaimer under READY TO START", () => {
 // `claude agents --json`, as recorded on a real background session waiting on a permission prompt:
 // { kind: "background", status: "waiting", waitingFor: "permission prompt", state: "blocked" }.
 const ROOT = "C:\\repo\\lanes";
-const agent = (id, cwd, extra = {}) => ({ id, cwd, kind: "background", startedAt: 1, sessionId: `${id}-uuid`, name: "lane", status: "busy", state: "working", ...extra });
+const agent = (id, cwd, extra = {}) => ({ id, cwd, kind: "background", startedAt: 1, sessionId: `${id}-uuid`, status: "busy", state: "working", ...extra });
 const waitingAgent = (id, cwd) => agent(id, cwd, { status: "waiting", waitingFor: "permission prompt", state: "blocked" });
 const wt = (name) => `${ROOT}\\.claude\\worktrees\\${name}`;
 

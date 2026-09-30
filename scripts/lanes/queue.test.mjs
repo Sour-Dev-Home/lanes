@@ -2,7 +2,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { loadBudget } from "./lane-cost.mjs";
 import { planTick } from "./queue.mjs";
+import { liveLanes } from "./status.mjs";
 
 // A task issue body naming `inPaths` in its Scope and blocked by `blockedBy`.
 const body = (inPaths, blockedBy = []) =>
@@ -224,6 +226,31 @@ test("edge: a leftover session of a closed issue with no open PR is not in fligh
   const out = tick({ sessions: [session(4)] });
   assert.equal(out.idle, true);
   assert.equal(tick({ issues: [issue(1, ["src/a.mjs"])], sessions: [session(4)], maxLanes: 1 }).launch.length, 1);
+});
+
+test("edge: a session named other than lane-<N> inside a lane worktree is not that lane (#494)", () => {
+  const owner = { ...session(4), name: "owner-session catch-up" };
+  // Not in flight: the issue may start; not a leftover: nothing for cleanup to remove.
+  assert.equal(tick({ issues: [issue(4, ["src/a.mjs"])], sessions: [owner], maxLanes: 1 }).launch.length, 1);
+  assert.equal(tick({ sessions: [owner] }).idle, true);
+  const lane = { ...session(4), name: "lane-4" };
+  assert.deepEqual(tick({ issues: [issue(4, ["src/a.mjs"])], sessions: [lane], maxLanes: 1 }).launch, [], "a lane-<N> session still holds it");
+  const laneAtRoot = { kind: "background", cwd: "/repo", name: "lane-4" };
+  assert.deepEqual(tick({ issues: [issue(4, ["src/a.mjs"])], sessions: [laneAtRoot], maxLanes: 1 }).launch, []);
+});
+
+test("the budget's per-lane and 24-hour counts leave out a session with another name in a lane worktree (#494)", () => {
+  const u = (input, output) => JSON.stringify({ type: "assistant", message: { id: "m", usage: { input_tokens: input, output_tokens: output } } });
+  const files = { owner: u(5000, 5000), lane: u(10, 10) };
+  const agent = (id, name) => ({ kind: "background", id, name, sessionId: id, cwd: "/repo/.claude/worktrees/issue-4-x", startedAt: 1 });
+  const load = (agents) => loadBudget({
+    root: "/repo", lanes: liveLanes(agents, "/repo"), perNightTokens: 1000, perLaneTokens: 100, now: Date.now(), home: "/home",
+    readCosts: () => "", read: (f) => files[/([^/\\]+)\.jsonl$/.exec(f)[1]],
+  });
+  const withOwner = load([agent("owner", "owner-session catch-up")]);
+  assert.deepEqual([withOwner.spent24h, withOwner.over, withOwner.lanesOver], [0, false, []]);
+  const both = load([agent("owner", "owner-session catch-up"), agent("lane", "lane-4")]);
+  assert.deepEqual([both.spent24h, both.lanesOver], [20, []]);
 });
 
 test("edge: a non-lane PR claims its paths but is not in flight or waiting", () => {

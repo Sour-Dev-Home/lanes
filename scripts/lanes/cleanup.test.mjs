@@ -50,6 +50,27 @@ test("a merged lane whose worktree has uncommitted or untracked changes is skipp
   assert.equal(entry.skip, "dirty worktree");
 });
 
+test("sessionsFrom gives an owner-named session in a lane worktree no issue (#494)", () => {
+  const agents = [{ kind: "background", id: "so", cwd: "C:/repo/.claude/worktrees/issue-490-x", name: "owner-session catch-up", status: "idle" }];
+  assert.equal(sessionsFrom(agents, "C:/repo")[0].issue, null);
+});
+
+test("an owner-named session inside a merged lane's worktree is never stopped or removed; the worktree is left (#494)", () => {
+  const owner = session("so", "issue-490-x", { issue: null, name: "owner-session catch-up", alive: true, status: "idle" });
+  const plan = planCleanup({ worktrees: [wt("issue-490-x")], sessions: [owner], prs: [merged("issue-490-x")] });
+  assert.equal(plan.length, 1);
+  assert.match(plan[0].skip, /so/);
+  assert.equal(plan.some((e) => (e.steps ?? []).some((s) => s.cmd === "claude")), false);
+});
+
+test("edge: the lane's own session is cleaned while an owner-named one sharing its worktree stays untouched (#494)", () => {
+  const lane = session("sl", "issue-490-x", { name: "lane-490", alive: true, status: "idle" });
+  const owner = session("so", "issue-490-x", { issue: null, name: "owner", status: "idle" });
+  const plan = planCleanup({ worktrees: [wt("issue-490-x")], sessions: [lane, owner], prs: [merged("issue-490-x")] });
+  assert.ok(plan[0].skip);
+  assert.equal(plan.some((e) => (e.steps ?? []).some((s) => s.args.includes("so"))), false);
+});
+
 test("no session (worktree only): git worktree remove, then git branch -D", () => {
   const [entry] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [], prs: [merged("issue-7-x")] });
   assert.deepEqual(cmds(entry), [`git worktree remove ${ROOT}/.claude/worktrees/issue-7-x`, "git branch -D issue-7-x"]);
