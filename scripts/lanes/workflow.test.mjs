@@ -945,11 +945,20 @@ test("lane.md step 3 checks the POSIX tools after setup, records the PATH shape,
 });
 
 const SCRATCH_RULE =
-  "scratch, probe and fuzz files go in `os.tmpdir()` (or a temp directory under it) and are deleted before the verdict; never write outside the lane's worktree, and never into another checkout of the repository.";
+  "scratch, probe and fuzz files go in `.lanes/scratch/` inside the lane's worktree (already gitignored) and are deleted before the verdict; never write outside the lane's worktree, and never into another checkout of the repository.";
+
+const PROBE_RULE =
+  "Keep guard probe payloads out of the Bash command text, since the guards scan it: write the cases with the Write tool where you have it, otherwise hand the probe to the test-hunter, and never retry a refused heredoc. A guard refusal of a probe is noted in the verdict, never rephrased or obfuscated to get past it.";
 
 for (const agent of ["security-reviewer", "test-hunter"]) {
-  test(`${agent} keeps scratch and probe files in the temp directory, never another checkout`, () => {
+  test(`${agent} keeps scratch and probe files in .lanes/scratch/, never another checkout`, () => {
     const md = readFileSync(`.claude/agents/${agent}.md`, "utf8").replace(/\s+/g, " ");
     assert.ok(md.includes(SCRATCH_RULE), `${agent}.md lacks the scratch-file rule`);
+    assert.ok(!md.includes("os.tmpdir()"), `${agent}.md still names os.tmpdir()`);
+  });
+
+  test(`${agent} keeps guard probe payloads out of Bash text and notes refusals`, () => {
+    const md = readFileSync(`.claude/agents/${agent}.md`, "utf8").replace(/\s+/g, " ");
+    assert.ok(md.includes(PROBE_RULE), `${agent}.md lacks the probe-payload rule`);
   });
 }
