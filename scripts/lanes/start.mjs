@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { mintInstallationToken, writeGhHosts } from "./app-token.mjs";
 import { main as checkBlockers } from "./blockers.mjs";
 import { cleanupMerged } from "./cleanup.mjs";
-import { TIERS, laneIssueOf, parseIssueForm } from "./lib.mjs";
+import { TIERS, laneIssueOf, parseIdentity, parseIssueForm } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { grantPath, grantRefusal, readGrant } from "./start-guard.mjs";
@@ -84,34 +84,14 @@ const ISSUE_LIMIT = 1000;
  * Throws when maxLanes is not a whole number from 1 to 10, softPaths is not an array of valid regex strings, or
  * models is not an object mapping tiers (skip, quick, full) to model names.
  * It also carries `identity` (ADR 0019 part 1) when the file sets one: `{ profile: "solo" }` or
- * `{ profile: "team", app: { id, installationId } }`; a missing key leaves it out, which is solo. Throws on any other shape.
- * @returns {{ maxLanes: number, softPaths: string[], models: { skip?: string, quick?: string, full?: string }, identity?: { profile: "solo" | "team", app?: { id: number, installationId: number } } }}
+ * `{ profile: "team", app: { id, installationId, botLogin } }` (lib's parseIdentity; botLogin is required under team); a
+ * missing key leaves it out, which is solo. Throws on any other shape.
+ * @returns {{ maxLanes: number, softPaths: string[], models: { skip?: string, quick?: string, full?: string }, identity?: { profile: "solo" | "team", app?: { id: number, installationId: number, botLogin?: string } } }}
  */
 export function startConfig(raw) {
-  const identity = startIdentity(raw?.identity);
+  const identity = parseIdentity(raw?.identity);
   const config = startBlock(raw?.start);
   return identity ? { ...config, identity } : config;
-}
-
-// identity, validated and copied; undefined when the key is missing.
-function startIdentity(identity) {
-  if (identity === undefined) return undefined;
-  const bad = (what) => new Error(`lanes.config.json: identity ${what}`);
-  if (identity === null || typeof identity !== "object" || Array.isArray(identity)) throw bad("must be an object");
-  const extra = Object.keys(identity).find((k) => k !== "profile" && k !== "app");
-  if (extra !== undefined) throw bad(`has an unknown key ${JSON.stringify(extra)}`);
-  if (identity.profile !== "solo" && identity.profile !== "team") throw bad(`.profile must be "solo" or "team", got ${JSON.stringify(identity.profile)}`);
-  const { app } = identity;
-  if (app === undefined) {
-    if (identity.profile === "team") throw bad(".app { id, installationId } is required for the team profile");
-    return { profile: "solo" };
-  }
-  if (app === null || typeof app !== "object" || Array.isArray(app)) throw bad(".app must be an object { id, installationId }");
-  if (Object.keys(app).some((k) => k !== "id" && k !== "installationId")) throw bad(".app may only have id and installationId");
-  for (const key of ["id", "installationId"]) {
-    if (!Number.isSafeInteger(app[key]) || app[key] < 1) throw bad(`.app.${key} must be a positive whole number, got ${JSON.stringify(app[key])}`);
-  }
-  return { profile: identity.profile, app: { id: app.id, installationId: app.installationId } };
 }
 
 function startBlock(start) {
