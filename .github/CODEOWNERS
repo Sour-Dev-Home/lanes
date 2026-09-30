@@ -1,4 +1,5 @@
-# The owner-only paths (lanes.config.json paths.owner; ADRs 0002 and 0019 part 6), one line per pattern, same order.
+# The owner-only paths (lanes.config.json paths.owner; ADRs 0002 and 0019 part 6), in the same order, with each regex
+# alternation spelled out as one line per alternative, since CODEOWNERS has no alternation.
 # workflow.test.mjs checks that this file and paths.owner cover the same files. It enforces nothing on its own: a
 # ruleset requiring code-owner review does, and that is an owner action in the repository settings.
 

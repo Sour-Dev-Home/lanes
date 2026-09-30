@@ -982,9 +982,13 @@ test("CODEOWNERS covers exactly the files paths.owner covers", () => {
   const owners = entries.map((e) => codeownersRegex(e.split(" ")[0]));
   const owner = JSON.parse(readFileSync("lanes.config.json", "utf8")).paths.owner.map((s) => new RegExp(s));
   const tracked = execFileSync("git", ["ls-files"], { encoding: "utf8" }).split("\n").filter(Boolean);
-  const samples = [".env.local", "a/auth/x.js", "secret/x", "secrets/x", "deploy/x", "sub/CLAUDE.md", "sub/yarn.lock", "sub/pnpm-lock.yaml"];
+  const samples = [".env.local", "x/.env", "a/auth/x.js", "secret/x", "secrets/x", "deploy/x", "sub/CLAUDE.md", "sub/yarn.lock", "sub/pnpm-lock.yaml", "package-lock.json", "lanes.lock.json"];
   for (const f of samples) assert.ok(owner.some((r) => r.test(f)), `sample ${f} is not an owner path; update the samples`);
-  for (const f of [...tracked, ...samples]) {
+  const paths = [...tracked, ...samples];
+  for (const f of paths) {
     assert.equal(owners.some((r) => r.test(f)), owner.some((r) => r.test(f)), `CODEOWNERS and paths.owner disagree on ${f}`);
   }
+  // Every entry on both sides is exercised, so a typo in one no path reaches cannot hide: add a sample for a new one.
+  entries.forEach((e, i) => assert.ok(paths.some((f) => owners[i].test(f)), `no tracked file or sample reaches CODEOWNERS entry ${e}; add a sample`));
+  owner.forEach((r) => assert.ok(paths.some((f) => r.test(f)), `no tracked file or sample reaches paths.owner ${r.source}; add a sample`));
 });
