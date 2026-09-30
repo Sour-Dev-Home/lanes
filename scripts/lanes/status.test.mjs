@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
-import { approveLine, formatAge, gateDescriptions, gateSince, laneBranches, laneSessions, liveLanes, loadLaneBranches, loadSessions, mergeQueueEntries, readBudget, render, renderWaiting, stalledItems, stalledLanes, summarize, waitingApprovals } from "./status.mjs";
+import { approveLine, formatAge, gateDescriptions, gateSince, laneBranches, laneSessions, liveLanes, loadLaneBranches, loadSessions, mergeQueueEntries, idleLanes, readBudget, render, renderWaiting, stalledItems, stalledLanes, summarize, waitingApprovals } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -954,4 +954,69 @@ test("edge: readBudget never puts a file system error's path in its note", () =>
 test("edge: readBudget keeps loadBudget's own note", () => {
   const r = readBudget("/repo", "[]", { readConfig: () => "{}", load: okLoad({ note: "no .lanes/costs.jsonl yet, counted as 0" }) });
   assert.equal(r.note, "no .lanes/costs.jsonl yet, counted as 0");
+});
+
+// Idle lane that still owes a review or check (#465): a session idle 30+ minutes while its PR waits on a reviewer.
+const idleLane = (extra = {}) => agent("aaaa0001", wt("issue-10-x"), { status: "idle", state: "blocked", ...extra });
+const idleOf = (agents, mtime) => idleLanes(agents, ROOT, { home: "H", now: NOW, mtime });
+const owedSummary = (gateState, min, agents = [idleLane()]) =>
+  summarize({
+    prs: [pr(5, [gate("PENDING", gateState)], { closingIssuesReferences: [{ number: 10 }] })],
+    issues: [issue(10)],
+    merged: [],
+    sessions: laneSessions(agents, ROOT),
+    idle: idleOf(agents, () => ago(min)),
+  });
+
+test("idle: 45 minutes idle with a review owed is reported under WAITING ON YOU with minutes and claude attach", () => {
+  const s = owedSummary("waiting for review/security-reviewer", 45);
+  assert.equal(s.inFlight.length, 0);
+  assert.equal(s.waitingOnOwner.length, 1);
+  assert.equal(s.waitingOnOwner[0].note, "waiting for review/security-reviewer — idle 45 min: claude attach aaaa0001");
+  assert.equal(s.waitingOnOwner[0].session.stalledMin, 45);
+  assert.equal(renderWaiting([], stalledItems(s)), "#5 pr 5 — stalled 45 min: claude attach aaaa0001");
+});
+
+test("idle: idle 45 minutes with nothing owed is not reported", () => {
+  const s = owedSummary("waiting on owner (/approve)", 45);
+  assert.equal(stalledItems(s).length, 0);
+  assert.doesNotMatch(JSON.stringify(s), /idle 45/);
+});
+
+test("idle: idle under 30 minutes is not reported", () => {
+  const s = owedSummary("waiting for review/security-reviewer", 29);
+  assert.equal(s.waitingOnOwner.length, 0);
+  assert.equal(s.inFlight[0].session.stalledMin, undefined);
+});
+
+test("idle: busy and silent is reported as before", () => {
+  const agents = [agent("aaaa0001", wt("issue-10-x"))];
+  assert.equal(idleOf(agents, () => ago(90)).size, 0);
+  const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions: laneSessions(agents, ROOT), stalled: stalledOf(agents, () => ago(90)) });
+  assert.equal(s.inFlight[0].note, "stalled 90 min — session aaaa0001");
+});
+
+test("edge: idle lanes skip a session waiting on a prompt, honour the 30 minute boundary and survive an unreadable transcript", () => {
+  assert.equal(idleOf([idleLane({ waitingFor: "permission prompt" })], () => ago(90)).size, 0);
+  assert.equal(idleOf([idleLane()], () => ago(30)).size, 1);
+  assert.equal(idleOf([idleLane()], () => ago(29.9)).size, 0);
+  assert.equal(idleOf([idleLane()], () => { throw new Error("x"); }).size, 0);
+});
+
+test("edge: a failing check owes the lane too, so an idle lane on it is reported", () => {
+  const agents = [idleLane()];
+  const s = summarize({
+    prs: [pr(5, [{ __typename: "CheckRun", name: "test", conclusion: "FAILURE" }, gate("PENDING", "waiting for review/test-hunter")], { closingIssuesReferences: [{ number: 10 }] })],
+    issues: [issue(10)], merged: [], sessions: laneSessions(agents, ROOT), idle: idleOf(agents, () => ago(60)),
+  });
+  assert.equal(s.waitingOnOwner[0].stage, "failing");
+  assert.match(s.waitingOnOwner[0].note, /idle 60 min: claude attach aaaa0001/);
+});
+
+test("edge: an idle lane is reported on a PR with no gate yet or a gate in another pending state, and not on a failed contract", () => {
+  const agents = [idleLane()];
+  const run = (rollup) => summarize({ prs: [pr(5, rollup, { closingIssuesReferences: [{ number: 10 }] })], issues: [issue(10)], merged: [], sessions: laneSessions(agents, ROOT), idle: idleOf(agents, () => ago(60)) });
+  assert.match(run([]).waitingOnOwner[0].note, /^no lanes\/gate yet — idle 60 min: claude attach aaaa0001$/);
+  assert.equal(run([gate("PENDING", "checks still running")]).waitingOnOwner[0].stage, "review");
+  assert.doesNotMatch(JSON.stringify(run([gate("FAILURE", "contract broken")])), /idle 60/);
 });
