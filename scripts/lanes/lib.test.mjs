@@ -1041,6 +1041,12 @@ test("parseIdentity rejects bad shapes and bad bot logins", () => {
     assert.throws(() => parseIdentity(app({ botLogin })), /botLogin/, JSON.stringify(botLogin));
   }
   assert.equal(parseIdentity(app({ botLogin: "a[bot]" })).app.botLogin, "a[bot]");
+  // edge: ids at the boundary: 0 and negative are refused, 1 accepted, and a 39-character slug is the longest allowed
+  for (const id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => parseIdentity(app({ id, botLogin: BOT })), /\.app\.id/, String(id));
+    assert.throws(() => parseIdentity(app({ installationId: id, botLogin: BOT })), /\.app\.installationId/, String(id));
+  }
+  assert.equal(parseIdentity({ profile: "team", app: { id: 1, installationId: 1, botLogin: `${"a".repeat(39)}[bot]` } }).app.id, 1);
 });
 
 test("compileConfig exposes a validated identity, leaves it out when absent and throws on an invalid one", () => {
@@ -1069,6 +1075,8 @@ test("trustedStatuses keeps a configured reviewer status from the lane bot and d
   const kept = botStatus("test-hunter");
   assert.deepEqual(trustedStatuses([kept], TEAM_ID, names), [kept]);
   assert.deepEqual(trustedStatuses([botStatus("owner")], TEAM_ID, names), []);
+  // edge: review/owner stays untrusted from the bot even if a caller's reviewer names wrongly include "owner"
+  assert.deepEqual(trustedStatuses([botStatus("owner")], TEAM_ID, [...names, "owner"]), []);
   assert.deepEqual(trustedStatuses([botStatus("unknown-reviewer")], TEAM_ID, names), []);
   assert.deepEqual(trustedStatuses([botStatus("test-hunter", { type: "Bot", login: "github-actions[bot]" })], TEAM_ID, names), []);
   assert.deepEqual(trustedStatuses([botStatus("test-hunter", { type: "Bot", login: "other-app[bot]" })], TEAM_ID, names), []);
