@@ -147,6 +147,20 @@ test("edge: bidi overrides and line separators are stripped and a long error is 
   assert.equal(r.message, `#15: cannot check blockers: #3 not found or unreadable (abc${"x".repeat(197)})`);
 });
 
+test("edge: the read-error cap keeps exactly 200 characters and cuts 201 to 200", () => {
+  const at = (len) => {
+    const run = (args) => {
+      if (args[0] === "issue") return JSON.stringify({ body: form("#3") });
+      throw new Error("y".repeat(len));
+    };
+    return main(["15"], run).message;
+  };
+  const line = (len) => `#15: cannot check blockers: #3 not found or unreadable (${"y".repeat(len)})`;
+  assert.equal(at(199), line(199));
+  assert.equal(at(200), line(200));
+  assert.equal(at(201), line(200));
+});
+
 test("edge: an unreadable blocker exits 2 even when another blocker is open", () => {
   const gh = fakeGh({ bodies: { 15: form("#3, #99") }, states: { 3: "open" } });
   assert.equal(main(["15"], gh.run).code, 2);
