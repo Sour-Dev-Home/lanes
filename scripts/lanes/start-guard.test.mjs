@@ -2513,6 +2513,15 @@ test("#441 criterion 5: start.mjs named as data to another script is no launch; 
   }
 });
 
+test("#441 extra: node options that take a value before the script, and a `--` before the script, keep the launch; data after `--` does not", () => {
+  for (const cmd of ["node --stack-size 500 scripts/lanes/start.mjs 1", "node --title x scripts/lanes/start.mjs 1", "node -C dev scripts/lanes/start.mjs 1", "node --env-file .env scripts/lanes/start.mjs 1", "node -- scripts/lanes/start.mjs 1", "node -r x -r scripts/lanes/start.mjs y.js"]) {
+    assert.notDeepEqual(findStartInvocations(cmd), [], cmd);
+  }
+  for (const cmd of ["node lessons.mjs -- scripts/lanes/start.mjs", "node lessons.mjs --paths a b scripts/lanes/start.mjs", "node x/lessons.mjs scripts/lanes/start.mjs"]) {
+    assert.deepEqual(findStartInvocations(cmd), [], cmd);
+  }
+});
+
 test("#424 criterion 4: bash -c with --rcfile or --init-file before the script reads the script, not the value", () => {
   for (const cmd of ['bash -c --init-file x "$X"', 'bash --init-file x -c "$X"', 'bash -c --rcfile x -- "$X"']) {
     assert.deepEqual(decideFor(bash(cmd), grant()), deny(RUNTIME_TEXT_DENY_REASON), cmd);

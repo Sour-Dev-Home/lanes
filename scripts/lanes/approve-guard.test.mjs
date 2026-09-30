@@ -1621,9 +1621,16 @@ test("#441 criterion 4: a subcommand word in argument position is no shell-text 
   for (const cmd of ["gh run watch 123 --repo o/r --exit-status > /dev/null", 'gh run watch "$RUN" --exit-status', "git log --grep=script", "gh run watch $RUN"]) {
     assert.equal(decideBash(cmd), null, cmd);
   }
-  for (const cmd of ['watch "$C"', 'ssh host "$C"', 'script -c "$C" out', 'env watch "$C"', 'xargs ssh host "$C"', 'sudo -u bob watch "$C"', 'time script -c "$C" out', '{ watch "$C"; }', 'if true; then watch "$C"; fi', '! watch "$C"', 'builtin watch "$C"', 'taskset 1 watch "$C"', 'nsenter ssh h "$C"', 'runas watch "$C"']) {
+  for (const cmd of ['watch "$C"', 'ssh host "$C"', 'script -c "$C" out', 'env watch "$C"', 'xargs ssh host "$C"', 'sudo -u bob watch "$C"', 'time script -c "$C" out', '{ watch "$C"; }', 'if true; then watch "$C"; fi', '! watch "$C"', 'builtin watch "$C"', 'taskset 1 watch "$C"', 'nsenter ssh h "$C"', 'runas watch "$C"',
+    // Launchers of a program by name are no subcommand host (test-hunter round 2).
+    'npx watch "$C"', 'npm exec watch "$C"', 'npm exec ssh host "$C"', 'yarn watch "$C"', 'go run watch "$C"', 'cargo run -- watch "$C"', 'docker run img watch "$C"', 'kubectl exec p -- watch "$C"', 'git filter-branch --tree-filter watch "$C"']) {
     assert.deepEqual(decideBash(cmd), DENY, cmd);
   }
+});
+
+test("#441 extra: a subcommand host with a .exe suffix or a path still exempts, and another program before it still fails closed", () => {
+  for (const cmd of ["gh.exe run watch 123 --exit-status", "/usr/bin/gh run watch 123", "git -C x log --grep=script"]) assert.equal(decideBash(cmd), null, cmd);
+  for (const cmd of ['sudo gh watch "$C"', 'env gh watch "$C"', 'time git ssh host "$C"', 'xargs gh watch "$C"']) assert.deepEqual(decideBash(cmd), DENY, cmd);
 });
 
 test("#424 criterion 4: bash -c with --rcfile or --init-file before the script reads the script, not the value", () => {

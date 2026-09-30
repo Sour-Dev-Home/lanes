@@ -667,6 +667,8 @@ test("#441 criterion 2: environment config, symbolic-ref, fast-import and gh api
     "gh api repos/o/r/git/refs -f ref=refs/tags/v1 -f sha=abc", "gh api -X POST repos/o/r/git/refs -fref=refs/tags/v1.0", "gh api repos/o/r/git/refs -f ref=refs/tags/v1 --method=POST",
     'gh api repos/o/r/git/refs -f ref="refs/tags/$V" -f sha=a', "gh api repos/o/r/git/refs --input body.json", "gh api repos/o/r/git/refs/tags/v1 -X PATCH -f sha=a",
     "gh api repos/o/r/releases -f tag_name=v1", "gh api repos/o/r/releases -f tag_name=$V",
+    // A query string on the endpoint, a ref read from a file, and a tag path named at run time.
+    "gh api 'repos/o/r/git/refs?x=1' -f ref=refs/tags/v1", "gh api repos/o/r/git/refs -F ref=@f", "gh api repos/o/r/git/refs/tags/$V -X PATCH -f sha=a",
   ]) {
     assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
   }

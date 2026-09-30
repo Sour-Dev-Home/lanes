@@ -190,10 +190,11 @@ function asBashText(text, shellName) {
 // Commands that hand their arguments to a shell as text without a -c flag of bash's (#219): watch, ssh, su -c,
 // script -c, flock -c, parallel, tmux, screen. Every argument after one counts as run.
 const SHELL_TEXT_COMMANDS = new Set(["watch", "ssh", "su", "runuser", "script", "flock", "parallel", "tmux", "screen", "sg"]);
-// Programs whose words after the first are subcommands and options, never a command to run (#441): a
+// Programs whose words after the first are subcommands and options that never launch a program by name (#441): a
 // SHELL_TEXT_COMMANDS word after one of these as the command word (`gh run watch 123`) is an argument. After anything
-// else (`{`, `!`, `then`, `env`, `taskset 1`, …) it is read as a program, so an unknown launcher fails closed.
-const SUBCOMMAND_HOST_RE = /^(gh|git|docker|podman|kubectl|helm|npm|npx|pnpm|yarn|cargo|go|systemctl|journalctl|terraform|aws|az|gcloud)(\.exe)?$/i;
+// else (`{`, `!`, `then`, `env`, `taskset 1`, and launchers such as `npx`, `npm exec`, `docker run`) it is read as a
+// program, so an unknown launcher fails closed.
+const SUBCOMMAND_HOST_RE = /^(gh|systemctl|journalctl|terraform|helm|aws|az|gcloud)(\.exe)?$/i;
 // powershell's own options (#404), read past before its command text: those that take no value, those that take the
 // next word, and -Command or -File, after which the rest is the command. Any other option leaves the text unread.
 const PS_BOOLEAN_OPTION_RE = /^[-/](noprofile|nop|nologo|noninteractive|noni|noexit|sta|mta|login|l)$/i;

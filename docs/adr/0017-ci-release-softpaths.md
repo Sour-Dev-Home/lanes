@@ -57,8 +57,9 @@ GitHub identity (ADR 0004/0007), `queue.mjs` never runs inside Claude or on a sc
 
    A subcommand word in argument position is no program (#441): the approve guard reads `watch`, `ssh`, `script` and the
    other shell-text commands as a program wherever they stand, except as an argument of a program whose words are
-   subcommands (`gh`, `git`, `docker`, `npm` and the like: `gh run watch 123` is not one); after `{`, `!`, `then`, `env`,
-   `xargs` or any other launcher they still fail closed, and the start guard reads `start.mjs` as a launch only as node's script, the value
+   subcommands that never launch a program by name (`gh`, `systemctl`, `terraform` and the like: `gh run watch 123` is
+   not one); after `{`, `!`, `then`, `env`, `xargs`, or a launcher such as `npx`, `npm exec` or `docker run`, they still
+   fail closed, and the start guard reads `start.mjs` as a launch only as node's script, the value
    of a node option before it (`-r`, `--import`), or a `-e` text naming it, not as data to another script
    (`node lessons.mjs --paths … start.mjs`).
 4. **An adopter smoke test.** `scripts/lanes/adopter-smoke.test.mjs` (module `install`, so affected tests pick it up

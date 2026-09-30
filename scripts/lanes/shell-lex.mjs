@@ -710,8 +710,9 @@ function ghApiTag(words, at) {
   if (endpoint === undefined) return false;
   const writes = method === undefined ? args.some((w) => GH_API_BODY_RE.test(w)) : !["GET", "DELETE", "HEAD"].includes(method);
   if (!writes) return false;
-  const path = unmark(endpoint);
-  if (/(?:^|\/)git\/refs\/tags\/(?:v|[*?[])/i.test(path)) return true;
+  // A query string does not change the endpoint (`git/refs?x=1`).
+  const path = unmark(endpoint).split("?")[0];
+  if (/(?:^|\/)git\/refs\/tags\/(?:v|[*?[])/i.test(path) || (/(?:^|\/)git\/refs\/tags\//i.test(path) && LIVE_RE.test(endpoint))) return true;
   const refs = /(?:^|\/)git\/refs\/?$/i.test(path);
   const releases = /(?:^|\/)releases\/?$/i.test(path);
   if (!refs && !releases) return false;
@@ -721,7 +722,8 @@ function ghApiTag(words, at) {
     const value = new RegExp(`(?:^|[^A-Za-z0-9_])${field}=(.*)$`, "s").exec(w)?.[1] ?? new RegExp(`^-[fF]${field}=(.*)$`, "s").exec(w)?.[1];
     if (value === undefined) continue;
     if (refs ? TAG_REF_RE.test(unmark(value)) : /^v/i.test(unmark(value))) return true;
-    if (LIVE_RE.test(value) || BRACED_OR_COMMAND_RE.test(value)) return true;
+    // A value read from a file (`-F ref=@f`) is known only when gh runs.
+    if (LIVE_RE.test(value) || BRACED_OR_COMMAND_RE.test(value) || value.startsWith("@")) return true;
   }
   return false;
 }
