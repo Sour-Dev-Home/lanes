@@ -1329,3 +1329,125 @@ test("edge: several assignees are all named, and an assigned issue without ready
   assert.ok(out.lines.some((l) => l === "#1: skipped: assigned to a, b"));
   assert.ok(!out.lines.some((l) => l.startsWith("#2:")));
 });
+
+// #535: a queue keeps the lanes scripts it loaded, so it stops when a merge changes them.
+function fakeGit({ head = "aaaaaaa1111", remote = "aaaaaaa1111", changed = [], fetchFails = false } = {}) {
+  const state = { head, remote, changed, fetchFails, calls: [] };
+  state.git = (args) => {
+    state.calls.push(args);
+    if (args[0] === "fetch") {
+      if (state.fetchFails) throw Object.assign(new Error("git failed"), { stderr: "fatal: unable to access remote\nmore" });
+      return "";
+    }
+    if (args[0] === "rev-parse") return `${args[1] === "HEAD" ? state.head : state.remote}\n`;
+    if (args[0] === "diff") {
+      const specs = args.slice(args.indexOf("--") + 1);
+      return state.changed.filter((f) => specs.some((s) => f === s || (s.endsWith("/") && f.startsWith(s)))).join("\n");
+    }
+    throw new Error(`unexpected git ${args.join(" ")}`);
+  };
+  return state;
+}
+const STALE_LINE = /lanes scripts changed since the queue started \(aaaaaaa\.\.bbbbbbb\): git pull --ff-only, then restart the queue$/;
+
+test("scripts unchanged since the queue started: it fetches origin/main and launches as before", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const git = fakeGit({ remote: "bbbbbbb2222", changed: [] });
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  assert.equal(await main([], { ...run.deps, git: git.git }), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [1]);
+  assert.ok(git.calls.some((c) => c[0] === "fetch" && c.includes("origin")));
+});
+
+test("a change under scripts/lanes/ stops the queue with both commits and the fix, launching nothing", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+  const git = fakeGit({ remote: "bbbbbbb2222", changed: ["scripts/lanes/queue.mjs"] });
+  assert.equal(await main([], { ...run.deps, git: git.git }), 3);
+  assert.deepEqual(run.launched, []);
+  assert.equal(run.out.filter((l) => STALE_LINE.test(l)).length, 1);
+});
+
+test("a change to lanes.config.json stops the queue the same way", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+  const git = fakeGit({ remote: "bbbbbbb2222", changed: ["lanes.config.json"] });
+  assert.equal(await main([], { ...run.deps, git: git.git }), 3);
+  assert.deepEqual(run.launched, []);
+  assert.ok(run.out.some((l) => STALE_LINE.test(l)));
+});
+
+test("a merge that lands mid-run stops it on the next tick, before that tick launches", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const git = fakeGit();
+  const run = fakeRun(world, {
+    onSleep: (t) => {
+      if (t !== 1) return;
+      git.remote = "bbbbbbb2222";
+      git.changed = ["scripts/lanes/pick.mjs"];
+      world.issues.push(issue(2, ["src/b.mjs"]));
+    },
+  });
+  assert.equal(await main([], { ...run.deps, git: git.git }), 3);
+  assert.deepEqual(run.launched.map((l) => l.n), [1]);
+  assert.ok(run.out.some((l) => STALE_LINE.test(l)));
+});
+
+test("a change elsewhere (docs, src, a lookalike path) does not stop the queue", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const git = fakeGit({ remote: "bbbbbbb2222", changed: ["docs/USING.md", "src/a.mjs", "scripts/lanes-other/x.mjs", "lanes.config.json.bak"] });
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  assert.equal(await main([], { ...run.deps, git: git.git }), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [1]);
+  assert.ok(!run.out.some((l) => /scripts changed/.test(l)));
+});
+
+test("a failed fetch is reported and launches nothing that tick, without exiting", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const git = fakeGit();
+  git.fetchFails = true;
+  const run = fakeRun(world, {
+    onSleep: (t) => {
+      if (t === 2) git.fetchFails = false;
+      if (t === 3) world.issues = [];
+    },
+  });
+  assert.equal(await main([], { ...run.deps, git: git.git }), 0);
+  assert.ok(run.out.some((l) => /cannot fetch origin\/main: fatal: unable to access remote.*launching nothing/.test(l)));
+  assert.deepEqual(run.launched.map((l) => ({ n: l.n, tick: l.tick })), [{ n: 1, tick: 2 }]);
+});
+
+test("edge: a startup commit that cannot be read exits 2 before reading GitHub", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+  const git = () => {
+    throw Object.assign(new Error("x"), { stderr: "fatal: not a git repository" });
+  };
+  assert.equal(await main([], { ...run.deps, git }), 2);
+  assert.deepEqual(run.launched, []);
+  assert.ok(run.out.some((l) => /cannot read the lanes scripts commit/.test(l)));
+});
+
+test("edge: a diff that cannot be read launches nothing that tick, like a failed fetch", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const git = fakeGit({ remote: "bbbbbbb2222" });
+  const base = git.git;
+  let broken = true;
+  git.git = (args) => {
+    if (args[0] === "diff" && broken) throw new Error("bad object");
+    return base(args);
+  };
+  const run = fakeRun(world, {
+    onSleep: (t) => {
+      if (t === 1) broken = false;
+      if (t === 2) world.issues = [];
+    },
+  });
+  assert.equal(await main([], { ...run.deps, git: git.git }), 0);
+  assert.deepEqual(run.launched.map((l) => l.tick), [1]);
+});
