@@ -647,6 +647,16 @@ test("#512: edge: a malformed identity still exits 2 on the config error, not a 
   assert.deepEqual(run.launched, []);
 });
 
+test("#512: edge: a mistyped profile (Team, team with a space) never launches", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const profile of ["Team", "team ", "TEAM", ""]) {
+    const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+    run.deps.config = () => ({ identity: { profile, app: { id: 1, installationId: 2 } } });
+    assert.equal(await main([], run.deps), 2, JSON.stringify(profile));
+    assert.deepEqual(run.launched, []);
+  }
+});
+
 test("edge: the config's maxLanes caps the launches", async () => {
   const { main } = await import("./queue.mjs");
   const world = { issues: [1, 2, 3].map((n) => issue(n, [`src/${n}.mjs`])), prs: [], sessions: [] };
