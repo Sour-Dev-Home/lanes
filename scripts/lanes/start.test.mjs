@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUDGET_DEFAULTS, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, launchEnv, main as runStart, makeRemint, markRunning, parseSessionId, planStart, refreshArgs, refreshLoop, startConfig, teamLaneEnv } from "./start.mjs";
+import { BUDGET_DEFAULTS, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, isLaneGhDir, launchEnv, main as runStart, makeRemint, markRunning, parseSessionId, planStart, refreshArgs, refreshLoop, startConfig, teamLaneEnv } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
@@ -2258,6 +2258,51 @@ test("the refresher rewrites the lane's hosts.yml through the injected app-token
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("edge: a re-mint with no key file set or an unreadable one fails by step and never mints or writes", async () => {
+  for (const [keyFile, readFile, step] of [
+    [() => undefined, () => "PEM", /LANES_APP_KEY_FILE is not set/],
+    [() => "/k", () => { throw new Error("EACCES: /k"); }, /^Error: key file unreadable$/],
+  ]) {
+    const calls = [];
+    const remint = makeRemint({ args: { app: 1, installation: 2, repo: "r", dir: "/d" }, keyFile, readFile, mint: async () => calls.push("mint"), writeHosts: () => calls.push("write") });
+    await assert.rejects(remint(), (err) => step.test(err.message) || step.test(String(err)));
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("edge: team with a throwing step outside the named ones, or a failing cleanup, still fails closed", () => {
+  const t = teamRun();
+  const boom = main(["1"], { ...t.deps, team: { ...t.deps.team, keyFile: () => { throw new Error("secret /keys/app.pem"); } } });
+  assert.equal(boom.code, 1);
+  assert.deepEqual(boom.lines, ["#1: launch failed: team profile: unexpected error"]);
+  const t2 = teamRun({ mintFail: "app-token: nope" });
+  const r = main(["1"], { ...t2.deps, team: { ...t2.deps.team, removeDir: () => { throw new Error("EBUSY"); } } });
+  assert.equal(r.code, 1);
+  assert.deepEqual(r.lines, ["#1: launch failed: team profile: token mint failed: app-token: nope"]);
+});
+
+test("edge: a refresher whose process never started (no pid) is reported and keeps the launch", () => {
+  const t = teamRun({
+    spawnChild: (cmd, args) => (args.includes("--refresh-token") ? { pid: undefined, on() {}, unref() {} } : { pid: 1, on() {}, unref() {} }),
+  });
+  const { code, lines } = main(["1"], t.deps);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, ["#1 → id1", "#1: token refresher not started: no process started"]);
+});
+
+test("isLaneGhDir accepts only lanes-gh-<issue>-* directly under the temp folder, and never a link", () => {
+  assert.equal(isLaneGhDir("/tmp/lanes-gh-7-AbC123", "/tmp"), true);
+  assert.equal(isLaneGhDir("C:\\Temp\\lanes-gh-7-AbC123", "c:/temp/"), true);
+  for (const dir of ["/tmp/lanes-gh-7-", "/tmp/other", "/home/me/.config/gh", "/tmp/x/lanes-gh-7-AbC123", "/tmp/lanes-gh-x-AbC123", "/tmp/lanes-gh-7-../gh", ""]) assert.equal(isLaneGhDir(dir, "/tmp"), false, dir);
+  assert.equal(isLaneGhDir("/tmp/lanes-gh-7-AbC123", "/tmp", () => true), false);
+});
+
+test("teamLaneEnv also drops ssh agent, ssh command and other token and host variables", () => {
+  const out = teamLaneEnv({ PATH: "p", SSH_AUTH_SOCK: "s", GIT_SSH: "a", GIT_SSH_COMMAND: "b", GITHUB_PERSONAL_ACCESS_TOKEN: "t", GH_HOST: "h", GH_REPO: "r" }, { ghDir: "/g", emptyConfig: "/e" });
+  for (const k of ["SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND", "GITHUB_PERSONAL_ACCESS_TOKEN", "GH_HOST", "GH_REPO"]) assert.equal(k in out, false, k);
+  assert.equal(out.PATH, "p");
 });
 
 test("refreshArgs parses the refresher's command line and refuses anything malformed", () => {

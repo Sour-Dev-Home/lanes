@@ -8,7 +8,7 @@
 // The cap and the soft paths come from the `start` block of lanes.config.json.
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync, appendFileSync, closeSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -218,7 +218,16 @@ export function localLaunchEnv() {
 }
 
 // ADR 0019 part 3: what a team lane never inherits. Matched case-insensitively, as Windows environment names are.
-const TEAM_SCRUBBED = [/^LANES_APP_KEY_FILE$/i, /^GH_TOKEN$/i, /^GITHUB_TOKEN$/i, /^GH_ENTERPRISE_TOKEN$/i, /^GITHUB_ENTERPRISE_TOKEN$/i, /^GH_CONFIG_DIR$/i, /^GIT_CONFIG_/i, /^GIT_ASKPASS$/i, /^SSH_ASKPASS$/i, /^GIT_TERMINAL_PROMPT$/i, /^GIT_CREDENTIAL/i, /^GCM_/i];
+const TEAM_SCRUBBED = [/^LANES_APP_KEY_FILE$/i, /^GH_TOKEN$/i, /^GITHUB_TOKEN$/i, /^GH_ENTERPRISE_TOKEN$/i, /^GITHUB_ENTERPRISE_TOKEN$/i, /^GH_CONFIG_DIR$/i, /^GIT_CONFIG_/i, /^GIT_ASKPASS$/i, /^SSH_ASKPASS$/i, /^GIT_TERMINAL_PROMPT$/i, /^GIT_CREDENTIAL/i, /^GCM_/i, /^GITHUB_PERSONAL_ACCESS_TOKEN$/i, /^SSH_AUTH_SOCK$/i, /^GIT_SSH(_COMMAND)?$/i, /^GH_HOST$/i, /^GH_REPO$/i];
+
+/** Whether `dir` is a lane directory `makeDir` creates: `lanes-gh-<issue>-*` directly under the OS temp folder, not a link. */
+export function isLaneGhDir(dir, tmp, isLink = () => false) {
+  const parts = String(dir).split(/[\\/]+/).filter(Boolean);
+  const base = parts.pop() ?? "";
+  const parent = String(dir).slice(0, String(dir).length - base.length).replace(/[\\/]+$/, "");
+  const norm = (p) => String(p).replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+  return /^lanes-gh-[1-9]\d*-[A-Za-z0-9]+$/.test(base) && norm(parent) === norm(tmp) && !isLink(dir);
+}
 
 /**
  * ADR 0019 parts 3 and 4: the environment a team lane launches with. Credentials and git credential settings are
@@ -866,6 +875,10 @@ async function runRefresher(argv) {
   const args = refreshArgs(argv);
   if (!args) {
     console.error("usage: start.mjs --refresh-token --issue <N> --session <id> --dir <dir> --app <id> --installation <id> --repo <name> [--once]");
+    return 2;
+  }
+  if (!isLaneGhDir(args.dir, tmpdir(), (d) => lstatSync(d).isSymbolicLink())) {
+    console.error("refusing: --dir is not a lane config directory");
     return 2;
   }
   const remint = makeRemint({ args, keyFile: () => process.env.LANES_APP_KEY_FILE, readFile: (file) => readFileSync(file, "utf8"), mint: mintInstallationToken, writeHosts: writeGhHosts });
