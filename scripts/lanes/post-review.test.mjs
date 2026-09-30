@@ -624,7 +624,7 @@ test("the refusal for a missing grant names the directory it checked", () => {
 });
 
 test("grantDirFrom finds the main checkout's .lanes/approve from the main checkout and from a worktree", () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "grant-repo-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "grant-repo-")));
   const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "core.hooksPath=", ...args], { cwd, stdio: "pipe" });
   const mainCheckout = join(root, "main");
   mkdirSync(join(mainCheckout, "scripts", "lanes"), { recursive: true });
@@ -639,7 +639,7 @@ test("grantDirFrom finds the main checkout's .lanes/approve from the main checko
 });
 
 test("edge: grantDirFrom outside any repository falls back to the checkout holding the script", () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "grant-nogit-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "grant-nogit-")));
   const dir = join(root, "scripts", "lanes");
   mkdirSync(dir, { recursive: true });
   assert.equal(grantDirFrom(dir), join(root, ".lanes", "approve"));
@@ -659,7 +659,7 @@ test("edge: a truncated status list without the security status fails closed, an
 });
 
 test("edge: an inherited GIT_DIR cannot redirect grantDirFrom", () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "grant-env-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "grant-env-")));
   const dir = join(root, "scripts", "lanes");
   mkdirSync(dir, { recursive: true });
   const other = join(root, "elsewhere", ".git");
