@@ -65,6 +65,8 @@ const AUTO_PROMPT_RE = /^\/start\s+--auto(\s+--go)?$/;
 const AUTO_PLAIN_RE = /^node scripts\/lanes\/start\.mjs --auto( --go)?$/;
 const AUTO_FORMS = { dry: "--auto", go: "--auto --go" };
 const START_WORD_RE = /start\.mjs$/i;
+// The scripts whose path arguments are data: lessons.mjs reads them as Scope paths and never runs them (#441, #502).
+const DATA_SCRIPT_RE = /(?:^|[\\/])lessons\.mjs$/i;
 const QUEUE_WORD_RE = /queue\.mjs$/i;
 // Matched at a word's end (#316): `CommandLine=claude` in a WMI hashtable, or `C:toolsclaude.exe` once a nested script
 // has dropped a Windows path's backslashes. Not after a dot, so a `~/.claude` directory is no claude.
@@ -514,7 +516,9 @@ function commandWords(words, stdin) {
  */
 function isScriptData(plain, nodeAt, scripts, i) {
   const scriptEnd = Math.max(-1, ...scripts);
-  return nodeAt === 0 && !mayBeNode(plain[Math.min(...scripts)] ?? "") && !scripts.has(i) && !(plain[i].startsWith("-") && (scripts.size === 0 || i < scriptEnd));
+  const script = plain[Math.min(...scripts)] ?? "";
+  // Only a script known to take its arguments as data: a runner (`node tsx/cli.mjs queue.mjs`) or launcher runs them (#502).
+  return nodeAt === 0 && DATA_SCRIPT_RE.test(script) && !mayBeNode(script) && !scripts.has(i) && !(plain[i].startsWith("-") && (scripts.size === 0 || i < scriptEnd));
 }
 
 /**

@@ -2684,6 +2684,19 @@ test("#502 criteria 1-3: queue.mjs or start.mjs named only as data is allowed; a
   }
 });
 
+test("#502 edge: a runner or launcher script followed by the name still runs it (test-hunter finding)", () => {
+  for (const name of ["queue.mjs", "start.mjs"]) {
+    const finder = name === "queue.mjs" ? findQueueInvocations : (c) => findStartInvocations(c).length > 0;
+    for (const cmd of [
+      `node node_modules/tsx/dist/cli.mjs scripts/lanes/${name}`, `node foo.mjs ${name}`, `node foo.mjs --x=scripts/lanes/${name}`,
+      `node --test --test-concurrency=1 x.test.mjs scripts/lanes/${name}`, `node --test --import=./x.mjs a.test.mjs ${name}`,
+      `node "" ${name}`, `node npx ${name}`, `node lessons.mjsx scripts/lanes/${name}`, `node -r dotenv/config lessons.mjs scripts/lanes/${name} x`.replace("lessons.mjs", "run.mjs"),
+    ]) {
+      assert.equal(finder(cmd), true, cmd);
+    }
+  }
+});
+
 test("#502 edge: node's own script word and options before it still count for queue.mjs; data after another script does not", () => {
   for (const cmd of ["node --stack-size 500 scripts/lanes/queue.mjs", "node -- scripts/lanes/queue.mjs", "node -r x -r scripts/lanes/queue.mjs y.js"]) {
     assert.equal(findQueueInvocations(cmd), true, cmd);
