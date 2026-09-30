@@ -103,6 +103,64 @@ test("cli: an API error on a blocker exits 2", () => {
   assert.match(r.message, /^#15: cannot check blockers: .*#3/);
 });
 
+test("cli: a thrown network error on a blocker names its cause and keeps the prefix", () => {
+  const run = (args) => {
+    if (args[0] === "issue") return JSON.stringify({ body: form("#441") });
+    throw new Error("error connecting to api.github.com\nsecond line");
+  };
+  const r = main(["468"], run);
+  assert.equal(r.code, 2);
+  assert.equal(r.message, "#468: cannot check blockers: #441 not found or unreadable (error connecting to api.github.com)");
+});
+
+test("cli: a thrown not-found error on a blocker names its cause", () => {
+  const gh = fakeGh({ bodies: { 15: form("#99") } });
+  const r = main(["15"], gh.run);
+  assert.equal(r.code, 2);
+  assert.equal(r.message, "#15: cannot check blockers: #99 not found or unreadable (gh: Not Found (HTTP 404))");
+});
+
+test("cli: an unknown state names the state and still fails closed", () => {
+  const gh = fakeGh({ bodies: { 15: form("#3") }, states: { 3: "merged" } });
+  const r = main(["15"], gh.run);
+  assert.equal(r.code, 2);
+  assert.equal(r.message, "#15: cannot check blockers: #3 not found or unreadable (state: merged)");
+});
+
+test("edge: control characters in a read error are stripped and each unreadable blocker gets its own reason", () => {
+  const run = (args) => {
+    if (args[0] === "issue") return JSON.stringify({ body: form("#3, #4") });
+    if (args[1].endsWith("/3")) throw new Error("bad\u001b[31m\u0007 thing");
+    return JSON.stringify({ state: "closed" });
+  };
+  const r = main(["15"], run);
+  assert.equal(r.code, 2);
+  assert.equal(r.message, "#15: cannot check blockers: #3 not found or unreadable (bad[31m thing)");
+});
+
+test("edge: bidi overrides and line separators are stripped and a long error is capped", () => {
+  const run = (args) => {
+    if (args[0] === "issue") return JSON.stringify({ body: form("#3") });
+    throw new Error(`a‮b c${"x".repeat(500)}`);
+  };
+  const r = main(["15"], run);
+  assert.equal(r.message, `#15: cannot check blockers: #3 not found or unreadable (abc${"x".repeat(197)})`);
+});
+
+test("edge: the read-error cap keeps exactly 200 characters and cuts 201 to 200", () => {
+  const at = (len) => {
+    const run = (args) => {
+      if (args[0] === "issue") return JSON.stringify({ body: form("#3") });
+      throw new Error("y".repeat(len));
+    };
+    return main(["15"], run).message;
+  };
+  const line = (len) => `#15: cannot check blockers: #3 not found or unreadable (${"y".repeat(len)})`;
+  assert.equal(at(199), line(199));
+  assert.equal(at(200), line(200));
+  assert.equal(at(201), line(200));
+});
+
 test("edge: an unreadable blocker exits 2 even when another blocker is open", () => {
   const gh = fakeGh({ bodies: { 15: form("#3, #99") }, states: { 3: "open" } });
   assert.equal(main(["15"], gh.run).code, 2);
