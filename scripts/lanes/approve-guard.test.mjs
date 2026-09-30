@@ -1762,6 +1762,17 @@ test("a config that lists owner never makes it a configured reviewer (#463)", ()
   }
 });
 
+test("a config name that is not a plain agent name leaves only the built-in four (#463)", () => {
+  for (const bad of ["Owner", "OWNER", "owner ", "review/owner", "", "9lives", "a_b"]) {
+    const dir = repoWith(reviewerConfig(["compliance-reviewer", bad]));
+    try {
+      assert.deepEqual(configuredReviewersFrom(join(dir, "scripts", "lanes")), BUILT_IN, JSON.stringify(bad));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("the guard lets exactly the allowed reviewer names through (#463)", () => {
   const allowed = [...BUILT_IN, "compliance-reviewer"];
   for (const r of allowed) assert.deepEqual(findOwnerInvocations(postAs(r), allowed), [], r);

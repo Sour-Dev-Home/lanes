@@ -1003,7 +1003,11 @@ function mainCheckoutFrom(from) {
  */
 export function configuredReviewersFrom(from) {
   try {
-    return reviewerNames(loadConfig(join(mainCheckoutFrom(from), "lanes.config.json"))).filter((n) => n !== "owner");
+    const names = reviewerNames(loadConfig(join(mainCheckoutFrom(from), "lanes.config.json"))).filter((n) => n !== "owner");
+    // loadConfig does not check the modules block: a name that is not the agent-name shape (`Owner`, `owner `,
+    // `review/owner`) could alias the owner's status, so one bad name leaves the built-in four.
+    if (!names.every((n) => /^[a-z][a-z0-9-]*$/.test(n))) return [...REVIEWERS];
+    return names;
   } catch {
     return [...REVIEWERS];
   }
