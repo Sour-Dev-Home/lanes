@@ -498,6 +498,75 @@ test("edge: a quick-tier PR passes on a reused status alone", () => {
   assert.equal(evaluatePr(api, "o/r", 5, config).description, `unattended-eligible (tier:quick), reviews in, reused test-hunter from ${OLD.slice(0, 7)}`);
 });
 
+// #493: the owner's approval on an earlier commit carries to the head when the PR's own diff is byte-identical
+const ownerStatus = { ...reviewStatus, context: "review/owner" };
+const ownerBody = readyBody.replace("## Needs the owner\nnothing", "## Needs the owner\ndecide x");
+function carryRoutes({ headDiff = ownDiff("2222222", "-40,1 +41,1"), ownerStatuses = [ownerStatus], headStatuses = [{ ...reviewStatus }], commits = [FIRST, OLD, SHA] } = {}) {
+  const routes = reuseRoutes({ tier: "quick", headDiff, oldStatuses: ownerStatuses, commits, comments: [] });
+  routes["repos/o/r/pulls/5"] = { ...routes["repos/o/r/pulls/5"], body: ownerBody };
+  routes[statusesRoute(SHA)] = headStatuses;
+  return routes;
+}
+const WAIT_STALE = `owner approval was for ${OLD.slice(0, 7)}; the PR's own diff changed since: /approve 5`;
+
+test("evaluatePr carries the owner's approval across a clean merge from main", () => {
+  const { api, posted } = fakeApi(carryRoutes());
+  const d = evaluatePr(api, "o/r", 5, config);
+  assert.equal(d.state, "success");
+  assert.equal(d.description, `approved by owner (carried from ${OLD.slice(0, 7)})`);
+  assert.equal(descriptionOf(posted[0]), d.description);
+});
+
+test("evaluatePr does not carry the approval when a conflict resolution changed the PR's own diff", () => {
+  const { api } = fakeApi(carryRoutes({ headDiff: ownDiff("2222222", "-40,1 +41,1", "+resolved") }));
+  const d = evaluatePr(api, "o/r", 5, config);
+  assert.equal(d.state, "pending");
+  assert.equal(d.description, WAIT_STALE);
+});
+
+test("evaluatePr does not carry the approval past a new commit", () => {
+  const routes = carryRoutes({ headDiff: ownDiff("2222222", "-40,1 +41,1") + "diff --git a/src/b.ts b/src/b.ts\n--- a/src/b.ts\n+++ b/src/b.ts\n@@ -1 +1 @@\n-p\n+q\n" });
+  assert.equal(evaluatePr(fakeApi(routes).api, "o/r", 5, config).description, WAIT_STALE);
+});
+
+test("evaluatePr does not carry the approval past a whitespace-only change", () => {
+  const { api } = fakeApi(carryRoutes({ headDiff: ownDiff("2222222", "-40,1 +41,1", "+y ") }));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_STALE);
+});
+
+test("evaluatePr lets the head's own owner status win over a carried approval", () => {
+  const { api } = fakeApi(carryRoutes({ headStatuses: [{ ...reviewStatus }, { ...ownerStatus, state: "failure" }] }));
+  const calls = [];
+  const d = evaluatePr((a) => (calls.push(a[0]), api(a)), "o/r", 5, config);
+  assert.match(d.description, /^waiting on owner \(\/approve\)/);
+  assert.ok(!calls.some((c) => c.startsWith("repos/o/r/compare/")));
+});
+
+test("evaluatePr never carries a bot-posted, failed or missing owner status", () => {
+  for (const ownerStatuses of [[{ ...ownerStatus, creator: { type: "Bot", login: "github-actions[bot]" } }], [{ ...ownerStatus, state: "failure" }], []]) {
+    const d = evaluatePr(fakeApi(carryRoutes({ ownerStatuses })).api, "o/r", 5, config);
+    assert.match(d.description, /^waiting on owner \(\/approve\)/, JSON.stringify(ownerStatuses));
+  }
+});
+
+test("carry passes the merge queue on a carried owner approval", () => {
+  const group = "b".repeat(40);
+  const { api, posted } = fakeApi(carryRoutes());
+  const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, group, config);
+  assert.equal(d.state, "success");
+  assert.equal(posted[0].sha, group);
+});
+
+test("edge: a carried owner approval still leaves a reviewer the head owes blocking", () => {
+  const { api } = fakeApi(carryRoutes({ headStatuses: [] }));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_HUNTER);
+});
+
+test("edge: an unreadable diff carries nothing and the gate waits on the owner", () => {
+  const { api } = fakeApi(carryRoutes({ headDiff: null }));
+  assert.match(evaluatePr(api, "o/r", 5, config).description, /^waiting on owner \(\/approve\)/);
+});
+
 // #154: the same reuse for the security-reviewer and the architecture-advisor
 const secArch = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: ["^src/"], ui: [] } });
 const srcAdrs = [parseAdr("# 0003: src\n\nStatus: accepted\n\n## Governs\n\n- src/\n")];
