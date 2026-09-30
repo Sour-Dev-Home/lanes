@@ -837,6 +837,7 @@ test("#477 criterion 3: create counts only as a method or argument of the call, 
     "$o = [wmiclass]'Win32_Process'; $o.Create($c)", "$o = [wmiclass]'Win32_Process'; $o . Create ($c)", "Invoke-CimMethod Win32_Process -MethodName Create", "Invoke-CimMethod -MethodName 'Cre'+'ate' Win32_Process",
     "wmic process call create x", "WMIC PROCESS CALL CREATE x", "Invoke-CimMethod -Arguments @{MethodName='Create'} Win32_Process",
     "[wmiclass]'Win32_Process' | % Create $c", "[wmiclass]'Win32_Process' | ForEach-Object Create calc", "[wmiclass]'Win32_Process' | % -MemberName Create -ArgumentList calc",
+    "wmic process call create\"calc\"", "wmic process call create'calc'", "wmic process call create\\calc", "[wmiclass]'Win32_Process' | % Create\"calc\"",
     "$w = [wmiclass]'Win32_Process'; $w.Create.Invoke('calc')", "objWMI.ExecMethod_(\"Create\", p); Win32_Process", "[wmiclass]'Win32_Process'.Create",
   ]) {
     assert.equal(wmiProcessCreate(t), true, t);

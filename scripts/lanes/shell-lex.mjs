@@ -1042,7 +1042,9 @@ export function wmiProcessCreate(text) {
   // Create, or a WMI/CIM method call whose method name may be built at run time (-MethodName $m, security review round
   // 1; `$o.$m(…)`, `$o.PSObject.Methods[$m]`, `$o.InvokeMethod($m, …)`, #378).
   // "create" counts only as a method or an argument of the call (#477), not inside "created" or "gh issue create".
-  if (!WMI_CREATE_RE.test(plain) && !/\b(invoke-(cim|wmi)method|icim|iwmi)\b/i.test(plain) && !COMPUTED_METHOD_RE.test(plain)) return false;
+  // A quote, backslash or backtick glued to it (`create"calc"`) ends the word too, so read the text with them as spaces as well.
+  const spaced = withoutLiteralSubstitutions(String(text ?? "")).replace(DEQUOTE_RE, " ").replace(/\+/g, "");
+  if (!WMI_CREATE_RE.test(plain) && !WMI_CREATE_RE.test(spaced) &&!/\b(invoke-(cim|wmi)method|icim|iwmi)\b/i.test(plain) && !COMPUTED_METHOD_RE.test(plain)) return false;
   if (/win32_process/.test(flat) || (/wmic/.test(flat) && /process/.test(flat))) return true;
   // Each word, and what follows a `[type]` cast glued to it ([wmiclass]Win32_Proc* once quotes are dropped). A word
   // with no literal character (`*`, `??`) names nothing, so it cannot be the class (#477).
