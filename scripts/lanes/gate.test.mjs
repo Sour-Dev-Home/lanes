@@ -1388,3 +1388,11 @@ test("team: a lane-bot review/owner status never satisfies the owner stage", () 
   const { api } = fakeApi(routes);
   assert.equal(evaluatePr(api, "o/r", 5, cfg).description, "waiting on owner (/approve) (owner-only path)");
 });
+
+test("team: a lane-bot review/test-hunter status on an earlier reviewed commit is reused; under solo it is not", () => {
+  const routes = reuseRoutes({ oldStatuses: [botStatus("review/test-hunter")], comments: [verdictComment(BOT, "test-hunter", OLD)] });
+  const team = evaluatePr(fakeApi(routes).api, "o/r", 5, laneConfig("team"));
+  assert.equal(team.description, REUSED);
+  assert.equal(team.state, "success");
+  assert.equal(evaluatePr(fakeApi(routes).api, "o/r", 5, laneConfig("solo")).description, WAIT_HUNTER);
+});
