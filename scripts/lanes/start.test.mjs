@@ -292,7 +292,7 @@ function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut
   };
   const view = (n) => {
     const i = issues[n];
-    return { number: n, state: i.state ?? "OPEN", labels: (i.labels ?? ["ready", "tier:quick"]).map((name) => ({ name })), body: i.body ?? form() };
+    return { number: n, state: i.state ?? "OPEN", labels: (i.labels ?? ["ready", "tier:quick"]).map((name) => ({ name })), assignees: i.assignees ?? [], body: i.body ?? form() };
   };
   const gh = (args) => {
     calls.push(`gh ${args[0]} ${args[1]}`);
@@ -2312,4 +2312,25 @@ test("refreshArgs parses the refresher's command line and refuses anything malfo
   assert.equal(refreshArgs(ok.slice(2)), null);
   assert.equal(refreshArgs(ok.map((a) => (a === "11" ? "x" : a))), null);
   assert.equal(refreshArgs([...ok, "--bogus", "1"]), null);
+});
+
+// #522: an issue the owner assigned is claimed by them; /start refuses it so a lane never races the assignee.
+test("refuses an assigned issue, naming the assignee", () => {
+  assert.deepEqual(plan([issue(1, { assignees: ["owner"] }), issue(2, { assignees: [] }), issue(3)]).refused, [{ number: 1, reason: "assigned to owner" }]);
+});
+
+test("/start <N> refuses an assigned issue and launches nothing for it", () => {
+  const { deps, launches } = fakes({ issues: { 1: { assignees: [{ login: "owner" }] } } });
+  const { code, lines } = main(["1"], deps);
+  assert.notEqual(code, 0);
+  assert.ok(lines.some((l) => l.includes("#1") && l.includes("assigned to owner")));
+  assert.equal(launches.length, 0);
+});
+
+test("--auto skips an assigned ready issue with the same reason", () => {
+  const { deps, launches } = fakes({ issues: { 1: { assignees: [{ login: "owner" }] } } });
+  deps.gh = ((inner) => (args) => (args[0] === "api" ? JSON.stringify({ state: "open" }) : inner(args)))(deps.gh);
+  const { lines } = main(["--auto", "--go"], deps);
+  assert.ok(lines.includes("#1: skipped: assigned to owner"));
+  assert.equal(launches.length, 0);
 });

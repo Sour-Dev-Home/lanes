@@ -36,6 +36,9 @@ function waitReason(pr) {
 
 // Why a ready issue cannot be a candidate, or null. Blockers count as open only when open in the snapshot.
 function refusal(issue, openNumbers) {
+  // #522: the owner claims an issue it will do itself by assigning it.
+  const assignees = (issue.assignees ?? []).map((a) => (typeof a === "string" ? a : a?.login)).filter(Boolean);
+  if (assignees.length) return `assigned to ${assignees.join(", ")}`;
   if (labelsOf(issue).filter((l) => l?.startsWith("tier:")).length !== 1) return "no single tier:* label";
   const { blockedBy, error } = parseBlockedBy(issue.body ?? "");
   if (error) return error;
@@ -191,7 +194,7 @@ const stamp = (ms) => new Date(ms).toTimeString().slice(0, 8);
 
 // One tick's snapshot for planTick. Throws when any part cannot be read, or a list may be truncated.
 function readSnapshot(deps, root) {
-  const issues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body"]));
+  const issues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body,assignees"]));
   // A blocker missing from a truncated list would read as closed, and a lane's claim would be lost.
   if (issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to plan from`);
   const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,title,headRefName,files,mergeable,statusCheckRollup,isCrossRepository"]));

@@ -41,7 +41,7 @@ export function classifySkip(text) {
   if (/^cap of \d+ lanes/.test(why)) return { reason: "cap" };
   if (/^blocked by /.test(why)) return { reason: "blocked" };
   if (/^already in flight/.test(why)) return { reason: "in-flight" };
-  if (/^(not open|lacks ready|needs-owner|no single tier)/.test(why)) return { reason: "not-ready" };
+  if (/^(not open|lacks ready|needs-owner|assigned to |no single tier)/.test(why)) return { reason: "not-ready" };
   return { reason: "other" };
 }
 
@@ -443,6 +443,8 @@ function refusal(issue) {
   if (!issue.labels.includes("ready")) return "lacks ready";
   // A lane found nothing to build and handed it to the owner (#136); it waits for them to close or rewrite it.
   if (issue.labels.includes("needs-owner")) return "needs-owner";
+  // #522: the owner claims an issue it will do itself by assigning it.
+  if (issue.assignees?.length) return `assigned to ${issue.assignees.join(", ")}`;
   if (issue.labels.filter((l) => l.startsWith("tier:")).length !== 1) return "no single tier:* label";
   if (issue.blockers?.code !== 0) return String(issue.blockers?.message ?? "cannot check blockers").replace(/^#\d+: /, "");
   return null;
@@ -642,7 +644,7 @@ function autoStart(go, deps, { maxLanes, softPaths, models, identity }) {
   let prs, sessions, inFlight, openIssues;
   try {
     ({ prs, sessions, inFlight } = readInFlight(deps, "number,headRefName,files"));
-    openIssues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body"]));
+    openIssues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body,assignees"]));
     // A blocker missing from a truncated list would not rank, and a running issue's claim would be lost.
     if (openIssues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to plan from`);
   } catch (err) {
@@ -650,6 +652,7 @@ function autoStart(go, deps, { maxLanes, softPaths, models, identity }) {
   }
 
   const labelsOf = (issue) => (issue.labels ?? []).map((l) => l.name);
+  const loginsOf = (issue) => (issue.assignees ?? []).map((a) => a.login).filter(Boolean);
   const ready = openIssues.filter((i) => labelsOf(i).includes("ready"));
   if (!ready.length) return { code: 0, lines: ["no ready issues to start"] };
 
@@ -659,7 +662,7 @@ function autoStart(go, deps, { maxLanes, softPaths, models, identity }) {
   for (const issue of ready) {
     const why = busy.has(issue.number)
       ? inFlightReason(issue.number, prs, sessions)
-      : refusal({ state: "OPEN", labels: labelsOf(issue), blockers: checkBlockers([String(issue.number)], deps.gh) });
+      : refusal({ state: "OPEN", labels: labelsOf(issue), assignees: loginsOf(issue), blockers: checkBlockers([String(issue.number)], deps.gh) });
     if (why) skipped.push({ number: issue.number, reason: why });
     else candidates.push(issue);
   }
@@ -793,7 +796,7 @@ function startIssues(args, deps, config) {
   for (const n of numbers) {
     let view;
     try {
-      view = JSON.parse(deps.gh(["issue", "view", String(n), "--json", "number,state,labels,body"]));
+      view = JSON.parse(deps.gh(["issue", "view", String(n), "--json", "number,state,labels,body,assignees"]));
     } catch {
       issues.push({ number: n, error: "not found or unreadable" });
       continue;
@@ -807,7 +810,7 @@ function startIssues(args, deps, config) {
       const hit = skipped.find((s) => s.reason.startsWith("overlaps running "));
       if (hit) runningOverlap.set(n, hit.reason);
     }
-    issues.push({ number: n, state: view.state, labels: (view.labels ?? []).map((l) => l.name), blockers: checkBlockers([String(n)], deps.gh) });
+    issues.push({ number: n, state: view.state, labels: (view.labels ?? []).map((l) => l.name), assignees: (view.assignees ?? []).map((a) => a.login).filter(Boolean), blockers: checkBlockers([String(n)], deps.gh) });
   }
   // Soft paths never count, as in pickStartable for --auto.
   const soft = config.softPaths.map((s) => new RegExp(s));
