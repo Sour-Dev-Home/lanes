@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, createVerify } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, statSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, statSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mintInstallationToken, writeGhHosts } from "./app-token.mjs";
@@ -31,7 +31,7 @@ test("signs an RS256 JWT with iss, iat 60s back and exp within 10 minutes", asyn
   const claims = JSON.parse(b64(p));
   assert.equal(claims.iss, "12345");
   assert.equal(claims.iat, NOW / 1000 - 60);
-  assert.ok(claims.exp > claims.iat && claims.exp <= NOW / 1000 + 600);
+  assert.ok(claims.exp === NOW / 1000 + 540 && claims.exp <= NOW / 1000 + 600);
   const v = createVerify("RSA-SHA256").update(`${h}.${p}`);
   assert.ok(v.verify(publicKey, Buffer.from(s, "base64url")));
 });
@@ -194,4 +194,29 @@ test("edge: writeGhHosts creates a missing directory and rejects a token that is
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("edge: writeGhHosts fails naming the step when the directory cannot be created, without the token", () => {
+  const base = mkdtempSync(join(tmpdir(), "app-token-"));
+  try {
+    const file = join(base, "afile");
+    writeFileSync(file, "x");
+    assert.throws(
+      () => writeGhHosts(join(file, "sub"), "ghs_secret"),
+      (e) => /app-token: could not write hosts.yml/.test(e.message) && !e.message.includes("ghs_secret"),
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("edge: a body that cannot be read fails naming the step", async () => {
+  const fetch = async () => ({
+    ok: true,
+    status: 201,
+    text: async () => {
+      throw new Error("stream broke");
+    },
+  });
+  await assert.rejects(mintInstallationToken(args({ fetch })), /app-token: request to GitHub failed/);
 });
