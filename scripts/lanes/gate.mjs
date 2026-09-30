@@ -11,8 +11,11 @@ import {
   latestByContext,
   loadAdrs,
   loadConfig,
+  moduleMapProblem,
   parsePrBody,
   parseVerdictComment,
+  REVIEWERS,
+  reviewerNames,
   reusableReviewers,
   reuseBlockedBy,
   reviewContext,
@@ -71,7 +74,7 @@ const statusesOf = (api, repo, sha) => JSON.parse(api([`repos/${repo}/commits/${
  * `authorCanWrite` (one lookup per login). Fails closed: comments that cannot be read mean no verdicts, so a full-tier
  * PR waits on the owner.
  */
-export function trustedVerdicts(api, repo, number) {
+export function trustedVerdicts(api, repo, number, names = REVIEWERS) {
   let lines;
   try {
     // @json emits one line per comment, whatever newlines its body holds.
@@ -88,7 +91,7 @@ export function trustedVerdicts(api, repo, number) {
     } catch {
       continue;
     }
-    const parsed = parseVerdictComment(comment?.body);
+    const parsed = parseVerdictComment(comment?.body, names);
     if (!parsed) continue;
     const login = comment.login;
     if (!canWrite.has(login)) canWrite.set(login, authorCanWrite(api, repo, login));
@@ -198,6 +201,9 @@ export function ownerDiffFor(api, repo, pr, files) {
 export function decideForPr(api, repo, number, config, adrs = []) {
   const pr = JSON.parse(api([`repos/${repo}/pulls/${number}`]));
   if (pr.state !== "open") return null;
+  // An unusable module map would throw in reusableReviewers below; report it as a gate failure instead.
+  const mapProblem = moduleMapProblem(config);
+  if (mapProblem !== null) return { pr, decision: { state: "failure", description: `module map unusable: ${mapProblem}`, stage: "contract" } };
   // Both names of a renamed file: moving code into docs/ must not make a diff look docs-only.
   const files = api([`repos/${repo}/pulls/${number}/files`, "--paginate", "--jq", ".[] | .filename, (.previous_filename // empty)"])
     .split("\n")
@@ -242,7 +248,7 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     headSha: pr.head.sha,
     files,
     statuses,
-    verdicts: trustedVerdicts(api, repo, number),
+    verdicts: trustedVerdicts(api, repo, number, reviewerNames(config)),
     config,
     adrs,
     interfaceContract,

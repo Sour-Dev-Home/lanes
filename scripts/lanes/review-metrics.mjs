@@ -25,7 +25,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { percentile } from "./delivery-metrics.mjs";
 import { parseGraphql } from "./graphql-lib.mjs";
-import { parseVerdictComment } from "./lib.mjs";
+import { loadConfig, parseVerdictComment, REVIEWERS, reviewerNames } from "./lib.mjs";
 
 export const SCHEMA_VERSION = 1;
 const DAY_MS = 24 * 3_600_000;
@@ -50,9 +50,9 @@ function validMetrics(m) {
  * @param {string | null} prTier - the tier label of the issue the PR closes
  * @returns {{ tier: string, reviewer: string, verdict: object } | { unreadable: true } | null}
  */
-export function readVerdict(body, prTier) {
+export function readVerdict(body, prTier, names = REVIEWERS) {
   if (typeof body !== "string" || !MARKER_RE.test(body)) return null;
-  const parsed = parseVerdictComment(body);
+  const parsed = parseVerdictComment(body, names);
   if (parsed === null) return { unreadable: true };
   const { reviewer, verdict } = parsed;
   if (!Array.isArray(verdict.findings) || verdict.findings.some((f) => f === null || typeof f !== "object")) return { unreadable: true };
@@ -74,11 +74,11 @@ export function normalizePr(node) {
 }
 
 /** Every run and unreadable marker on the PRs merged in the window. */
-export function collectVerdicts(prs, { now, days }) {
+export function collectVerdicts(prs, { now, days, names = REVIEWERS }) {
   const from = new Date(now.getTime() - days * DAY_MS);
   return prs
     .filter((pr) => pr !== undefined && new Date(pr.mergedAt) >= from && new Date(pr.mergedAt) <= now)
-    .flatMap((pr) => pr.bodies.map((body) => readVerdict(body, pr.tier)))
+    .flatMap((pr) => pr.bodies.map((body) => readVerdict(body, pr.tier, names)))
     .filter((e) => e !== null);
 }
 
@@ -263,7 +263,7 @@ function main() {
   const options = parseArgs(process.argv.slice(2));
   const now = new Date();
   const from = new Date(now.getTime() - options.days * DAY_MS);
-  const report = buildReport({ entries: collectVerdicts(fetchMergedPrs(from), { now, days: options.days }), now, days: options.days });
+  const report = buildReport({ entries: collectVerdicts(fetchMergedPrs(from), { now, days: options.days, names: reviewerNames(loadConfig()) }), now, days: options.days });
   console.log(options.json ? JSON.stringify(report, null, 2) : renderMarkdown(report));
 }
 

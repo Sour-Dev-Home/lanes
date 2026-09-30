@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GATE_CONTEXT, parseIssueForm, parseVerdictComment } from "./lib.mjs";
+import { GATE_CONTEXT, loadConfig, parseIssueForm, parseVerdictComment, REVIEWERS, reviewerNames } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { STATUS_QUERY, gateDescriptions, mergeQueueEntries, prStage } from "./status.mjs";
 
@@ -38,11 +38,11 @@ const checksOf = (pr) => (pr.statusCheckRollup ?? []).map((c) => ({ name: clean(
  * The parsed verdict comments on a PR that count: trusted authors, bound to `headSha`, the newest per reviewer.
  * Nothing but the parsed verdict leaves this function.
  */
-function currentVerdicts(comments, headSha) {
+function currentVerdicts(comments, headSha, names) {
   const newest = new Map();
   for (const c of comments ?? []) {
     if (!TRUSTED_ASSOCIATIONS.has(c?.authorAssociation)) continue;
-    const parsed = parseVerdictComment(c.body);
+    const parsed = parseVerdictComment(c.body, names);
     if (parsed && parsed.sha === String(headSha).toLowerCase()) newest.set(parsed.reviewer, parsed);
   }
   return [...newest.values()];
@@ -90,7 +90,7 @@ function prBlockers(stage, note) {
  * `issues` every open issue with body and labels; `mergeQueue` and `gateDescriptions` are the outputs of status.mjs's
  * mergeQueueEntries and gateDescriptions.
  */
-export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), softPaths = DEFAULT_SOFT_PATHS, generatedAt }) {
+export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), softPaths = DEFAULT_SOFT_PATHS, reviewers = REVIEWERS, generatedAt }) {
   const queuePosition = new Map(mergeQueue.map((e) => [e.number, e.position]));
   const prOf = new Map();
   // A fork's PR is stranger-controlled (its check names are whatever its workflow calls them, and "Fixes #N" is free),
@@ -117,7 +117,7 @@ export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: 
       item.stage = stage === "conflict" ? "owner" : stage;
       item.blockedBy = prBlockers(stage, note);
       item.pr = { number: pr.number, headSha: String(pr.headRefOid ?? "").toLowerCase(), checks: checksOf(pr) };
-      const criteria = verdictCriteria(currentVerdicts(pr.comments, item.pr.headSha), item.pr.headSha);
+      const criteria = verdictCriteria(currentVerdicts(pr.comments, item.pr.headSha, reviewers), item.pr.headSha);
       if (criteria.length) item.criteria = criteria;
     } else {
       item.stage = labels.includes("needs-owner")
@@ -229,7 +229,7 @@ function main(argv = process.argv.slice(2)) {
   const prs = gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,isCrossRepository,mergeable,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefOid,comments"]);
   // Same reason as issues: a PR cut off the list would leave its issue showing a wrong stage.
   if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to list every issue's real stage`);
-  const snapshot = buildSnapshot({ prs, issues, mergeQueue: mergeQueueEntries(reply), gateDescriptions: gateDescriptions(reply), softPaths: configuredSoftPaths(), generatedAt: new Date().toISOString() });
+  const snapshot = buildSnapshot({ prs, issues, mergeQueue: mergeQueueEntries(reply), gateDescriptions: gateDescriptions(reply), softPaths: configuredSoftPaths(), reviewers: reviewerNames(loadConfig()), generatedAt: new Date().toISOString() });
   if (out) writeSnapshot(snapshot, out);
   else console.log(JSON.stringify(snapshot, null, 2));
 }

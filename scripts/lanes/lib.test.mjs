@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adrGoverns, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { adrGoverns, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -930,6 +930,23 @@ test("reviewerNames is the built-in four plus configured names, never owner", ()
   const withOwner = { modules: { entries: [{ id: "x", paths: ["x/"], imports: [], reviewers: ["owner"] }] } };
   assert.ok(!reviewerNames(withOwner).includes("owner"));
 });
+
+test("edge: reviewerNames and moduleMapProblem on a malformed module map", () => inAgentRepo(() => {
+  for (const modules of ["x", { entries: 5 }, { entries: [null, { reviewers: "a" }, { reviewers: [7, "ok-name"] }] }]) {
+    assert.doesNotThrow(() => reviewerNames({ modules }), JSON.stringify(modules));
+  }
+  assert.deepEqual(reviewerNames({ modules: { entries: [{ reviewers: [7, "ok-name"] }] } }), [...REVIEWERS, "ok-name"]);
+  assert.equal(moduleMapProblem(modConfig), null);
+  assert.equal(moduleMapProblem({}), null);
+  assert.match(moduleMapProblem({ modules: "x" }), /modules must be an object/);
+  assert.match(moduleMapProblem({ modules: { entries: [{ id: "a", paths: ["a/"], imports: [], reviewers: ["ghost"] }] } }), /"ghost" has no \.claude\/agents\/ghost\.md/);
+}));
+
+test("gateDecision fails with the module-map reason, before any tier check", () => inAgentRepo(() => {
+  const d = gateDecision({ ...quickPr, config: { ...config, modules: { entries: "nope" } } });
+  assert.equal(d.state, "failure");
+  assert.match(d.description, /^module map unusable: .*entries must be an array/);
+}));
 
 test("parseVerdictComment accepts exactly the names it is given", () => {
   const body = (r) => `<!-- lanes:verdict ${r} -->\n\`\`\`json\n{"reviewer":"${r}","verdict":"success"}\n\`\`\``;
