@@ -717,6 +717,31 @@ test("#444: edge: an open PR whose newest session is idle is a dead lane, and a 
   assert.deepEqual(main(["1"], blocked.deps).lines, ["#1: refused: already in flight"]);
 });
 
+// #448: --auto names a dead lane with the same text /start <N> prints.
+test("#448: --auto skips a dead lane with the same text /start <N> prints", () => {
+  const base = { issues: { 1: { body: form({ scope: "In: `a.mjs`." }) } }, prs: [prFor(1, "a.mjs")] };
+  const viaAuto = main(["--auto"], fakes(base).deps).lines[0];
+  const viaStart = main(["1"], fakes(base).deps).lines[0];
+  assert.match(viaAuto, /^#1: skipped: already in flight: dead lane with open PR #\d+ and no live session; run the queue/);
+  assert.equal(viaAuto.replace(": skipped: ", ": refused: "), viaStart);
+});
+
+test("#448: --auto still prints plain already in flight for a live lane", () => {
+  const { deps } = fakes({
+    issues: { 1: { body: form({ scope: "In: `a.mjs`." }) } },
+    prs: [prFor(1, "a.mjs")],
+    sessions: [{ kind: "background", status: "busy", cwd: "/repo/.claude/worktrees/issue-1-x" }],
+  });
+  assert.equal(main(["--auto"], deps).lines[0], "#1: skipped: already in flight");
+});
+
+test("#448: edge: --auto --go names a dead lane too and launches nothing for it", () => {
+  const { deps, launches } = fakes({ issues: { 1: { body: form({ scope: "In: `a.mjs`." }) } }, prs: [prFor(1, "a.mjs")] });
+  const { lines } = main(["--auto", "--go"], deps);
+  assert.match(lines[0], /^#1: skipped: already in flight: dead lane with open PR/);
+  assert.equal(launches.length, 0);
+});
+
 test("edge: a requested issue that already has an open PR is refused as in flight, not as overlapping its own PR", () => {
   const { deps, launches } = fakes({ issues: { 1: { body: form({ scope: "In: `a.mjs`." }) } }, prs: [prFor(1, "a.mjs")], sessions: [{ kind: "background", status: "busy", cwd: "/repo/.claude/worktrees/issue-1-x" }] });
   const { code, lines } = main(["1"], deps);

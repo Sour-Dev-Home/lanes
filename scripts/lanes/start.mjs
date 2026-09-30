@@ -379,9 +379,9 @@ function launchAll(numbers, deps, { tiers, models, labels }) {
 // --auto: every ready issue is checked the way /lane does, then pickStartable chooses among the rest against the
 // paths open PRs change and running lanes claim. Prints the plan; launches it only with `go`.
 function autoStart(go, deps, { maxLanes, softPaths, models }) {
-  let prs, inFlight, openIssues;
+  let prs, sessions, inFlight, openIssues;
   try {
-    ({ prs, inFlight } = readInFlight(deps, "number,headRefName,files"));
+    ({ prs, sessions, inFlight } = readInFlight(deps, "number,headRefName,files"));
     openIssues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body"]));
     // A blocker missing from a truncated list would not rank, and a running issue's claim would be lost.
     if (openIssues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to plan from`);
@@ -398,7 +398,7 @@ function autoStart(go, deps, { maxLanes, softPaths, models }) {
   const candidates = [];
   for (const issue of ready) {
     const why = busy.has(issue.number)
-      ? "already in flight"
+      ? inFlightReason(issue.number, prs, sessions)
       : refusal({ state: "OPEN", labels: labelsOf(issue), blockers: checkBlockers([String(issue.number)], deps.gh) });
     if (why) skipped.push({ number: issue.number, reason: why });
     else candidates.push(issue);
