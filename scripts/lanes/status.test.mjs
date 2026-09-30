@@ -1012,3 +1012,11 @@ test("edge: a failing check owes the lane too, so an idle lane on it is reported
   assert.equal(s.waitingOnOwner[0].stage, "failing");
   assert.match(s.waitingOnOwner[0].note, /idle 60 min: claude attach aaaa0001/);
 });
+
+test("edge: an idle lane is reported on a PR with no gate yet or a gate in another pending state, and not on a failed contract", () => {
+  const agents = [idleLane()];
+  const run = (rollup) => summarize({ prs: [pr(5, rollup, { closingIssuesReferences: [{ number: 10 }] })], issues: [issue(10)], merged: [], sessions: laneSessions(agents, ROOT), idle: idleOf(agents, () => ago(60)) });
+  assert.match(run([]).waitingOnOwner[0].note, /^no lanes\/gate yet — idle 60 min: claude attach aaaa0001$/);
+  assert.equal(run([gate("PENDING", "checks still running")]).waitingOnOwner[0].stage, "review");
+  assert.doesNotMatch(JSON.stringify(run([gate("FAILURE", "contract broken")])), /idle 60/);
+});
