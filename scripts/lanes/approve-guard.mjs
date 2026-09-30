@@ -31,7 +31,20 @@ export const UNPARSED_REASON = `the command could not be parsed and names post-r
 // ADR 0017 decision 3: a pushed v* tag releases, so only the owner makes one, from their own terminal (#404).
 export const TAG_REASON = "creating or pushing a v* tag starts a release, which the owner does from their own terminal, never from a Claude session (ADR 0017)";
 export const WMI_REASON =`this WMI/CIM process creation builds its command line at run time, which could be post-review.mjs owner: ${DENY_REASON}`;
+// Each fail-closed path that has no PR says why it fired (#507), so "runs a program named only at run time" reads apart from "needs /approve".
+export const DEPTH_REASON = `the command nests scripts deeper than the guard reads: ${DENY_REASON}`;
+export const RUNTIME_PROGRAM_REASON = `this command runs a program or script named only at run time ($VAR, $(…), a glob or a backtick), which could be post-review.mjs owner: ${DENY_REASON}`;
+export const POWERSHELL_REASON = `the PowerShell text could not be read, and it may run post-review.mjs owner: ${DENY_REASON}`;
+export const POST_REVIEW_ARGS_REASON = `post-review.mjs owner has no single readable --pr: ${DENY_REASON}`;
+export const REVIEWER_NAME_REASON = `the post-review.mjs reviewer name is set at run time or is no configured reviewer: ${DENY_REASON}`;
 const SESSION_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** A fail-closed entry for `out`; `why` is non-enumerable so the entry's shape stays `{ pr, standalone }`. */
+function failClosed(out, pr, why) {
+  const entry = { pr, standalone: false };
+  Object.defineProperty(entry, "why", { value: why });
+  out.push(entry);
+}
 const APPROVE_RE = /^\/approve ([1-9][0-9]{0,8})$/;
 // `/approve <N> [<N>...]`: numbers separated by one space, so the match is linear (#275).
 const APPROVE_LIST_RE = /^\/approve((?: [1-9][0-9]{0,8})+)$/;
@@ -393,7 +406,7 @@ function scanNested(w, depth, out, shell) {
 
 /** Text that may be run as a script (a heredoc fed to a shell): scan it as a command of its own. */
 function scanScript(text, depth, out) {
-  if (depth >= MAX_DEPTH) out.push({ pr: undefined, standalone: false });
+  if (depth >= MAX_DEPTH) failClosed(out, undefined, DEPTH_REASON);
   else scan(text, depth + 1, out);
 }
 
@@ -488,14 +501,14 @@ function scan(cmd, depth, out) {
     });
     // Shell text known only at run time (shell-lex.mjs's runsRuntimeText, shared with start-guard.mjs) could be
     // post-review.mjs owner; the scan below denies it too, and this keeps both guards reading it by one rule (#378).
-    if (runsArgs && runsRuntimeText(plain)) out.push({ pr: undefined, standalone: false });
+    if (runsArgs && runsRuntimeText(plain)) failClosed(out, undefined, RUNTIME_PROGRAM_REASON);
     // A v* tag, made or pushed, is the owner's alone (ADR 0017, #404).
     // `plain` has its assignments dropped, so the raw words are read too: `GIT_CONFIG_KEY_0=push.followTags git push` (#441).
     if (releaseTagCommand(plain) || releaseTagCommand(segments[k])) out.push({ pr: undefined, standalone: false, tag: true });
     // An awk or sed program that runs a command (#404): one holding a backslash escape could spell any name
     // (`post-revi\145w`), so it fails closed; one with none is read with its strings joined, as awk's "a" "b" joins them.
     const running = programArgs ? runningProgram(name ?? "", plain.slice(1).map(unmark)) : null;
-    if (running !== null && (running.includes("\\") || /post-review/i.test(running.replace(/["'\s]/g, "")))) out.push({ pr: undefined, standalone: false });
+    if (running !== null && (running.includes("\\") || /post-review/i.test(running.replace(/["'\s]/g, "")))) failClosed(out, undefined, RUNTIME_PROGRAM_REASON);
     // What powershell, pwsh, cmd or fish runs: its arguments as one command line, scanned in bash terms (#119).
     // powershell's text with its own syntax in it is read with PowerShell's rules (powershellAsBash, #404), past the
     // shell's own options, and then its words are not read again as bash; text that cannot be read fails closed.
@@ -511,7 +524,7 @@ function scan(cmd, depth, out) {
         } catch {
           read = null;
         }
-        if (read === null) out.push({ pr: undefined, standalone: false });
+        if (read === null) failClosed(out, undefined, POWERSHELL_REASON);
         else {
           readAsPowerShell = true;
           scanScript(read, depth, out);
@@ -550,11 +563,12 @@ function scan(cmd, depth, out) {
       } else if (POST_REVIEW_RE.test(w)) {
         const { reviewer, pr } = readPostReviewArgs(plain.slice(i + 1).map((x) => (shell ? unmark(x) : x)));
         // Fail closed: a reviewer word that could expand to anything, or that no configured reviewer carries, counts as the owner.
-        if (reviewer === "owner" || (reviewer !== undefined && (/[$`*?[{]/.test(reviewer) || (REVIEWER_WORD_RE.test(reviewer) && !(allowedReviewers ??= configuredReviewers()).includes(reviewer))))) out.push({ pr, standalone: false });
+        if (reviewer === "owner") failClosed(out, pr, pr === undefined ? POST_REVIEW_ARGS_REASON : undefined);
+        else if (reviewer !== undefined && (/[$`*?[{]/.test(reviewer) || (REVIEWER_WORD_RE.test(reviewer) && !(allowedReviewers ??= configuredReviewers()).includes(reviewer)))) failClosed(out, pr, REVIEWER_NAME_REASON);
       } else if ((UNRESOLVED_RE.test(w) || mayExpandToPostReview(w)) && (i === 0 || nodeRange.has(i) || (i >= evalFrom && UNRESOLVED_RE.test(w)))) {
         // The command word, a node option or the script node runs, or text a shell evaluates, that could still expand
         // to post-review.mjs: fail closed.
-        out.push({ pr: undefined, standalone: false });
+        failClosed(out, undefined, RUNTIME_PROGRAM_REASON);
       }
     });
   });
@@ -1085,7 +1099,8 @@ export function decidePreToolUse(input, grantOrLookup, now = Date.now()) {
   if (found.length === 0) return null;
   if (found.some((f) => f.unparsed)) return { decision: "deny", reason: UNPARSED_REASON };
   if (found.some((f) => f.tag)) return { decision: "deny", reason: TAG_REASON };
-  const deny ={ decision: "deny", reason: DENY_REASON };
+  // The first entry that says why; a real owner invocation carries no reason and keeps the generic one (#507).
+  const deny = { decision: "deny", reason: found.find((f) => f.why)?.why ?? DENY_REASON };
   const sessionId = input.session_id;
   if (found.length !== 1 || !found[0].standalone) return deny;
   if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId)) return deny;
