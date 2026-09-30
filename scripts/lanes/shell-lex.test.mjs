@@ -799,3 +799,21 @@ test("#468 criterion 4: gh api with an endpoint known only at run time, gh relea
     assert.equal(tagIn(cmd), false, cmd);
   }
 });
+
+test("#468 security: chained launchers are followed to a cap and then fail closed, in bounded time", () => {
+  assert.equal(tagIn("xargs xargs xargs git tag -l"), false);
+  assert.equal(tagIn("xargs ssh h xargs git tag v1"), true);
+  const start = Date.now();
+  assert.equal(tagIn(`${"xargs ".repeat(3000)}git tag -l`), true, "past the cap fails closed");
+  assert.equal(tagIn(`${"ssh h ".repeat(3000)}git tag -l`), true);
+  assert.ok(Date.now() - start < 500, `took ${Date.now() - start} ms`);
+});
+
+test("#468 test-hunter: a fetch into tags/v1 (git completes it to refs/tags/) and a draft read from a file are tag paths", () => {
+  for (const cmd of ["git fetch . HEAD:tags/v1", "git fetch . +HEAD:tags/v1", "git fetch . HEAD:tags/*", "gh api repos/o/r/releases/1 -X PATCH -F draft=@f", "gh api repos/o/r/releases/$ID -X PATCH -F draft=@-", "ssh -- host git tag v1", "ssh -p 22 -- host git push --tags"]) {
+    assert.equal(tagIn(cmd), true, cmd);
+  }
+  for (const cmd of ["git fetch . HEAD:tags/x", "git fetch . HEAD:heads/v1x", "git fetch origin pull/5/head:pr-5", "gh api repos/o/r/releases/1 -X PATCH -F name=@f"]) {
+    assert.equal(tagIn(cmd), false, cmd);
+  }
+});

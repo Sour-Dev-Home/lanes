@@ -694,6 +694,9 @@ function sshCommand(words, at) {
   return words.slice(words[i + 1] === "--" ? i + 2 : i + 1);
 }
 
+// A fetch destination git completes to refs/tags/… itself: `tags/v1` (git's get_local_ref adds `refs/` to heads/, tags/ and remotes/).
+const FETCH_TAGS_DST_RE = /^tags\/(?:v|[*?[])/i;
+
 /** True when git fetch's arguments `rest` write a v* tag: a `src:dst` refspec whose destination could be one, or `tag NAME` (#468). */
 function fetchWritesTag(rest) {
   const args = [];
@@ -702,7 +705,7 @@ function fetchWritesTag(rest) {
     else if (!rest[j].startsWith("-")) args.push(rest[j]);
   }
   // The first argument is the repository; each one after it is a refspec, or `tag` before a tag's name.
-  return args.slice(1).some((w, k, specs) => (w.includes(":") && (RELEASE_REF_RE.test(unmark(w).split(":").at(-1)) || runtimeRef(w))) || (w === "tag" && k + 1 < specs.length));
+  return args.slice(1).some((w, k, specs) => (w.includes(":") && (RELEASE_REF_RE.test(unmark(w).split(":").at(-1)) || FETCH_TAGS_DST_RE.test(unmark(w).split(":").at(-1)) || runtimeRef(w))) || (w === "tag" && k + 1 < specs.length));
 }
 
 // How many -c aliases deep releaseTagCommand follows before failing closed.
@@ -809,7 +812,8 @@ function ghApiTag(words, at) {
       const value = new RegExp(`(?:^|[^A-Za-z0-9_])${field}=(.*)$`, "s").exec(w)?.[1] ?? new RegExp(`^-[fF]${field}=(.*)$`, "s").exec(w)?.[1];
       if (value === undefined) continue;
       if (field === "draft") {
-        if (isFalse(value)) return true;
+        // `-F draft=@f` reads the value from a file.
+        if (isFalse(value) || value.startsWith("@")) return true;
         continue;
       }
       if (refs ? TAG_REF_RE.test(unmark(value)) : /^v/i.test(unmark(value))) return true;
@@ -860,8 +864,9 @@ function releaseTagAt(words, depth) {
   if (at >= words.length) return false;
   if (GH_RE.test(basename(words[at]))) return ghReleaseTag(words, at) || ghApiTag(words, at);
   // A launcher hands its command words on (#468): xargs, with its input as a run-time argument, and ssh, to the remote shell.
-  if (XARGS_RE.test(basename(words[at]))) return releaseTagAt([...words.slice(0, at), ...xargsCommand(words, at)], depth);
-  if (SSH_RE.test(basename(words[at]))) return releaseTagAt(sshCommand(words, at), depth);
+  // Each launcher is a level, capped like the alias chain: a chain of thousands fails closed instead of costing time.
+  if (XARGS_RE.test(basename(words[at]))) return depth >= MAX_ALIAS_DEPTH || releaseTagAt([...words.slice(0, at), ...xargsCommand(words, at)], depth + 1);
+  if (SSH_RE.test(basename(words[at]))) return depth >= MAX_ALIAS_DEPTH || releaseTagAt(sshCommand(words, at), depth + 1);
   if (!GIT_RE.test(basename(words[at]))) return false;
   let i = at + 1;
   let followTags = false;
