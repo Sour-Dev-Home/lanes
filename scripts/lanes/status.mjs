@@ -5,7 +5,7 @@ import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GATE_CONTEXT, laneIssueOf, parseIssueForm, parsePrBody, reviewContext } from "./lib.mjs";
+import { GATE_CONTEXT, laneIssueOf, loadConfig, parseIssueForm, parsePrBody, reviewContext, reviewerNames, trustedStatuses } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { BUDGET_DEFAULTS, budgetConfig, loadBudget, projectFolder } from "./lane-cost.mjs";
 import { claimedPaths } from "./pick.mjs";
@@ -35,6 +35,29 @@ export function prStage(pr, queuePosition, gateDescription) {
   // The gate waits for a reviewer's status: the lane owes it, not the owner, whatever the body asks for.
   if (/^waiting for review\/\S/.test(description)) return { stage: "gate", note: description };
   return { stage: "review", note: description };
+}
+
+// `gh pr list`'s rollup carries no status creator, so each PR's `review/*` entries are checked against the creators in
+// STATUS_QUERY's reply: lib's `trustedStatuses` drops a bot's (except the configured lane bot's for a non-owner
+// reviewer under team), and an entry with no readable creator, or a PR missing from the reply, is untrusted. Every
+// other entry is kept. A `lanes/gate` status is trusted as posted (it comes from the gate workflow's own bot, so
+// its author cannot be filtered): the risk ADR 0004 part 3 accepts.
+export function trustedRollups(prs, reply, config) {
+  const byPr = new Map();
+  for (const node of reply?.data?.repository?.pullRequests?.nodes ?? []) {
+    const contexts = node?.commits?.nodes?.[0]?.commit?.status?.contexts;
+    const statuses = (Array.isArray(contexts) ? contexts : []).map((c) => ({
+      context: c?.context,
+      state: c?.state,
+      creator: c?.creator ? { login: c.creator.login, type: c.creator.__typename } : undefined,
+    }));
+    byPr.set(node.number, trustedStatuses(statuses, config?.identity, reviewerNames(config)));
+  }
+  return prs.map((pr) => {
+    const trusted = byPr.get(pr.number) ?? [];
+    const keep = (c) => !String(c?.context ?? "").startsWith("review/") || trusted.some((t) => t.context === c.context && t.state === c.state);
+    return { ...pr, statusCheckRollup: (pr.statusCheckRollup ?? []).filter(keep) };
+  });
 }
 
 const ownerApproved = (pr) => (pr.statusCheckRollup ?? []).some((c) => c.context === reviewContext("owner") && c.state === "SUCCESS");
@@ -441,7 +464,7 @@ const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", std
 export const STATUS_QUERY =
   "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ " +
   "mergeQueue { entries(first:100){ nodes { state position pullRequest { number } } } } " +
-  `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description createdAt } } } } } } } } }`;
+  `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description createdAt } contexts { context state creator { login __typename } } } } } } } } } }`;
 
 // #390: the token budget for `--json`. A bad or unreadable lanes.config.json gives the defaults and says so in `note`;
 // unreadable agents or costs count as 0 (loadBudget notes the latter). Never throws.
@@ -498,7 +521,7 @@ async function main(argv = process.argv.slice(2)) {
   let rawAgents;
   const reply = gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${STATUS_QUERY}`]);
   const data = {
-    prs: gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,mergeable,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefName,files"]),
+    prs: trustedRollups(gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,mergeable,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefName,files"]), reply, loadConfig()),
     issues: gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,title,labels,body"]),
     merged: gh(["pr", "list", "--state", "merged", "--search", `merged:>=${since}`, "--limit", "100", "--json", "number,title"]),
     mergeQueue: mergeQueueEntries(reply),
