@@ -83,7 +83,7 @@ files with Edit, not Write.
    no figures, leave `metrics` out (`post-review.mjs` then warns but still posts). Fix what they find (one more round
    only if they found real bugs), set `fixed` truthfully, and save each verdict to `.lanes/verdicts/<reviewer>.json`. After the final push, post each:
    `node scripts/lanes/post-review.mjs --file .lanes/verdicts/<reviewer>.json`. A refused verdict prints why; fix the
-   JSON or the code, never the facts. Never post a verdict for a review you did not run. A verdict with an unfixed
+   JSON or the code, never the facts. Never post a verdict for a review you did not run: post only a verdict the reviewer agent returned, and never change a verdict's `verdict` field yourself. After fixing findings, re-run the reviewer and post its new verdict (`post-review.mjs` refuses a `security-reviewer` success over a failure on the same commit unless the verdict carries `metrics`). A verdict with an unfixed
    critical or important finding is still posted, as `failure`: never hold it back, so the gate reports the finding
    instead of waiting on a review that never arrives. For each posted finding with severity critical or important and
    `fixed: true`, write one fragment in the same PR, `docs/lessons.d/<area>-<pattern>-<issue>.md`, reusing an existing

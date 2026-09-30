@@ -13,8 +13,9 @@
 //   PreToolUse (PowerShell) runs the same hook (#61): powershellAsBash reads the command with PowerShell's rules into the
 //     Bash command with the same words, which is scanned as above; the plain form must also hold no character
 //     PowerShell gives a meaning of its own, and a command that cannot be read is denied when it names post-review.
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dequoted, launchedCommands, lex, mayBeNode, mayExpandTo, readGrant, releaseTagCommand, RUNS_ON_EXPANSION_RE, runsRuntimeText, scriptSubcommand, unmark, wmiProcessCreate } from "./shell-lex.mjs";
 
@@ -956,9 +957,25 @@ const unquotedPowerShell = (command) => psDequoted(String(command ?? ""));
 // The owner command through PowerShell is plain only without any character PowerShell gives a meaning of its own.
 const PS_META_RE = new RegExp(`[;&|\`$<>(){}@,#%*?[\\]\\n\\r\\\\${String.fromCharCode(0x2018)}-${String.fromCharCode(0x201e, 0x85, 0x2028, 0x2029, 0xe000)}-${String.fromCharCode(0xf8ff)}]`);
 
-/** The directory the UserPromptSubmit hook writes grants to: .lanes/approve/ in the checkout holding this script. */
+/**
+ * The .lanes/approve/ of the main checkout, found from `from` (a directory of any checkout or worktree of the repository)
+ * through `git rev-parse --git-common-dir`, so every worktree shares one grant directory (#447). Without git, or outside
+ * a repository, it falls back to the checkout holding `from`.
+ */
+export function grantDirFrom(from) {
+  const own = resolve(from, "../../.lanes/approve");
+  try {
+    const common = execFileSync("git", ["-C", from, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (common !== "" && basename(common) === ".git") return join(dirname(common), ".lanes", "approve");
+  } catch {
+    // git missing or not a repository: the checkout holding this script is the best answer.
+  }
+  return own;
+}
+
+/** The directory the UserPromptSubmit hook writes grants to: .lanes/approve/ in the main checkout, from any worktree. */
 export function grantDir() {
-  return fileURLToPath(new URL("../../.lanes/approve/", import.meta.url));
+  return grantDirFrom(fileURLToPath(new URL(".", import.meta.url)));
 }
 
 /** A grant file's shape: { sessionId: string, pr: positive integer, at: a parseable date }. */

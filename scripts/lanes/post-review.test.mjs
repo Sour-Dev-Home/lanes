@@ -1,9 +1,11 @@
 // scripts/lanes/post-review.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { grantDirFrom } from "./approve-guard.mjs";
 import { buildStatus, buildVerdictComment, checkSha, claimGrant, main, metricsWarning, parseArgs, requireOwnerGrant, validateVerdict } from "./post-review.mjs";
 
 test("skipped is a success whose description starts with skipped", () => {
@@ -298,9 +300,10 @@ const HEAD = "a".repeat(40);
 const ISSUE_BODY = "### Goal\n\ng\n\n### Acceptance criteria\n\n- [ ] one\n- [ ] two\n\n### Interface contract\n\nnone\n\n### Scope\n\nIn: `a.mjs`.\n\n### Blocked by\n\nnone\n\n### Tier\n\nfull\n";
 
 /** A fake `gh`: answers the reads, records every write, and throws on the write named by `failOn`. */
-function fakeGh({ failOn = null, prBody = "Closes #7" } = {}) {
+function fakeGh({ failOn = null, prBody = "Closes #7", statuses = [] } = {}) {
   const writes = [];
   const run = (args) => {
+    if (args[0] === "api" && args.length === 2 && args[1].endsWith("/status")) return JSON.stringify({ statuses });
     if (args[0] === "pr" && args[1] === "view") return JSON.stringify({ number: 12, headRefOid: HEAD, body: prBody });
     if (args[0] === "repo" && args[1] === "view") return "o/r\n";
     if (args[0] === "issue" && args[1] === "view") return JSON.stringify({ body: ISSUE_BODY });
@@ -352,7 +355,7 @@ function grantDirWith(files = {}) {
   return dir;
 }
 const approval = (...extra) => ["owner", "success", "approved", "--pr", "12", ...extra];
-const NO_GRANT = /(^|Error: )no fresh \/approve 12 grant: run \/approve 12 in the owner's session$/;
+const NO_GRANT = /(^|Error: )no fresh \/approve 12 grant in .+: run \/approve 12 in the owner's session$/;
 
 test("without --file, the owner's approval with a fresh grant posts only the status and consumes the grant", () => {
   const gh = fakeGh();
@@ -577,4 +580,74 @@ test("edge: a --file path that does not exist posts neither comment nor status",
   const missing = join(mkdtempSync(join(tmpdir(), "post-review-")), "does-not-exist.json");
   assert.throws(() => main(["--file", missing], { run: gh.run, ...quiet }), /ENOENT/);
   assert.deepEqual(gh.writes, []);
+});
+
+// #447: the security reviewer's failure flips to success only through a real reviewer run (metrics), never a hand edit.
+const secVerdict = (over = {}) => verdict({ reviewer: "security-reviewer", criteria: [], findings: [], ...over });
+const METRICS = { tier: "full", minutes: 3.2, tokens: 41000 };
+const secFailed = [{ context: "review/security-reviewer", state: "failure" }];
+
+test("a security-reviewer success without metrics over a failure on the same SHA is refused, posting nothing", () => {
+  const gh = fakeGh({ statuses: secFailed });
+  assert.throws(() => main(["--file", verdictFile(secVerdict())], { run: gh.run, ...quiet }), /review\/security-reviewer is failure.*re-run the security reviewer/);
+  assert.deepEqual(gh.writes, []);
+});
+
+test("a security-reviewer success with metrics over a failure is allowed", () => {
+  const gh = fakeGh({ statuses: secFailed });
+  main(["--file", verdictFile(secVerdict({ metrics: METRICS }))], { run: gh.run, ...quiet });
+  assert.deepEqual(gh.writes.map((w) => w.kind), ["comment", "status"]);
+});
+
+test("edge: without metrics, a security success is allowed when the status is not a failure, and other reviewers are never refused", () => {
+  for (const statuses of [[], [{ context: "review/security-reviewer", state: "success" }], [{ context: "review/security-reviewer", state: "pending" }], [{ context: "review/test-hunter", state: "failure" }]]) {
+    const gh = fakeGh({ statuses });
+    const warnings = [];
+    main(["--file", verdictFile(secVerdict())], { run: gh.run, log: () => {}, warn: (w) => warnings.push(w) });
+    assert.deepEqual(gh.writes.map((w) => w.kind), ["comment", "status"]);
+    assert.match(warnings[0], /no metrics/);
+  }
+  const gh = fakeGh({ statuses: [{ context: "review/test-hunter", state: "failure" }] });
+  main(["--file", verdictFile()], { run: gh.run, ...quiet });
+  assert.deepEqual(gh.writes.map((w) => w.kind), ["comment", "status"]);
+});
+
+test("edge: a security failure verdict is never refused over a failure status", () => {
+  const gh = fakeGh({ statuses: secFailed });
+  main(["--file", verdictFile(secVerdict({ verdict: "failure", summary: "still open", findings: [{ severity: "critical", file: "a.mjs", line: 1, summary: "x", fixed: false }] }))], { run: gh.run, ...quiet });
+  assert.deepEqual(gh.writes.map((w) => w.kind), ["comment", "status"]);
+});
+
+test("the refusal for a missing grant names the directory it checked", () => {
+  const dir = grantDirWith({});
+  assert.throws(() => requireOwnerGrant("12", dir, NOW), (e) => e.message.includes(dir));
+});
+
+test("grantDirFrom finds the main checkout's .lanes/approve from the main checkout and from a worktree", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "grant-repo-")));
+  const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "core.hooksPath=", ...args], { cwd, stdio: "pipe" });
+  const mainCheckout = join(root, "main");
+  mkdirSync(join(mainCheckout, "scripts", "lanes"), { recursive: true });
+  git(mainCheckout, "init", "-q", "-b", "main");
+  git(mainCheckout, "commit", "-q", "--allow-empty", "-m", "init");
+  const wt = join(root, "wt");
+  git(mainCheckout, "worktree", "add", "-q", "-b", "wt", wt);
+  mkdirSync(join(wt, "scripts", "lanes"), { recursive: true });
+  const want = join(mainCheckout, ".lanes", "approve");
+  assert.equal(grantDirFrom(join(mainCheckout, "scripts", "lanes")), want);
+  assert.equal(grantDirFrom(join(wt, "scripts", "lanes")), want);
+});
+
+test("edge: grantDirFrom outside any repository falls back to the checkout holding the script", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "grant-nogit-")));
+  const dir = join(root, "scripts", "lanes");
+  mkdirSync(dir, { recursive: true });
+  assert.equal(grantDirFrom(dir), join(root, ".lanes", "approve"));
+});
+
+test("lane.md says a lane posts only a verdict the reviewer returned, never edits its verdict field, and re-runs after fixes", () => {
+  const step6 = laneStep6();
+  assert.match(step6, /only a verdict the reviewer agent returned/);
+  assert.match(step6, /never change a verdict's `verdict` field/);
+  assert.match(step6, /re-run the reviewer/);
 });
