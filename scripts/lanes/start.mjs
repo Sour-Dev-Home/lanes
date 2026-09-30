@@ -139,9 +139,9 @@ function startModels(models) {
  * @param {{ tier?: string, models?: { skip?: string, quick?: string, full?: string }, opus?: boolean }} [options] tier
  *   without `tier:`; opus (the issue's `model:opus` label) launches on Opus over the tier's model
  */
-export function launchArgs(n, { tier, models = {}, opus = false } = {}) {
+export function launchArgs(n, { tier, models = {}, opus = false, settings } = {}) {
   const model = opus ? "opus" : TIERS.includes(tier) && Object.hasOwn(models, tier) ? models[tier] : undefined;
-  const named = ["--bg", "--name", `lane-${n}`];
+  const named = ["--bg", "--name", `lane-${n}`, ...(settings ? ["--settings", settings] : [])];
   return model ? [...named, "--model", model, `/lane ${n}`] : [...named, `/lane ${n}`];
 }
 
@@ -218,19 +218,44 @@ export function isLaneGhDir(dir, tmp, isLink = () => false) {
  */
 export function teamLaneEnv(env, { ghDir, emptyConfig }) {
   const kept = Object.fromEntries(Object.entries(env).filter(([k]) => !TEAM_SCRUBBED.some((re) => re.test(k))));
+  return { ...kept, ...teamLaneVars({ ghDir, emptyConfig }) };
+}
+
+/**
+ * #540: the variables a team lane sets, apart from what it scrubs. `origin` is ssh in the repository's own
+ * `.git/config`, which GIT_CONFIG_GLOBAL does not override, so git is told to rewrite both ssh forms of github.com to
+ * https (where `gh auth git-credential` answers) and `GIT_SSH_COMMAND` fails, so a push never reaches the owner's key.
+ */
+export function teamLaneVars({ ghDir, emptyConfig }) {
   return {
-    ...kept,
     GH_CONFIG_DIR: ghDir,
     GIT_CONFIG_GLOBAL: emptyConfig,
     GIT_CONFIG_SYSTEM: emptyConfig,
     // The first, empty value resets any helper list; the second is the only helper.
-    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_COUNT: "4",
     GIT_CONFIG_KEY_0: "credential.helper",
     GIT_CONFIG_VALUE_0: "",
     GIT_CONFIG_KEY_1: "credential.helper",
     GIT_CONFIG_VALUE_1: "!gh auth git-credential",
+    GIT_CONFIG_KEY_2: "url.https://github.com/.insteadOf",
+    GIT_CONFIG_VALUE_2: "git@github.com:",
+    GIT_CONFIG_KEY_3: "url.https://github.com/.insteadOf",
+    GIT_CONFIG_VALUE_3: "ssh://git@github.com/",
+    GIT_SSH_COMMAND: 'echo "lanes: ssh is disabled for a team lane" >&2; exit 1',
     GIT_TERMINAL_PROMPT: "0",
   };
+}
+
+// Names a launcher's env removes from a team lane; in settings `env` (which cannot unset) they are blanked instead.
+const TEAM_BLANKED = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN", "LANES_APP_KEY_FILE", "SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GH_HOST", "GH_REPO"];
+
+/**
+ * #540: the `--settings` content that carries the team environment into a `claude --bg` session. A background session
+ * is started by a host that holds the owner's environment, so the launcher's `env` does not reach the session's tools;
+ * a settings file's `env` is applied to the session's tool processes. Holds no secret.
+ */
+export function teamLaneSettings({ ghDir, emptyConfig }) {
+  return { env: { ...Object.fromEntries(TEAM_BLANKED.map((k) => [k, ""])), ...teamLaneVars({ ghDir, emptyConfig }) } };
 }
 
 // Launcher side of the team profile for lane n: checks the key, makes the lane's directory and mints into it. Returns
@@ -265,7 +290,16 @@ function prepareTeam(n, identity, deps, baseEnv) {
       removeQuietly(team, lane.dir);
       return { failed: `token mint failed: ${reason(err)}` };
     }
-    return { env: teamLaneEnv(baseEnv, { ghDir: lane.dir, emptyConfig: lane.emptyConfig }), dir: lane.dir, repo };
+    // The launcher's env does not reach a --bg session's tools (#540), so the team environment is also delivered as
+    // a settings file; a lane that cannot have it never launches.
+    const settings = join(lane.dir, "settings.json");
+    try {
+      team.writeSettings(settings, teamLaneSettings({ ghDir: lane.dir, emptyConfig: lane.emptyConfig }));
+    } catch {
+      removeQuietly(team, lane.dir);
+      return { failed: "could not deliver the team settings to the lane" };
+    }
+    return { env: teamLaneEnv(baseEnv, { ghDir: lane.dir, emptyConfig: lane.emptyConfig }), dir: lane.dir, repo, settings };
   } catch {
     return { failed: "unexpected error" };
   }
@@ -607,7 +641,7 @@ function launchAll(numbers, deps, { tiers, models, labels, identity }) {
     let id = null;
     let why = "no session id in output";
     try {
-      id = parseSessionId(deps.claude(launchArgs(n, { tier: tiers.get(n), models, opus }), launchEnvFor ? { cwd: root, env: launchEnvFor } : { cwd: root }));
+      id = parseSessionId(deps.claude(launchArgs(n, { tier: tiers.get(n), models, opus, settings: lane?.settings }), launchEnvFor ? { cwd: root, env: launchEnvFor } : { cwd: root }));
     } catch (err) {
       why = reason(err);
     }
@@ -849,6 +883,7 @@ const team = {
     return { dir, emptyConfig };
   },
   removeDir: (dir) => rmSync(dir, { recursive: true, force: true }),
+  writeSettings: (file, settings) => writeFileSync(file, JSON.stringify(settings, null, 2)),
   mintInto: ({ issue, appId, installationId, repo, dir }) => {
     execFileSync(process.execPath, [selfPath, "--refresh-token", "--once", "--issue", String(issue), "--session", "mint-only", "--dir", dir, "--app", String(appId), "--installation", String(installationId), "--repo", repo], {
       env: process.env,

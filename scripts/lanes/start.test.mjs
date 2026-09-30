@@ -2061,17 +2061,20 @@ test("startConfig refuses any other identity shape with a clear error", () => {
 test("teamLaneEnv removes the credentials and points gh and git at the lane's own files", () => {
   const env = { PATH: "/bin", HOME: "/h", LANES_APP_KEY_FILE: "/k", GH_TOKEN: "t", GITHUB_TOKEN: "t", GH_ENTERPRISE_TOKEN: "t", GH_CONFIG_DIR: "/owner", github_token: "t", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "store", GIT_CONFIG_PARAMETERS: "'a=b'", GIT_ASKPASS: "x", SSH_ASKPASS: "x", GCM_INTERACTIVE: "1" };
   const out = teamLaneEnv(env, { ghDir: "/lane/gh", emptyConfig: "/lane/empty" });
-  assert.deepEqual(out, { PATH: "/bin", HOME: "/h", GH_CONFIG_DIR: "/lane/gh", GIT_CONFIG_GLOBAL: "/lane/empty", GIT_CONFIG_SYSTEM: "/lane/empty", GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "", GIT_CONFIG_KEY_1: "credential.helper", GIT_CONFIG_VALUE_1: "!gh auth git-credential", GIT_TERMINAL_PROMPT: "0" });
+  assert.deepEqual(out, { PATH: "/bin", HOME: "/h", GH_CONFIG_DIR: "/lane/gh", GIT_CONFIG_GLOBAL: "/lane/empty", GIT_CONFIG_SYSTEM: "/lane/empty", GIT_CONFIG_COUNT: "4", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "", GIT_CONFIG_KEY_1: "credential.helper", GIT_CONFIG_VALUE_1: "!gh auth git-credential", GIT_CONFIG_KEY_2: "url.https://github.com/.insteadOf", GIT_CONFIG_VALUE_2: "git@github.com:", GIT_CONFIG_KEY_3: "url.https://github.com/.insteadOf", GIT_CONFIG_VALUE_3: "ssh://git@github.com/", GIT_SSH_COMMAND: out.GIT_SSH_COMMAND, GIT_TERMINAL_PROMPT: "0" });
+  assert.match(out.GIT_SSH_COMMAND, /exit 1$/, "ssh is made to fail");
   assert.equal(env.GH_TOKEN, "t", "the input is not mutated");
 });
 
 // A team launch with every side effect faked: what was minted, where, what claude got, what the refresher was given.
-function teamRun({ env = {}, key = "/keys/app.pem", unreadable = false, mintFail = null, dirFail = false, noRepo = false, identity = TEAM, launchFail = [], spawnChild } = {}) {
+function teamRun({ env = {}, key = "/keys/app.pem", unreadable = false, mintFail = null, dirFail = false, noRepo = false, settingsFail = false, identity = TEAM, launchFail = [], spawnChild } = {}) {
   const f = fakes({ issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } }, launchFail, config: { identity }, spawnChild });
   const made = [];
   const removed = [];
   const minted = [];
   const claudeEnvs = [];
+  const claudeArgs = [];
+  const settingsWritten = [];
   const team = {
     keyFile: () => key,
     readable: () => {
@@ -2087,17 +2090,24 @@ function teamRun({ env = {}, key = "/keys/app.pem", unreadable = false, mintFail
       return { dir: `/tmp/lane-${n}`, emptyConfig: `/tmp/lane-${n}/empty` };
     },
     removeDir: (dir) => removed.push(dir),
+    writeSettings: (file, settings) => {
+      if (settingsFail) throw new Error("EACCES: /tmp/x/settings.json");
+      settingsWritten.push({ file, settings });
+    },
     mintInto: (args) => {
       minted.push(args);
       if (mintFail) throw new Error(mintFail);
     },
   };
   const claude = (args, opts) => {
-    if (args[0] !== "agents") claudeEnvs.push(opts.env);
+    if (args[0] !== "agents") {
+      claudeEnvs.push(opts.env);
+      claudeArgs.push(args);
+    }
     return f.deps.claude(args, opts);
   };
   const deps = { ...f.deps, claude, team, launchEnv: () => ({ env: { PATH: "/bin", ...env }, note: null }) };
-  return { ...f, deps, made, removed, minted, claudeEnvs };
+  return { ...f, deps, made, removed, minted, claudeEnvs, claudeArgs, settingsWritten };
 }
 
 test("team: each lane gets a scrubbed environment and its own minted config directory", () => {
@@ -2115,6 +2125,41 @@ test("team: each lane gets a scrubbed environment and its own minted config dire
     for (const k of ["LANES_APP_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"]) assert.equal(k in env, false, k);
     assert.equal(JSON.stringify(env).includes("/keys/app.pem"), false);
   }
+});
+
+test("team (#540): the team environment is delivered by a settings file the lane launches with", () => {
+  const t = teamRun({ env: { GH_TOKEN: "owner" } });
+  assert.equal(main(["1"], t.deps).code, 0);
+  const file = join("/tmp/lane-1", "settings.json");
+  assert.deepEqual(t.settingsWritten.map((w) => w.file), [file]);
+  const i = t.claudeArgs[0].indexOf("--settings");
+  assert.equal(t.claudeArgs[0][i + 1], file);
+  assert.ok(i > t.claudeArgs[0].indexOf("--bg") && i < t.claudeArgs[0].indexOf("/lane 1"));
+  const { env } = t.settingsWritten[0].settings;
+  assert.equal(env.GH_CONFIG_DIR, "/tmp/lane-1");
+  assert.equal(env.GIT_CONFIG_GLOBAL, "/tmp/lane-1/empty");
+  assert.equal(env.GIT_CONFIG_SYSTEM, "/tmp/lane-1/empty");
+  assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+  assert.equal(env.GIT_CONFIG_VALUE_1, "!gh auth git-credential");
+  for (const k of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]) assert.equal(env[k], "", k);
+  // The SSH rewrite and the failing ssh command.
+  assert.equal(env.GIT_CONFIG_COUNT, "4");
+  assert.deepEqual([env.GIT_CONFIG_KEY_2, env.GIT_CONFIG_VALUE_2, env.GIT_CONFIG_KEY_3, env.GIT_CONFIG_VALUE_3], ["url.https://github.com/.insteadOf", "git@github.com:", "url.https://github.com/.insteadOf", "ssh://git@github.com/"]);
+  assert.match(env.GIT_SSH_COMMAND, /exit 1$/);
+  assert.equal(JSON.stringify(env).includes("owner"), false, "no owner value and no token in the file");
+});
+
+test("edge (#540): a solo launch passes no --settings", () => {
+  const f = fakes({ issues: { 1: {} } });
+  main(["1"], f.deps);
+  assert.equal(f.launches.some((l) => l.args.includes("--settings")), false);
+});
+
+test("edge (#540): undeliverable settings remove the lane's directory and launch nothing", () => {
+  const t = teamRun({ settingsFail: true });
+  assert.equal(main(["1"], t.deps).code, 1);
+  assert.deepEqual(t.removed, ["/tmp/lane-1"]);
+  assert.equal(t.claudeArgs.length, 0);
 });
 
 test("team: a refresher is spawned beside each lane, detached, with the app ids and the lane's directory and no key", () => {
@@ -2146,6 +2191,7 @@ for (const [name, opts, step] of [
   ["an unreadable key file", { unreadable: true }, "key file unreadable"],
   ["an unknown repository", { noRepo: true }, "repository name unknown"],
   ["a config directory that cannot be made", { dirFail: true }, "could not create the lane's config directory"],
+  ["settings that cannot be delivered", { settingsFail: true }, "could not deliver the team settings to the lane"],
   ["a failed mint", { mintFail: "app-token: request to GitHub failed with status 401" }, "token mint failed: app-token: request to GitHub failed with status 401"],
 ]) {
   test(`team fails closed on ${name}: nothing launches and the owner's environment is never used`, () => {
@@ -2320,7 +2366,8 @@ test("isLaneGhDir accepts only lanes-gh-<issue>-* directly under the temp folder
 
 test("teamLaneEnv also drops ssh agent, ssh command and other token and host variables", () => {
   const out = teamLaneEnv({ PATH: "p", SSH_AUTH_SOCK: "s", GIT_SSH: "a", GIT_SSH_COMMAND: "b", GITHUB_PERSONAL_ACCESS_TOKEN: "t", GH_HOST: "h", GH_REPO: "r" }, { ghDir: "/g", emptyConfig: "/e" });
-  for (const k of ["SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND", "GITHUB_PERSONAL_ACCESS_TOKEN", "GH_HOST", "GH_REPO"]) assert.equal(k in out, false, k);
+  for (const k of ["SSH_AUTH_SOCK", "GIT_SSH", "GITHUB_PERSONAL_ACCESS_TOKEN", "GH_HOST", "GH_REPO"]) assert.equal(k in out, false, k);
+  assert.notEqual(out.GIT_SSH_COMMAND, "b", "the owner's ssh command is replaced by the failing one");
   assert.equal(out.PATH, "p");
 });
 
