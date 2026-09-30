@@ -494,13 +494,17 @@ export function shellTextIndexes(words) {
     cmd = next;
   }
   if (cmd !== -1 && EVAL_WORDS.has(words[cmd])) for (let i = cmd + 1; i < words.length; i += 1) at.add(i);
+  // Whether a word that puts a program after it stands before word p, kept as a flag: a slice per word is quadratic
+  // in the word count (#468).
+  let wrapped = false;
   words.forEach((w, p) => {
     const name = basename(w);
+    const program = wrapped || p === cmd;
+    wrapped ||= RUNS_NEXT_RE.test(name);
     if (SHELL_RE.test(name)) {
       for (let c = p + 1; c < words.length; c += 1) if (SHELL_C_RE.test(words[c])) at.add(shellScriptAt(words, c));
       return;
     }
-    const program = p === cmd || words.slice(0, p).some((x) => RUNS_NEXT_RE.test(basename(x)));
     if (!program) return;
     if (TEXT_C_RE.test(name)) {
       for (let c = p + 1; c < words.length; c += 1) {
@@ -643,15 +647,93 @@ const ALIAS_RE = /^alias\.([^=]+)=(.*)$/is;
 // its take the next word as their value.
 const GH_RE = /^gh(\.exe)?$/i;
 const GH_RELEASE_VALUED = new Set(["-t", "--title", "-n", "--notes", "-F", "--notes-file", "--target", "--discussion-category", "--notes-start-tag", "-R", "--repo"]);
+// What xargs appends to its command, or puts in place of its replace string: known only at run time.
+const XARGS_RE = /^xargs(\.exe)?$/i;
+const XARGS_INPUT = "${LANES_XARGS_INPUT}";
+const XARGS_VALUED = new Set(["-a", "-d", "-E", "-L", "-n", "-P", "-s", "--arg-file", "--delimiter", "--eof", "--max-lines", "--max-args", "--max-procs", "--max-chars", "--process-slot-var"]);
+const SSH_RE = /^ssh(\.exe)?$/i;
+const SSH_VALUED = new Set(["-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w"]);
+// git fetch's options that take the next word as their value.
+const FETCH_VALUED = new Set(["--depth", "--deepen", "--shallow-since", "--shallow-exclude", "--upload-pack", "--jobs", "-j", "--filter", "--server-option", "-o", "--refmap", "--negotiation-tip"]);
+
+/** The command words xargs at `words[at]` runs: those after its options, with its input appended or put in place of its replace string (#468). */
+function xargsCommand(words, at) {
+  let replace = null;
+  let i = at + 1;
+  for (; i < words.length; i += 1) {
+    const w = words[i];
+    if (w === "--") {
+      i += 1;
+      break;
+    }
+    if (!w.startsWith("-") || w === "-") break;
+    if (w === "-I") replace = words[(i += 1)] ?? null;
+    else if (w.startsWith("-I")) replace = w.slice(2);
+    else if (w === "-i" || w === "--replace") replace = "{}";
+    else if (w.startsWith("-i")) replace = w.slice(2);
+    else if (w.startsWith("--replace=")) replace = w.slice("--replace=".length);
+    else if (XARGS_VALUED.has(w)) i += 1;
+  }
+  const command = words.slice(i);
+  if (command.length === 0) return [];
+  return replace ? command.map((w) => w.replaceAll(replace, XARGS_INPUT)) : [...command, XARGS_INPUT];
+}
+
+/** The remote command words of ssh at `words[at]`: those after its options and its host (#468). */
+function sshCommand(words, at) {
+  let i = at + 1;
+  for (; i < words.length; i += 1) {
+    if (words[i] === "--") {
+      i += 1;
+      break;
+    }
+    if (!words[i].startsWith("-")) break;
+    if (SSH_VALUED.has(words[i])) i += 1;
+  }
+  // words[i] is the host; a `--` may stand between it and the command.
+  return words.slice(words[i + 1] === "--" ? i + 2 : i + 1);
+}
+
+/** True when git fetch's arguments `rest` write a v* tag: a `src:dst` refspec whose destination could be one, or `tag NAME` (#468). */
+function fetchWritesTag(rest) {
+  const args = [];
+  for (let j = 0; j < rest.length; j += 1) {
+    if (FETCH_VALUED.has(rest[j])) j += 1;
+    else if (!rest[j].startsWith("-")) args.push(rest[j]);
+  }
+  // The first argument is the repository; each one after it is a refspec, or `tag` before a tag's name.
+  return args.slice(1).some((w, k, specs) => (w.includes(":") && (RELEASE_REF_RE.test(unmark(w).split(":").at(-1)) || runtimeRef(w))) || (w === "tag" && k + 1 < specs.length));
+}
+
 // How many -c aliases deep releaseTagCommand follows before failing closed.
 const MAX_ALIAS_DEPTH = 8;
 
-/** True when gh release create at `words[at]` names a v* tag, one known only at run time, or none (gh then asks). */
+// A boolean value git or gh reads as false (Go's ParseBool), or one known only at run time.
+const isFalse = (v) => /^(?:0|f|false)$/i.test(unmark(v)) || LIVE_RE.test(v);
+
+/**
+ * True when gh release edit at `words[sub]` publishes a draft (`--draft=false`, or a value known only at run time) or
+ * points the release at a v* tag (`--tag v2`, or one known only at run time) (#468). `--draft` alone or `=true` drafts.
+ */
+function ghReleaseEdit(words, sub) {
+  for (let j = sub + 1; j < words.length; j += 1) {
+    const w = words[j];
+    const draft = /^--draft=(.*)$/s.exec(w)?.[1];
+    const tag = /^--tag=(.*)$/s.exec(w)?.[1] ?? (w === "--tag" ? words[j + 1] ?? "" : undefined);
+    if (draft !== undefined && isFalse(draft)) return true;
+    if (tag !== undefined && (RELEASE_REF_RE.test(unmark(tag)) || LIVE_RE.test(tag))) return true;
+    if (GH_RELEASE_VALUED.has(w) || w === "--tag") j += 1;
+  }
+  return false;
+}
+
+/** True when gh release create at `words[at]` names a v* tag, one known only at run time, or none (gh then asks); or gh release edit publishes a draft. */
 function ghReleaseTag(words, at) {
   if (words[at + 1] !== "release") return false;
   // release's own -R/--repo may stand before its subcommand (`gh release --repo o/r create v1`, security review).
   let sub = at + 2;
   while (/^(?:-R|--repo)(?:=.*)?$/s.test(words[sub] ?? "") || /^-R./s.test(words[sub] ?? "")) sub += /^(?:-R|--repo)$/.test(words[sub]) ? 2 : 1;
+  if (words[sub] === "edit") return ghReleaseEdit(words, sub);
   if (!["create", "new"].includes(words[sub])) return false;
   for (let j = sub + 1; j < words.length; j += 1) {
     if (GH_RELEASE_VALUED.has(words[j])) j += 1;
@@ -663,21 +745,23 @@ function ghReleaseTag(words, at) {
 // Config git reads from the environment (#441): GIT_CONFIG_KEY_n names a key (its GIT_CONFIG_VALUE_n and
 // GIT_CONFIG_COUNT need no reading), GIT_CONFIG_PARAMETERS holds `'key'='value'` pairs. Names are read in any case, as
 // Windows environment names are.
-const ENV_KEY_RE = /^GIT_CONFIG_KEY_[0-9]+=(.*)$/is;
+const ENV_KEY_RE = /^GIT_CONFIG_KEY_[^=]*=(.*)$/is;
 const ENV_PARAMETERS_RE = /^GIT_CONFIG_PARAMETERS=(.*)$/is;
 const TAG_CONFIG_RE = /(?:^|[^A-Za-z0-9_.])(?:alias\.|push\.followtags)/i;
 
 /**
  * True when any word of `words` (an assignment, `export NAME=…` or `env NAME=…` too, whatever the program) sets an
  * environment config key that is `push.followTags` or an `alias.…`: the alias's expansion may be `tag` or `push`, so
- * the setting itself is denied rather than followed, and this covers a setting made in an earlier statement (#441).
+ * the setting itself is denied rather than followed, and this covers a setting made in an earlier statement (#441). A key
+ * or parameter list known only at run time (`export GIT_CONFIG_KEY_0=$K`) is denied where it is set too, since it may be
+ * either, and the command using it may stand behind a launcher or in a later statement (#468).
  */
 function envConfigSetsTagPath(words) {
   return words.some((w) => {
     const key = ENV_KEY_RE.exec(w)?.[1];
-    if (key !== undefined) return /^(?:alias\.|push\.followtags$)/i.test(unmark(key));
+    if (key !== undefined) return LIVE_RE.test(key) || /^(?:alias\.|push\.followtags$)/i.test(unmark(key));
     const parameters = ENV_PARAMETERS_RE.exec(w)?.[1];
-    return parameters !== undefined && TAG_CONFIG_RE.test(unmark(parameters));
+    return parameters !== undefined && (LIVE_RE.test(parameters) || TAG_CONFIG_RE.test(unmark(parameters)));
   });
 }
 
@@ -715,17 +799,39 @@ function ghApiTag(words, at) {
   if (/(?:^|\/)git\/refs\/tags\/(?:v|[*?[])/i.test(path) || (/(?:^|\/)git\/refs\/tags\//i.test(path) && LIVE_RE.test(endpoint))) return true;
   const refs = /(?:^|\/)git\/refs\/?$/i.test(path);
   const releases = /(?:^|\/)releases\/?$/i.test(path);
-  if (!refs && !releases) return false;
+  // A release updated by id: PATCH publishes a draft (`draft=false`) or points it at another tag (#468).
+  const release = /(?:^|\/)releases\/[^/]+$/i.test(path);
+  if (!refs && !releases && !release) return runtimeEndpoint(endpoint);
   if (args.some((w) => /^(?:--input)(?:=|$)/.test(w))) return true;
-  const field = refs ? "ref" : "tag_name";
+  const fields = refs ? ["ref"] : release ? ["tag_name", "draft"] : ["tag_name"];
   for (const w of args) {
-    const value = new RegExp(`(?:^|[^A-Za-z0-9_])${field}=(.*)$`, "s").exec(w)?.[1] ?? new RegExp(`^-[fF]${field}=(.*)$`, "s").exec(w)?.[1];
-    if (value === undefined) continue;
-    if (refs ? TAG_REF_RE.test(unmark(value)) : /^v/i.test(unmark(value))) return true;
-    // A value read from a file (`-F ref=@f`) is known only when gh runs.
-    if (LIVE_RE.test(value) || BRACED_OR_COMMAND_RE.test(value) || value.startsWith("@")) return true;
+    for (const field of fields) {
+      const value = new RegExp(`(?:^|[^A-Za-z0-9_])${field}=(.*)$`, "s").exec(w)?.[1] ?? new RegExp(`^-[fF]${field}=(.*)$`, "s").exec(w)?.[1];
+      if (value === undefined) continue;
+      if (field === "draft") {
+        if (isFalse(value)) return true;
+        continue;
+      }
+      if (refs ? TAG_REF_RE.test(unmark(value)) : /^v/i.test(unmark(value))) return true;
+      // A value read from a file (`-F ref=@f`) is known only when gh runs.
+      if (LIVE_RE.test(value) || BRACED_OR_COMMAND_RE.test(value) || value.startsWith("@")) return true;
+    }
   }
   return false;
+}
+
+// Path segments after which a run-time id is an issue, a pull request or the like, never a ref or a release.
+const API_ID_PARENTS = new Set(["issues", "pulls", "comments", "labels", "milestones", "runs", "jobs", "reviews", "check-runs", "statuses", "commits", "actions", "artifacts"]);
+
+/**
+ * True when a writing gh api endpoint is known only at run time (#468): it starts with an expansion (`$EP`,
+ * `"$BASE/git/refs"`), or its last segment is one and follows no segment that names an id's collection, so it may be
+ * `git/refs` or a release. `repos/o/r/issues/$N/comments` ends in a static segment and is read as written.
+ */
+function runtimeEndpoint(endpoint) {
+  const segments = endpoint.split("?")[0].split("/");
+  if (!LIVE_RE.test(segments.join("/"))) return false;
+  return LIVE_RE.test(segments[0]) || (LIVE_RE.test(segments.at(-1)) && !API_ID_PARENTS.has(segments.at(-2)?.toLowerCase() ?? ""));
 }
 
 /**
@@ -753,6 +859,9 @@ function releaseTagAt(words, depth) {
   const at = launcherAt(words);
   if (at >= words.length) return false;
   if (GH_RE.test(basename(words[at]))) return ghReleaseTag(words, at) || ghApiTag(words, at);
+  // A launcher hands its command words on (#468): xargs, with its input as a run-time argument, and ssh, to the remote shell.
+  if (XARGS_RE.test(basename(words[at]))) return releaseTagAt([...words.slice(0, at), ...xargsCommand(words, at)], depth);
+  if (SSH_RE.test(basename(words[at]))) return releaseTagAt(sshCommand(words, at), depth);
   if (!GIT_RE.test(basename(words[at]))) return false;
   let i = at + 1;
   let followTags = false;
@@ -795,6 +904,7 @@ function releaseTagAt(words, depth) {
     const ref = rest.find((w, k) => !w.startsWith("-") && !UPDATE_REF_VALUED.has(rest[k - 1]));
     return ref !== undefined && (TAG_REF_RE.test(unmark(ref)) || runtimeRef(ref));
   }
+  if (sub === "fetch") return fetchWritesTag(rest);
   const args = [];
   let reads = false;
   let repoGiven = false;

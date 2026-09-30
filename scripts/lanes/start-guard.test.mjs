@@ -2553,3 +2553,50 @@ test("#404 criterion 13: a case pattern glob and a PowerShell variable read get 
   assert.deepEqual(decideFor(bash("case x in *) node scripts/lanes/start.mjs 1;; esac")), deny(DENY_REASON));
   assert.deepEqual(decideFor(bash("powershell -NoProfile -Command \"node scripts/lanes/start.mjs 1\"")), deny(DENY_REASON));
 });
+
+// --- #468: run-time config keys across statements, gh api and release edit, fetch, and time on long commands ------------
+
+test("#468 criterion 2: a GIT_CONFIG_KEY_n known only at run time, set in an earlier statement or ahead of a launcher, is denied", () => {
+  for (const cmd of [
+    "export GIT_CONFIG_KEY_0=$K", "export GIT_CONFIG_KEY_0=$K; git push", 'export GIT_CONFIG_KEY_0="$K" && git t v1', "GIT_CONFIG_KEY_0=$K xargs git push", "env GIT_CONFIG_KEY_0=$K xargs git t",
+    "xargs env GIT_CONFIG_KEY_0=$K git push", 'export GIT_CONFIG_PARAMETERS="$P"; git push',
+  ]) {
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(TAG_DENY_REASON), cmd);
+  }
+  for (const cmd of ["export GIT_CONFIG_KEY_0=core.pager", "GIT_CONFIG_KEY_0=user.name git push origin main", "export GIT_CONFIG_VALUE_0=$V"]) assert.equal(decideFor(bash(cmd)), null, cmd);
+});
+
+test("#468 criterion 4: gh api with a run-time endpoint, gh release edit --draft=false and a fetch into refs/tags/v* are denied", () => {
+  for (const cmd of [
+    "gh api $EP -f a=b", 'gh api "$EP" -X POST', "gh api repos/o/r/releases/1 -X PATCH -f draft=false", "gh release edit v1 --draft=false", "gh release edit v1 --notes x --draft=false",
+    "git fetch . HEAD:refs/tags/v1", "git fetch origin +refs/heads/*:refs/tags/*", "git status && git fetch . HEAD:refs/tags/v1", "bash -c 'gh release edit v1 --draft=false'",
+  ]) {
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(TAG_DENY_REASON), cmd);
+    assert.deepEqual(decideFor(ps(cmd)), deny(TAG_DENY_REASON), `${cmd} (PowerShell)`);
+  }
+  for (const cmd of [
+    "gh api $EP", "gh api repos/o/r/issues/$N/comments -f body=x", "gh release edit v1 --draft", "gh release edit v1 --notes x", "git fetch origin main", "git fetch origin +refs/heads/*:refs/remotes/origin/*", "git fetch . HEAD:refs/heads/x",
+  ]) {
+    assert.equal(decideFor(bash(cmd)), null, cmd);
+  }
+});
+
+test("#468 extra: a tag command behind xargs or ssh is denied, and a listing behind them is not", () => {
+  for (const cmd of ["xargs git tag v1", "echo v1 | xargs -n1 git tag", "ssh host git tag v1", "ssh -p 22 host git push --tags", 'ssh host "git tag v1"', "xargs -I{} sh -c 'git tag {}'"]) {
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(TAG_DENY_REASON), cmd);
+  }
+  for (const cmd of ["xargs git tag -l", "ssh host git tag -l", "bash -c 'git tag --list'", "xargs echo"]) assert.equal(decideFor(bash(cmd)), null, cmd);
+});
+
+test("#468 criterion 3: a command with 20000 arguments is read in under a second, and the words still count", () => {
+  const args = Array.from({ length: 20000 }, (_, i) => `arg${i}`).join(" ");
+  for (const cmd of [`node a.js ${args}`, `env node a.js ${args}`, `bash -c x ${args}`]) {
+    const start = Date.now();
+    assert.equal(decideFor(bash(cmd)), null);
+    assert.ok(Date.now() - start < 1000, `${cmd.slice(0, 20)} took ${Date.now() - start} ms`);
+  }
+  // edge: a launch after a very long argument list is still seen.
+  const start = Date.now();
+  assert.deepEqual(decideFor(bash(`node a.js ${args}; node scripts/lanes/start.mjs 1`)), deny(DENY_REASON));
+  assert.ok(Date.now() - start < 1000, `took ${Date.now() - start} ms`);
+});

@@ -1653,3 +1653,48 @@ test("#404 criterion 13: a case pattern glob and a PowerShell variable read get 
   assert.deepEqual(decideBash(`powershell -Command "(node scripts/lanes/post-revie?.mjs owner x --pr 1)"`), DENY);
   assert.deepEqual(decideBash(`powershell -Command "(unclosed"`), DENY);
 });
+
+// --- #468: nested tag commands, run-time config keys across statements, gh api and release edit, fetch --------------
+
+const TAG_DENIED = { decision: "deny", reason: TAG_REASON };
+
+test("#468 criterion 1: a v* tag command inside nested shell text or behind xargs and ssh is denied, and a listing there is not", () => {
+  for (const cmd of [
+    'bash -c "git push --tags"', "sh -c 'git tag v1.2.3'", 'bash -lc "git status && git push origin v1"', 'eval "git tag v1"', "xargs git tag v1", "echo v1 | xargs git tag", "xargs -I{} git push origin {}",
+    "xargs sh -c 'git push --tags'", "ssh host git tag v1", "ssh -p 22 host git push --tags", 'ssh host "git push --tags"', "ssh host 'git tag v1'", 'env bash -c "git tag v1"', 'timeout 5 bash -c "gh release create v1"',
+    "bash -c \"bash -c 'git push --tags'\"",
+  ]) {
+    assert.deepEqual(decideBash(cmd, grant({ pr: 1 })), TAG_DENIED, cmd);
+  }
+  for (const cmd of [
+    'bash -c "git tag -l"', "sh -c 'git tag --list v*'", 'bash -c "git push origin issue-468-guards"', "xargs git tag -l", "ssh host git tag -l", 'ssh host "git tag --list"', "xargs echo", 'bash -c "echo git tag v1 is the owner\'s"',
+    'git commit -m "docs: never run git tag v1 from a lane"',
+  ]) {
+    assert.equal(decideBash(cmd), null, cmd);
+  }
+});
+
+test("#468 criterion 2: a GIT_CONFIG_KEY_n known only at run time, set in an earlier statement or ahead of a launcher, is denied", () => {
+  for (const cmd of [
+    "export GIT_CONFIG_KEY_0=$K", "export GIT_CONFIG_KEY_0=$K; git push", 'export GIT_CONFIG_KEY_0="$K" && git t v1', "GIT_CONFIG_KEY_0=$K xargs git push", "env GIT_CONFIG_KEY_0=$K xargs git t",
+    "xargs env GIT_CONFIG_KEY_0=$K git push", 'export GIT_CONFIG_PARAMETERS="$P"; git push', 'bash -c "export GIT_CONFIG_KEY_0=$K; git push"',
+  ]) {
+    assert.deepEqual(decideBash(cmd, grant({ pr: 1 })), TAG_DENIED, cmd);
+  }
+  for (const cmd of ["export GIT_CONFIG_KEY_0=core.pager", "GIT_CONFIG_KEY_0=user.name git push origin main", "export GIT_CONFIG_VALUE_0=$V"]) assert.equal(decideBash(cmd), null, cmd);
+});
+
+test("#468 criterion 4: gh api with a run-time endpoint, gh release edit --draft=false and a fetch into refs/tags/v* are denied", () => {
+  for (const cmd of [
+    "gh api $EP -f a=b", 'gh api "$EP" -X POST', "gh api repos/o/r/releases/1 -X PATCH -f draft=false", "gh release edit v1 --draft=false", "gh release edit v1 --notes x --draft=false",
+    "git fetch . HEAD:refs/tags/v1", "git fetch origin +refs/heads/*:refs/tags/*", "git status && git fetch . HEAD:refs/tags/v1", "bash -c 'gh release edit v1 --draft=false'",
+  ]) {
+    assert.deepEqual(decideBash(cmd, grant({ pr: 1 })), TAG_DENIED, cmd);
+    assert.deepEqual(decidePs(cmd), TAG_DENIED, `${cmd} (PowerShell)`);
+  }
+  for (const cmd of [
+    "gh api $EP", "gh api repos/o/r/issues/$N/comments -f body=x", "gh release edit v1 --draft", "gh release edit v1 --notes x", "git fetch origin main", "git fetch origin +refs/heads/*:refs/remotes/origin/*", "git fetch . HEAD:refs/heads/x",
+  ]) {
+    assert.equal(decideBash(cmd), null, cmd);
+  }
+});
