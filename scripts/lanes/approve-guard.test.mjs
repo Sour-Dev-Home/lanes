@@ -1781,3 +1781,28 @@ test("the guard lets exactly the allowed reviewer names through (#463)", () => {
   assert.deepEqual(findOwnerInvocations(`cd x && ${postAs("compliance-reviewer")}`, allowed), []);
   assert.equal(findOwnerInvocations(`cd x && ${postAs("nobody")}`, allowed).length, 1);
 });
+
+// --- #477: the WMI check's text, $(…) in a tag statement, and the other run-time tag paths ---------------------------
+
+test("#477 criteria 2-4: text that says create and names a path glob is allowed, and a real WMI process creation is still denied", () => {
+  const text = "cat > f <<'EOF'\nfix the issue-477-* worktree, created when it was missing\nEOF\ngh issue create --title x --body-file f";
+  assert.equal(decideBash(text), null);
+  assert.equal(decideBash("ls issue-477-* && gh issue create --title x"), null);
+  assert.equal(decidePs("Get-ChildItem issue-477-*; gh issue create --title x"), null);
+  for (const cmd of ["wmic process call create $C", "(Get-WmiObject -List Win32_Pro*).Create($c)", "Invoke-CimMethod -ClassName ('Win32'+'_Process') -MethodName Create -Arguments @{CommandLine=$c}"]) {
+    assert.deepEqual(decideBash(cmd), { decision: "deny", reason: WMI_REASON }, cmd);
+  }
+});
+
+test("#477 criteria 5-8: a $(…), xargs -I{} sh -c, env -S, env operand, --refmap and --stdin tag path is denied", () => {
+  for (const cmd of [
+    "git push $(echo o) --tags", "gh api $(cat e) -f ref=refs/tags/v1", "echo v1 | xargs -I{} bash -c 'git tag {}'", "echo v1 | xargs -I{} sh -c 'git tag {}'",
+    "env -S 'GIT_CONFIG_KEY_0=$K git push'", "env $(echo GIT_CONFIG_KEY_0=alias.x) git push", "git fetch --refmap=refs/tags/*:refs/tags/* origin", "git fetch --refmap='+refs/heads/*:refs/tags/*' origin",
+    "git fetch --stdin", "bash -c 'git push $(echo o) --tags'",
+  ]) {
+    assert.deepEqual(decideBash(cmd, grant({ pr: 1 })), TAG_DENIED, cmd);
+  }
+  for (const cmd of ["git push $(echo o) --tags", "gh api $(cat e) -f ref=refs/tags/v1", "git fetch --stdin"]) assert.deepEqual(decidePs(cmd), TAG_DENIED, `${cmd} (PowerShell)`);
+  assert.equal(decideBash("ssh host $CMD", grant({ pr: 1 }))?.decision, "deny");
+  for (const cmd of ["git push $(echo o) origin main", "echo $(git tag -l)", "xargs -I{} sh -c 'git tag -l {}'", "git fetch --refmap= origin main", "git fetch origin main"]) assert.equal(decideBash(cmd), null, cmd);
+});

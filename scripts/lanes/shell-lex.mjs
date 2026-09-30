@@ -512,6 +512,8 @@ export function shellTextIndexes(words) {
         else if (GLUED_C_RE.test(words[c])) at.add(c);
       }
     } else if (SG_RE.test(name)) for (let i = p + 2; i < words.length; i += 1) at.add(i);
+    // ssh hands its remote command to the remote shell as text, so one known only at run time could be any command (#477).
+    else if (SSH_RE.test(name)) for (let i = sshCommandAt(words, p); i < words.length; i += 1) at.add(i);
   });
   return at;
 }
@@ -676,11 +678,16 @@ function xargsCommand(words, at) {
   }
   const command = words.slice(i);
   if (command.length === 0) return [];
-  return replace ? command.map((w) => w.replaceAll(replace, XARGS_INPUT)) : [...command, XARGS_INPUT];
+  // A quoted `{}` is marked literal: the replace string stands in it too (`xargs -I{} sh -c 'git tag {}'`, #477).
+  const swap = (w) => (w.includes(replace) ? w.replaceAll(replace, XARGS_INPUT) : unmark(w).replaceAll(replace, XARGS_INPUT));
+  return replace ? command.map(swap) : [...command, XARGS_INPUT];
 }
 
 /** The remote command words of ssh at `words[at]`: those after its options and its host (#468). */
-function sshCommand(words, at) {
+const sshCommand = (words, at) => words.slice(sshCommandAt(words, at));
+
+/** The index where the remote command of ssh at `words[at]` starts (#468), or past the end when it has none. */
+function sshCommandAt(words, at) {
   let i = at + 1;
   for (; i < words.length; i += 1) {
     if (words[i] === "--") {
@@ -691,7 +698,7 @@ function sshCommand(words, at) {
     if (SSH_VALUED.has(words[i])) i += 1;
   }
   // words[i] is the host; a `--` may stand between it and the command.
-  return words.slice(words[i + 1] === "--" ? i + 2 : i + 1);
+  return words[i + 1] === "--" ? i + 2 : i + 1;
 }
 
 // A fetch destination git completes to refs/tags/… itself: `tags/v1` (git's get_local_ref adds `refs/` to heads/, tags/ and remotes/).
@@ -700,12 +707,17 @@ const FETCH_TAGS_DST_RE = /^tags\/(?:v|[*?[])/i;
 /** True when git fetch's arguments `rest` write a v* tag: a `src:dst` refspec whose destination could be one, or `tag NAME` (#468). */
 function fetchWritesTag(rest) {
   const args = [];
+  const specWritesTag = (w) => w.includes(":") && (RELEASE_REF_RE.test(unmark(w).split(":").at(-1)) || FETCH_TAGS_DST_RE.test(unmark(w).split(":").at(-1)) || runtimeRef(w));
   for (let j = 0; j < rest.length; j += 1) {
+    // --stdin reads refspecs known only at run time; --refmap names the refspec that maps what was fetched (#477).
+    if (rest[j] === "--stdin") return true;
+    const refmap = /^--refmap=(.*)$/s.exec(rest[j])?.[1] ?? (rest[j] === "--refmap" ? rest[j + 1] : undefined);
+    if (refmap !== undefined && (specWritesTag(refmap) || LIVE_RE.test(refmap))) return true;
     if (FETCH_VALUED.has(rest[j])) j += 1;
     else if (!rest[j].startsWith("-")) args.push(rest[j]);
   }
   // The first argument is the repository; each one after it is a refspec, or `tag` before a tag's name.
-  return args.slice(1).some((w, k, specs) => (w.includes(":") && (RELEASE_REF_RE.test(unmark(w).split(":").at(-1)) || FETCH_TAGS_DST_RE.test(unmark(w).split(":").at(-1)) || runtimeRef(w))) || (w === "tag" && k + 1 < specs.length));
+  return args.slice(1).some((w, k, specs) => specWritesTag(w) || (w === "tag" && k + 1 < specs.length));
 }
 
 // How many -c aliases deep releaseTagCommand follows before failing closed.
@@ -769,7 +781,11 @@ function envConfigSetsTagPath(words) {
 }
 
 /** True when a GIT_CONFIG_KEY_n before the program is known only at run time: the key may be any alias (#441). */
-const envConfigKeyUnknown = (before) => before.some((w) => LIVE_RE.test(ENV_KEY_RE.exec(w)?.[1] ?? ""));
+const envConfigKeyUnknown = (before) => {
+  const e = before.findIndex((w) => ENV_RE.test(basename(w)));
+  // An operand of env built by a run-time expansion (`env $(echo GIT_CONFIG_KEY_0=alias.x) git push`) may be that assignment (#477).
+  return before.some((w) => LIVE_RE.test(ENV_KEY_RE.exec(w)?.[1] ?? "")) || (e !== -1 && before.slice(e + 1).some((w) => !w.startsWith("-") && LIVE_RE.test(w) && !ASSIGN_RE.test(w)));
+};
 
 // gh api's options that take the next word as their value, and those that put fields in the request body.
 const GH_API_VALUED = new Set(["-X", "--method", "-f", "--raw-field", "-F", "--field", "-H", "--header", "-q", "--jq", "-t", "--template", "--input", "--hostname", "--cache", "-p", "--preview"]);
@@ -857,12 +873,63 @@ export function releaseTagCommand(words) {
   return releaseTagAt(words, 0);
 }
 
+const ENV_RE = /^env(\.exe)?$/i;
+
+/**
+ * `words` with env's -S / --split-string text split into the words it stands for (#477): `env -S 'A=b git push'` runs
+ * git with A set. Repeated while a split text holds another, to a fixed depth.
+ */
+function envSplitExpanded(words) {
+  for (let round = 0; round < MAX_ALIAS_DEPTH; round += 1) {
+    const e = words.findIndex((w) => ENV_RE.test(basename(w)));
+    if (e === -1) return words;
+    let next = null;
+    for (let j = e + 1; j < words.length && next === null; j += 1) {
+      const w = words[j];
+      const glued = /^--split-string=(.*)$/s.exec(w)?.[1] ?? /^-S(.+)$/s.exec(w)?.[1];
+      const text = glued ?? (w === "-S" || w === "--split-string" ? words[j + 1] : undefined);
+      if (text !== undefined) {
+        try {
+          next = [...words.slice(0, j), ...lex(unmark(text)).flat(), ...words.slice(j + (glued !== undefined ? 1 : 2))];
+        } catch {
+          return words;
+        }
+      } else if (!w.startsWith("-") && !ASSIGN_RE.test(w)) break;
+    }
+    if (next === null) return words;
+    words = next;
+  }
+  return words;
+}
+
+/** True when shell text `text` holds a v* tag command: read as written, and with each `$(…)` as one word of its statement (#477). */
+function shellTextTags(text, depth) {
+  for (const collapse of [false, true]) {
+    let segments;
+    try {
+      segments = lex(text, { collapse });
+    } catch {
+      return false;
+    }
+    if (segments.some((s) => releaseTagAt(s, depth))) return true;
+  }
+  return false;
+}
+
 /** releaseTagCommand, `depth` -c aliases deep. */
 function releaseTagAt(words, depth) {
+  words = envSplitExpanded(words);
   if (depth === 0 && envConfigSetsTagPath(words)) return true;
-  const at = launcherAt(words);
+  let at = launcherAt(words);
+  // An operand of env known only at run time may be an assignment (#477): the program is the word after it.
+  while (at < words.length - 1 && LIVE_RE.test(words[at]) && words.slice(0, at).some((w) => ENV_RE.test(basename(w)))) at += 1;
   if (at >= words.length) return false;
   if (GH_RE.test(basename(words[at]))) return ghReleaseTag(words, at) || ghApiTag(words, at);
+  // A shell's -c text is read as commands of their own (#477): behind xargs -I the replace string has become run-time input.
+  if (SHELL_RE.test(basename(words[at]))) {
+    const c = words.findIndex((w, j) => j > at && /^-[A-Za-z]*c[A-Za-z]*$/.test(w));
+    return c !== -1 && c + 1 < words.length && (depth >= MAX_ALIAS_DEPTH || shellTextTags(unmark(words[c + 1]), depth + 1));
+  }
   // A launcher hands its command words on (#468): xargs, with its input as a run-time argument, and ssh, to the remote shell.
   // Each launcher is a level, capped like the alias chain: a chain of thousands fails closed instead of costing time.
   if (XARGS_RE.test(basename(words[at]))) return depth >= MAX_ALIAS_DEPTH || releaseTagAt([...words.slice(0, at), ...xargsCommand(words, at)], depth + 1);
@@ -960,6 +1027,10 @@ export function withoutLiteralSubstitutions(cmd) {
 const DEQUOTE_RE = new RegExp(`['"\\\\\`${String.fromCharCode(0x2018)}-${String.fromCharCode(0x201e)}${LIT_TICK}${QUOTED_TICK}]`, "g");
 export const dequoted = (s) => (s.includes("$'") ? `${s}\n${ansiCResolved(s)}` : s).replace(DEQUOTE_RE, "");
 
+// `Create` as a whole word, however the call spells it (`.Create(`, `% Create`, `-MemberName Create`, `.Create.Invoke(`,
+// `ExecMethod_("Create"`, `call create`): "created", "creating" and the like do not count (#477).
+const WMI_CREATE_RE = /(?<![a-z0-9])create(?![a-z0-9])/i;
+
 /**
  * True when a call creates a process through WMI or CIM (#316): it names Win32_Process, or runs wmic's `process`, with
  * a `create`. Read on the text with quotes, `+`, whitespace and literal messages dropped, so 'Win32'+'_Process' reads
@@ -970,11 +1041,15 @@ export function wmiProcessCreate(text) {
   const flat = plain.replace(/[\s()]/g, "").toLowerCase();
   // Create, or a WMI/CIM method call whose method name may be built at run time (-MethodName $m, security review round
   // 1; `$o.$m(…)`, `$o.PSObject.Methods[$m]`, `$o.InvokeMethod($m, …)`, #378).
-  if (!/create/.test(flat) && !/\b(invoke-(cim|wmi)method|icim|iwmi)\b/i.test(plain) && !COMPUTED_METHOD_RE.test(plain)) return false;
+  // "create" counts only as a method or an argument of the call (#477), not inside "created" or "gh issue create".
+  // A quote, backslash or backtick glued to it (`create"calc"`) ends the word too, so read the text with them as spaces as well.
+  const spaced = withoutLiteralSubstitutions(String(text ?? "")).replace(DEQUOTE_RE, " ").replace(/\+/g, "");
+  if (!WMI_CREATE_RE.test(plain) && !WMI_CREATE_RE.test(spaced) &&!/\b(invoke-(cim|wmi)method|icim|iwmi)\b/i.test(plain) && !COMPUTED_METHOD_RE.test(plain)) return false;
   if (/win32_process/.test(flat) || (/wmic/.test(flat) && /process/.test(flat))) return true;
-  // Each word, and what follows a `[type]` cast glued to it ([wmiclass]Win32_Proc* once quotes are dropped).
+  // Each word, and what follows a `[type]` cast glued to it ([wmiclass]Win32_Proc* once quotes are dropped). A word
+  // with no literal character (`*`, `??`) names nothing, so it cannot be the class (#477).
   const words = plain.split(/[^\w.*?[\]]+/).flatMap((t) => [t, ...[...t.matchAll(/\](?=[\w*?])/g)].map((m) => t.slice(m.index + 1))]);
-  return words.some((t) => /[*?[]/.test(t) && mayExpandTo(t, ["win32_process"]));
+  return words.some((t) => /[*?[]/.test(t) && /[a-z0-9_]/i.test(t.replace(/[*?[\]]/g, "")) && mayExpandTo(t, ["win32_process"]));
 }
 
 /** A grant file, parsed: null when it does not exist, { unreadable: true } when it cannot be read or parsed. */
@@ -990,6 +1065,57 @@ export function readGrant(file) {
   } catch {
     return { unreadable: true };
   }
+}
+
+const MAX_UNCLOSED = 16;
+
+/** The index of the `)` closing a `$(` whose contents start at `from`, or -1 when it never closes. */
+function substitutionEnd(cmd, from) {
+  let depth = 1;
+  let single = false;
+  let double = false;
+  for (let i = from; i < cmd.length; i += 1) {
+    const c = cmd[i];
+    if (c === "\\" && !single) i += 1;
+    else if (c === "'" && !double) single = !single;
+    else if (c === '"' && !single) double = !double;
+    else if (!single && !double && c === "(") depth += 1;
+    else if (!single && !double && c === ")" && (depth -= 1) === 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * `cmd` with each `$(…)` outside single quotes replaced by `${LANES_SUBSTITUTION}`: a word known only at run time that
+ * does not end the statement (#477). One that never closes stays as it is.
+ */
+function collapsedSubstitutions(cmd) {
+  let unclosed = 0;
+  let out = "";
+  let single = false;
+  let double = false;
+  for (let i = 0; i < cmd.length; i += 1) {
+    const c = cmd[i];
+    if (c === "\\" && !single) {
+      out += c + (cmd[i + 1] ?? "");
+      i += 1;
+      continue;
+    }
+    if (c === "'" && !double) single = !single;
+    else if (c === '"' && !single) double = !double;
+    else if (c === "$" && cmd[i + 1] === "(" && !single && unclosed < MAX_UNCLOSED) {
+      const end = substitutionEnd(cmd, i + 2);
+      if (end !== -1) {
+        out += "${LANES_SUBSTITUTION}";
+        i = end;
+        continue;
+      }
+      // Each search that fails scans to the end: after a few, stop, so a run of openers costs bounded time.
+      unclosed += 1;
+    }
+    out += c;
+  }
+  return out;
 }
 
 /**
@@ -1016,7 +1142,10 @@ export function readGrant(file) {
  * quote or backtick.
  * @returns {(string[] & { pipedOut?: true, redirects?: { text: string, herestring: boolean, toFile: boolean }[], heredocs?: { body: string, quoted: boolean }[], literal?: Set<number> })[]}
  */
-export function lex(cmd, { bodies: withBodies = false } = {}) {
+export function lex(cmd, { bodies: withBodies = false, collapse = false } = {}) {
+  // `collapse` (#477): each unquoted `$(…)` reads as one word of its statement, so the words around it stay together
+  // for the tag rules; what the substitution runs is read from the lexing without it.
+  if (collapse) cmd = collapsedSubstitutions(cmd);
   // A raw stand-in character would read as a marked one: refuse to parse it, so a command naming post-review fails
   // closed. start-guard.mjs's shape never refused one.
   if (!withBodies && /[-]/.test(cmd)) throw new Error("private-use character");

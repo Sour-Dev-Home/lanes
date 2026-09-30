@@ -122,7 +122,7 @@ export function onUserPromptSubmit(input, now = Date.now()) {
 // eval) expands them; a restored backtick comes back as QUOTED_TICK, so a literal message such as 'Fix `start.mjs`'
 // is not read as a run of start.mjs (#197).
 // Every command is lexed in shell-lex.mjs's bodies shape; its words shape is approve-guard.mjs's.
-const lexBodies = (cmd) => lex(cmd, { bodies: true });
+const lexBodies = (cmd, collapse = false) => lex(cmd, { bodies: true, collapse });
 const unliteral = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, QUOTED_TICK);
 // dequoted and withoutLiteralSubstitutions, the raw-text readers, live in shell-lex.mjs beside the WMI reader (#308).
 
@@ -276,6 +276,26 @@ function programWords(words) {
   return at;
 }
 
+// The text fields of `gh issue|pr create|comment|edit|close|review`, which gh stores and never runs (#477).
+const GH_PROSE_FLAGS = new Set(["--title", "-t", "--body", "-b", "--comment", "-c"]);
+const GH_PROSE_VERBS = new Set(["create", "comment", "edit", "close", "reopen", "review"]);
+
+/**
+ * The indexes of a simple command's words that are prose gh posts (title, body, comment), when gh is its command word.
+ * Such a word is still walked when it reads as a script, but one that cannot be lexed (`…the App's credentials…` holds
+ * an apostrophe inside double quotes) is no script: denying it as unreadable refused a valid `gh issue create` (#477).
+ */
+function proseWords(words) {
+  const at = new Set();
+  const cmd = words.findIndex((w) => !ASSIGN_RE.test(w));
+  if (cmd === -1 || !GH_RE.test(basename(words[cmd])) || !["issue", "pr"].includes(words[cmd + 1]) || !GH_PROSE_VERBS.has(words[cmd + 2])) return at;
+  for (let i = cmd + 3; i < words.length; i += 1) {
+    if (/^--(title|body|comment)=/.test(words[i])) at.add(i);
+    else if (GH_PROSE_FLAGS.has(words[i])) at.add(++i);
+  }
+  return at;
+}
+
 // A node -e script that names start.mjs, queue.mjs or claude --bg counts as a run, whatever else it does (owner
 // decision on #61, 2026-09-28: no exemption for scripts that only write text; four review rounds each found a way to
 // launch through one). The owner session writes such scripts to a file instead.
@@ -331,20 +351,21 @@ function evalScripts(words) {
  * backtick, a heredoc that is not literal, an arithmetic expression. A simple command piped into a shell has its
  * words, and its arguments joined as one line, walked with their backticks live (#246).
  */
-function walk(cmd, depth, visit, onOpaque, onEval) {
+function walk(cmd, depth, visit, onOpaque, onEval, collapse = false) {
   let lexed;
   try {
-    lexed = lexBodies(cmd);
+    lexed = lexBodies(cmd, collapse);
   } catch {
     onOpaque(cmd);
     return;
   }
-  const nested = (text) => (depth >= MAX_DEPTH ? onOpaque(text) : walk(text, depth + 1, visit, onOpaque, onEval));
+  const nested = (text) => (depth >= MAX_DEPTH ? onOpaque(text) : walk(text, depth + 1, visit, onOpaque, onEval, collapse));
   const dataOnly = depth === 0 && isDataOnly(lexed);
   const scan = (words, stdin, piped = false) => {
     if (!dataOnly) visit(words, stdin);
     const scripts = dataOnly ? new Map() : evalScripts(words);
     const programs = programWords(words);
+    const prose = proseWords(words);
     // A search's pattern is no script (#404), unless a shell reads the output or a here-string in the call could be
     // mistaken for the pattern (`grep <<< "…" x`, whose here-string grep reads as its input and prints).
     const patterns = piped || cmd.includes("<<<") ? new Set() : searchPatterns(words);
@@ -354,7 +375,16 @@ function walk(cmd, depth, visit, onOpaque, onEval) {
       else if (isNestedScript(w) && !((dataOnly || patterns.has(i)) && !UNRESOLVED_RE.test(w))) {
         // A jq program or Go template keeps its quoted `$` literal: `$s` there is its own variable (#61). PowerShell's
         // text is read with its own rules (#404).
-        if (powershellAt !== -1 && i > powershellAt && !piped) nested(powershellText(w));
+        if (prose.has(i) && !piped && !runsAsShell(words, i)) {
+          const text = unliteral(w);
+          try {
+            lexBodies(text);
+          } catch {
+            // The shell still runs a live `$(…)` or backtick in the word, so only text without one is prose (#477).
+            if (!UNRESOLVED_RE.test(w)) return;
+          }
+          nested(text);
+        } else if (powershellAt !== -1 && i > powershellAt && !piped) nested(powershellText(w));
         else nested(piped || runsAsShell(words, i) ? unliteralLive(w) : programs.has(i) ? w : unliteral(w));
       }
     });
@@ -606,15 +636,19 @@ function scanRuntimeText(command) {
 /** True when a simple command anywhere in a Bash command, nested scripts included, creates or pushes a v* tag (#404). */
 function scanReleaseTags(command) {
   let found = false;
-  walk(
-    String(command ?? ""),
-    0,
-    (words) => {
-      if (releaseTagCommand(words)) found = true;
-    },
-    () => {},
-    () => {},
-  );
+  // Read as written, and with each `$(…)` as one word of its statement, which it would otherwise end (#477).
+  for (const collapse of [false, true]) {
+    walk(
+      String(command ?? ""),
+      0,
+      (words) => {
+        if (releaseTagCommand(words)) found = true;
+      },
+      () => {},
+      () => {},
+      collapse,
+    );
+  }
   return found;
 }
 
