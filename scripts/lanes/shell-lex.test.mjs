@@ -726,3 +726,18 @@ test("#441 test-hunter: env -i, a path or option before symbolic-ref and fast-im
   }
   assert.ok(Date.now() - start < 2000);
 });
+
+test("#441 final round: query strings, mixed-case config keys, quoted refs and method overrides on gh api are read as the request they make", () => {
+  for (const cmd of [
+    "gh api repos/o/r/git/refs/tags/v1?force=true -X PATCH", 'gh api "repos/o/r/git/refs?x=1" -f ref=refs/tags/V1', "gh api repos/o/r/git/refs -F ref=@f", "gh api repos/o/r/git/refs -X post -f ref=refs/tags/v1",
+    "GIT_CONFIG_KEY_0=ALIAS.t git t v1", "GIT_CONFIG_KEY_0=Push.FollowTags git push", "git symbolic-ref --quiet refs/tags/v1 HEAD", "git -c a=b -C x --no-pager fast-import",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of [
+    "gh api repos/o/r/git/refs -f ref=refs/tags/v1 --method=DELETE", "gh api repos/o/r/git/refs -f ref=refs/tags/v1 -XGET", "gh api repos/o/r/git/refs/tags/v1?x=1", "GIT_CONFIG_KEY_0=push.followTagsX git push",
+    "GIT_CONFIG_KEY_0=alias git push", "git symbolic-ref --short HEAD",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+  }
+});
