@@ -26,9 +26,11 @@ files with Edit, not Write.
    blocker is open; 2: the blockers cannot be checked, which also stops the lane). A refusal in
    step 1 or 2 notifies `lanes #$ARGUMENTS: cannot start: <reason>`.
 3. `git fetch origin`, then run `git worktree list`. When an `issue-$ARGUMENTS-*` worktree already exists (a lane that
-   died before its PR), do not make a second one: enter it with the EnterWorktree tool's `path` parameter and follow
-   step 3b. When more than one exists, stop, report them and notify `lanes #$ARGUMENTS: several worktrees for the
-   issue`. Otherwise create and enter the worktree with the EnterWorktree tool's `name` parameter set to
+   died before its PR), never make a second one. Entering it by path prompts the owner and leaves the session's cwd at
+   the repository root (#354, #366), so stop, report the worktree and notify `lanes #$ARGUMENTS: resume the existing
+   worktree`: the owner resumes it by launching a session with that worktree as its cwd, where step 3b applies. When
+   more than one exists, stop, report them all and notify `lanes #$ARGUMENTS: several worktrees for the issue`.
+   Otherwise create and enter the worktree with the EnterWorktree tool's `name` parameter set to
    `issue-$ARGUMENTS-<short-slug>` (this needs no permission prompt and makes the session's cwd the worktree). It
    creates branch `worktree-issue-$ARGUMENTS-<short-slug>`, so rename it in one command, before any other work:
    `git branch -m issue-$ARGUMENTS-<short-slug>`. Outside Claude Code (no EnterWorktree), create the worktree from
@@ -42,8 +44,8 @@ files with Edit, not Write.
    notify `lanes #$ARGUMENTS: shell PATH broken`, report that line and stop. Never prefix commands with `export PATH=…` or
    change PATH to work around missing tools.
 3b. Resuming (#444, #476): when the session's cwd is already an `issue-$ARGUMENTS-*` worktree (the queue relaunched a
-    lane whose session died after it opened its PR), or step 3 entered one by path (a lane that died before its PR;
-    the checks below apply there too), skip step 3's worktree creation, branch rename and setup, but still
+    lane whose session died after it opened its PR), or the owner resumed one step 3 reported (a lane that died
+    before its PR; the checks below apply there too), skip step 3's worktree creation, branch rename and setup, but still
     run the `command -v` check. Run `gh pr list --head <branch> --state open --json number,headRefOid`, then
     `git status --short` and `git log origin/<branch>..HEAD --oneline`. If the worktree is dirty, or holds commits the
     PR does not have, stop and report it, since a resume never builds over unsaved work. Exception: with no open PR

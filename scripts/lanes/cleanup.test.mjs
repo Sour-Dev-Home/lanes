@@ -1778,3 +1778,10 @@ test("a worktree with its own merged PR is still removed when another branch als
   const [ok] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [], prs: [merged("issue-7-x"), merged("issue-7-y", { number: 91 })] });
   assert.ok(ok.steps);
 });
+
+test("edge: a lane branch checked out in the main worktree is skipped as such, never a leftover (#476)", () => {
+  const [entry] = planCleanup({ worktrees: [{ ...wt("issue-7-old"), main: true }], prs: [merged("issue-7-new", { state: "OPEN" })] });
+  assert.equal(entry.leftover, undefined);
+  assert.notEqual(entry.skip, "leftover");
+  assert.equal(entry.steps, undefined);
+});
