@@ -59,6 +59,26 @@ export function metricsWarning(v) {
   return `warning: ${who}'s verdict has no metrics (tier, minutes, tokens); posting it anyway`;
 }
 
+/**
+ * #447: a `security-reviewer` success over a failure already on the same SHA must carry `metrics`, the record of a reviewer
+ * run, so a hand-edited verdict cannot turn the failure into a success. `latestState()` is read only in that case. Returns
+ * the refusal or null. It stops accidental self-grading, not forged metrics (the single-account model).
+ */
+export function flipRefusal(verdict, latestState) {
+  if (verdict?.reviewer !== "security-reviewer" || verdict.verdict !== "success" || verdict.metrics !== undefined) return null;
+  if (latestState() !== "failure") return null;
+  return "refusing: review/security-reviewer is failure on this commit and this success verdict has no metrics, the record of a reviewer run; re-run the security reviewer and post the verdict it returns";
+}
+
+/** The latest state of the status `context` on `sha` (the combined status keeps the newest per context), or null. */
+function latestStatusState(run, repo, sha, context) {
+  const combined = JSON.parse(run(["api", `repos/${repo}/commits/${sha}/status?per_page=100`]));
+  const found = combined.statuses?.find((s) => s.context === context)?.state;
+  // A truncated list may hide the failure: fail closed.
+  if (found === undefined && combined.total_count > (combined.statuses?.length ?? 0)) return "failure";
+  return found ?? null;
+}
+
 export function validateVerdict(v, { criteriaCount }) {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return { ok: false, errors: ["verdict must be a JSON object"], status: null };
   const errors = [];
@@ -182,7 +202,7 @@ export function requireOwnerGrant(prArg, dir, now) {
   if (file !== null) return file;
   const claimed = claimedGrant(dir, Number(prArg), now);
   if (claimed !== null) throw new Error(claimedMessage(prArg, claimed));
-  throw new Error(`no fresh /approve ${prArg} grant: run /approve ${prArg} in the owner's session`);
+  throw new Error(`no fresh /approve ${prArg} grant in ${dir}: run /approve ${prArg} in the owner's session`);
 }
 
 const CLAIMED_SUFFIX = ".claimed";
@@ -265,6 +285,8 @@ function post(parsed, owner, { run, warn }) {
     const verdict = JSON.parse(readFileSync(parsed.file, "utf8"));
     const result = validateVerdict(verdict, { criteriaCount: parseIssueForm(issue.body).fields.criteria.length });
     if (!result.ok) throw new Error(`verdict refused:\n- ${result.errors.join("\n- ")}`);
+    const flip = flipRefusal(verdict, () => latestStatusState(run, repo, pr.headRefOid, result.status.context));
+    if (flip) throw new Error(flip);
     const warning = metricsWarning(verdict);
     if (warning) warn(warning);
     status = result.status;
