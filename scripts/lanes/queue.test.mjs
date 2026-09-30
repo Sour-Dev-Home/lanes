@@ -616,6 +616,47 @@ test("edge: a bad lanes.config.json exits 2 before any tick", async () => {
   assert.equal(run.calls.length, 0);
 });
 
+test("#512: the team profile refuses before any read or launch, and says why", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+  run.deps.config = () => ({ identity: { profile: "team", app: { id: 1, installationId: 2 } } });
+  assert.equal(await main([], run.deps), 2);
+  assert.equal(run.out.length, 1);
+  assert.match(run.out[0], /team/);
+  assert.match(run.out[0], /\/start/);
+  assert.deepEqual(run.calls, []);
+  assert.deepEqual(run.launched, []);
+});
+
+test("#512: solo and a missing identity launch as before", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const identity of [{ profile: "solo" }, undefined]) {
+    const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+    const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+    run.deps.config = () => ({ start: { maxLanes: 3 }, ...(identity ? { identity } : {}) });
+    assert.equal(await main([], run.deps), 0);
+    assert.deepEqual(run.launched.map((l) => l.n), [1]);
+  }
+});
+
+test("#512: edge: a malformed identity still exits 2 on the config error, not a launch", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+  run.deps.config = () => ({ identity: { profile: "team" } });
+  assert.equal(await main([], run.deps), 2);
+  assert.deepEqual(run.launched, []);
+});
+
+test("#512: edge: a mistyped profile (Team, team with a space) never launches", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const profile of ["Team", "team ", "TEAM", ""]) {
+    const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+    run.deps.config = () => ({ identity: { profile, app: { id: 1, installationId: 2 } } });
+    assert.equal(await main([], run.deps), 2, JSON.stringify(profile));
+    assert.deepEqual(run.launched, []);
+  }
+});
+
 test("edge: the config's maxLanes caps the launches", async () => {
   const { main } = await import("./queue.mjs");
   const world = { issues: [1, 2, 3].map((n) => issue(n, [`src/${n}.mjs`])), prs: [], sessions: [] };

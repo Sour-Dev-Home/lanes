@@ -298,6 +298,12 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     print(`cannot read lanes.config.json: ${reason(err)}`);
     return 2;
   }
+  // #512 (ADR 0019): a queued lane would inherit the owner's GH_TOKEN, git credentials and LANES_APP_KEY_FILE, so a team
+  // profile fails closed until the queue uses /start's App-only preparation.
+  if (settings.identity?.profile === "team") {
+    print('queue.mjs refuses to launch under identity.profile "team": a queued lane would run with the owner\'s credentials; launch lanes with /start until the queue uses the App-only environment (#512)');
+    return 2;
+  }
   let caps;
   try {
     caps = budgetConfig(config());
