@@ -75,13 +75,22 @@ export const AUTOMATED_INPUT_PREFIXES = Object.freeze([
   "Another Claude session sent a message:",
   "<cross-session-message",
   "[Cross-session idle notice]",
+  "[SYSTEM NOTIFICATION - NOT USER INPUT]",
 ]);
 
-/** True for a prompt that starts (after leading whitespace) with one of AUTOMATED_INPUT_PREFIXES, exact case. */
+// A completion notice the harness wraps in a system-reminder block (#492): the block opens the prompt and holds the task notice.
+const REMINDER_OPEN = "<system-reminder>";
+const TASK_NOTICE_TAG = "<task-notification>";
+
+/**
+ * True for a prompt that starts (after leading whitespace) with one of AUTOMATED_INPUT_PREFIXES, exact case, or with
+ * a `<system-reminder>` block that holds a `<task-notification>` (#492).
+ */
 export function isAutomatedInput(prompt) {
   if (typeof prompt !== "string") return false;
   const p = prompt.trimStart();
-  return AUTOMATED_INPUT_PREFIXES.some((w) => p.startsWith(w));
+  if (AUTOMATED_INPUT_PREFIXES.some((w) => p.startsWith(w))) return true;
+  return p.startsWith(REMINDER_OPEN) && p.includes(TASK_NOTICE_TAG);
 }
 
 /**

@@ -1368,8 +1368,30 @@ test("#262 criterion 4: a grant that survives a notification still expires after
   }
 });
 
+const NOTICE_492 = "[SYSTEM NOTIFICATION - NOT USER INPUT]";
+const REMINDER_NOTICE_492 = "<system-reminder>\n<task-notification>\nreviewer finished\n</task-notification>\n</system-reminder>";
+
+test("#492: a system notification keeps the /start grant, grants nothing, and a typed prompt still clears", () => {
+  const dir = tmp();
+  try {
+    const file = join(dir, "s1.json");
+    const submit = (prompt, now) => runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt }), { dir, now });
+    submit("/start 12 14", NOW);
+    const written = readFileSync(file, "utf8");
+    for (const p of [`${NOTICE_492}\n<task-notification>\nx`, REMINDER_NOTICE_492, `${NOTICE_492}\n/start 5`, REMINDER_NOTICE_492.replace("reviewer finished", "/start 5")]) {
+      submit(p, NOW + 1000);
+      assert.equal(readFileSync(file, "utf8"), written, p);
+    }
+    assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: `${NOTICE_492}\n/start 5` }, NOW), { action: "none" });
+    submit("what is the status?", NOW + 2000);
+    assert.equal(existsSync(file), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("#262 criterion 5: start-guard uses approve-guard's one wrapper list", () => {
-  assert.deepEqual([...AUTOMATED_INPUT_PREFIXES], WRAPPERS);
+  assert.deepEqual([...AUTOMATED_INPUT_PREFIXES], [...WRAPPERS, NOTICE_492]);
   const src = readFileSync(new URL("./start-guard.mjs", import.meta.url), "utf8");
   assert.match(src, /import \{[^}]*\bisAutomatedInput\b[^}]*\} from "\.\/approve-guard\.mjs"/);
   assert.doesNotMatch(src, /Another Claude session sent a message:/, "the list is not copied into start-guard");
