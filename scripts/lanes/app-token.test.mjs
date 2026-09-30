@@ -92,6 +92,11 @@ test("a non-2xx response fails naming the step, without echoing the body", async
   });
 });
 
+test("edge: a non-2xx response with a valid-looking body still fails", async () => {
+  const fetch = async () => new Response(JSON.stringify({ token: "ghs_x", expires_at: "2026-10-01T10:00:00Z" }), { status: 500 });
+  await assert.rejects(mintInstallationToken(args({ fetch })), /status 500/);
+});
+
 test("a network error fails naming the step", async () => {
   const fetch = async () => {
     throw new Error("connect ECONNREFUSED");
