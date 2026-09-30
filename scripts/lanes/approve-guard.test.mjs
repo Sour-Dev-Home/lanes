@@ -5,13 +5,19 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AUTOMATED_INPUT_PREFIXES, configuredReviewersFrom, DENY_REASON, GRANT_TTL_MS, UNPARSED_REASON, WMI_REASON, decidePreToolUse, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, readGrant, runHook, TAG_REASON, validGrant } from "./approve-guard.mjs";
+import { AUTOMATED_INPUT_PREFIXES, configuredReviewersFrom, DENY_REASON, DEPTH_REASON, POST_REVIEW_ARGS_REASON, POWERSHELL_REASON, REVIEWER_NAME_REASON, RUNTIME_PROGRAM_REASON, GRANT_TTL_MS, UNPARSED_REASON, WMI_REASON, decidePreToolUse as decideWithReason, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, readGrant, runHook, TAG_REASON, validGrant } from "./approve-guard.mjs";
 import { WRAPPERS, automatedInputLeavesTheGrant } from "./shell-lex.fixtures.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
 const SHA = "a".repeat(40);
 const OWNER = `node scripts/lanes/post-review.mjs owner success "approved by owner" --pr 16 --sha ${SHA}`;
 const grant = (over = {}) => ({ sessionId: "s1", pr: 16, at: new Date(NOW - 60_000).toISOString(), ...over });
+const FAIL_CLOSED_REASONS = [DEPTH_REASON, POST_REVIEW_ARGS_REASON, POWERSHELL_REASON, REVIEWER_NAME_REASON, RUNTIME_PROGRAM_REASON];
+// The decision tests below assert allow or deny; a fail-closed denial's own cause (#507) is tested on decideWithReason.
+const decidePreToolUse = (...args) => {
+  const d = decideWithReason(...args);
+  return d?.decision === "deny" && FAIL_CLOSED_REASONS.includes(d.reason) ? { ...d, reason: DENY_REASON } : d;
+};
 const bash = (command, over = {}) => ({ hook_event_name: "PreToolUse", session_id: "s1", tool_name: "Bash", tool_input: { command }, ...over });
 
 // --- UserPromptSubmit ---------------------------------------------------------------------------------------------
@@ -1828,4 +1834,28 @@ test("#477 criteria 5-8: a $(…), xargs -I{} sh -c, env -S, env operand, --refm
   for (const cmd of ["git push $(echo o) --tags", "gh api $(cat e) -f ref=refs/tags/v1", "git fetch --stdin"]) assert.deepEqual(decidePs(cmd), TAG_DENIED, `${cmd} (PowerShell)`);
   assert.equal(decideBash("ssh host $CMD", grant({ pr: 1 }))?.decision, "deny");
   for (const cmd of ["git push $(echo o) origin main", "echo $(git tag -l)", "xargs -I{} sh -c 'git tag -l {}'", "git fetch --refmap= origin main", "git fetch origin main"]) assert.equal(decideBash(cmd), null, cmd);
+});
+
+test("#507: a fail-closed denial names its cause and still ends with the owner-approval reason", () => {
+  const why = (cmd, g = null) => decideWithReason(bash(cmd), g, NOW);
+  const runtime = why('node "$CLAUDE_JOB_DIR/tmp/x.mjs" file');
+  assert.equal(runtime.decision, "deny");
+  assert.match(runtime.reason, /named only at run time/);
+  assert.ok(runtime.reason.endsWith(DENY_REASON));
+
+  let nested = "node scripts/lanes/post-review.mjs owner success x --pr 3";
+  for (let i = 0; i < 6; i += 1) nested = `bash -c ${JSON.stringify(nested)}`;
+  const deep = why(nested);
+  assert.equal(deep.decision, "deny");
+  assert.match(deep.reason, /deeper than the guard reads/);
+  assert.ok(deep.reason.endsWith(DENY_REASON));
+
+  const reviewer = why('node scripts/lanes/post-review.mjs "$R" success x --pr 3');
+  assert.match(reviewer.reason, /reviewer name is set at run time/);
+  assert.ok(reviewer.reason.endsWith(DENY_REASON));
+  assert.match(why("node scripts/lanes/post-review.mjs no-such-reviewer success x --pr 3").reason, /no configured reviewer/);
+
+  assert.match(why("node scripts/lanes/post-review.mjs owner success x").reason, /no single readable --pr/);
+  // A real owner invocation that is merely wrapped keeps the generic reason.
+  assert.equal(why("echo hi; node scripts/lanes/post-review.mjs owner success x --pr 3").reason, DENY_REASON);
 });
