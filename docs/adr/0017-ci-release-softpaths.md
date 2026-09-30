@@ -41,7 +41,17 @@ GitHub identity (ADR 0004/0007), `queue.mjs` never runs inside Claude or on a sc
      fast-import`, which writes any ref from its input.
    - A `-c alias.NAME=…` or `--config-env alias.NAME=…` alias used as the subcommand, read as what it expands to.
    - Config given by the environment: any `GIT_CONFIG_KEY_n` (or `GIT_CONFIG_PARAMETERS`) naming `push.followTags` or an
-     `alias.…`, in the command or an earlier statement (`export …`). The setting is denied rather than followed.
+     `alias.…`, in the command or an earlier statement (`export …`). The setting is denied rather than followed, and so
+     is one known only at run time (`export GIT_CONFIG_KEY_0=$K`), wherever it is set: in a statement of its own, ahead
+     of a launcher (`GIT_CONFIG_KEY_0=$K xargs git push`) or behind one (#468).
+   - A launcher's command (#468): `xargs`, whose input counts as a name known only at run time (`xargs git tag`), and
+     `ssh host git tag v1`, both read as the command they run. In the approve guard, shell text (`bash -c "git push
+     --tags"`, `ssh h "git tag v1"`) is scanned whole for the same rule, as the start guard already did.
+   - `git fetch` with a `src:dst` refspec whose destination is `v*`, `refs/tags/*` or known at run time (`git fetch .
+     HEAD:refs/tags/v1`), or `fetch … tag NAME`; `gh release edit` with `--draft=false` (publishing a draft) or `--tag`
+     naming a `v*` tag; `gh api` on a release by id with `draft=false` or a `tag_name`, and `gh api` whose endpoint is
+     known only at run time (it starts with an expansion, or ends in one after a segment that is not an id's collection
+     such as `issues` or `pulls`) when it writes (#468).
    - `gh release create` (or `new`) naming a `v*` tag, one known only at run time, or none; `gh api` writing (POST, PATCH,
      or any request with body fields) a `git/refs` ref that is `refs/tags/v*` or known only at run time, or a release's
      `tag_name`.
@@ -51,7 +61,7 @@ GitHub identity (ADR 0004/0007), `queue.mjs` never runs inside Claude or on a sc
      on `git/refs` or `releases`.
    - **Outside the rule**, recorded and not guarded: aliases and `push.followTags` from git config files (`~/.gitconfig`,
      a repository's `.git/config`, `GIT_CONFIG_GLOBAL`): a guard sees the command line, and lanes act as the owner's
-     account under the accepted-risk rule of ADR 0004/0007. Known gaps, not guarded yet: a run-time `GIT_CONFIG_KEY_n` set in an earlier statement (`export GIT_CONFIG_KEY_0=$K`) or behind a launcher, a `-c` key spliced at run time, and tag commands inside nested shell text (`bash -c "git push --tags"`, `ssh h git tag v1`), which the start guard denies and the approve guard scans only for `post-review`; #468 tracks them. Also outside: `gh api graphql` mutations (`createRef`) and creating a tag object through `git/tags`, which makes no ref. A `git config` write is not denied either, nor is a script file
+     account under the accepted-risk rule of ADR 0004/0007. Known gap, not guarded yet: a `-c` key spliced at run time. Also outside: `gh api graphql` mutations (`createRef`) and creating a tag object through `git/tags`, which makes no ref. A `git config` write is not denied either, nor is a script file
      that itself pushes a tag: the guards read the names a command runs, not what a program does inside. `release.yml`
      still checks any pushed tag against `main`, `package.json` and `CHANGELOG.md`.
 

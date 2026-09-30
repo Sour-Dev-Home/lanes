@@ -741,3 +741,79 @@ test("#441 final round: query strings, mixed-case config keys, quoted refs and m
     assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
   }
 });
+
+// --- #468: run-time config keys across statements and launchers, xargs and ssh, gh api and release edit, fetch -------
+
+/** releaseTagCommand of any statement of `cmd`, as both guards ask it. */
+const tagIn = (cmd) => lex(cmd).some((words) => releaseTagCommand(words));
+
+test("#468 criterion 2: a GIT_CONFIG_KEY_n or GIT_CONFIG_PARAMETERS known only at run time is denied where it is set, in a statement of its own or ahead of a launcher", () => {
+  for (const cmd of [
+    "export GIT_CONFIG_KEY_0=$K", 'export GIT_CONFIG_KEY_0="$K"; git t v1', "export GIT_CONFIG_KEY_0=$(cat k)", "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=`cat k`",
+    "GIT_CONFIG_KEY_0=$K xargs git push", 'GIT_CONFIG_KEY_0="$K" xargs -n1 git push origin', "env GIT_CONFIG_KEY_0=$K xargs git t", "xargs env GIT_CONFIG_KEY_0=$K git push",
+    "export GIT_CONFIG_PARAMETERS=$P", 'GIT_CONFIG_PARAMETERS="$P" git push', "export GIT_CONFIG_KEY_$N=alias.t", "export GIT_CONFIG_KEY_$N=$K",
+  ]) {
+    assert.equal(tagIn(cmd), true, cmd);
+  }
+  for (const cmd of [
+    "export GIT_CONFIG_KEY_0=core.pager", "GIT_CONFIG_KEY_0=user.name xargs git log", "export GIT_CONFIG_KEY_$N=user.name", "export GIT_CONFIG_KEY_0='$K'",
+    "export GIT_CONFIG_COUNT=$N", "export GIT_CONFIG_VALUE_0=$V",
+  ]) {
+    assert.equal(tagIn(cmd), false, cmd);
+  }
+});
+
+test("#468 criterion 1: releaseTagCommand reads the command after xargs and ssh, whose run-time input it counts as a tag name", () => {
+  for (const cmd of [
+    "xargs git tag v1", "xargs git tag", "xargs -n1 git push origin", "xargs -I{} git tag {}", "xargs -I {} git push origin {}", "xargs -0 -P 4 git push --tags", "xargs -- git tag v1",
+    "xargs env git tag v1", "xargs git -C x tag v1", "xargs gh release create", "xargs -a f git tag",
+    "ssh host git tag v1", "ssh -p 22 -i key host git push --tags", "ssh user@host -- git push origin v1", "ssh -o StrictHostKeyChecking=no host git tag $V",
+  ]) {
+    assert.equal(tagIn(cmd), true, cmd);
+  }
+  for (const cmd of [
+    "xargs git tag -l", "xargs git tag --list", "xargs echo v1", "xargs git status", "xargs", "xargs -I{}", "xargs git log --oneline",
+    "ssh host git tag -l", "ssh host ls v1", "ssh host", "ssh -p 22", "ssh host git push origin main",
+  ]) {
+    assert.equal(tagIn(cmd), false, cmd);
+  }
+});
+
+test("#468 criterion 4: gh api with an endpoint known only at run time, gh release edit --draft=false and a fetch into refs/tags/v* are read as tag paths", () => {
+  for (const cmd of [
+    "gh api $EP -f a=b", 'gh api "$EP" -X POST', "gh api $EP --method PATCH", "gh api ${EP:-x} -f a=b", 'gh api "$BASE/x" -f a=b', "gh api repos/o/r/$REST -f a=b", "gh api repos/o/r/releases/$ID -X PATCH -f draft=false", "gh api repos/o/r/releases/$ID -X PATCH --input b.json",
+    "gh api repos/o/r/releases/1 -X PATCH -f draft=false", "gh api repos/o/r/releases/1 -X PATCH -F draft=false", "gh api repos/o/r/releases/1 -X PATCH -f tag_name=v2",
+    "gh release edit v1 --draft=false", "gh release edit --draft=false v1", "gh release edit v1 --draft=False", "gh release edit v1 --draft=0", "gh release edit v1 --draft=$D", "gh release edit v1 --notes x --draft=false",
+    "gh release --repo o/r edit v1 --draft=false", "gh release edit v1 --tag v2", "gh release edit v1 --tag=$T", "gh release edit v1 -R o/r --draft=false",
+    "git fetch . HEAD:refs/tags/v1", "git fetch . HEAD:v1", "git fetch origin +refs/heads/*:refs/tags/*", "git fetch origin main:refs/tags/v1.2", 'git fetch . "HEAD:$T"', "git fetch origin tag v1", "git -C x fetch . +HEAD:refs/tags/v1",
+    "git fetch --depth 1 . HEAD:refs/tags/v1",
+  ]) {
+    assert.equal(tagIn(cmd), true, cmd);
+  }
+  for (const cmd of [
+    "gh api $EP", "gh api $EP -X GET", "gh api repos/o/r/issues/$N/comments -f body=x", "gh api repos/o/r/pulls/$N -X PATCH -f state=closed", "gh api repos/o/r/releases/1 -X PATCH -f name=x", "gh api repos/o/r/releases/1 -X PATCH -f draft=true",
+    "gh api repos/o/r/releases/$ID", "gh api repos/o/r/releases/$ID -X PATCH -f name=x", "gh api graphql -f query=x",
+    "gh release edit v1 --draft", "gh release edit v1 --draft=true", "gh release edit v1 --notes x", "gh release edit v1 --title draft=false", "gh release view v1 --draft=false", "gh release edit v1 --tag-x y",
+    "git fetch origin main", "git fetch origin main:refs/remotes/origin/main", "git fetch --all", "git fetch origin +refs/heads/*:refs/remotes/origin/*", "git fetch . HEAD:refs/heads/x", "git fetch --depth 1 origin main", "git fetch", "git fetch origin v1",
+  ]) {
+    assert.equal(tagIn(cmd), false, cmd);
+  }
+});
+
+test("#468 security: chained launchers are followed to a cap and then fail closed, in bounded time", () => {
+  assert.equal(tagIn("xargs xargs xargs git tag -l"), false);
+  assert.equal(tagIn("xargs ssh h xargs git tag v1"), true);
+  const start = Date.now();
+  assert.equal(tagIn(`${"xargs ".repeat(3000)}git tag -l`), true, "past the cap fails closed");
+  assert.equal(tagIn(`${"ssh h ".repeat(3000)}git tag -l`), true);
+  assert.ok(Date.now() - start < 500, `took ${Date.now() - start} ms`);
+});
+
+test("#468 test-hunter: a fetch into tags/v1 (git completes it to refs/tags/) and a draft read from a file are tag paths", () => {
+  for (const cmd of ["git fetch . HEAD:tags/v1", "git fetch . +HEAD:tags/v1", "git fetch . HEAD:tags/*", "gh api repos/o/r/releases/1 -X PATCH -F draft=@f", "gh api repos/o/r/releases/$ID -X PATCH -F draft=@-", "ssh -- host git tag v1", "ssh -p 22 -- host git push --tags"]) {
+    assert.equal(tagIn(cmd), true, cmd);
+  }
+  for (const cmd of ["git fetch . HEAD:tags/x", "git fetch . HEAD:heads/v1x", "git fetch origin pull/5/head:pr-5", "gh api repos/o/r/releases/1 -X PATCH -F name=@f"]) {
+    assert.equal(tagIn(cmd), false, cmd);
+  }
+});
