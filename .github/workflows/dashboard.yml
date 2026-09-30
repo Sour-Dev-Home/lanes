@@ -9,7 +9,6 @@ on:
   issues:
     types: [opened, edited, closed, reopened, labeled, unlabeled]
   status:
-  merge_group:
   push:
     # The default branch. Change it here if the repository's is not main.
     branches: [main]

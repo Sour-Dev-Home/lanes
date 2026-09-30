@@ -16,15 +16,16 @@ const jobsBlock = section(yml, "\njobs:\n");
 const buildJob = section(jobsBlock, "\n  build:\n", "\n  deploy:\n");
 const deployJob = section(jobsBlock, "\n  deploy:\n");
 
-test("it triggers on issues, status, merge_group, a push to the default branch and a 5-minute cron", () => {
-  for (const trigger of ["issues", "status", "merge_group", "push", "schedule"]) assert.match(onBlock, new RegExp(`\\n {2}${trigger}:`), trigger);
+test("it triggers on issues, status, a push to the default branch and a 5-minute cron", () => {
+  for (const trigger of ["issues", "status", "push", "schedule"]) assert.match(onBlock, new RegExp(`\\n {2}${trigger}:`), trigger);
   assert.match(onBlock, /\n {2}push:\n {4}branches: \[main\]/);
   assert.match(onBlock, /- cron: "\*\/5 \* \* \* \*"/);
 });
 
-test("it has no pull_request or pull_request_target trigger, anywhere in the file", () => {
-  assert.doesNotMatch(yml, /pull_request/);
-  assert.deepEqual([...onBlock.matchAll(/\n {2}(\w+):/g)].map((m) => m[1]).sort(), ["issues", "merge_group", "push", "schedule", "status"]);
+test("it has no pull_request, pull_request_target or merge_group trigger, anywhere in the file", () => {
+  // #475: github-pages only accepts deploys from main, so a merge group's ref (or a PR's) can never deploy.
+  assert.doesNotMatch(yml, /pull_request|merge_group/);
+  assert.deepEqual([...onBlock.matchAll(/\n {2}(\w+):/g)].map((m) => m[1]).sort(), ["issues", "push", "schedule", "status"]);
 });
 
 test("every checkout is of the default branch's own code", () => {
