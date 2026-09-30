@@ -410,6 +410,14 @@ test("edge: without a config a skip issue is not checked; a quick issue is never
   assert.deepEqual(issuePlan(quick, [], true, skipConfig).add, ["tier:quick", "ready"]);
 });
 
+test("edge: a backtick in a scope token cannot break out of the code span in the comment", () => {
+  const p = issuePlan(skipBody("In scope: `a`b`c/x.js` and [t](//h/x)/y.js"), [], true, skipConfig);
+  assert.deepEqual(p.add, []);
+  const listed = p.comment.split("\n").filter((l) => l.startsWith("- "));
+  assert.ok(listed.length > 0);
+  for (const l of listed) assert.match(l, /^- `[\w./\\-]+`$/);
+});
+
 test("edge: a skip issue with no path in its Scope is not refused", () => {
   assert.deepEqual(issuePlan(skipBody("nothing to change"), [], true, skipConfig).add, ["tier:skip", "ready"]);
 });
