@@ -3,10 +3,9 @@
 // Run by .github/workflows/issue-contract.yml. Inputs: REPO, ISSUE_NUMBER, ISSUE_BODY, ISSUE_LABELS_JSON, ISSUE_AUTHOR,
 // GH_TOKEN.
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { issuePaths } from "./paths.mjs";
-import { authorCanWrite, classifyFiles, compileConfig, parseIssueForm, parseSections, parseValidation, ValidationParseError } from "./lib.mjs";
+import { authorCanWrite, classifyFiles, compileConfig, interfacePaths, parseIssueForm, parseSections, parseValidation, ValidationParseError } from "./lib.mjs";
 
 const MAX_VALIDATE_LINE = 500;
 
@@ -18,7 +17,7 @@ export const MARKER = "<!-- lanes:issue-contract -->";
  */
 function nonSkipScopePaths(scope, config) {
   const inPart = scope.split(/(?<![\w-])Out(?: of scope)?:/i)[0].replace(/^[\s\S]*?(?<![\w-])In(?: scope)?:/i, "");
-  return issuePaths({ scope: `In: ${inPart}` }).filter((p) => !classifyFiles([p], config).skipOnly);
+  return interfacePaths(inPart).filter((p) => !classifyFiles([p], config).skipOnly);
 }
 
 /**
@@ -199,7 +198,7 @@ export function main(env = process.env, run = gh) {
   // Only a task form needs the permission lookup; a plain issue is left alone without an extra API call.
   if (!issuePlan(env.ISSUE_BODY, labels, false).isTask) return;
   const canWrite = authorCanWrite((args) => run(["api", ...args]), repo, env.ISSUE_AUTHOR);
-  const plan = issuePlan(env.ISSUE_BODY, labels, canWrite, JSON.parse(readFileSync("lanes.config.json", "utf8")));
+  const plan = issuePlan(env.ISSUE_BODY, labels, canWrite, existsSync("lanes.config.json") ? JSON.parse(readFileSync("lanes.config.json", "utf8")) : undefined);
   const edit = ["issue", "edit", n, "-R", repo];
   if (plan.add.length) edit.push("--add-label", plan.add.join(","));
   if (plan.remove.length) edit.push("--remove-label", plan.remove.join(","));
