@@ -660,6 +660,72 @@ function ghReleaseTag(words, at) {
   return true;
 }
 
+// Config git reads from the environment (#441): GIT_CONFIG_KEY_n names a key (its GIT_CONFIG_VALUE_n and
+// GIT_CONFIG_COUNT need no reading), GIT_CONFIG_PARAMETERS holds `'key'='value'` pairs. Names are read in any case, as
+// Windows environment names are.
+const ENV_KEY_RE = /^GIT_CONFIG_KEY_[0-9]+=(.*)$/is;
+const ENV_PARAMETERS_RE = /^GIT_CONFIG_PARAMETERS=(.*)$/is;
+const TAG_CONFIG_RE = /(?:^|[^A-Za-z0-9_.])(?:alias\.|push\.followtags)/i;
+
+/**
+ * True when any word of `words` (an assignment, `export NAME=…` or `env NAME=…` too, whatever the program) sets an
+ * environment config key that is `push.followTags` or an `alias.…`: the alias's expansion may be `tag` or `push`, so
+ * the setting itself is denied rather than followed, and this covers a setting made in an earlier statement (#441).
+ */
+function envConfigSetsTagPath(words) {
+  return words.some((w) => {
+    const key = ENV_KEY_RE.exec(w)?.[1];
+    if (key !== undefined) return /^(?:alias\.|push\.followtags$)/i.test(unmark(key));
+    const parameters = ENV_PARAMETERS_RE.exec(w)?.[1];
+    return parameters !== undefined && TAG_CONFIG_RE.test(unmark(parameters));
+  });
+}
+
+/** True when a GIT_CONFIG_KEY_n before the program is known only at run time: the key may be any alias (#441). */
+const envConfigKeyUnknown = (before) => before.some((w) => LIVE_RE.test(ENV_KEY_RE.exec(w)?.[1] ?? ""));
+
+// gh api's options that take the next word as their value, and those that put fields in the request body.
+const GH_API_VALUED = new Set(["-X", "--method", "-f", "--raw-field", "-F", "--field", "-H", "--header", "-q", "--jq", "-t", "--template", "--input", "--hostname", "--cache", "-p", "--preview"]);
+const GH_API_BODY_RE = /^(?:-f|-F|--raw-field|--field|--input)(?:=|$)|^-[fF]./s;
+
+/**
+ * True when `gh api` at `words[at]` writes a v* tag ref (#441): a POST or PATCH (or a request with body fields, which
+ * gh sends as POST) to a `git/refs` endpoint naming `refs/tags/v…` in its ref field or its path, or a ref known only at
+ * run time, or a body read from --input; or to `releases` with a tag_name that is v*, or known only at run time (a release
+ * creates its tag). A DELETE or GET writes no tag.
+ */
+function ghApiTag(words, at) {
+  if (words[at + 1] !== "api") return false;
+  const args = words.slice(at + 2);
+  let method;
+  let endpoint;
+  for (let j = 0; j < args.length; j += 1) {
+    const w = args[j];
+    const glued = /^--method=(.*)$/s.exec(w)?.[1] ?? /^-X(.+)$/s.exec(w)?.[1];
+    if (glued !== undefined) method = unmark(glued).toUpperCase();
+    else if (w === "-X" || w === "--method") method = unmark(args[++j] ?? "").toUpperCase();
+    else if (GH_API_VALUED.has(w)) j += 1;
+    else if (!w.startsWith("-") && endpoint === undefined) endpoint = w;
+  }
+  if (endpoint === undefined) return false;
+  const writes = method === undefined ? args.some((w) => GH_API_BODY_RE.test(w)) : !["GET", "DELETE", "HEAD"].includes(method);
+  if (!writes) return false;
+  const path = unmark(endpoint);
+  if (/(?:^|\/)git\/refs\/tags\/(?:v|[*?[])/i.test(path)) return true;
+  const refs = /(?:^|\/)git\/refs\/?$/i.test(path);
+  const releases = /(?:^|\/)releases\/?$/i.test(path);
+  if (!refs && !releases) return false;
+  if (args.some((w) => /^(?:--input)(?:=|$)/.test(w))) return true;
+  const field = refs ? "ref" : "tag_name";
+  for (const w of args) {
+    const value = new RegExp(`(?:^|[^A-Za-z0-9_])${field}=(.*)$`, "s").exec(w)?.[1] ?? new RegExp(`^-[fF]${field}=(.*)$`, "s").exec(w)?.[1];
+    if (value === undefined) continue;
+    if (refs ? TAG_REF_RE.test(unmark(value)) : /^v/i.test(unmark(value))) return true;
+    if (LIVE_RE.test(value) || BRACED_OR_COMMAND_RE.test(value)) return true;
+  }
+  return false;
+}
+
 /**
  * True when simple command `words` creates or pushes a `v*` tag (ADR 0017 decision 3): git, as the program behind any
  * wrappers, running `tag` with a name starting with v and no list, delete or verify option, or `push` with --tags,
@@ -669,8 +735,11 @@ function ghReleaseTag(words, at) {
  * with --repo given, every positional word as a refspec; `update-ref` of a `refs/tags/v*` ref (or one named at run
  * time, or `--stdin`); a `-c alias.NAME=…` alias used as the subcommand, read as what it expands to (one that runs a
  * shell with `!`, or whose value is known only at run time or through --config-env, fails closed); and gh release
- * create (or new) naming a v* tag, one known only at run time, or none. Both guards deny it from any session; the
- * owner tags from their own terminal.
+ * create (or new) naming a v* tag, one known only at run time, or none. Since #441 also: the same `push.followTags` and
+ * `alias.NAME` config given as GIT_CONFIG_COUNT, GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n; `symbolic-ref` of a
+ * `refs/tags/v*` ref; `fast-import`; and `gh api` writing a `git/refs` ref (or a release's tag_name) that is a v* tag or
+ * known only at run time. Aliases from git config files are outside the rule (ADR 0017). Both guards deny it from any
+ * session; the owner tags from their own terminal.
  */
 export function releaseTagCommand(words) {
   return releaseTagAt(words, 0);
@@ -678,12 +747,15 @@ export function releaseTagCommand(words) {
 
 /** releaseTagCommand, `depth` -c aliases deep. */
 function releaseTagAt(words, depth) {
+  if (depth === 0 && envConfigSetsTagPath(words)) return true;
   const at = launcherAt(words);
   if (at >= words.length) return false;
-  if (GH_RE.test(basename(words[at]))) return ghReleaseTag(words, at);
+  if (GH_RE.test(basename(words[at]))) return ghReleaseTag(words, at) || ghApiTag(words, at);
   if (!GIT_RE.test(basename(words[at]))) return false;
   let i = at + 1;
   let followTags = false;
+  // A GIT_CONFIG_KEY_n known only at run time: any command that is not a built-in might be its alias.
+  const unknownKey = envConfigKeyUnknown(words.slice(0, at));
   const aliases = new Map();
   for (; i < words.length && words[i].startsWith("-"); i += 1) {
     const env = /^--config-env=(.*)$/s.exec(words[i])?.[1] ?? (words[i] === "--config-env" ? words[i + 1] : undefined);
@@ -695,6 +767,17 @@ function releaseTagAt(words, depth) {
   }
   const sub = words[i];
   const rest = words.slice(i + 1);
+  // git fast-import writes any ref, tags among them, from its input; symbolic-ref makes a ref an alias of another (#441).
+  if (sub === "fast-import") return true;
+  if (sub === "symbolic-ref") {
+    const options = rest.filter((w, k) => w.startsWith("-") && !UPDATE_REF_VALUED.has(rest[k - 1]));
+    if (options.some((w) => /^(-d|--delete)$/.test(w))) return false;
+    const ref = rest.find((w, k) => !w.startsWith("-") && !UPDATE_REF_VALUED.has(rest[k - 1]));
+    return ref !== undefined && (TAG_REF_RE.test(unmark(ref)) || runtimeRef(ref));
+  }
+  // An unreadable config key may be an alias for anything but the commands read above.
+  if (unknownKey && sub !== undefined && !["tag", "push", "update-ref"].includes(sub)) return true;
+  if (unknownKey && sub === "push") return true;
   // git ignores an alias that shadows a built-in command, so `-c alias.tag=log tag v1` still tags.
   if (sub !== undefined && !["tag", "push", "update-ref"].includes(sub) && aliases.has(sub.toLowerCase())) {
     const value = aliases.get(sub.toLowerCase());

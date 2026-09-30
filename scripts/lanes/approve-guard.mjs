@@ -190,6 +190,10 @@ function asBashText(text, shellName) {
 // Commands that hand their arguments to a shell as text without a -c flag of bash's (#219): watch, ssh, su -c,
 // script -c, flock -c, parallel, tmux, screen. Every argument after one counts as run.
 const SHELL_TEXT_COMMANDS = new Set(["watch", "ssh", "su", "runuser", "script", "flock", "parallel", "tmux", "screen", "sg"]);
+// Words that run the command after them (#441): a SHELL_TEXT_COMMANDS word is a program only in command position or
+// after one of these; anywhere else (`gh run watch 123`) it is an argument. After a runner every later word counts,
+// since a runner's option values (`sudo -u bob watch`) cannot be told from the command.
+const RUNNER_RE = /^(env|exec|command|nohup|time|timeout|nice|sudo|doas|xargs|setsid|stdbuf|ionice|chroot|unbuffer|busybox|strace|ltrace|find)(\.exe)?$/i;
 // powershell's own options (#404), read past before its command text: those that take no value, those that take the
 // next word, and -Command or -File, after which the rest is the command. Any other option leaves the text unread.
 const PS_BOOLEAN_OPTION_RE = /^[-/](noprofile|nop|nologo|noninteractive|noni|noexit|sta|mta|login|l)$/i;
@@ -445,7 +449,8 @@ function scan(cmd, depth, out) {
     plain.forEach((p, at) => {
       if ((at > 0 && !runsArgs) || at >= evalFrom) return;
       const name = p.split(/[\\/]/).at(-1);
-      if (EVAL_RE.test(name) || SHELL_TEXT_COMMANDS.has(name)) evalFrom = at + 1;
+      const inCommandPosition = at === 0 || plain.slice(0, at).some((w) => RUNNER_RE.test(w.split(/[\\/]/).at(-1)));
+      if (EVAL_RE.test(name) || (SHELL_TEXT_COMMANDS.has(name) && inCommandPosition)) evalFrom = at + 1;
       else if (name === "sudo" && plain.some((w, j) => j > at && /^(-[A-Za-z]*[si][A-Za-z]*|--shell|--login)$/.test(w))) evalFrom = at + 1;
       else if (FOREIGN_SHELL_RE.test(name)) {
         evalFrom = at + 1;
@@ -460,7 +465,8 @@ function scan(cmd, depth, out) {
     // post-review.mjs owner; the scan below denies it too, and this keeps both guards reading it by one rule (#378).
     if (runsArgs && runsRuntimeText(plain)) out.push({ pr: undefined, standalone: false });
     // A v* tag, made or pushed, is the owner's alone (ADR 0017, #404).
-    if (releaseTagCommand(plain)) out.push({ pr: undefined, standalone: false, tag: true });
+    // `plain` has its assignments dropped, so the raw words are read too: `GIT_CONFIG_KEY_0=push.followTags git push` (#441).
+    if (releaseTagCommand(plain) || releaseTagCommand(segments[k])) out.push({ pr: undefined, standalone: false, tag: true });
     // An awk or sed program that runs a command (#404): one holding a backslash escape could spell any name
     // (`post-revi\145w`), so it fails closed; one with none is read with its strings joined, as awk's "a" "b" joins them.
     const running = programArgs ? runningProgram(name ?? "", plain.slice(1).map(unmark)) : null;

@@ -658,6 +658,28 @@ test("#424 hunt: an alias shadowing a built-in is ignored by git, so it hides no
   assert.equal(releaseTagCommand(lex(chain(9))[0]), true, "past the cap fails closed");
 });
 
+test("#441 criterion 2: environment config, symbolic-ref, fast-import and gh api writes are release tags", () => {
+  for (const cmd of [
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.followTags GIT_CONFIG_VALUE_0=true git push", "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.t GIT_CONFIG_VALUE_0=tag git t v1",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.t GIT_CONFIG_VALUE_0='!git tag v1' git t", "git_config_key_0=ALIAS.t git t v1", "export GIT_CONFIG_KEY_0=push.followTags",
+    "GIT_CONFIG_PARAMETERS=\"'push.followTags'='true'\" git push", 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="$K" GIT_CONFIG_VALUE_0=tag git t v1',
+    "git symbolic-ref refs/tags/v1 HEAD", 'git symbolic-ref "refs/tags/$V" refs/heads/main', "git symbolic-ref -m x refs/tags/v1 refs/heads/main", "git fast-import", "git -C x fast-import --quiet",
+    "gh api repos/o/r/git/refs -f ref=refs/tags/v1 -f sha=abc", "gh api -X POST repos/o/r/git/refs -fref=refs/tags/v1.0", "gh api repos/o/r/git/refs -f ref=refs/tags/v1 --method=POST",
+    'gh api repos/o/r/git/refs -f ref="refs/tags/$V" -f sha=a', "gh api repos/o/r/git/refs --input body.json", "gh api repos/o/r/git/refs/tags/v1 -X PATCH -f sha=a",
+    "gh api repos/o/r/releases -f tag_name=v1", "gh api repos/o/r/releases -f tag_name=$V",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), true, cmd);
+  }
+  for (const cmd of [
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=x git push origin main", "GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat git log",
+    "git symbolic-ref HEAD", "git symbolic-ref --short HEAD", "git symbolic-ref -d refs/tags/v1", "git symbolic-ref refs/heads/x refs/heads/main",
+    "gh api repos/o/r/git/refs/heads/main", "gh api repos/o/r/git/refs -f ref=refs/heads/x -f sha=a", "gh api repos/o/r/git/refs/tags/v1 -X DELETE", "gh api repos/o/r/git/refs/tags/v1",
+    "gh api repos/o/r/git/refs -X GET", "gh api repos/o/r/releases", "gh api repos/o/r/releases -f tag_name=x1", "gh api repos/o/r/issues -f title=v1", "gh api",
+  ]) {
+    assert.equal(releaseTagCommand(lex(cmd)[0]), false, cmd);
+  }
+});
+
 test("#424 security review: gh release's own --repo before create, a -m value of -d, and --config-env push.followTags", () => {
   for (const cmd of [
     "gh release --repo o/r create v1", "gh release -R o/r create v1", "gh release -Ro/r create v1", "gh release --repo=o/r new v1",

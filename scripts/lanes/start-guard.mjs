@@ -497,10 +497,18 @@ function startInvocations(cmd, typed) {
     0,
     (words, stdin) => {
       const { plain, nodeAt, scripts, counts } = commandWords(words, stdin);
+      // Node runs the first script word and the values of options before it; a word after the script is that script's
+      // data (`node lessons.mjs --paths … start.mjs`, #441). An option word (`-r start.mjs`, `--import=start.mjs`) counts
+      // up to there.
+      // Only when node is the command word itself: behind another program (`rg --pre node x start.mjs`) node's arguments
+      // are not known.
+      const scriptEnd = Math.max(-1, ...scripts);
+      // A script word that is itself node (`node node -ArgumentList …`, how a PowerShell launcher reads) leaves the rest unknown.
+      const isNodeData = (i) => nodeAt === 0 && !mayBeNode(plain[Math.min(...scripts)] ?? "") && !scripts.has(i) && !(plain[i].startsWith("-") && (scripts.size === 0 || i < scriptEnd));
       plain.forEach((w, i) => {
         if (!counts(i)) return;
         // Unquoted `scripts\lanes\start.mjs` loses its backslashes in the lexer, as in bash: match the word's end.
-        if (START_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i))) out.push({ issues: undefined, standalone: false });
+        if (START_WORD_RE.test(w) && (i === 0 || (nodeAt !== -1 && nodeAt < i && !isNodeData(i)))) out.push({ issues: undefined, standalone: false });
         // A glob that could expand to start.mjs, as the command word or node's script (#308).
         else if (mayExpandTo(w, START_NAMES) && (i === 0 || scripts.has(i))) out.push({ issues: undefined, standalone: false });
         // The command word, or a word node could run as its script, that still holds `$` or a backtick could expand to start.mjs.

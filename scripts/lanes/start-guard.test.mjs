@@ -2468,6 +2468,51 @@ test("#424 criteria 1-3: a run-time tag name, --repo= push, update-ref, a -c ali
   }
 });
 
+// --- #441: the remaining tag-creation paths, and start.mjs named as data -----------------------------------------------
+
+test("#441 criteria 2-3: config from the environment, symbolic-ref, fast-import and gh api writes to a v* tag ref are denied", () => {
+  for (const cmd of [
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.followTags GIT_CONFIG_VALUE_0=true git push",
+    "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.t GIT_CONFIG_VALUE_0=tag git t v1",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.t GIT_CONFIG_VALUE_0='!git tag v1' git t",
+    'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="$K" GIT_CONFIG_VALUE_0=tag git t v1',
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.followTags GIT_CONFIG_VALUE_0=true", "GIT_CONFIG_PARAMETERS=\"'push.followTags'='true'\" git push",
+    "git symbolic-ref refs/tags/v1 HEAD", "git fast-import", "git -C x fast-import --quiet",
+    "gh api repos/o/r/git/refs -f ref=refs/tags/v1 -f sha=abc", "gh api -X POST repos/o/r/git/refs -F ref=refs/tags/v1.0", 'gh api repos/o/r/git/refs -f ref="refs/tags/$V"',
+    "gh api repos/o/r/git/refs --input body.json", "gh api repos/o/r/git/refs/tags/v1 -X PATCH -f sha=a", "gh api repos/o/r/releases -f tag_name=v1",
+  ]) {
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(TAG_DENY_REASON), cmd);
+    assert.deepEqual(decideFor(ps(cmd)), deny(TAG_DENY_REASON), `${cmd} (PowerShell)`);
+  }
+  for (const cmd of [
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=x git push origin main", "GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat git log",
+    "git symbolic-ref HEAD", "git symbolic-ref -d refs/tags/v1", "gh api repos/o/r/git/refs/heads/main", "gh api repos/o/r/git/refs -f ref=refs/heads/x -f sha=a",
+    "gh api repos/o/r/git/refs/tags/v1 -X DELETE", "gh api repos/o/r/releases", "gh api repos/o/r/issues -f title=v1",
+  ]) {
+    assert.equal(decideFor(bash(cmd)), null, cmd);
+  }
+});
+
+test("#441 criterion 5: start.mjs named as data to another script is no launch; node's own script, options, -e and wrappers still are", () => {
+  // The lane-448 case: node runs lessons.mjs, and start.mjs is one of its --paths.
+  for (const cmd of [
+    "node scripts/lanes/lessons.mjs --paths docs/adr/0005-owner-run-lane-queue.md scripts/lanes/start.mjs scripts/lanes/start.test.mjs",
+    "node scripts/lanes/lessons.mjs scripts/lanes/start.mjs", "node --test scripts/lanes/pick.test.mjs scripts/lanes/start.mjs.md",
+    "node scripts/lanes/lessons.mjs --check --paths scripts/lanes/start.mjs", "node scripts/lanes/lessons.mjs --require=scripts/lanes/start.mjs",
+  ]) {
+    assert.deepEqual(findStartInvocations(cmd), [], cmd);
+    assert.equal(decideFor(bash(cmd)), null, cmd);
+  }
+  for (const cmd of [
+    "node scripts/lanes/start.mjs 12", "node --require scripts/lanes/start.mjs x.mjs", "node -r scripts/lanes/start.mjs x.mjs", "node --import scripts/lanes/start.mjs x.mjs",
+    "node --require=scripts/lanes/start.mjs x.mjs", "node -rscripts/lanes/start.mjs", "node -e \"import('./scripts/lanes/start.mjs')\"", "node -p \"require('./scripts/lanes/start.mjs')\"",
+    "env node scripts/lanes/start.mjs 12", "xargs node scripts/lanes/start.mjs", "sh -c 'node scripts/lanes/start.mjs 12'", "rg --pre node x scripts/lanes/start.mjs",
+    "node --experimental-vm-modules scripts/lanes/start.mjs 12",
+  ]) {
+    assert.notDeepEqual(findStartInvocations(cmd), [], cmd);
+  }
+});
+
 test("#424 criterion 4: bash -c with --rcfile or --init-file before the script reads the script, not the value", () => {
   for (const cmd of ['bash -c --init-file x "$X"', 'bash --init-file x -c "$X"', 'bash -c --rcfile x -- "$X"']) {
     assert.deepEqual(decideFor(bash(cmd), grant()), deny(RUNTIME_TEXT_DENY_REASON), cmd);

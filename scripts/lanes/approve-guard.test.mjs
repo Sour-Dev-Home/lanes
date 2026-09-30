@@ -1588,6 +1588,44 @@ test("#424 criteria 1-3: a run-time tag name, --repo= push, update-ref, a -c ali
   }
 });
 
+// --- #441: the remaining tag-creation paths, and a subcommand word in argument position -----------------------------
+
+// Each is a v* tag made through config from the environment, symbolic-ref, fast-import or gh api (ADR 0017 decision 3).
+const TAG_PATHS_441 = [
+  "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.followTags GIT_CONFIG_VALUE_0=true git push",
+  "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.t GIT_CONFIG_VALUE_0=tag git t v1",
+  "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.t GIT_CONFIG_VALUE_0='!git tag v1' git t",
+  'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.t GIT_CONFIG_VALUE_0="$A" git t v1',
+  'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="$K" GIT_CONFIG_VALUE_0=tag git t v1',
+  "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.followTags GIT_CONFIG_VALUE_0=true", "GIT_CONFIG_PARAMETERS=\"'push.followTags'='true'\" git push",
+  "git symbolic-ref refs/tags/v1 HEAD", "git fast-import", "git -C x fast-import --quiet",
+  "gh api repos/o/r/git/refs -f ref=refs/tags/v1 -f sha=abc", "gh api -X POST repos/o/r/git/refs -F ref=refs/tags/v1.0", 'gh api repos/o/r/git/refs -f ref="refs/tags/$V"',
+  "gh api repos/o/r/git/refs --input body.json", "gh api repos/o/r/git/refs/tags/v1 -X PATCH -f sha=a", "gh api repos/o/r/releases -f tag_name=v1",
+];
+
+test("#441 criterion 2-3: config from the environment, symbolic-ref, fast-import and gh api writes to a v* tag ref are denied", () => {
+  for (const cmd of TAG_PATHS_441) {
+    assert.deepEqual(decideBash(cmd, grant({ pr: 1 })), { decision: "deny", reason: TAG_REASON }, cmd);
+    assert.deepEqual(decidePs(cmd), { decision: "deny", reason: TAG_REASON }, `${cmd} (PowerShell)`);
+  }
+  for (const cmd of [
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=x git push origin main", "GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat git log",
+    "git symbolic-ref HEAD", "git symbolic-ref -d refs/tags/v1", "gh api repos/o/r/git/refs/heads/main", "gh api repos/o/r/git/refs -f ref=refs/heads/x -f sha=a",
+    "gh api repos/o/r/git/refs/tags/v1 -X DELETE", "gh api repos/o/r/releases", "gh api repos/o/r/issues -f title=v1",
+  ]) {
+    assert.equal(decideBash(cmd), null, cmd);
+  }
+});
+
+test("#441 criterion 4: a subcommand word in argument position is no shell-text program; a real one still fails closed", () => {
+  for (const cmd of ["gh run watch 123 --repo o/r --exit-status > /dev/null", 'gh run watch "$RUN" --exit-status', "git log --grep=script", "gh run watch $RUN"]) {
+    assert.equal(decideBash(cmd), null, cmd);
+  }
+  for (const cmd of ['watch "$C"', 'ssh host "$C"', 'script -c "$C" out', 'env watch "$C"', 'xargs ssh host "$C"', 'sudo -u bob watch "$C"', 'time script -c "$C" out']) {
+    assert.deepEqual(decideBash(cmd), DENY, cmd);
+  }
+});
+
 test("#424 criterion 4: bash -c with --rcfile or --init-file before the script reads the script, not the value", () => {
   for (const cmd of ['bash -c --rcfile x "$X"', 'bash -c --init-file x "$X"', 'bash --init-file x -c "$X"']) {
     assert.deepEqual(decideBash(cmd, grant({ pr: 1 })), DENY, cmd);
