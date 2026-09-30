@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
+import { reviewersFor } from "./modules.mjs";
 
 export const REVIEWERS = ["test-hunter", "ui-reviewer", "security-reviewer", "architecture-advisor"];
 export const TIERS = ["skip", "quick", "full"];
@@ -55,7 +56,8 @@ export function compileConfig(raw) {
   if (!Array.isArray(requiredChecks) || requiredChecks.length === 0) {
     throw new Error("lanes.config.json: requiredChecks must be a non-empty array");
   }
-  return { requiredChecks, paths };
+  // ADR 0018: the optional module map, kept as written; modules.mjs validates it.
+  return raw.modules === undefined ? { requiredChecks, paths } : { requiredChecks, paths, modules: raw.modules };
 }
 
 export function loadConfig(file = "lanes.config.json") {
@@ -136,13 +138,24 @@ export function classifyFiles(files, config, adrs = [], interfaceContract = "") 
  * The fresh-eyes reviewers a PR must pass, from its issue's tier and its diff. The architecture-advisor runs for a
  * contract or architecture change (#241), not for every diff an accepted ADR governs.
  */
-export function requiredReviewers(tier, cls) {
+export function requiredReviewers(tier, cls, files = [], modules = undefined) {
   if (tier === "skip") return [];
   const out = ["test-hunter"];
   if (cls.ui) out.push("ui-reviewer");
   if (cls.sensitive) out.push("security-reviewer");
   if (cls.contract || cls.architecture) out.push("architecture-advisor");
+  // ADR 0018: a module's configured reviewers are added to the built-in ones, never a replacement.
+  for (const name of reviewersFor(files, modules)) if (!out.includes(name)) out.push(name);
   return out;
+}
+
+/** The names a verdict may carry: the built-in reviewers plus every configured one; `owner` is never a reviewer. */
+export function reviewerNames(config) {
+  const names = [...REVIEWERS];
+  for (const e of config?.modules?.entries ?? []) {
+    for (const r of e?.reviewers ?? []) if (r !== "owner" && !names.includes(r)) names.push(r);
+  }
+  return names;
 }
 
 /** What `reviewers.mjs` prints: a skip warning if due, the reviewers (or `none`), then `ADRs: NNNN, ...` if any govern. */
@@ -150,7 +163,7 @@ export function reviewersReport(tier, files, config, adrs = [], interfaceContrac
   const cls = classifyFiles(files, config, adrs, interfaceContract);
   const lines = [];
   if (tier === "skip" && !cls.skipOnly) lines.push("NOT SKIP: the diff changes files outside the skip paths; use quick or full");
-  const list = requiredReviewers(tier, cls);
+  const list = requiredReviewers(tier, cls, files, config.modules);
   lines.push(...(list.length ? list : ["none"]));
   if (cls.adr.length) lines.push(`ADRs: ${cls.adr.map((n) => String(n).padStart(4, "0")).join(", ")}`);
   return lines.join("\n");
@@ -355,11 +368,11 @@ const VERDICT_COMMENT_RE = /^<!-- lanes:verdict (\S+)(?: (\S+))? -->\r?\n```json
 const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
 
 /** @returns {{ reviewer: string, sha: string | null, verdict: object } | null} null for anything not well-formed */
-export function parseVerdictComment(body) {
+export function parseVerdictComment(body, names = REVIEWERS) {
   const m = String(body ?? "").match(VERDICT_COMMENT_RE);
   if (!m) return null;
   const [, reviewer, sha, json] = m;
-  if (!REVIEWERS.includes(reviewer)) return null;
+  if (!names.includes(reviewer)) return null;
   if (sha !== undefined && !COMMIT_SHA_RE.test(sha)) return null;
   let verdict;
   try {
@@ -561,7 +574,7 @@ export function reusableReviewers({ issueLabels, files, statuses, config, adrs =
   const tier = tierOf(issueLabels);
   if (tier === null) return [];
   const latest = latestByContext(trustedStatuses(statuses));
-  return requiredReviewers(tier, classifyFiles(files, config, adrs, interfaceContract)).filter((r) => REUSABLE_REVIEWERS.includes(r) && !latest.has(reviewContext(r)));
+  return requiredReviewers(tier, classifyFiles(files, config, adrs, interfaceContract), files, config.modules).filter((r) => REUSABLE_REVIEWERS.includes(r) && !latest.has(reviewContext(r)));
 }
 
 /** Whether the gate should look for a test-hunter success on an earlier commit (#25). */
@@ -715,7 +728,7 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
   const reuse = acceptReused(reused, latest);
   for (const [name, r] of reuse) latest.set(reviewContext(name), r.status);
   const note = reuseNote(reuse);
-  const required = requiredReviewers(tier, cls);
+  const required = requiredReviewers(tier, cls, files, config.modules);
   for (const name of required) {
     const s = latest.get(reviewContext(name));
     if (!s) return { state: "pending", description: `waiting for review/${name}`, stage: "review" };
