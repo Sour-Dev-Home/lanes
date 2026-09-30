@@ -8,6 +8,7 @@ import {
   GATE_CONTEXT,
   gateDecision,
   interfaceContractOf,
+  isLaneBot,
   latestByContext,
   loadAdrs,
   loadConfig,
@@ -74,7 +75,7 @@ const statusesOf = (api, repo, sha) => JSON.parse(api([`repos/${repo}/commits/${
  * `authorCanWrite` (one lookup per login). Fails closed: comments that cannot be read mean no verdicts, so a full-tier
  * PR waits on the owner.
  */
-export function trustedVerdicts(api, repo, number, names = REVIEWERS) {
+export function trustedVerdicts(api, repo, number, names = REVIEWERS, identity = undefined) {
   let lines;
   try {
     // @json emits one line per comment, whatever newlines its body holds.
@@ -94,6 +95,11 @@ export function trustedVerdicts(api, repo, number, names = REVIEWERS) {
     const parsed = parseVerdictComment(comment?.body, names);
     if (!parsed) continue;
     const login = comment.login;
+    // ADR 0020 part 3: the configured lane bot's comment counts without a permission lookup (it is no collaborator).
+    if (isLaneBot(identity, { login })) {
+      out.push(parsed);
+      continue;
+    }
     if (!canWrite.has(login)) canWrite.set(login, authorCanWrite(api, repo, login));
     if (canWrite.get(login)) out.push(parsed);
   }
@@ -116,9 +122,9 @@ const COMPARE_FILES_CAP = 300;
  * `files` and the gate's `adrs`). Fails closed per reviewer: any API error, an empty diff, or a changed-file list that
  * may be cut short means no reuse for it; a commit list that does not end at the head means no reuse at all.
  */
-export function reusableReviews(api, repo, number, pr, reviewers, { files = [], adrs = [] } = {}) {
+export function reusableReviews(api, repo, number, pr, reviewers, { files = [], adrs = [], config = undefined } = {}) {
   if (!Array.isArray(reviewers) || reviewers.length === 0) return [];
-  const w = reviewWalk(api, repo, number, pr);
+  const w = reviewWalk(api, repo, number, pr, config);
   if (w === null) return [];
   const { head, ownDiff, changedSince, statusesAt, walk } = w;
   const out = [];
@@ -146,8 +152,8 @@ export function reusableReviews(api, repo, number, pr, reviewers, { files = [], 
  * the reviewers' own inputs (their briefs, checklists, ADRs) do not matter to it. A status that is not a success, any
  * API error or an empty diff means null (a diff that cannot be compared is never `same`).
  */
-export function carriedOwnerApproval(api, repo, number, pr) {
-  const w = reviewWalk(api, repo, number, pr);
+export function carriedOwnerApproval(api, repo, number, pr, config = undefined) {
+  const w = reviewWalk(api, repo, number, pr, config);
   if (w === null) return null;
   const context = reviewContext("owner");
   try {
@@ -166,7 +172,7 @@ export function carriedOwnerApproval(api, repo, number, pr) {
  * commit's own diff fingerprint (three-dot compare against the base branch), the files changed since a commit, a
  * commit's trusted statuses, and the PR's newest `REUSE_WALK` commits before the head, newest first.
  */
-function reviewWalk(api, repo, number, pr) {
+function reviewWalk(api, repo, number, pr, config = undefined) {
   const head = pr?.head?.sha;
   const base = pr?.base?.ref;
   if (!SHA.test(head ?? "") || !BASE_REF.test(base ?? "")) return null;
@@ -190,7 +196,7 @@ function reviewWalk(api, repo, number, pr) {
     if (!/^\d+$/.test(count ?? "") || Number(count) >= COMPARE_FILES_CAP) throw new Error(`cannot list the files changed since ${sha}`);
     return names;
   });
-  const statusesAt = once((sha) => latestByContext(trustedStatuses(statusesOf(api, repo, sha))));
+  const statusesAt = once((sha) => latestByContext(trustedStatuses(statusesOf(api, repo, sha), config?.identity, reviewerNames(config ?? {}))));
   let walk;
   try {
     const shas = api([`repos/${repo}/pulls/${number}/commits`, "--paginate", "--jq", ".[].sha"]).split("\n").filter(Boolean);
@@ -273,7 +279,7 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   }
   const statuses = statusesOf(api, repo, pr.head.sha);
   const candidates = reusableReviewers({ issueLabels, files, statuses, config, adrs, interfaceContract });
-  const reused = candidates.length > 0 ? reusableReviews(api, repo, number, pr, candidates, { files, adrs }) : [];
+  const reused = candidates.length > 0 ? reusableReviews(api, repo, number, pr, candidates, { files, adrs, config }) : [];
   const inputs = {
     prNumber: number,
     prBody: pr.body,
@@ -285,7 +291,7 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     headSha: pr.head.sha,
     files,
     statuses,
-    verdicts: trustedVerdicts(api, repo, number, reviewerNames(config)),
+    verdicts: trustedVerdicts(api, repo, number, reviewerNames(config), config.identity),
     config,
     adrs,
     interfaceContract,
@@ -296,8 +302,8 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   let decision = gateDecision(inputs);
   // #493: an earlier owner approval is only looked for when the gate waits on the owner and the head has no trusted
   // review/owner status of its own; every other outcome (a reviewer still owed included) is final without it.
-  if (decision.stage === "owner" && !latestByContext(trustedStatuses(statuses)).has(reviewContext("owner"))) {
-    const ownerCarry = carriedOwnerApproval(api, repo, number, pr);
+  if (decision.stage === "owner" && !latestByContext(trustedStatuses(statuses, config.identity, reviewerNames(config))).has(reviewContext("owner"))) {
+    const ownerCarry = carriedOwnerApproval(api, repo, number, pr, config);
     if (ownerCarry !== null) decision = gateDecision({ ...inputs, ownerCarry });
   }
   return { pr, decision };
