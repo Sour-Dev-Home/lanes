@@ -77,6 +77,12 @@ GitHub identity (ADR 0004/0007), `queue.mjs` never runs inside Claude or on a sc
   made only of glob characters (`*`, `??`) as a possible `Win32_Process`; `(gwmi -Class *).Create($c)` is outside it, as
   `(gwmi -List).Create($c)` already was, and "create" counts as a whole word, not inside "created" or "creating".
 
+  And since #511: a git subcommand known only at run time (`git $(echo tag) v1`, `git $V push --tags`) is read as each of
+  `tag`, `push`, `update-ref`, `fetch` and as no word at all (`git $(true) push --tags`), with the words after it, and is
+  denied when any reading tags. A run-time subcommand that no reading turns into a tag or push (`git $(echo log)`) stays
+  allowed, as does `git log $(echo a)`, whose subcommand is written out. Denied on purpose: `git $(echo log) v1`, since
+  the substitution may print `tag`. Not read: a run-time subcommand that is `fast-import` or `symbolic-ref`.
+
   A subcommand word in argument position is no program (#441): the approve guard reads `watch`, `ssh`, `script` and the
    other shell-text commands as a program wherever they stand, except as an argument of a program whose words are
    subcommands that never launch a program by name (`gh`, `systemctl`, `terraform` and the like: `gh run watch 123` is

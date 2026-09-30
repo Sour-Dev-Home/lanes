@@ -1836,6 +1836,14 @@ test("#477 criteria 5-8: a $(…), xargs -I{} sh -c, env -S, env operand, --refm
   for (const cmd of ["git push $(echo o) origin main", "echo $(git tag -l)", "xargs -I{} sh -c 'git tag -l {}'", "git fetch --refmap= origin main", "git fetch origin main"]) assert.equal(decideBash(cmd), null, cmd);
 });
 
+test("#511 criteria 1-2: a git subcommand known only at run time is read as a tag path; one with no tag or push words stays allowed", () => {
+  for (const cmd of ["git $(echo tag) v1", "git $(true) push --tags"]) {
+    assert.deepEqual(decideBash(cmd, grant({ pr: 1 })), TAG_DENIED, cmd);
+    assert.deepEqual(decidePs(cmd), TAG_DENIED, `${cmd} (PowerShell)`);
+  }
+  for (const cmd of ["git $(echo log)", "git log $(echo a)"]) assert.equal(decideBash(cmd), null, cmd);
+});
+
 test("#507: a fail-closed denial names its cause and still ends with the owner-approval reason", () => {
   const why = (cmd, g = null) => decideWithReason(bash(cmd), g, NOW);
   const runtime = why('node "$CLAUDE_JOB_DIR/tmp/x.mjs" file');

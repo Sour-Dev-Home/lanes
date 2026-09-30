@@ -2638,6 +2638,14 @@ test("#477 criteria 5-8: a $(…), xargs -I{} sh -c, env -S, env operand, --refm
   for (const cmd of ["git push $(echo o) origin main", "echo $(git tag -l)", "git fetch --refmap= origin main", "git fetch origin main"]) assert.equal(decideFor(bash(cmd)), null, cmd);
 });
 
+test("#511 criteria 1-2: a git subcommand known only at run time is read as a tag path; one with no tag or push words stays allowed", () => {
+  for (const cmd of ["git $(echo tag) v1", "git $(true) push --tags"]) {
+    assert.deepEqual(decideFor(bash(cmd), grant()), deny(TAG_DENY_REASON), cmd);
+    assert.deepEqual(decideFor(ps(cmd)), deny(TAG_DENY_REASON), `${cmd} (PowerShell)`);
+  }
+  for (const cmd of ["git $(echo log)", "git log $(echo a)"]) assert.equal(decideFor(bash(cmd)), null, cmd);
+});
+
 test("#477 criteria 2-4: text that says create and names a path glob is no WMI process creation, and a real one is denied", () => {
   const text = "cat > f <<'EOF'\nfix the issue-477-* worktree, created when it was missing\nEOF\ngh issue create --title x --body-file f";
   assert.equal(decideFor(bash(text)), null);
