@@ -965,7 +965,9 @@ const PS_META_RE = new RegExp(`[;&|\`$<>(){}@,#%*?[\\]\\n\\r\\\\${String.fromCha
 export function grantDirFrom(from) {
   const own = resolve(from, "../../.lanes/approve");
   try {
-    const common = execFileSync("git", ["-C", from, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    // An inherited GIT_DIR, GIT_COMMON_DIR or GIT_WORK_TREE would redirect the answer, so git reads only `from`.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.toUpperCase().startsWith("GIT_")));
+    const common = execFileSync("git", ["-C", from, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env }).trim();
     if (common !== "" && basename(common) === ".git") return join(dirname(common), ".lanes", "approve");
   } catch {
     // git missing or not a repository: the checkout holding this script is the best answer.

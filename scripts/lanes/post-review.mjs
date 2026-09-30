@@ -72,8 +72,11 @@ export function flipRefusal(verdict, latestState) {
 
 /** The latest state of the status `context` on `sha` (the combined status keeps the newest per context), or null. */
 function latestStatusState(run, repo, sha, context) {
-  const combined = JSON.parse(run(["api", `repos/${repo}/commits/${sha}/status`]));
-  return combined.statuses?.find((s) => s.context === context)?.state ?? null;
+  const combined = JSON.parse(run(["api", `repos/${repo}/commits/${sha}/status?per_page=100`]));
+  const found = combined.statuses?.find((s) => s.context === context)?.state;
+  // A truncated list may hide the failure: fail closed.
+  if (found === undefined && combined.total_count > (combined.statuses?.length ?? 0)) return "failure";
+  return found ?? null;
 }
 
 export function validateVerdict(v, { criteriaCount }) {

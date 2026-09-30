@@ -300,10 +300,10 @@ const HEAD = "a".repeat(40);
 const ISSUE_BODY = "### Goal\n\ng\n\n### Acceptance criteria\n\n- [ ] one\n- [ ] two\n\n### Interface contract\n\nnone\n\n### Scope\n\nIn: `a.mjs`.\n\n### Blocked by\n\nnone\n\n### Tier\n\nfull\n";
 
 /** A fake `gh`: answers the reads, records every write, and throws on the write named by `failOn`. */
-function fakeGh({ failOn = null, prBody = "Closes #7", statuses = [] } = {}) {
+function fakeGh({ failOn = null, prBody = "Closes #7", statuses = [], totalCount = null } = {}) {
   const writes = [];
   const run = (args) => {
-    if (args[0] === "api" && args.length === 2 && args[1].endsWith("/status")) return JSON.stringify({ statuses });
+    if (args[0] === "api" && args.length === 2 && args[1].endsWith("/status?per_page=100")) return JSON.stringify({ statuses, total_count: totalCount ?? statuses.length });
     if (args[0] === "pr" && args[1] === "view") return JSON.stringify({ number: 12, headRefOid: HEAD, body: prBody });
     if (args[0] === "repo" && args[1] === "view") return "o/r\n";
     if (args[0] === "issue" && args[1] === "view") return JSON.stringify({ body: ISSUE_BODY });
@@ -650,4 +650,27 @@ test("lane.md says a lane posts only a verdict the reviewer returned, never edit
   assert.match(step6, /only a verdict the reviewer agent returned/);
   assert.match(step6, /never change a verdict's `verdict` field/);
   assert.match(step6, /re-run the reviewer/);
+});
+
+test("edge: a truncated status list without the security status fails closed, and a complete one without it is allowed", () => {
+  const gh = fakeGh({ statuses: [{ context: "review/test-hunter", state: "success" }], totalCount: 150 });
+  assert.throws(() => main(["--file", verdictFile(secVerdict())], { run: gh.run, ...quiet }), /re-run the security reviewer/);
+  assert.deepEqual(gh.writes, []);
+});
+
+test("edge: an inherited GIT_DIR cannot redirect grantDirFrom", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "grant-env-")));
+  const dir = join(root, "scripts", "lanes");
+  mkdirSync(dir, { recursive: true });
+  const other = join(root, "elsewhere", ".git");
+  mkdirSync(join(root, "elsewhere"), { recursive: true });
+  execFileSync("git", ["init", "-q", join(root, "elsewhere")], { stdio: "pipe" });
+  const saved = process.env.GIT_DIR;
+  process.env.GIT_DIR = other;
+  try {
+    assert.equal(grantDirFrom(dir), join(root, ".lanes", "approve"));
+  } finally {
+    if (saved === undefined) delete process.env.GIT_DIR;
+    else process.env.GIT_DIR = saved;
+  }
 });
