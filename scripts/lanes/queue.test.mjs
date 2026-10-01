@@ -1669,3 +1669,13 @@ test("#604: planTick treats the team gate wording as a wait on the owner", async
   const plan = planTick({ issues: [], prs: teamRows([5]), sessions: [] });
   assert.deepEqual(plan.waiting, [{ number: 5, reason: teamGate }]);
 });
+
+test("edge: under team a review wait with a missing or non-https url gets no link", async () => {
+  const { waitingDigest } = await import("./queue.mjs");
+  for (const url of [undefined, null, 5, "http://github.com/o/r/pull/5", "javascript:alert(1)"]) {
+    const prs = teamRows([5]).map((p) => ({ ...p, url }));
+    const lines = waitingDigest(prs, [{ number: 5, reason: teamGate }], 60_000, new Map(), true);
+    assert.equal(lines.length, 2);
+    assert.ok(!lines[1].includes("/files"), String(url));
+  }
+});

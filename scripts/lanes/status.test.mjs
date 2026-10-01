@@ -1202,3 +1202,12 @@ test("#604: under team a review/owner status is not an approval; under solo it s
   const solo = summarize({ prs: [pr(8, [gate("PENDING", "waiting on owner (/approve)"), ownerApproved()])], issues: [], merged: [] });
   assert.deepEqual(solo.inFlight.map((i) => i.number), [8]);
 });
+
+test("edge: teamContext is undefined under solo or no config, and reads code owners under team", async () => {
+  const { teamContext } = await import("./status.mjs");
+  assert.equal(teamContext(undefined, "* @boss"), undefined);
+  assert.equal(teamContext({ identity: { profile: "solo" } }, "* @boss"), undefined);
+  const identity = { profile: "team", app: { id: 1, installationId: 2, botLogin: "lanes[bot]" } };
+  assert.deepEqual(teamContext({ identity }, "* @boss @dev\n# c\n"), { owners: ["boss", "dev"], identity });
+  assert.deepEqual(teamContext({ identity }, undefined), { owners: [], identity });
+});
