@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compileConfig, gateDecision, isBotStatus, loadConfig, parseAdr, reusableReviewers, reuseBlockedBy } from "./lib.mjs";
+import { compileConfig, gateDecision, isBotStatus, loadConfig, nativeCodeOwnerApproval, parseAdr, reusableReviewers, reuseBlockedBy } from "./lib.mjs";
 
 const config = compileConfig({
   requiredChecks: ["verify"],
@@ -384,6 +384,36 @@ test("real config under the team profile: an owner-only path waits for a native 
   const d = onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"], input);
   assert.deepEqual(d, { state: "pending", description: "waiting for a code-owner review in GitHub (owner-only path)", stage: "owner" });
   assert.equal(onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"], { ...input, nativeApproval: { approved: true, by: "leo" } }).state, "success");
+});
+
+// #559: gate.mjs feeds nativeCodeOwnerApproval's result to gateDecision; these pin the pair end to end.
+test("team: a code owner's approval on the head SHA passes, and a stale, author or non-owner approval stays pending without /approve", () => {
+  const files = ["scripts/lanes/gate.mjs"];
+  const decide = (reviews, author = "someone") =>
+    onReal("full", files, ["test-hunter", "security-reviewer"], { config: realTeam, nativeApproval: nativeCodeOwnerApproval(reviews, author, HEAD, ["leo"], realTeam.identity) });
+  const approve = (login, commit_id = HEAD) => ({ user: { login }, state: "APPROVED", commit_id });
+  const passed = decide([approve("leo")]);
+  assert.deepEqual(passed, { state: "success", description: "approved by code owner @leo", stage: "ready" });
+  for (const d of [decide([approve("leo", "f".repeat(40))]), decide([approve("leo")], "leo"), decide([approve("stranger")]), decide([])]) {
+    assert.equal(d.state, "pending");
+    assert.equal(d.stage, "owner");
+    assert.doesNotMatch(d.description, /\/approve/);
+  }
+});
+
+test("team: a failed read (the approval { approved: false, by: null }) is pending, even with a review/owner status on the head", () => {
+  const input = { config: realTeam, ...clean(["test-hunter", "security-reviewer"]), nativeApproval: { approved: false, by: null } };
+  input.statuses = [...input.statuses, st("review/owner")];
+  const d = onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"], input);
+  assert.equal(d.state, "pending");
+  assert.doesNotMatch(d.description, /\/approve/);
+});
+
+test("solo: nativeApproval is ignored, so the decision is unchanged", () => {
+  const files = ["scripts/lanes/gate.mjs"];
+  const d = onReal("full", files, ["test-hunter", "security-reviewer"], { nativeApproval: { approved: true, by: "leo" } });
+  assert.equal(d.state, "pending");
+  assert.match(d.description, /waiting on owner \(\/approve\)/);
 });
 
 test("owner-only is reported before the other owner reasons", () => {

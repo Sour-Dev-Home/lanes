@@ -1386,7 +1386,8 @@ test("team: a lane-bot review/owner status never satisfies the owner stage", () 
   const base = routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`];
   routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`] = [...base, botStatus("review/owner")];
   const { api } = fakeApi(routes);
-  assert.equal(evaluatePr(api, "o/r", 5, cfg).description, "waiting on owner (/approve) (owner-only path)");
+  // #559: under team the owner stage is the native review (none readable here), and the status is not consulted.
+  assert.equal(evaluatePr(api, "o/r", 5, cfg).description, "waiting for a code-owner review in GitHub (owner-only path)");
 });
 
 test("team: a lane-bot review/test-hunter status on an earlier reviewed commit is reused; under solo it is not", () => {
@@ -1395,4 +1396,158 @@ test("team: a lane-bot review/test-hunter status on an earlier reviewed commit i
   assert.equal(team.description, REUSED);
   assert.equal(team.state, "success");
   assert.equal(evaluatePr(fakeApi(routes).api, "o/r", 5, laneConfig("solo")).description, WAIT_HUNTER);
+});
+
+// ---- #559 / ADR 0021 part 1: the team owner stage reads native reviews and the default branch's CODEOWNERS ----
+
+const teamIdentity = { profile: "team", app: { id: 1, installationId: 2, botLogin: BOT } };
+// The Needs-the-owner section sends an otherwise clean tier:skip PR to the owner stage.
+const needsOwnerBody = readyBody.replace("## Needs the owner\nnothing", "## Needs the owner\nsign off");
+const OLD_SHA = "d".repeat(40);
+const review = (login, state = "APPROVED", commit_id = SHA, type = "User") => ({ user: { login, type }, state, commit_id });
+const teamRoutes = (reviews, over = {}) => ({
+  "repos/o/r/pulls/5": { state: "open", body: needsOwnerBody, user: { login: "author" }, head: { sha: SHA, ref: "issue-7-add-thing" } },
+  "repos/o/r/pulls/5/files": "docs/a.md\n",
+  "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
+  [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
+  ...(reviews === null ? {} : { "repos/o/r/pulls/5/reviews": commentsOut(reviews) }),
+  ...over,
+});
+// A checkout like the workflow's: the default branch's lanes.config.json and, when `codeOwners` is a string, .github/CODEOWNERS.
+function teamCheckout(codeOwners, fn, identity = teamIdentity) {
+  const root = mkdtempSync(join(tmpdir(), "lanes-gate-team-"));
+  const prev = process.cwd();
+  try {
+    writeFileSync(join(root, "lanes.config.json"), JSON.stringify({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] }, identity }));
+    mkdirSync(join(root, "docs", "adr"), { recursive: true });
+    if (typeof codeOwners === "string") {
+      mkdirSync(join(root, ".github"));
+      writeFileSync(join(root, ".github", "CODEOWNERS"), codeOwners);
+    }
+    process.chdir(root);
+    return fn();
+  } finally {
+    process.chdir(prev);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+const OWNERS = "# owners\n* @code-owner\n";
+const teamEval = (reviews, { owners = OWNERS, over = {} } = {}) => {
+  const { api, posted } = fakeApi(teamRoutes(reviews, over));
+  const d = teamCheckout(owners, () => evaluatePr(api, "o/r", 5, laneConfig("team")));
+  return { d, posted };
+};
+
+test("team: a code owner's approval on the head SHA passes the owner stage, with no review/owner status posted", () => {
+  const { d, posted } = teamEval([review("code-owner")]);
+  assert.equal(d.state, "success");
+  assert.equal(d.description, "approved by code owner @code-owner");
+  assert.deepEqual(posted.map((p) => p.fields.find((f) => f.startsWith("context="))), ["context=lanes/gate"]);
+});
+
+test("team: reviews are read with every page", () => {
+  const { api } = fakeApi(teamRoutes([review("code-owner")]));
+  const calls = [];
+  teamCheckout(OWNERS, () => evaluatePr((args) => (calls.push(args), api(args)), "o/r", 5, laneConfig("team")));
+  assert.ok(calls.find((a) => a[0] === "repos/o/r/pulls/5/reviews").includes("--paginate"));
+});
+
+test("team: pending, never success and never /approve, on a stale approval", () => {
+  const { d } = teamEval([review("code-owner", "APPROVED", OLD_SHA)]);
+  assert.equal(d.state, "pending");
+  assert.equal(d.description, "waiting for a code-owner review in GitHub (needs the owner)");
+  assert.doesNotMatch(d.description, /\/approve/);
+});
+
+test("team: pending when the approver is the PR author, a non-owner, or the approval was dismissed after", () => {
+  assert.equal(teamEval([review("author")], { owners: "* @author @code-owner\n" }).d.state, "pending");
+  assert.equal(teamEval([review("stranger")]).d.state, "pending");
+  assert.equal(teamEval([review("code-owner"), review("code-owner", "DISMISSED")]).d.state, "pending");
+});
+
+test("team: pending when the reviews cannot be read", () => {
+  const { d } = teamEval(null);
+  assert.equal(d.state, "pending");
+  assert.match(d.description, /waiting for a code-owner review/);
+});
+
+test("team: pending when the default branch has no CODEOWNERS file, or one with no user owner", () => {
+  assert.equal(teamEval([review("code-owner")], { owners: null }).d.state, "pending");
+  assert.equal(teamEval([review("code-owner")], { owners: "* @org/team\n" }).d.state, "pending");
+});
+
+test("team: CODEOWNERS comes from the checkout, never fetched from the PR", () => {
+  const { api } = fakeApi(teamRoutes([review("code-owner")]));
+  const calls = [];
+  teamCheckout(OWNERS, () => evaluatePr((args) => (calls.push(args[0]), api(args)), "o/r", 5, laneConfig("team")));
+  assert.deepEqual(calls.filter((c) => /CODEOWNERS|contents\//.test(c)), []);
+});
+
+test("team: a lane bot review never counts, and an earlier review/owner status is ignored", () => {
+  const routes = teamRoutes([review(BOT, "APPROVED", SHA, "Bot")]);
+  routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`] = [{ context: "review/owner", state: "success", created_at: "2026-09-26T10:00:00Z", creator: { type: "User", login: "leo" } }];
+  const { api } = fakeApi(routes);
+  const d = teamCheckout(`* @${BOT} @code-owner\n`, () => evaluatePr(api, "o/r", 5, laneConfig("team")));
+  assert.equal(d.state, "pending");
+});
+
+test("solo unchanged: no reviews or CODEOWNERS are read and the stage still says /approve", () => {
+  const { api } = fakeApi(teamRoutes(null));
+  const d = teamCheckout(null, () => evaluatePr(api, "o/r", 5, laneConfig("solo")), { profile: "solo" });
+  assert.equal(d.state, "pending");
+  assert.equal(d.description, "waiting on owner (/approve) (needs the owner)");
+});
+
+test("team merge_group: the queued PR's reviews are re-read against its head, so a dismissal after enqueue fails the merge", () => {
+  const group = "b".repeat(40);
+  const queueRef = `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`;
+  const ok = fakeApi(teamRoutes([review("code-owner")]));
+  assert.equal(teamCheckout(OWNERS, () => carry(ok.api, "o/r", queueRef, group, laneConfig("team"))).state, "success");
+  assert.equal(ok.posted[0].sha, group);
+  const dismissed = fakeApi(teamRoutes([review("code-owner"), review("code-owner", "DISMISSED")]));
+  assert.equal(teamCheckout(OWNERS, () => carry(dismissed.api, "o/r", queueRef, group, laneConfig("team"))).state, "failure");
+  assert.equal(dismissed.posted[0].sha, group);
+});
+
+const runEnv = (over) => ({ REPO: "o/r", EVENT_NAME: "workflow_run", ...over });
+function runMain(env, routes) {
+  const { api, posted } = fakeApi(routes);
+  const calls = [];
+  const log = console.log;
+  console.log = () => {};
+  try {
+    teamCheckout(OWNERS, () => main(env, (args) => (calls.push(args[0]), api(args))));
+  } finally {
+    console.log = log;
+  }
+  return { posted, calls };
+}
+
+test("workflow_run: the PR number comes from workflow_run.pull_requests[0].number", () => {
+  const { posted } = runMain(runEnv({ RUN_PR_NUMBER: "5", RUN_HEAD_SHA: SHA }), teamRoutes([review("code-owner")]));
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].sha, SHA);
+  assert.equal(descriptionOf(posted[0]), "approved by code owner @code-owner");
+});
+
+test("workflow_run: with no pull_requests it falls back to the open PR whose head SHA is workflow_run.head_sha", () => {
+  const routes = teamRoutes([review("code-owner")], { "repos/o/r/pulls?state=open&per_page=100": "5\n" });
+  const { posted, calls } = runMain(runEnv({ RUN_PR_NUMBER: "", RUN_HEAD_SHA: SHA }), routes);
+  assert.ok(calls.includes("repos/o/r/pulls?state=open&per_page=100"));
+  assert.equal(posted.length, 1);
+});
+
+test("workflow_run: does nothing, posting no status, when neither resolves", () => {
+  const none = runMain(runEnv({ RUN_HEAD_SHA: SHA }), teamRoutes([], { "repos/o/r/pulls?state=open&per_page=100": "" }));
+  assert.equal(none.posted.length, 0);
+  const noSha = runMain(runEnv({ RUN_PR_NUMBER: "x", RUN_HEAD_SHA: "nope" }), teamRoutes([]));
+  assert.equal(noSha.posted.length, 0);
+  assert.deepEqual(noSha.calls, []);
+});
+
+test("team: a status event re-evaluates through the native review and posts only lanes/gate", () => {
+  const routes = teamRoutes([review("code-owner")], { [`repos/o/r/commits/${SHA}/pulls`]: [{ number: 5, state: "open", head: { sha: SHA } }] });
+  const { posted } = runMain({ REPO: "o/r", EVENT_NAME: "status", STATUS_SHA: SHA, STATUS_CONTEXT: "review/test-hunter", STATUS_STATE: "success" }, routes);
+  assert.equal(posted.length, 1);
+  assert.equal(descriptionOf(posted[0]), "approved by code owner @code-owner");
 });
