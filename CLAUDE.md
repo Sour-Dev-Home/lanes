@@ -26,8 +26,9 @@ restructure decision in `docs/adr/` or `docs/history/`, written so it can later 
 6. **Owner-only stays owner-only.** `/plan-issues`, `/start` and `/approve` are typed by the owner; never run, imitate
    or work around them from a lane, a schedule or another session. A denial or refusal is reported, never routed
    around.
-7. **No extra setup for adopters.** Prefer designs that need no additional accounts, apps or credentials. Lanes acting
-   as the owner's GitHub account is an accepted risk (ADRs 0004 and 0007); fix holes within that model.
+7. **No extra setup for adopters by default.** The solo profile needs no account, app or credential; acting as the
+   owner's account is an accepted risk there (ADRs 0004 and 0007). The team profile (ADR 0019, 0021) is opt-in and needs
+   a GitHub App and a code-owner ruleset.
 8. **No personal data and no absolute local paths** in any commit, issue or PR.
 9. **Surface what waits on the owner.** The owner session names every PR waiting on `/approve` whenever it reports,
    with the ready `/approve <N>` line.

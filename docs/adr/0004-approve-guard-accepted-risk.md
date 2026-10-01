@@ -51,6 +51,11 @@ no signal when a `review/owner` status is posted, by any route.
   owner is notified through the PR comment and can dismiss it.
 - `.github/workflows/lanes-gate.yml` gains `issues: write`.
 
+## Amendment (2026-10-01, #562)
+
+Amended by ADR 0021: under the `team` profile the owner stage is a native code-owner review on the head commit, read
+by the gate; `/approve` and `review/owner` are solo only, so this ADR's accepted risk applies to solo alone.
+
 ## Governs
 
 - scripts/lanes/approve-guard.mjs

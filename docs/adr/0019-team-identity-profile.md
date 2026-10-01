@@ -141,6 +141,15 @@ sets CODEOWNERS and protection; lanes do not. A short note, written after, measu
   files (`approve-guard.mjs`, `lib.mjs`, `gate.mjs`, `queue.mjs`).
 - The `identity` key is additive, so it is not `contract:breaking`; `lib.mjs` must accept it.
 
+## Amendment (2026-10-01, #562)
+
+Amended by ADR 0021 (this ADR is amended, not superseded):
+
+- Part 7 is replaced by ADR 0021 parts 1 to 3: the gate reads a native code-owner approval on the head commit
+  instead of skipping the owner stage.
+- Parts 3 and 4 include `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`, set to
+  the bot's name and its `users.noreply.github.com` address (#553). They are not secrets.
+
 ## Governs
 
 - lanes.config.json
