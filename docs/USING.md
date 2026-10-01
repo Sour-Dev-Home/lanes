@@ -32,7 +32,8 @@
    where a subtle bug is a security hole: security-critical parsing, guards, and contracts the reviewers found hard.
    Any other `model:*` label is ignored and logged as `#N: ignored label model:<x>`.
    Team lanes (identity profile `team`) run without MCP servers: `start.mjs` launches them with `--strict-mcp-config`
-   and the lane's settings deny `mcp__*`. A user-level MCP server (a GitHub one, say) holds your own token, so a lane
+   and the lane's settings deny `mcp__github` and `mcp__*` (a best-effort backstop behind `--strict-mcp-config`:
+   `mcp__<server>` is the documented permission form, the bare wildcard is not). A user-level MCP server (a GitHub one, say) holds your own token, so a lane
    that loaded it could open PRs or review as you and defeat the bot identity. Solo lanes are unchanged.
    The start guard (`scripts/lanes/start-guard.mjs`, two hooks in `.claude/settings.json` next to the approve guard)
    enforces that: it lets `start.mjs` run only for the same issue numbers or the same `--auto` form, within 15 minutes
@@ -74,6 +75,12 @@
    is the approval, and the merge queue does the rest. The approve guard (`scripts/lanes/approve-guard.mjs`, two hooks
    in `.claude/settings.json`) lets `post-review.mjs owner` run without a prompt only for that PR, once, in the turn
    where you typed `/approve <pr>`. It denies that command everywhere else, including lanes and auto mode.
+   **Under the team profile there is no `/approve`** ([ADR 0021](adr/0021-team-native-code-owner-review.md)): approve
+   the PR in GitHub with a review from a user listed in `.github/CODEOWNERS`. The gate reads that review and counts it
+   only if it is on the PR's current head commit and is not by the PR author or the lane bot, so any push after the review
+   needs a fresh one. It waits for a review in the same cases `/approve` waits (owner-only path, non-empty "Needs the
+   owner", a full-tier blocker, a quick-tier contract change). Owner work under team goes through lanes, so the bot is
+   the author and you approve natively; a PR you push yourself cannot be approved by you.
 5. **At night** a scheduled cloud session runs `/night`: up to 3 skip or quick tasks, merged only if CI finds them
    unattended-eligible. In the morning read the digest comment on the "Lanes digest" issue, and `/approve` the rest.
 6. **Weekly `/health`** files issues for stale work, a red main and flaky checks.

@@ -72,6 +72,12 @@ dependency and no new adopter setup.
 - The new code in `lib.mjs`, `gate.mjs`, `owner-diff.mjs` and `queue.mjs` gets security and architecture review, as
   owner and gate paths already do.
 
+## Amendment (2026-10-01, #562)
+
+Amended by ADR 0021: under the `team` profile the owner stage is a native code-owner review on the head commit, read
+by the gate; `/approve` and `review/owner` are solo only, and the additive exemption is solo only too (it stays off
+under team).
+
 ## Governs
 
 - lanes.config.json

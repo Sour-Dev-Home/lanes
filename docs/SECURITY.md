@@ -27,6 +27,12 @@ exactly). The bot counts for reviewer output alone: a `review/<reviewer>` status
 reviewer, never `review/owner`, which only a human with write permission can post. Any other bot, such as
 `github-actions[bot]`, counts for nothing, and under `solo` no bot does.
 
+**Approving under the `team` profile** ([0021](adr/0021-team-native-code-owner-review.md)). There is no `/approve` and no
+`review/owner`: the owner approves the PR in GitHub. The gate counts a review only if it is `APPROVED` on the PR's
+current head commit, by a user listed in the default branch's `.github/CODEOWNERS`, and not by the PR author or the lane
+bot; a read failure or a CODEOWNERS file with no user entries means pending. Owner work under team goes through lanes,
+so the bot is the author and the owner is the approver.
+
 Also in force: required reviews chosen by tier and diff (test-hunter, security-reviewer, ui-reviewer,
 architecture-advisor, each a fresh session), a security reviewer that cites a vendored OWASP source
 ([0009](adr/0009-owasp-cheatsheets.md)), CodeQL, a ruleset with no bypass and no force push (both set up as described in [USING.md](USING.md)), and module boundaries

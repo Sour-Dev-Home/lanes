@@ -14,7 +14,7 @@
 //     Bash command with the same words, which is scanned as above; the plain form must also hold no character
 //     PowerShell gives a meaning of its own, and a command that cannot be read is denied when it names post-review.
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, REVIEWERS, reviewerNames } from "./lib.mjs";
@@ -96,7 +96,8 @@ const REMINDER_OPEN = "<system-reminder>";
 const TASK_NOTICE_TAG = "<task-notification>";
 
 const REMINDER_CLOSE = "</system-reminder>";
-const AGENT_MESSAGE_RE = /<agent-message\b[^>]*>[\s\S]*?<\/agent-message>/g;
+const AGENT_MESSAGE_OPEN = "<agent-message";
+const AGENT_MESSAGE_CLOSE = "</agent-message>";
 const TYPED_COMMAND_LINE_RE = /^[ \t]*\/(?:approve|start)\b/m;
 
 /** The prompt without its leading `<system-reminder>` blocks and the blank space around them (an unclosed block stays). */
@@ -112,6 +113,37 @@ export function withoutLeadingReminders(prompt) {
 }
 
 /**
+ * `text` with every closed `open … close` block replaced by a newline, and whether there was one. A block is the same
+ * match as `open[^>]*>[\s\S]*?close` (`tagged`) or `open[\s\S]*?close`, found with indexOf so that the scan stays
+ * linear whatever the input: once one opener has no closer, no later opener has one either, so the scan stops (#548).
+ */
+function replaceBlocks(text, open, close, tagged) {
+  let out = "";
+  let from = 0;
+  let found = false;
+  for (let at = text.indexOf(open); at !== -1; at = text.indexOf(open, from)) {
+    let bodyAt = at + open.length;
+    if (tagged) {
+      // `\b` after the tag name: `<agent-messages>` is another tag.
+      if (/\w/.test(text[bodyAt] ?? "")) {
+        out += text.slice(from, bodyAt);
+        from = bodyAt;
+        continue;
+      }
+      const gt = text.indexOf(">", bodyAt);
+      if (gt === -1) break;
+      bodyAt = gt + 1;
+    }
+    const end = text.indexOf(close, bodyAt);
+    if (end === -1) break;
+    out += `${text.slice(from, at)}\n`;
+    from = end + close.length;
+    found = true;
+  }
+  return { found, text: out + text.slice(from) };
+}
+
+/**
  * True for a prompt that starts, after any leading `<system-reminder>` blocks and blank lines, with one of
  * AUTOMATED_INPUT_PREFIXES (exact case); for a `<system-reminder>` block that holds a `<task-notification>` (#492); and
  * for a prompt holding a closed `<agent-message ...>` hand-back however it is wrapped, unless a `/approve` or `/start`
@@ -123,9 +155,9 @@ export function isAutomatedInput(prompt) {
   if (AUTOMATED_INPUT_PREFIXES.some((w) => p.startsWith(w))) return true;
   const t = prompt.trimStart();
   if (t.startsWith(REMINDER_OPEN) && t.includes(TASK_NOTICE_TAG)) return true;
-  if (!AGENT_MESSAGE_RE.test(p)) return false;
-  AGENT_MESSAGE_RE.lastIndex = 0;
-  const outside = p.replace(AGENT_MESSAGE_RE, "\n").replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "\n");
+  const messages = replaceBlocks(p, AGENT_MESSAGE_OPEN, AGENT_MESSAGE_CLOSE, true);
+  if (!messages.found) return false;
+  const outside = replaceBlocks(messages.text, REMINDER_OPEN, REMINDER_CLOSE, false).text;
   return !TYPED_COMMAND_LINE_RE.test(outside);
 }
 
@@ -174,12 +206,42 @@ function clearSessionGrants(dir, sessionId) {
   return cleared;
 }
 
+// clears.log is cut to its newest half once it passes this size (#548).
+export const CLEARS_LOG_MAX_BYTES = 1024 * 1024;
+
+/** A logged prompt head with backslash, CR, LF, every C0 and C1 control character and U+2028/U+2029 escaped. */
+function escapeLogText(text) {
+  return text.replace(/[\\\u0000-\u001f\u007f-\u009f\p{Zl}\p{Zp}]/gu, (c) => {
+    if (c === "\\") return "\\\\";
+    if (c === "\r") return "\\r";
+    if (c === "\n") return "\\n";
+    const n = c.charCodeAt(0);
+    return n <= 0xff ? `\\x${n.toString(16).padStart(2, "0")}` : `\\u${n.toString(16).padStart(4, "0")}`;
+  });
+}
+
+/** Cuts `file` to its newest half, from a line start, when it is larger than CLEARS_LOG_MAX_BYTES. */
+function capClearsLog(file) {
+  const size = statSync(file).size;
+  if (size <= CLEARS_LOG_MAX_BYTES) return;
+  const buf = readFileSync(file);
+  const keep = buf.subarray(buf.length - Math.floor(CLEARS_LOG_MAX_BYTES / 2));
+  const nl = keep.indexOf(10);
+  writeFileSync(file, nl === -1 ? Buffer.alloc(0) : keep.subarray(nl + 1));
+}
+
 /** Appends one line to `<dir>/clears.log` for a clear: time, session, grants cleared, the prompt's first 80 characters (#546). */
 function logClear(dir, sessionId, cleared, prompt, now) {
-  const head = String(prompt ?? "").slice(0, 80).replace(/\\/g, "\\\\").replace(/\r/g, "\\r").replace(/\n/g, "\\n");
+  const head = escapeLogText(String(prompt ?? "").slice(0, 80));
   try {
     mkdirSync(dir, { recursive: true });
-    appendFileSync(join(dir, "clears.log"), `${new Date(now).toISOString()} ${sessionId} ${cleared} ${head}\n`);
+    const file = join(dir, "clears.log");
+    try {
+      capClearsLog(file);
+    } catch {
+      // No log yet, or one that cannot be cut: the append below decides.
+    }
+    appendFileSync(file, `${new Date(now).toISOString()} ${sessionId} ${cleared} ${head}\n`);
   } catch {
     // The log is evidence for a later look; a prompt is never blocked for it.
   }
@@ -426,6 +488,18 @@ const unquoted = (s) => s.replace(/['"\\]/g, "");
 /** The command word of a simple command, without its directory. */
 const commandName = (plain) => plain[0]?.split(/[\\/]/).at(-1);
 
+const GH_TEXT_FLAGS = new Set(["--title", "-t", "--body", "-b"]);
+
+/**
+ * Whether word `i` of a `gh issue|pr …` command is the text of --title or --body (`--flag text` or `--flag=text`) with no
+ * live `$` or backtick: an argument to gh that merely names post-review, not a command (#548). A live substitution still runs.
+ */
+function ghTextValue(plain, i) {
+  if (commandName(plain) !== "gh" || !["issue", "pr"].includes(plain[1]) || /[$`]/.test(plain[i])) return false;
+  const eq = plain[i].indexOf("=");
+  return GH_TEXT_FLAGS.has(plain[i - 1]) || (eq > 0 && GH_TEXT_FLAGS.has(plain[i].slice(0, eq)));
+}
+
 /**
  * A quoted script, as in bash -c "…", sh -c '…' or eval "…": scan it as a command of its own. One that still holds
  * `$` or a glob may splice a name inside it, so it is scanned too. `shell` is true when the word is run as shell text
@@ -593,8 +667,8 @@ function scan(cmd, depth, out) {
       // A word run as shell text reads with its quoted characters alive again.
       const shell = i >= evalFrom || argsRun;
       const w = shell ? unmark(raw) : raw;
-      if (i > 0 && ((readsData && literalAt[k].has(i)) || (programArgs && !/post-review/i.test(unquoted(w))))) {
-        // Data for a command that does not run it: a commit message, a PR body, an awk program.
+      if (i > 0 && ((readsData && literalAt[k].has(i)) || (programArgs && !/post-review/i.test(unquoted(w))) || (!shell && ghTextValue(plain, i)))) {
+        // Data for a command that does not run it: a commit message, a PR body, an awk program, a gh --title or --body text.
       } else if (scanNested(raw, depth, out, shell)) {
         // Scanned as a command of its own.
       } else if (POST_REVIEW_RE.test(w)) {

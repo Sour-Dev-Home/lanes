@@ -76,6 +76,11 @@ does not type `/approve` again after a merge that changed none of the approved c
   reviewer reuse, it does not look at changes to a reviewer's brief or checklists, since the owner approved code.
 - How the approval is posted (`/approve`, `approve-guard.mjs`, `post-review.mjs`) does not change.
 
+## Amendment (2026-10-01, #562)
+
+Amended by ADR 0021: under the `team` profile the owner stage is a native code-owner review on the head commit, read
+by the gate; `/approve` and `review/owner` (and the carry above) are solo only.
+
 ## Governs
 
 - lanes.config.json
