@@ -1,10 +1,11 @@
 // scripts/lanes/lib.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adrGoverns, botIssueReleased, readBotIssueRelease, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { adrGoverns, pendingFileHash, parsePending, pendingReuseBlockedBy, botIssueReleased, readBotIssueRelease, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -1402,4 +1403,125 @@ test("solo gateDecision ignores nativeApproval and keeps the /approve wording", 
   assert.equal(today.description, "waiting on owner (/approve) (owner-only path)");
   assert.deepEqual(gateDecision({ ...solo, nativeApproval: approvedBy }), today);
   assert.deepEqual(gateDecision({ ...solo, config: { ...ownerCfg, identity: { profile: "solo" } }, nativeApproval: approvedBy }), today);
+});
+
+// #593: pure reuse check for pending workflow files (ADR 0023 part 3)
+const WF = ".github/workflows/x.yml";
+const wfDiff = (path, line = "y") => `diff --git a/${path} b/${path}\nindex 0000000..1111111 100644\n--- a/${path}\n+++ b/${path}\n@@ -1,1 +1,1 @@\n-x\n+${line}\n`;
+const sha = (text) => createHash("sha256").update(text).digest("hex");
+
+test("pendingFileHash hashes the normalised text; CRLF and final-newline variants hash alike", () => {
+  const want = sha("a: 1\nb: 2\n");
+  assert.equal(pendingFileHash("a: 1\nb: 2\n"), want);
+  assert.equal(pendingFileHash("a: 1\r\nb: 2\r\n"), want);
+  assert.equal(pendingFileHash("a: 1\nb: 2"), want);
+  assert.equal(pendingFileHash("a: 1\nb: 2\n\n\n"), want);
+  assert.notEqual(pendingFileHash("a: 1\nb: 3\n"), want);
+});
+
+test("edge: pendingFileHash is null for empty, newline-only, invalid UTF-8 and non-text input", () => {
+  assert.equal(pendingFileHash(""), null);
+  assert.equal(pendingFileHash("\r\n\n"), null);
+  assert.equal(pendingFileHash(Buffer.from([0xff, 0xfe, 0x41])), null);
+  assert.equal(pendingFileHash("a\ud800b"), null);
+  assert.equal(pendingFileHash(undefined), null);
+  assert.equal(pendingFileHash(42), null);
+  assert.equal(pendingFileHash(Buffer.from("a: 1\r\n")), sha("a: 1\n"));
+});
+
+const H = "a".repeat(64);
+test("parsePending returns the entries only for a valid non-empty list", () => {
+  assert.deepEqual(parsePending({ pending: [{ path: WF, sha256: H }] }), [{ path: WF, sha256: H }]);
+  assert.deepEqual(parsePending({ pending: [{ path: WF, sha256: H, extra: 1 }] }), [{ path: WF, sha256: H }]);
+});
+
+test("edge: parsePending rejects a path outside .github/workflows/, a .. path, a bad hash and duplicates", () => {
+  const bad = (p) => assert.equal(parsePending({ pending: p }), null);
+  bad([{ path: "src/x.yml", sha256: H }]);
+  bad([{ path: ".github/other/x.yml", sha256: H }]);
+  bad([{ path: ".github/workflows/../x.yml", sha256: H }]);
+  bad([{ path: ".github/workflows/", sha256: H }]);
+  bad([{ path: WF, sha256: "A".repeat(64) }]);
+  bad([{ path: WF, sha256: "a".repeat(63) }]);
+  bad([{ path: WF, sha256: H }, { path: WF, sha256: "b".repeat(64) }]);
+  bad([{ path: WF }]);
+  bad([null]);
+  bad([[]]);
+  bad([]);
+  bad("x");
+  bad(undefined);
+});
+
+test("edge: parsePending fails closed on a non-object verdict", () => {
+  for (const v of [null, undefined, "x", 3, [], {}]) assert.equal(parsePending(v), null);
+});
+
+test("diffFingerprint with omit drops the listed paths' blocks; without omit it is unchanged", () => {
+  const both = fileB("0000000") + wfDiff(WF);
+  assert.equal(diffFingerprint(both, { omit: [WF] }), diffFingerprint(fileB("1234567")));
+  assert.equal(diffFingerprint(both), diffFingerprint(both, {}));
+  assert.equal(diffFingerprint(both), diffFingerprint(both, { omit: [] }));
+  assert.notEqual(diffFingerprint(both), diffFingerprint(fileB("0000000")));
+  assert.notEqual(diffFingerprint(both, { omit: [WF] }), diffFingerprint(both));
+});
+
+test("edge: diffFingerprint with omit fails closed (null) on a block whose file name cannot be parsed", () => {
+  assert.equal(diffFingerprint(fileB("0000000").replace("diff --git a/b.js b/b.js", "diff --git weird"), { omit: [WF] }), null);
+  assert.equal(diffFingerprint('diff --git "a/q r.js" "b/q r.js"\n+x\n', { omit: [WF] }), null);
+  assert.equal(diffFingerprint("+stray\n", { omit: [WF] }), null);
+  assert.equal(diffFingerprint(fileB("0000000").replace("b/b.js", "b/c.js"), { omit: [WF] }), null);
+});
+
+const earlier = fileB("0000000");
+const reuse = (over = {}) => pendingReuseBlockedBy({
+  pending: [{ path: WF, sha256: H }],
+  changedSince: [WF],
+  headHashes: { [WF]: H },
+  earlierDiff: earlier,
+  headDiff: earlier + wfDiff(WF),
+  ...over,
+});
+
+test("pendingReuseBlockedBy is null when only the pending file was added, with the reviewed hash and the same other diff", () => {
+  assert.equal(reuse(), null);
+  assert.equal(reuse({ headHashes: new Map([[WF, H]]) }), null);
+  assert.equal(reuse({ headDiff: wfDiff(WF) + earlier.replace("0000000", "9999999") }), null);
+});
+
+test("pendingReuseBlockedBy blocks a changed file that is not pending", () => {
+  assert.match(reuse({ changedSince: [WF, "src/a.js"] }), /src\/a\.js/);
+  assert.match(reuse({ changedSince: [WF, ".github/workflows/y.yml"] }), /y\.yml/);
+});
+
+test("pendingReuseBlockedBy names a missing or different pending blob", () => {
+  assert.equal(reuse({ headHashes: { [WF]: "b".repeat(64) } }), `workflow file ${WF} differs from the reviewed copy`);
+  assert.equal(reuse({ headHashes: {} }), `workflow file ${WF} is not committed yet`);
+  assert.equal(reuse({ headHashes: { [WF]: null } }), `workflow file ${WF} is not committed yet`);
+  assert.equal(reuse({ headHashes: new Map() }), `workflow file ${WF} is not committed yet`);
+  assert.equal(reuse({ changedSince: [], headHashes: {} }), `workflow file ${WF} is not committed yet`);
+});
+
+test("pendingReuseBlockedBy blocks a fingerprint mismatch of the non-pending diff", () => {
+  assert.match(reuse({ headDiff: fileB("0000000").replace("+y", "+z") + wfDiff(WF) }), /./);
+  assert.match(reuse({ headDiff: "" }), /./);
+});
+
+test("edge: pendingReuseBlockedBy fails closed on malformed inputs", () => {
+  const blocked = (over) => assert.equal(typeof reuse(over), "string");
+  blocked({ pending: null });
+  blocked({ pending: [] });
+  blocked({ pending: [{ path: "src/x.yml", sha256: H }] });
+  blocked({ changedSince: null });
+  blocked({ changedSince: "x" });
+  blocked({ changedSince: [WF, 3] });
+  blocked({ headHashes: null });
+  blocked({ headHashes: undefined });
+  blocked({ earlierDiff: undefined });
+  blocked({ headDiff: "diff --git weird\n" });
+  assert.equal(typeof pendingReuseBlockedBy(), "string");
+  assert.equal(typeof pendingReuseBlockedBy({}), "string");
+});
+
+test("edge: pendingReuseBlockedBy ignores a hash that is only inherited from Object.prototype", () => {
+  assert.equal(reuse({ headHashes: Object.create({ [WF]: H }) }), `workflow file ${WF} is not committed yet`);
 });

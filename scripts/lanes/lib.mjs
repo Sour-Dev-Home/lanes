@@ -481,8 +481,12 @@ const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@.*$/;
  * drops `index` lines, reduces each hunk header to `@@` (line numbers and the function heading both move with code
  * above the hunk) and sorts the per-file blocks. Every other byte counts, whitespace and CR included, unlike
  * `git patch-id`: whitespace can change behaviour, so a whitespace-only change must invalidate a review.
+ *
+ * `omit` (ADR 0023 part 3) lists paths whose blocks are dropped before sorting. When it is non-empty and a block's
+ * file name cannot be parsed (no `diff --git a/<p> b/<p>` header, a quoted or renamed path), it returns null: the
+ * caller cannot know which block to drop, so it fails closed.
  */
-export function diffFingerprint(diffText) {
+export function diffFingerprint(diffText, { omit = [] } = {}) {
   const blocks = [];
   const lines = String(diffText ?? "").split("\n");
   // The diff's final newline belongs to whichever file comes last; dropping it keeps blocks order-independent.
@@ -492,8 +496,89 @@ export function diffFingerprint(diffText) {
     if (line.startsWith("index ")) continue;
     blocks.at(-1).push(HUNK_HEADER.test(line) ? "@@" : line);
   }
-  const normalized = blocks.map((b) => b.join("\n")).sort();
+  let kept = blocks;
+  if (Array.isArray(omit) && omit.length > 0) {
+    kept = [];
+    for (const block of blocks) {
+      const m = /^diff --git a\/(.+) b\/(.+)$/.exec(block[0]);
+      if (!m || m[1] !== m[2]) return null;
+      if (!omit.includes(m[1])) kept.push(block);
+    }
+  }
+  const normalized = kept.map((b) => b.join("\n")).sort();
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
+const PENDING_DIR = ".github/workflows/";
+
+/**
+ * Hex SHA-256 of a workflow file's normalised content (ADR 0023 part 3): every `\r\n` becomes `\n`, trailing newlines
+ * are removed and one `\n` is appended. Null for empty (or newline-only) text, invalid UTF-8, or input that is neither
+ * a string nor bytes.
+ */
+export function pendingFileHash(text) {
+  let s;
+  if (typeof text === "string") {
+    if (!text.isWellFormed()) return null;
+    s = text;
+  } else if (text instanceof Uint8Array) {
+    try {
+      s = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(text);
+    } catch {
+      return null;
+    }
+  } else {
+    return null;
+  }
+  const body = s.replaceAll("\r\n", "\n").replace(/\n+$/, "");
+  if (body === "") return null;
+  return createHash("sha256").update(`${body}\n`).digest("hex");
+}
+
+/** A verdict's `pending` as `[{ path, sha256 }]` when it is valid (ADR 0023 part 3), otherwise null. */
+export function parsePending(verdict) {
+  const list = verdict?.pending;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const seen = new Set();
+  const out = [];
+  for (const e of list) {
+    if (!e || typeof e !== "object" || Array.isArray(e)) return null;
+    const { path, sha256 } = e;
+    if (typeof path !== "string" || typeof sha256 !== "string") return null;
+    if (!path.startsWith(PENDING_DIR) || path.length === PENDING_DIR.length) return null;
+    if (path.split("/").includes("..") || seen.has(path)) return null;
+    if (!/^[0-9a-f]{64}$/.test(sha256)) return null;
+    seen.add(path);
+    out.push({ path, sha256 });
+  }
+  return out;
+}
+
+/**
+ * Pure check of ADR 0023 part 3 conditions 2 to 4 for reusing a verdict that lists `pending` files. Returns null when
+ * they hold, otherwise the reason. `changedSince` is the files the head changed since the reviewed commit,
+ * `headHashes` maps each pending path to `pendingFileHash` of its blob at the head (absent or null: not committed),
+ * and the diffs are the reviewed commit's own diff and the head's own diff. Anything malformed blocks.
+ */
+export function pendingReuseBlockedBy({ pending, changedSince, headHashes, earlierDiff, headDiff } = {}) {
+  const entries = parsePending({ pending });
+  if (!entries) return "the reviewed verdict's pending list is missing or invalid";
+  if (!Array.isArray(changedSince) || changedSince.some((f) => typeof f !== "string")) return "the files changed since the reviewed commit are unknown";
+  const hashOf = headHashes instanceof Map ? (p) => headHashes.get(p) : headHashes && typeof headHashes === "object" ? (p) => (Object.hasOwn(headHashes, p) ? headHashes[p] : undefined) : null;
+  if (!hashOf) return "the pending files at the head could not be read";
+  const paths = entries.map((e) => e.path);
+  const other = changedSince.find((f) => !paths.includes(f));
+  if (other !== undefined) return `${other} changed since the reviewed commit and is not a pending workflow file`;
+  for (const { path, sha256 } of entries) {
+    const got = hashOf(path);
+    if (typeof got !== "string") return `workflow file ${path} is not committed yet`;
+    if (got !== sha256) return `workflow file ${path} differs from the reviewed copy`;
+  }
+  if (typeof earlierDiff !== "string" || typeof headDiff !== "string") return "the diffs to compare are unavailable";
+  const before = diffFingerprint(earlierDiff);
+  const after = diffFingerprint(headDiff, { omit: paths });
+  if (after === null || before !== after) return "the PR's own diff changed since the reviewed commit, beyond the pending workflow files";
+  return null;
 }
 
 /** Newest status per context (GitHub keeps every status ever posted on a commit). */
