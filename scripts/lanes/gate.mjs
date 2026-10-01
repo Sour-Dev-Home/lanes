@@ -1,6 +1,8 @@
 // Posts the `lanes/gate` commit status. Run by .github/workflows/lanes-gate.yml, always from the default branch.
 // Inputs (environment): REPO, EVENT_NAME, PR_NUMBER, STATUS_SHA, STATUS_CONTEXT, STATUS_STATE, HEAD_REF, GROUP_SHA, ISSUE_NUMBER, GH_TOKEN.
+// On workflow_run (the review ping, ADR 0021): RUN_PR_NUMBER (workflow_run.pull_requests[0].number, may be empty) and RUN_HEAD_SHA (workflow_run.head_sha).
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   authorCanWrite,
@@ -13,6 +15,8 @@ import {
   loadAdrs,
   loadConfig,
   moduleMapProblem,
+  nativeCodeOwnerApproval,
+  parseCodeOwnerUsers,
   parsePrBody,
   parseVerdictComment,
   REVIEWERS,
@@ -235,6 +239,25 @@ export function ownerDiffFor(api, repo, pr, files) {
 }
 
 /**
+ * ADR 0021 part 1: `nativeCodeOwnerApproval`'s `{ approved, by }` for PR `pr`, from its native reviews (every page) and
+ * the user owners of `.github/CODEOWNERS` in this checkout, which is the default branch's, never the PR's copy. Fails
+ * closed: a failed read of either, or a CODEOWNERS file with no user owner, is `{ approved: false, by: null }`.
+ */
+export function readNativeApproval(api, repo, pr, config, codeOwnersPath = ".github/CODEOWNERS") {
+  const none = { approved: false, by: null };
+  try {
+    const owners = parseCodeOwnerUsers(readFileSync(codeOwnersPath, "utf8"));
+    const reviews = api([`repos/${repo}/pulls/${pr.number}/reviews`, "--paginate", "--jq", ".[] | {user: {login: .user.login, type: .user.type}, state, commit_id} | @json"])
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    return nativeCodeOwnerApproval(reviews, pr.user?.login, pr.head.sha, owners, config.identity);
+  } catch {
+    return none;
+  }
+}
+
+/**
  * Gathers every input `gateDecision` needs for PR `number` from the API and returns its verdict, without posting
  * anything. Returns `null` for a closed PR. Shared by `evaluatePr` (posts on the PR head) and `carry` (posts on the
  * merge-group commit): the merge queue must re-decide from these same live inputs, never trust a `lanes/gate` status
@@ -280,7 +303,11 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   const statuses = statusesOf(api, repo, pr.head.sha);
   const candidates = reusableReviewers({ issueLabels, files, statuses, config, adrs, interfaceContract });
   const reused = candidates.length > 0 ? reusableReviews(api, repo, number, pr, candidates, { files, adrs, config }) : [];
+  // ADR 0021: under team the owner stage is a native code-owner review, read live here so a merge_group run re-reads it
+  // against the queued head. Under solo nothing is read and the decision is unchanged. Team never passes null.
+  const team = config.identity?.profile === "team";
   const inputs = {
+    ...(team ? { nativeApproval: readNativeApproval(api, repo, { number, user: pr.user, head: pr.head }, config) } : {}),
     prNumber: number,
     prBody: pr.body,
     issueLabels,
@@ -302,7 +329,8 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   let decision = gateDecision(inputs);
   // #493: an earlier owner approval is only looked for when the gate waits on the owner and the head has no trusted
   // review/owner status of its own; every other outcome (a reviewer still owed included) is final without it.
-  if (decision.stage === "owner" && !latestByContext(trustedStatuses(statuses, config.identity, reviewerNames(config))).has(reviewContext("owner"))) {
+  // Under team there is no review/owner status to carry: the native review decides.
+  if (!team && decision.stage === "owner" && !latestByContext(trustedStatuses(statuses, config.identity, reviewerNames(config))).has(reviewContext("owner"))) {
     const ownerCarry = carriedOwnerApproval(api, repo, number, pr, config);
     if (ownerCarry !== null) decision = gateDecision({ ...inputs, ownerCarry });
   }
@@ -460,6 +488,19 @@ function decide(env, api) {
         console.log(JSON.stringify(evaluatePr(api, repo, pr.number, config, adrs)));
       }
       if (failures.length > 0) throw new Error(`owner approval comment failed on ${failures.join("; ")}`);
+      return;
+    }
+    // ADR 0021: the review ping workflow completed. Default-branch code, like every trigger here. The PR comes from the
+    // run's own list, else from the open PR whose head is the run's head SHA; with neither the gate posts nothing.
+    case "workflow_run": {
+      const numbers = [];
+      if (/^[1-9][0-9]{0,8}$/.test(env.RUN_PR_NUMBER ?? "")) numbers.push(Number(env.RUN_PR_NUMBER));
+      else if (SHA.test(env.RUN_HEAD_SHA ?? "")) {
+        // The SHA was just checked to be 40 hex digits, so it is safe inside the jq filter.
+        const found = api([`repos/${repo}/pulls?state=open&per_page=100`, "--paginate", "--jq", `.[] | select(.head.sha == "${env.RUN_HEAD_SHA}") | .number`]);
+        for (const n of found.split("\n").filter(Boolean)) if (/^[1-9][0-9]{0,8}$/.test(n)) numbers.push(Number(n));
+      }
+      for (const n of numbers) console.log(JSON.stringify(evaluatePr(api, repo, n, config, adrs)));
       return;
     }
     case "issues": {
