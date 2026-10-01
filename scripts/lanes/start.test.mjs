@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BUDGET_DEFAULTS, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, isLaneGhDir, launchEnv, main as runStart, makeRemint, markRunning, parseSessionId, planStart, refreshArgs, refreshLoop, startConfig, teamLaneEnv, teamLaneSettings, TEAM_SCRUBBED_NAMES, botCommitIdentity } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
-import { launchLane, teamSteps } from "./start.mjs";
+import { launchLane, scopeNamesWorkflows, teamSteps } from "./start.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
 
@@ -2648,4 +2648,42 @@ test("launchLane (#556): edge: a failed launch under team removes the lane's dir
 
 test("teamSteps (#556): the real team steps are exported for the queue", () => {
   assert.deepEqual(Object.keys(teamSteps).sort(), ["botUserId", "keyFile", "makeDir", "mintInto", "readable", "removeDir", "repo", "writeSettings"]);
+});
+
+// #595 (ADR 0023 part 5): under team, a Scope naming .github/workflows/ prints one informational note and still launches.
+const WF_NOTE = "#4: Scope names .github/workflows/: the lane opens its PR without the workflow change and hands it over in a PR comment";
+test("launchLane (#595): team with a workflow scope path prints the note first and still launches", () => {
+  const t = laneDeps({ team: laneTeam() });
+  const r = launchLane(4, t.deps, { tier: "full", models: {}, labels: [], identity: TEAM, root: "/repo", env: {}, scope: ["scripts/lanes/x.mjs", ".github/workflows/ci.yml"] });
+  assert.equal(r.failed, false);
+  assert.equal(r.lines[0], WF_NOTE);
+  assert.ok(r.lines.includes("#4 → s-1"));
+  assert.equal(t.launches.length, 1);
+});
+
+test("launchLane (#595): team without a workflow path, and solo with one, print no note", () => {
+  const a = laneDeps({ team: laneTeam() });
+  assert.deepEqual(launchLane(4, a.deps, { labels: [], identity: TEAM, root: "/repo", env: {}, scope: ["scripts/lanes/x.mjs"] }).lines, ["#4 → s-1"]);
+  const b = laneDeps();
+  assert.deepEqual(launchLane(4, b.deps, { labels: [], root: "/repo", scope: [".github/workflows/ci.yml"] }).lines, ["#4 → s-1"]);
+});
+
+test("launchLane (#595): edge: no scope, a bare workflows directory and a look-alike path", () => {
+  assert.equal(scopeNamesWorkflows(undefined), false);
+  assert.equal(scopeNamesWorkflows([]), false);
+  assert.equal(scopeNamesWorkflows([".github/workflows/"]), true);
+  assert.equal(scopeNamesWorkflows([".github/workflows"]), true);
+  assert.equal(scopeNamesWorkflows([".github/workflows-old/x.yml", "docs/.github/workflows/x.yml"]), false);
+});
+
+test("#595: --auto and an explicit /start pass the issue's Scope paths to launchLane", () => {
+  const body = "### Goal\ng\n### Acceptance criteria\n- [ ] a\n### Interface contract\nnone\n### Scope\nIn: `.github/workflows/ci.yml`.\n### Blocked by\nnone\n### Tier\nquick\n";
+  for (const argv of [["--auto", "--go"], ["1"]]) {
+    const { deps, launches } = fakes({ issues: { 1: { body } }, config: { identity: TEAM } });
+    deps.team = laneTeam();
+    deps.gh = ((inner) => (args) => (args[0] === "api" ? JSON.stringify({ state: "open" }) : inner(args)))(deps.gh);
+    const { lines } = main(argv, deps);
+    assert.ok(lines.includes("#1: Scope names .github/workflows/: the lane opens its PR without the workflow change and hands it over in a PR comment"), lines.join("\n"));
+    assert.equal(launches.length, 1);
+  }
 });

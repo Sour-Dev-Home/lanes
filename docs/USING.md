@@ -157,6 +157,26 @@ For the portfolio, export by hand and commit the file yourself: `node scripts/la
 <date> --out docs/metrics/<date>.json`. `--out` refuses to write when the output holds an email, an @-mention, your
 GitHub login or a local path, and says which kind, never the text.
 
+## When a team lane changes a workflow file
+
+Under the team profile a lane cannot push `.github/workflows/` (the App has no `workflows` permission; see
+[ADR 0023](adr/0023-workflow-changes-owner-web-editor.md) and `docs/SECURITY.md`). Solo is unchanged. The steps are all
+in the browser:
+
+1. **The note.** `/start` and the queue print `#N: Scope names .github/workflows/: the lane opens its PR without the
+   workflow change and hands it over in a PR comment` and still launch the lane.
+2. **The PR comment.** The lane opens its PR without the workflow files and posts one comment (by
+   `node scripts/lanes/handover.mjs <pr>`) with each file's full content, a link to GitHub's web editor on the PR
+   branch (`edit/` for a changed file, `new/` for a new one) and a warning to read it first.
+3. **Commit changes.** Read each file. Then open its link, paste the content, choose "Commit directly to the branch" and
+   click **Commit changes**. Committing runs any push-triggered workflow in the file, so do not commit what you did not
+   read. The PR stays the bot's.
+4. **The gate's message.** Until the gate reuses reviews by file hash, the reviewers run again on the new head. When a
+   committed file differs from the reviewed copy the gate says `workflow file <path> differs from the reviewed copy`,
+   or `workflow file <path> is not committed yet` while it is missing.
+5. **Deleting a workflow file.** A lane never hands over a deletion: it stops and asks you to delete the file in the
+   browser (the file's page, the trash icon, commit to the PR branch), after which its reviewers run on the head.
+
 ## Common pitfalls
 
 - **Vague issues make vague PRs.** If an acceptance criterion cannot be written as a test, rewrite it before the lane

@@ -716,6 +716,30 @@ test("#556: a team launch through the queue carries --settings and --strict-mcp-
   assert.ok(run.out.every((l) => !/refuses/.test(l)));
 });
 
+// #595 (ADR 0023 part 5): the queue passes each issue's Scope paths, so team prints the workflow note and still launches.
+const WF_NOTE_1 = "#1: Scope names .github/workflows/: the lane opens its PR without the workflow change and hands it over in a PR comment";
+test("#595: a team launch through the queue notes a Scope that names .github/workflows/ and still launches", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, [".github/workflows/lanes-gate.yml"])], prs: [], sessions: [] };
+  const run = teamQueueRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [1]);
+  assert.equal(run.out.filter((l) => l.endsWith(WF_NOTE_1)).length, 1, run.out.join("\n"));
+});
+
+test("#595: edge: team without a workflow path in Scope, and solo with one, print no note", async () => {
+  const { main } = await import("./queue.mjs");
+  const teamWorld = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const team = teamQueueRun(teamWorld, { onSleep: (t) => t === 1 && (teamWorld.issues = []) });
+  assert.equal(await main([], team.deps), 0);
+  assert.equal(team.out.some((l) => l.includes("Scope names .github/workflows/")), false);
+  const soloWorld = { issues: [issue(1, [".github/workflows/lanes-gate.yml"])], prs: [], sessions: [] };
+  const solo = fakeRun(soloWorld, { onSleep: (t) => t === 1 && (soloWorld.issues = []) });
+  assert.equal(await main([], solo.deps), 0);
+  assert.deepEqual(solo.launched.map((l) => l.n), [1]);
+  assert.equal(solo.out.some((l) => l.includes("Scope names .github/workflows/")), false);
+});
+
 for (const [name, opts, step] of [
   ["no LANES_APP_KEY_FILE", { key: "" }, "LANES_APP_KEY_FILE is not set"],
   ["a mint failure", { mintFail: true }, "token mint failed: HTTP 401"],

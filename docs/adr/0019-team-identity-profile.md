@@ -43,7 +43,8 @@ so changing the key needs `/approve`, or under team a native review.
 60 seconds back, `exp` at most 10 minutes out), posts it to `POST /app/installations/{id}/access_tokens` with
 `repositories` set to this repo only and `permissions` set to the minimum: `contents`, `pull_requests` and `issues`
 write, `statuses` write (for `review/*`), `checks` read. It asks for no `workflows` or `administration` permission, so a
-lane can't edit workflow files or protection. It adds no npm dependency.
+lane can't edit workflow files or protection (confirmed, and the hand-over of a workflow change described, in
+[ADR 0023](0023-workflow-changes-owner-web-editor.md)). It adds no npm dependency.
 
 **3. Where the key lives.** Outside the repo, in a per-user file (owner-only mode 0600, or an owner-only ACL on
 Windows) named by `LANES_APP_KEY_FILE`. Only the launcher side reads it: `start.mjs`, `queue.mjs` and the refresher

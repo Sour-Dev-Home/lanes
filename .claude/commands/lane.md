@@ -140,6 +140,22 @@ files with Edit, not Write.
      reason>` (the status's description), instead of watching.
    - Any other `pending` or `failure`: report the gate's description as the lane's end state.
    - `pass`: done. A passing gate needs no notification.
+   Team and workflow files (ADR 0023; solo is unchanged and skips this): the App has no `workflows` permission, so a
+   push whose range holds any commit touching `.github/workflows/` is refused. Before step 6 and the push, under team,
+   check `git diff --name-only origin/main...HEAD` for `.github/workflows/`. When there is none, push as above. When
+   there is one: a change that deletes a workflow file stops the lane, which says the owner must delete that file in
+   the browser and notifies `lanes #<N>: delete a workflow file in the browser`. Otherwise keep every workflow-file
+   change in one final local commit (rewrite unpushed history so no earlier commit touches `.github/workflows/`), run
+   the reviewers (step 6) and `npm run preflight` on the full change including that commit, and push only the commit
+   before it: `git push origin HEAD~1:refs/heads/<branch>`; never push the final commit. Open the PR as above, then post
+   the hand-over comment with exactly `node scripts/lanes/handover.mjs <PR>` (never a free-text `gh pr comment`): it
+   reads the files from the final local commit, posts each file's full content in a fenced block, the web-editor link on
+   the PR branch (`edit/` for a changed file, `new/<branch>?filename=` for a new one) and the read-before-commit
+   warning, and prints a `pending: [...]` line with each file's `pendingFileHash`. Put that list in each reviewer
+   verdict's `pending` field (post-review.mjs validates it) before posting the verdicts for the pushed head. Until the
+   gate's pending reuse exists (#593 is the pure check; the gate wiring is a later issue), the reviewers re-run on the
+   final head once the owner commits the files, so say so in "Needs the owner": the owner commits each file in the
+   browser from the PR comment. The PR stays the bot's; post nothing new for the owner's commit.
    From Git Bash, prefix `gh pr create`, `gh pr edit` and `gh issue create` with `MSYS_NO_PATHCONV=1` when they pass `--title` or `--body`, or a leading `/` becomes a Windows path.
    Never push with `--no-verify`, or skip a git hook any other way: when a hook refuses a push or a commit, stop,
    comment the hook's output on the PR or issue, and notify `lanes #<N>: hook refused the push`, instead of bypassing it.

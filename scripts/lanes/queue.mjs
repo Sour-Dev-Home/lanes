@@ -11,7 +11,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseBlockedBy } from "./blockers.mjs";
 import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWorktree, waitForStop } from "./cleanup.mjs";
-import { GATE_CONTEXT, laneIssueOf } from "./lib.mjs";
+import { GATE_CONTEXT, laneIssueOf, parseIssueForm } from "./lib.mjs";
+import { issuePaths } from "./paths.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
 import { appendStarts, budgetConfig, inFlightIssues, startDecisions, deadLaneSession, launchLane, localLaunchEnv, reaperLog, START_DEFAULTS, startConfig, teamSteps } from "./start.mjs";
@@ -431,6 +432,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     // allow a second relaunch, and the launch runs in the lane's own worktree, where /lane continues its PR.
     const resuming = budgetOver ? [] : resumes;
     const labelsByIssue = new Map(issues.map((i) => [i.number, labelsOf(i).filter(Boolean)]));
+    const scopeByIssue = new Map(issues.map((i) => [i.number, issuePaths(parseIssueForm(i.body ?? "").fields)]));
     const launches = [...resuming.map((r) => ({ n: r.number, cwd: r.cwd })), ...plan.launch.map((n) => ({ n, cwd: dir }))];
     const { env: launchEnvironment, note: envNote } = launches.length && deps.launchEnv ? deps.launchEnv() : { env: undefined, note: null };
     for (const { n, cwd } of launches) {
@@ -448,7 +450,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       // #556: /start's one-lane launcher: one attempt, then the reaper (ADR 0010) and the running label (ADR 0014); under
       // team (ADR 0019) the App-only environment, --settings, strict MCP and the token refresher, or no launch at all.
       // #577: the issue's labels, so `model:opus` launches on Opus as under /start (resumed lanes too).
-      const launched = launchLane(n, deps, { tier: tierOf.get(n), models, labels: labelsByIssue.get(n) ?? [], identity, root: dir, cwd, env: launchEnvironment, envNote });
+      const launched = launchLane(n, deps, { tier: tierOf.get(n), models, labels: labelsByIssue.get(n) ?? [], identity, root: dir, cwd, env: launchEnvironment, envNote, scope: scopeByIssue.get(n) ?? [] });
       for (const line of launched.lines) say(line);
       if (launched.failed) failedLaunches.add(n);
     }
