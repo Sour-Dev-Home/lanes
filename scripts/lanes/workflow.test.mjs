@@ -607,30 +607,42 @@ const draftStep = () => {
   return next < 0 ? rest : rest.slice(0, next + 1);
 };
 
-test("plan-issues.md step 5 names each issue's module from the map, and adds a blocking contract issue for one spanning modules", () => {
+test("plan-issues.md step 5 notes the modules an issue touches, lets one issue span modules, and puts a contract issue first only when consumed", () => {
   const step = draftStep();
   assert.match(step, /`modules` key in `lanes\.config\.json`/);
   assert.match(step, /module map exists/);
-  assert.match(step, /names its module from the map/);
-  assert.match(step, /exactly one module/);
-  assert.match(step, /spans more than one module/);
-  assert.match(step, /adds the contract issue first and lists it under "Blocked by"/);
-  // ADR 0008: the spanning issue clears issue-contract.mjs only if its contract path is in the blocker's Scope.
+  assert.match(step, /notes the module\s+or modules it touches/);
   assert.match(step, /a note in the draft, not a field of the Task form/);
-  assert.match(step, /Interface contract naming a path that the contract issue's Scope contains/);
+  assert.match(step, /One issue may span modules when the change is one feature/);
+  assert.match(step, /a contract issue comes first only when another issue in the plan, or open work, consumes the interface it defines/);
+  // No such check exists in issue-contract.mjs, so the old rule must be gone.
+  assert.doesNotMatch(step, /exactly one module/);
+  assert.doesNotMatch(step, /issue-contract\.mjs/);
   // With no map the step must not invent modules.
   assert.match(step, /no `modules` key[^.]*skip this/);
 });
 
-test("plan-issues.md step 5 sizes issues at roughly 50 to 150 changed lines and merges two tiny issues that share a file", () => {
-  const step = draftStep();
-  assert.match(step, /roughly 50 to 150 changed lines/);
-  assert.match(step, /fewer than about 30 lines/);
-  assert.match(step, /share a file/);
-  assert.match(step, /merge them into one issue/);
-  assert.match(step, /unless they need different tiers or one is a contract the other depends on/);
-  // The old "100 lines or less" cap contradicts the new range, so it must be gone.
-  assert.doesNotMatch(step, /roughly 100 changed lines/);
+test("plan-issues.md step 5 sizes issues at roughly 100 to 300 changed lines, guards and gate near 200, and cites the measurement", () => {
+  const step = draftStep().replace(/\s+/g, " ");
+  assert.match(step, /roughly 100 to 300 changed lines, tests included/);
+  assert.match(step, /guards and the gate \(`scripts\/lanes\/\*-guard\.mjs`, `shell-lex\.mjs`, `gate\.mjs`, `lib\.mjs`'s gate decision\) near 200/);
+  assert.match(step, /split anything over 300/);
+  assert.match(step, /merge related changes smaller than about 100 lines into one issue/);
+  assert.match(step, /unless they need different tiers or one is a contract another issue consumes/);
+  assert.match(step, /docs\/history\/2026-09-30-lane-size-and-cost\.md/);
+  // edge: the old 50-to-150 range and 30-line merge floor contradict the new numbers.
+  assert.doesNotMatch(step, /50 to 150/);
+  assert.doesNotMatch(step, /fewer than about 30 lines/);
+});
+
+test("plan-issues.md step 4 commits the ADR in the one implementing issue's PR, and is unchanged for two or more", () => {
+  const md = planIssues();
+  const at = md.search(/^\d+\. When an ADR is needed/m);
+  const step = md.slice(at).split(/^\d+\. /m)[1].replace(/\s+/g, " ");
+  assert.match(step, /exactly one implementing issue, the ADR is committed in that issue's PR/);
+  assert.match(step, /byte-identical to the approved text/);
+  assert.match(step, /no separate tier:skip ADR issue/);
+  assert.match(step, /two or more implementing issues, this step is unchanged/);
 });
 
 test("plan-issues.md step 5 checks open issues for the same files before drafting and proposes extending one", () => {
@@ -642,35 +654,31 @@ test("plan-issues.md step 5 checks open issues for the same files before draftin
 });
 
 // #203: Scope must include the files the criteria force a lane to change (#82 missed both kinds).
-test("plan-issues.md step 5 registers a plan's new files in one up-front module-map issue, blocks the creators on it and keeps lanes.config.json out of their Scope", () => {
+test("plan-issues.md step 5: the issue creating a new file registers its prefix in lanes.config.json; no separate module-map issue", () => {
   const step = draftStep().replace(/\s+/g, " ");
-  assert.match(step, /adds one "Module map: register the plan's new files" issue \(tier quick, since `lanes\.config\.json` is a sensitive path\)/);
-  // edge: a sensitive path is not allowed at tier:skip, so the issue must not be skip.
-  assert.doesNotMatch(step, /register the plan's new files" issue \(tier skip/);
-  assert.match(step, /placed right after the ADR issue \(or first when there is none\)/);
-  assert.match(step, /Its only criterion is adding each new file's prefix \(for example `scripts\/lanes\/release\.`\) to the named module's `paths` in `lanes\.config\.json`, with nothing else in the PR/);
-  assert.match(step, /Every issue that creates one of those files lists it under "Blocked by"/);
-  assert.match(step, /puts `lanes\.config\.json` under Scope "Out" unless the issue changes other keys there/);
-  // the existing rule for other edits is unchanged.
-  assert.match(step, /changes anything else in `lanes\.config\.json` \(a new config key, `paths\.owner`, `start\.\*`\) still adds `lanes\.config\.json` to its Scope "In"/);
-});
-
-test("plan-issues.md step 5 applies the module-map issue rule only with a module map", () => {
-  const step = draftStep().replace(/\s+/g, " ");
-  // edge: with no map there is nothing to claim a file, so the rule is conditional on a map.
-  assert.match(step, /With a module map, when drafted issues name new files the map does not claim/);
+  assert.match(step, /the issue that creates a new file the map does not claim adds the file's prefix \(for example `scripts\/lanes\/release\.`\) to the named module's `paths` in `lanes\.config\.json` and lists `lanes\.config\.json` in its Scope "In"/);
+  assert.match(step, /there is no separate issue for it/);
+  assert.doesNotMatch(step, /Module map: register/);
+  // edge: the rule applies only with a module map.
   assert.ok(
-    step.indexOf("Module map: register") > step.indexOf("With a module map, when drafted issues name new files"),
-    "the module-map issue rule must sit inside the with-a-map clause",
+    step.indexOf("With a module map, the issue that creates a new file") >= 0,
+    "the registration rule must sit inside the with-a-map clause",
   );
 });
 
-test("plan-issues.md step 6 lists the module-map issue in the draft's issue table", () => {
+test("plan-issues.md step 6 no longer lists a module-map issue in the draft's issue table", () => {
   const md = planIssues();
   const at = md.search(/^\d+\. Show the owner the draft/m);
   assert.ok(at >= 0, "expected a `Show the owner the draft` step");
   const step = md.slice(at).split(/^\d+\. /m)[1].replace(/\s+/g, " ");
-  assert.match(step, /the module-map issue is one of them/);
+  assert.doesNotMatch(step, /module-map issue/);
+});
+
+test("ADR 0008 carries the 2026-10-01 amendment: sized by lines, may span modules, issue-contract check withdrawn", () => {
+  const adr = readFileSync("docs/adr/0008-module-map.md", "utf8").replace(/\s+/g, " ");
+  assert.match(adr, /## Amendment \(2026-10-01\)/);
+  assert.match(adr, /sized by changed lines, not by module, and may span modules/);
+  assert.match(adr, /never implemented and is withdrawn/);
 });
 
 test("plan-issues.md step 5 greps the existing tests for strings the draft changes and adds each pinning test to Scope", () => {
