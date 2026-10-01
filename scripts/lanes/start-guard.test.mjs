@@ -2771,6 +2771,8 @@ test("#576 criterion 3: an awk program holding an odd number of backticks is all
     `awk 'BEGIN{system("node scripts/lanes/queue.mjs")}'`, `awk '/^${T}${T}${T}/ {system("node scripts/lanes/queue.mjs")}' f`,
     `awk '{system("sh -c queue.mjs")}' f`, `awk '/^${T}${T}${T}/ {print}' f | sh -c 'node scripts/lanes/queue.mjs'`,
     `awk '{print "node scripts/lanes/queue.mjs"}' f > x.sh && node scripts/lanes/queue.mjs`, `awk "{print $X}" f; node $X`, `awk '/x/' ${T}echo f${T} && "$A"`,
+    // A pipe inside the program runs a command, so its backticks stay unresolved words (mutation check: the `|` in AWK_RUNS_RE).
+    `awk '/^${T}${T}${T}/ {print | "sh"}' f`, `awk 'BEGIN{"echo ${T}" | getline x}' f`,
     // A program read from a file may run a -v value (regression found in review).
     "awk -f p.awk -v c='node scripts/lanes/queue.mjs' f", "awk -v c='node scripts/lanes/queue.mjs' -f p.awk f", "awk -i inc -v c='node scripts/lanes/queue.mjs' 'BEGIN{x}'",
   ]) denied(cmd);
