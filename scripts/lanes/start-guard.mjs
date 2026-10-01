@@ -287,6 +287,7 @@ function programWords(words) {
 // `/^```markdown/`) is a plain character, not an unresolved word at the start of a command.
 const AWK_RE = /^(awk|gawk|mawk|nawk)(\.exe)?$/i;
 const AWK_RUNS_RE = /system|\|/i;
+const AWK_FILE_RE = /^(-[fEi]|--(file|exec|include))/;
 
 /** The indexes of a simple command's words that are an awk program or option value, when awk is its command word and none of them can run a command. */
 function awkText(words) {
@@ -295,6 +296,9 @@ function awkText(words) {
   if (cmd === -1 || !AWK_RE.test(basename(words[cmd]))) return at;
   const rest = words.slice(cmd + 1);
   if (rest.some((w) => AWK_RUNS_RE.test(unliteral(w)))) return at;
+  // A program read from a file (-f, -E, -i, gawk's --file, --exec, --include) is text this check never sees, and it may run
+  // a `-v` or operand value as a command: every word then counts as before.
+  if (rest.some((w) => AWK_FILE_RE.test(unliteral(w)))) return at;
   rest.forEach((_, i) => at.add(cmd + 1 + i));
   return at;
 }
@@ -393,7 +397,8 @@ function walk(cmd, depth, visit, onOpaque, onEval, collapse = false) {
     // mistaken for the pattern (`grep <<< "…" x`, whose here-string grep reads as its input and prints).
     const patterns = piped || cmd.includes("<<<") ? new Set() : searchPatterns(words);
     // A jq program or Go template is no shell text (#576), so one naming queue.mjs only in its text is no run, unless the
-    // call hands the program's output on: a pipe, a file written, or a process substitution a shell may read.
+    // call hands the program's output on: any pipe out of it (xargs node, tee), any redirect (`>`, `2>&1`), or a process
+    // substitution a shell may read.
     const quiet = piped || written || cmd.includes("<(") ? new Set() : new Set([...programs, ...awkText(words), ...scriptDataWords(words)]);
     const powershellAt = words.findIndex((w) => PS_SHELL_RE.test(basename(w)));
     words.forEach((w, i) => {
@@ -421,7 +426,7 @@ function walk(cmd, depth, visit, onOpaque, onEval, collapse = false) {
     if (!dataOnly) for (const line of launchedCommands(words)) nested(line);
   };
   for (const [k, words] of resolveSegments(lexed.segments).entries()) {
-    scan(words, lexed.stdin[k], feedsShell(lexed.segments, lexed.pipes, k), lexed.writes[k] === true);
+    scan(words, lexed.stdin[k], feedsShell(lexed.segments, lexed.pipes, k), lexed.writes[k] !== false || lexed.pipes[k] === true);
     // The command find -exec or xargs runs is a simple command of its own (#113).
     if (!dataOnly) for (const sub of runnerCommands(words)) scan(sub);
   }

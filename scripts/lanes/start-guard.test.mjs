@@ -2752,6 +2752,10 @@ test("#576 criterion 4 and edge: a run of queue.mjs is still denied, also beside
     // A program's output that a shell reads, or that is written for one to run, is not exempt.
     "gh api x --jq '\"node scripts/lanes/queue.mjs\"' | sh", "gh api x --jq '\"node scripts/lanes/queue.mjs\"' > x.sh && sh x.sh",
     "bash <(gh api x --jq '\"node scripts/lanes/queue.mjs\"')", "node scripts/lanes/lessons.mjs --paths 'queue.mjs b' | sh",
+    // Output handed to a non-shell runner or a file (security review).
+    "jq -rn '\"scripts/lanes/queue.mjs\"' | xargs node", "jq -rn '\"import(\\\"./scripts/lanes/queue.mjs\\\")\"' | node",
+    "awk '{print \"scripts/lanes/queue.mjs\"}' f | xargs node", "gh api x --jq '\"node scripts/lanes/queue.mjs\"' 2>&1 > run.sh", "jq -rn '\"node scripts/lanes/queue.mjs\"' | tee run.sh",
+    "jq -rn '\"node scripts/lanes/queue.mjs\"' 2>&1 | cat > f && sh f",
     // A live expansion in a double-quoted jq program still runs in the shell.
     'gh api x --jq "$(node scripts/lanes/queue.mjs)"', 'jq "$(node scripts/lanes/queue.mjs) x" f',
   ]) denied(cmd);
@@ -2767,5 +2771,7 @@ test("#576 criterion 3: an awk program holding an odd number of backticks is all
     `awk 'BEGIN{system("node scripts/lanes/queue.mjs")}'`, `awk '/^${T}${T}${T}/ {system("node scripts/lanes/queue.mjs")}' f`,
     `awk '{system("sh -c queue.mjs")}' f`, `awk '/^${T}${T}${T}/ {print}' f | sh -c 'node scripts/lanes/queue.mjs'`,
     `awk '{print "node scripts/lanes/queue.mjs"}' f > x.sh && node scripts/lanes/queue.mjs`, `awk "{print $X}" f; node $X`, `awk '/x/' ${T}echo f${T} && "$A"`,
+    // A program read from a file may run a -v value (regression found in review).
+    "awk -f p.awk -v c='node scripts/lanes/queue.mjs' f", "awk -v c='node scripts/lanes/queue.mjs' -f p.awk f", "awk -i inc -v c='node scripts/lanes/queue.mjs' 'BEGIN{x}'",
   ]) denied(cmd);
 });
