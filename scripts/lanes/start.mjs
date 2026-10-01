@@ -276,8 +276,9 @@ const TEAM_BLANKED = [...TEAM_SCRUBBED_NAMES, ...TEAM_KNOWN_PREFIXED];
  * a settings file's `env` is applied to the session's tool processes. Holds no secret.
  */
 export function teamLaneSettings({ ghDir, emptyConfig, commit }) {
-  // #544: the deny is the backstop for --strict-mcp-config, should an MCP server load another way.
-  return { env: { ...Object.fromEntries(TEAM_BLANKED.map((k) => [k, ""])), ...teamLaneVars({ ghDir, emptyConfig, commit }) }, permissions: { deny: ["mcp__*"] } };
+  // #544, #549: a best-effort backstop behind --strict-mcp-config, should an MCP server load another way. `mcp__github`
+  // is the documented `mcp__<server>` permission form; the bare `mcp__*` wildcard is not documented, so it is only an extra.
+  return { env: { ...Object.fromEntries(TEAM_BLANKED.map((k) => [k, ""])), ...teamLaneVars({ ghDir, emptyConfig, commit }) }, permissions: { deny: ["mcp__github", "mcp__*"] } };
 }
 
 // Launcher side of the team profile for lane n: checks the key, makes the lane's directory and mints into it. Returns

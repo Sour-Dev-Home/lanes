@@ -2226,11 +2226,12 @@ test("team (#544): a team launch passes --strict-mcp-config, never --mcp-config,
   const i = args.indexOf("--strict-mcp-config");
   assert.ok(i > args.indexOf("--bg") && i < args.indexOf("/lane 1"));
   assert.equal(args.includes("--mcp-config"), false);
-  assert.deepEqual(t.settingsWritten[0].settings.permissions.deny, ["mcp__*"]);
+  assert.deepEqual(t.settingsWritten[0].settings.permissions.deny, ["mcp__github", "mcp__*"]);
 });
 
 test("team (#544): the settings deny MCP tools, and launchArgs adds --strict-mcp-config only when asked", () => {
-  assert.deepEqual(teamLaneSettings({ ghDir: "/g", emptyConfig: "/e" }).permissions, { deny: ["mcp__*"] });
+  assert.deepEqual(teamLaneSettings({ ghDir: "/g", emptyConfig: "/e" }).permissions, { deny: ["mcp__github", "mcp__*"] });
+  assert.ok(teamLaneSettings({ ghDir: "/g", emptyConfig: "/e" }).permissions.deny.includes("mcp__github"), "the documented mcp__<server> form is denied");
   assert.deepEqual(launchArgs(18, { strictMcp: true }), [...NAMED(18), "--strict-mcp-config", "/lane 18"]);
   assert.deepEqual(launchArgs(18, { strictMcp: true, tier: "full", models: { full: "sonnet" } }), [...NAMED(18), "--strict-mcp-config", "--model", "sonnet", "/lane 18"]);
   assert.deepEqual(launchArgs(18), [...NAMED(18), "/lane 18"]);
