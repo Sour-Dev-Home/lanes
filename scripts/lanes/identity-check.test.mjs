@@ -7,7 +7,7 @@ import { identityCheck } from "./identity-check.mjs";
 
 const TOKEN = "ghs_FAKEfakeFAKEfakeFAKEfakeFAKEfake0123";
 const OTHER = "gho_OWNERownerOWNERownerOWNERowner9876";
-const LANE_DIR = "C:\\Users\\someone\\AppData\\Local\\Temp\\lanes-gh-552-nfIElz";
+const LANE_DIR = "X:\\fakehome\\Temp\\lanes-gh-552-nfIElz";
 const TEAM = JSON.stringify({ identity: { profile: "team", app: { id: 1, installationId: 2, botLogin: "x[bot]" } } });
 
 const authOk = [
@@ -49,7 +49,7 @@ const failed = (parsed) => Object.entries(parsed.checks ?? {}).filter(([, c]) =>
 
 /** No secret text, from any fake, ever reaches the printed line. */
 function assertNoSecret(line) {
-  for (const s of [TOKEN, OTHER, "ghs_FAKE", "gho_OWNER", "oauth_token", "password=", "Users\\someone", "hunter2"]) {
+  for (const s of [TOKEN, OTHER, "ghs_FAKE", "gho_OWNER", "oauth_token", "password=", "fakehome", "hunter2"]) {
     assert.ok(!line.includes(s), `output leaked ${s}: ${line}`);
   }
 }
@@ -87,7 +87,7 @@ test("credential fill is asked for https://github.com with no terminal prompt", 
 });
 
 test("fails ghDir when gh auth status names the owner's own config", () => {
-  const status = authOk.replace(`${LANE_DIR}\\hosts.yml`, "C:\\Users\\someone\\AppData\\Roaming\\GitHub CLI\\hosts.yml");
+  const status = authOk.replace(`${LANE_DIR}\\hosts.yml`, "X:\\fakehome\\Roaming\\GitHub CLI\\hosts.yml");
   const r = check({ run: fakeRun({ "gh auth status": { stdout: status } }) });
   assert.equal(r.code, 1);
   assert.deepEqual(failed(r.parsed), ["ghDir"]);
