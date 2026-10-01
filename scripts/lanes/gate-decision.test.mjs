@@ -333,7 +333,9 @@ test("gateDecision fails on duplicate PR template sections", () => {
 
 // ---- #48 / ADR 0002: owner-only paths, against the repo's real lanes.config.json ----
 
-const real = loadConfig();
+// The repository config is on the team profile (ADR 0019); these cases pin the solo owner stage (ADR 0002).
+const realTeam = loadConfig();
+const real = { ...realTeam, identity: { profile: "solo" } };
 const clean = (names) => ({ statuses: names.map((n) => st(`review/${n}`)), verdicts: names.map((n) => verdict(n)) });
 const onReal = (tier, files, reviewers, over = {}) =>
   run({ config: real, issueLabels: [`tier:${tier}`, "ready"], headSha: HEAD, files, ...clean(reviewers), ...over });
@@ -374,6 +376,14 @@ test("real config: review/owner success still passes anything, owner-only includ
   const withOwner = (reviewers) => ({ statuses: [...reviewers.map((n) => st(`review/${n}`)), st("review/owner")], verdicts: [] });
   assert.deepEqual(onReal("full", ["scripts/lanes/gate.mjs", "lanes.config.json"], [], withOwner(["test-hunter", "security-reviewer", "architecture-advisor"])), { state: "success", description: "approved by owner", stage: "ready" });
   assert.equal(onReal("skip", ["docs/adr/0003-x.md"], [], withOwner([])).state, "success");
+});
+
+test("real config under the team profile: an owner-only path waits for a native code-owner review (ADR 0021)", () => {
+  assert.equal(realTeam.identity?.profile, "team");
+  const input = { config: realTeam, ...clean(["test-hunter", "security-reviewer"]) };
+  const d = onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"], input);
+  assert.deepEqual(d, { state: "pending", description: "waiting for a code-owner review in GitHub (owner-only path)", stage: "owner" });
+  assert.equal(onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"], { ...input, nativeApproval: { approved: true, by: "leo" } }).state, "success");
 });
 
 test("owner-only is reported before the other owner reasons", () => {

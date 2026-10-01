@@ -583,7 +583,8 @@ export function parseCodeOwnerUsers(text) {
 
 /**
  * ADR 0021 part 1: whether a code owner approved the PR's current head. `reviews` is `pulls/{n}/reviews` oldest first;
- * the latest review per login decides, so a later CHANGES_REQUESTED or DISMISSED supersedes an approval. It counts only
+ * the latest review per login (COMMENTED and PENDING ignored) decides, so a later CHANGES_REQUESTED or DISMISSED
+ * supersedes an approval. It counts only
  * when APPROVED on `headSha`, by a login in `owners` (exact, case-sensitive) who is neither `prAuthor` nor the lane bot.
  */
 export function nativeCodeOwnerApproval(reviews, prAuthor, headSha, owners, identity = undefined) {
@@ -593,6 +594,8 @@ export function nativeCodeOwnerApproval(reviews, prAuthor, headSha, owners, iden
   const latest = new Map();
   for (const r of reviews) {
     const login = r?.user?.login;
+    // A COMMENTED or PENDING review changes no approval state on GitHub, so it never supersedes one.
+    if (r?.state === "COMMENTED" || r?.state === "PENDING") continue;
     if (typeof login === "string" && login !== "") latest.set(login, r);
   }
   for (const [login, r] of latest) {

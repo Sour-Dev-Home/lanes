@@ -1147,6 +1147,15 @@ test("nativeCodeOwnerApproval lets a later CHANGES_REQUESTED or DISMISSED supers
   assert.deepEqual(nativeCodeOwnerApproval([review("leo"), review("Mia", "CHANGES_REQUESTED")], "x", HEAD, OWNERS, TEAM_ID), { approved: true, by: "leo" });
 });
 
+test("nativeCodeOwnerApproval: approve-then-comment stays approved, approve-then-changes-requested does not", () => {
+  for (const state of ["COMMENTED", "PENDING"]) {
+    assert.deepEqual(nativeCodeOwnerApproval([review("leo"), review("leo", state)], "x", HEAD, OWNERS, TEAM_ID), { approved: true, by: "leo" }, state);
+  }
+  assert.equal(nativeCodeOwnerApproval([review("leo"), review("leo", "COMMENTED"), review("leo", "CHANGES_REQUESTED")], "x", HEAD, OWNERS, TEAM_ID).approved, false);
+  // edge: a comment alone is no approval
+  assert.equal(nativeCodeOwnerApproval([review("leo", "COMMENTED")], "x", HEAD, OWNERS, TEAM_ID).approved, false);
+});
+
 test("edge: nativeCodeOwnerApproval matches owners exactly and fails closed on empty or malformed input", () => {
   const no = { approved: false, by: null };
   assert.deepEqual(nativeCodeOwnerApproval([review("LEO")], "x", HEAD, OWNERS, TEAM_ID), no);
