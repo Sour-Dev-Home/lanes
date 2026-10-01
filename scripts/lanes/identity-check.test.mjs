@@ -266,3 +266,14 @@ test("edge: a runner that throws on every command fails each team check, not the
   assert.deepEqual(failed(JSON.parse(r.line)).sort(), ["credential", "ghDir", "push"]);
   assertNoSecret(r.line);
 });
+
+test("edge: CRLF output and a POSIX lane directory still pass, with no leak", () => {
+  const run = fakeRun({
+    "gh auth status": { stdout: "Logged in to github.com account  (/tmp/lanes-gh-552-abc123/hosts.yml)\r\n" },
+    "git config --get-all credential.helper": { stdout: "\r\n!gh auth git-credential\r\n" },
+    "git credential fill": { stdout: "protocol=https\r\nusername=x\r\npassword=" + TOKEN + "\r\n" },
+  });
+  const r = check({ run });
+  assert.equal(r.code, 0, r.line);
+  assertNoSecret(r.line);
+});
