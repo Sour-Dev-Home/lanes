@@ -18,6 +18,13 @@ const SAFE_BRANCH = /^[A-Za-z0-9._\/-]+$/;
 // GitHub rejects a comment body over 65536 characters.
 const MAX_COMMENT = 60000;
 
+// Characters that make displayed text differ from copied text: C0 and C1 controls except tab, LF and CR, bidi controls
+// (U+061C, U+200E/F, U+202A-E, U+2066-9), zero-width and invisible joiners (U+180E, U+200B-D, U+2060-4, U+FEFF) and the
+// line and paragraph separators (U+2028/9).
+const HIDDEN_RANGES = [[0x00, 0x08], [0x0b, 0x0c], [0x0e, 0x1f], [0x7f, 0x9f], [0x61c, 0x61c], [0x180e, 0x180e], [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x2064], [0x2066, 0x2069], [0xfeff, 0xfeff]];
+const hex = (n) => "\\" + "u" + n.toString(16).padStart(4, "0");
+const HIDDEN = new RegExp(`[${HIDDEN_RANGES.map(([a, b]) => hex(a) + "-" + hex(b)).join("")}]`, "u");
+
 class Refusal extends Error {}
 const refuse = (why) => new Refusal(why);
 
@@ -95,7 +102,11 @@ export function handover(argv, deps) {
       const raw = deps.git(["show", `HEAD:${c.path}`], { raw: true });
       const sha256 = pendingFileHash(raw);
       if (!sha256) throw refuse(`${c.path} is empty or not valid UTF-8, so it cannot be handed over`);
-      files.push({ path: c.path, status: c.status, text: new TextDecoder("utf-8", { fatal: true }).decode(raw) });
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+      // The owner reads this text and then copies it: nothing may display differently from what is copied.
+      const hidden = HIDDEN.exec(text);
+      if (hidden) throw refuse(`${c.path} holds a hidden, bidirectional or control character (U+${hidden[0].codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}), so its displayed text could differ from what is copied`);
+      files.push({ path: c.path, status: c.status, text });
       pending.push({ path: c.path, sha256 });
     }
     const body = handoverComment({ repo, branch, files });
