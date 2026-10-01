@@ -198,7 +198,13 @@ export function localLaunchEnv() {
 }
 
 // ADR 0019 part 3: what a team lane never inherits. Matched case-insensitively, as Windows environment names are.
-const TEAM_SCRUBBED = [/^LANES_APP_KEY_FILE$/i, /^GH_TOKEN$/i, /^GITHUB_TOKEN$/i, /^GH_ENTERPRISE_TOKEN$/i, /^GITHUB_ENTERPRISE_TOKEN$/i, /^GH_CONFIG_DIR$/i, /^GIT_CONFIG_/i, /^GIT_ASKPASS$/i, /^SSH_ASKPASS$/i, /^GIT_TERMINAL_PROMPT$/i, /^GIT_CREDENTIAL/i, /^GCM_/i, /^GITHUB_PERSONAL_ACCESS_TOKEN$/i, /^SSH_AUTH_SOCK$/i, /^GIT_SSH(_COMMAND)?$/i, /^GH_HOST$/i, /^GH_REPO$/i];
+// One source (#540): the launcher env drops these, and the settings `env` blanks or sets each exact name, so they cannot drift.
+export const TEAM_SCRUBBED_NAMES = ["LANES_APP_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_CONFIG_DIR", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_TERMINAL_PROMPT", "GITHUB_PERSONAL_ACCESS_TOKEN", "SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND", "GH_HOST", "GH_REPO"];
+// Prefix families cannot be enumerated: the known names below are blanked in the settings `env`, and any other name
+// in them can only matter through git config, which GIT_CONFIG_GLOBAL/SYSTEM (empty) leave with gh's helper alone.
+const TEAM_SCRUBBED_PREFIXES = ["GIT_CONFIG_", "GIT_CREDENTIAL", "GCM_"];
+const TEAM_KNOWN_PREFIXED = ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG_NOSYSTEM", "GIT_CREDENTIAL_HELPER", "GCM_INTERACTIVE", "GCM_CREDENTIAL_STORE", "GCM_PROVIDER", "GCM_AUTHORITY", "GCM_GUI_PROMPT"];
+const TEAM_SCRUBBED = [...TEAM_SCRUBBED_NAMES.map((n) => new RegExp(`^${n}$`, "i")), ...TEAM_SCRUBBED_PREFIXES.map((p) => new RegExp(`^${p}`, "i"))];
 
 /** Whether `dir` is a lane directory `makeDir` creates: `lanes-gh-<issue>-*` directly under the OS temp folder, not a link. */
 export function isLaneGhDir(dir, tmp, isLink = () => false) {
@@ -246,8 +252,9 @@ export function teamLaneVars({ ghDir, emptyConfig }) {
   };
 }
 
-// Names a launcher's env removes from a team lane; in settings `env` (which cannot unset) they are blanked instead.
-const TEAM_BLANKED = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN", "LANES_APP_KEY_FILE", "SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GH_HOST", "GH_REPO"];
+// Names a launcher's env removes from a team lane; in settings `env` (which cannot unset) they are blanked instead,
+// except those the lane sets (teamLaneVars comes last and overrides).
+const TEAM_BLANKED = [...TEAM_SCRUBBED_NAMES, ...TEAM_KNOWN_PREFIXED];
 
 /**
  * #540: the `--settings` content that carries the team environment into a `claude --bg` session. A background session

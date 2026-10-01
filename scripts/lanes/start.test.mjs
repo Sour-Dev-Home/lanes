@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUDGET_DEFAULTS, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, isLaneGhDir, launchEnv, main as runStart, makeRemint, markRunning, parseSessionId, planStart, refreshArgs, refreshLoop, startConfig, teamLaneEnv } from "./start.mjs";
+import { BUDGET_DEFAULTS, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, isLaneGhDir, launchEnv, main as runStart, makeRemint, markRunning, parseSessionId, planStart, refreshArgs, refreshLoop, startConfig, teamLaneEnv, teamLaneSettings, TEAM_SCRUBBED_NAMES } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
@@ -2147,6 +2147,19 @@ test("team (#540): the team environment is delivered by a settings file the lane
   assert.deepEqual([env.GIT_CONFIG_KEY_2, env.GIT_CONFIG_VALUE_2, env.GIT_CONFIG_KEY_3, env.GIT_CONFIG_VALUE_3], ["url.https://github.com/.insteadOf", "git@github.com:", "url.https://github.com/.insteadOf", "ssh://git@github.com/"]);
   assert.match(env.GIT_SSH_COMMAND, /exit 1$/);
   assert.equal(JSON.stringify(env).includes("owner"), false, "no owner value and no token in the file");
+});
+
+test("edge (#540): the settings env blanks or sets every exact name the launcher scrub removes, and the known prefixed ones", () => {
+  const { env } = teamLaneSettings({ ghDir: "/g", emptyConfig: "/e" });
+  for (const k of TEAM_SCRUBBED_NAMES) assert.ok(k in env, k);
+  for (const k of ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG_NOSYSTEM", "GIT_CREDENTIAL_HELPER", "GCM_INTERACTIVE", "GCM_CREDENTIAL_STORE", "GIT_SSH"]) assert.equal(env[k], "", k);
+  assert.equal(env.GH_CONFIG_DIR, "/g");
+  assert.notEqual(env.GIT_SSH_COMMAND, "", "set, not blanked");
+  // Everything the launcher env drops is covered by the settings env too.
+  const dropped = ["GIT_CONFIG_PARAMETERS", "GCM_INTERACTIVE", ...TEAM_SCRUBBED_NAMES];
+  const out = teamLaneEnv(Object.fromEntries(dropped.map((k) => [k, "x"])), { ghDir: "/g", emptyConfig: "/e" });
+  for (const k of dropped) assert.ok(k in env, `${k} in settings`);
+  assert.equal("GIT_CONFIG_PARAMETERS" in out, false);
 });
 
 test("edge (#540): a solo launch passes no --settings", () => {
