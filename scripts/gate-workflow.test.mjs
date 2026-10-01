@@ -19,6 +19,13 @@ test("lanes-gate passes the status event's state to gate.mjs", () => {
   assert.match(yml, /\n {10}STATUS_STATE: \$\{\{ github\.event\.state \}\}\n/);
 });
 
+// #561 (ADR 0021): the review ping's completion re-runs the gate; the event's PR and head SHA reach gate.mjs (#559).
+test("lanes-gate runs on workflow_run of lanes-review-ping, completed only, and passes the run's PR and head SHA", () => {
+  assert.match(yml, /\n {2}workflow_run:\n {4}workflows: \[lanes-review-ping\]\n {4}types: \[completed\]\n/);
+  assert.match(yml, /\n {10}RUN_PR_NUMBER: \$\{\{ github\.event\.workflow_run\.pull_requests\[0\]\.number \}\}\n/);
+  assert.match(yml, /\n {10}RUN_HEAD_SHA: \$\{\{ github\.event\.workflow_run\.head_sha \}\}\n/);
+});
+
 test("lanes-gate still checks out only the default branch", () => {
   const checkouts = yml.match(/uses: actions\/checkout@/g) ?? [];
   assert.equal(checkouts.length, 1);
