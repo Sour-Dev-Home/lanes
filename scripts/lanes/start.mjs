@@ -647,49 +647,56 @@ export function reaperLog(root, n) {
   return { fd, close: () => closeSync(fd) };
 }
 
-// Launches each issue from the repository root, one attempt each, on its tier's model (`tiers`: issue → tier), and
-// starts a reaper for each lane that returned a session id. Returns issue → lines, and whether any launch failed.
-// `labels` (issue → label names) supplies the model:opus override; an ignored model:* label is logged once.
+/**
+ * Launches one lane, one attempt, on its tier's model, and starts its reaper (and, under team, its token refresher)
+ * once it returns a session id. /start and the owner-run queue both launch through this one function (#556).
+ * `labels` (the issue's label names) supplies the model:opus override; an ignored model:* label is logged once. `env`
+ * is the launch environment (`launchEnv()`'s env, or undefined for the inherited one) and `envNote` its note. The
+ * session starts in `cwd` (default `root`); the reaper and refresher run from `root`, the main checkout. Under team
+ * the lane launches with only the App's credentials, or not at all (ADR 0019). `deps` needs `claude`, `spawn`,
+ * `reaperLog`, `gh`, and `team` under team. Never throws for a launch or preparation failure.
+ * @returns {{ id: string | null, failed: boolean, lines: string[] }}
+ */
+export function launchLane(n, deps, { tier, models, labels, identity, root, cwd = root, env, envNote = null }) {
+  const { opus, ignored } = modelLabels(labels);
+  // A label name is untrusted text: control characters (ANSI escapes, newlines) become `?` in the log line.
+  const notes = ignored.map((l) => `#${n}: ignored label ${l.replace(/[\x00-\x1f\x7f-\x9f]/g, "?")}`);
+  if (envNote) notes.push(`#${n}: ${envNote}`);
+  let lane = null;
+  if (identity?.profile === "team") {
+    lane = prepareTeam(n, identity, deps, env ?? process.env);
+    if (lane.failed) return { id: null, failed: true, lines: [...notes, `#${n}: launch failed: team profile: ${lane.failed}`] };
+  }
+  const launchEnvFor = lane ? lane.env : env;
+  // One attempt only: a launch that printed no id may still have started, and a retry could start it twice.
+  let id = null;
+  let why = "no session id in output";
+  try {
+    id = parseSessionId(deps.claude(launchArgs(n, { tier, models, opus, settings: lane?.settings, strictMcp: Boolean(lane?.settings) }), launchEnvFor ? { cwd, env: launchEnvFor } : { cwd }));
+  } catch (err) {
+    why = reason(err);
+  }
+  if (!id) {
+    if (lane) removeQuietly(deps.team, lane.dir);
+    return { id: null, failed: true, lines: [...notes, `#${n}: launch failed: ${why}, not retried`] };
+  }
+  const reaperFailed = startReaper(n, id, deps, root);
+  const refresherFailed = lane ? startRefresher(n, id, lane, identity, deps, root) : null;
+  const marked = markRunning(n, deps);
+  return { id, failed: false, lines: [...notes, `#${n} → ${id}`, ...(reaperFailed ? [reaperFailed] : []), ...(refresherFailed ? [refresherFailed] : []), ...(marked.includes(": label not set: ") ? [marked] : [])] };
+}
+
+// Launches each issue from the repository root through launchLane (`tiers`: issue → tier, `labels`: issue → label
+// names). Returns issue → lines, and whether any launch failed.
 function launchAll(numbers, deps, { tiers, models, labels, identity }) {
   const lines = new Map();
   let failed = false;
   const root = numbers.length ? deps.root() : null;
   const { env, note: envNote } = numbers.length && deps.launchEnv ? deps.launchEnv() : { env: undefined, note: null };
-  const team = identity?.profile === "team";
   for (const n of numbers) {
-    const { opus, ignored } = modelLabels(labels.get(n));
-    // A label name is untrusted text: control characters (ANSI escapes, newlines) become `?` in the log line.
-    const notes = ignored.map((l) => `#${n}: ignored label ${l.replace(/[\x00-\x1f\x7f-\x9f]/g, "?")}`);
-    if (envNote) notes.push(`#${n}: ${envNote}`);
-    // ADR 0019: under team a lane launches with only the App's credentials, or not at all.
-    let lane = null;
-    if (team) {
-      lane = prepareTeam(n, identity, deps, env ?? process.env);
-      if (lane.failed) {
-        lines.set(n, [...notes, `#${n}: launch failed: team profile: ${lane.failed}`]);
-        failed = true;
-        continue;
-      }
-    }
-    const launchEnvFor = lane ? lane.env : env;
-    // One attempt only: a launch that printed no id may still have started, and a retry could start it twice.
-    let id = null;
-    let why = "no session id in output";
-    try {
-      id = parseSessionId(deps.claude(launchArgs(n, { tier: tiers.get(n), models, opus, settings: lane?.settings, strictMcp: Boolean(lane?.settings) }), launchEnvFor ? { cwd: root, env: launchEnvFor } : { cwd: root }));
-    } catch (err) {
-      why = reason(err);
-    }
-    if (id) {
-      const reaperFailed = startReaper(n, id, deps, root);
-      const refresherFailed = lane ? startRefresher(n, id, lane, identity, deps, root) : null;
-      const marked = markRunning(n, deps);
-      lines.set(n, [...notes, `#${n} → ${id}`, ...(reaperFailed ? [reaperFailed] : []), ...(refresherFailed ? [refresherFailed] : []), ...(marked.includes(": label not set: ") ? [marked] : [])]);
-    } else {
-      if (lane) removeQuietly(deps.team, lane.dir);
-      lines.set(n, [...notes, `#${n}: launch failed: ${why}, not retried`]);
-      failed = true;
-    }
+    const launched = launchLane(n, deps, { tier: tiers.get(n), models, labels: labels.get(n), identity, root, env, envNote });
+    lines.set(n, launched.lines);
+    if (launched.failed) failed = true;
   }
   return { lines, failed };
 }
@@ -904,7 +911,8 @@ function readConfig() {
 }
 
 // ADR 0019: the real team-profile steps, all on the owner's side. `mintInto` runs this file's `--refresh-token --once`
-// in a child so the launch stays synchronous; the child reads the key from the owner's own environment.
+// in a child so the launch stays synchronous; the child reads the key from the owner's own environment. Exported as
+// `teamSteps` for the queue (#556).
 const selfPath = fileURLToPath(import.meta.url);
 const team = {
   keyFile: () => process.env.LANES_APP_KEY_FILE,
@@ -939,6 +947,7 @@ const team = {
     }).trim();
   },
 };
+export { team as teamSteps };
 
 // `--refresh-token`: the owner-side refresher (or, with --once, a single mint). Not grant-gated: it only rewrites the
 // lane's own hosts.yml from the owner's key file, and it prints a failure's step only, never the key or a token.
