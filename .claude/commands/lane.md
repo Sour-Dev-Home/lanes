@@ -19,6 +19,12 @@ calls in one turn; read the issue once (step 1) and reuse it rather than calling
 (`gh run watch <id>`), never a polling loop (step 7 explains why `lanes/gate` is never watched); change existing
 files with Edit, not Write.
 
+0. Identity check (#540), before any other step and before anything touches GitHub: `grep -n '"profile"' lanes.config.json`.
+   When the profile is `team`, run `gh auth status` and `git remote get-url --push origin` as separate commands.
+   `gh auth status` must name a `lanes-gh-$ARGUMENTS-*` directory (the lane's own config) and the push URL must start
+   with `https://`. Otherwise stop with a message that says which one failed, do nothing on GitHub, and notify
+   `lanes #$ARGUMENTS: team identity not in effect`: the session would act as the owner. Record the passing result
+   (`identity: team, own gh dir, https push`) in your first status line and in the PR body. Under `solo` skip this step.
 1. `gh issue view $ARGUMENTS --json title,body,labels,state`. Stop and report if it is not open, lacks the `ready`
    label, or lacks exactly one `tier:*` label. An issue labelled `spike` is findings, not code (ADR 0012): it skips
    test-first (step 5), and its PR adds only a findings file or an ADR draft, no other code.
