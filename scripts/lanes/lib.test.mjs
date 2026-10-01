@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adrGoverns, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { adrGoverns, botIssueReleased, readBotIssueRelease, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -66,6 +66,141 @@ test("authorCanWrite fails closed when the permission cannot be read", () => {
   assert.equal(authorCanWrite(permissionApi("not json").api, "o/r", "leo"), false);
   assert.equal(authorCanWrite(permissionApi("null").api, "o/r", "leo"), false);
 });
+
+// ADR 0022 part 1 and 6: a bot-authored issue is trusted once a write-access actor removed lane-filed. Block-scoped so its
+// fixtures do not clash with the module-level BOT further down.
+{
+const TEAM = { profile: "team", app: { botLogin: "lanes-app[bot]" } };
+const BOT = { login: "lanes-app[bot]", type: "Bot" };
+const WRITERS = new Set(["owner"]);
+const canWrite = (login) => WRITERS.has(login);
+const botIssue = (labels = []) => ({ user: BOT, labels });
+const ev = (id, event, login, at = "2026-10-01T10:00:00Z") => ({ id, event, created_at: at, label: { name: "lane-filed" }, actor: { login } });
+const RELEASED = [ev(1, "labeled", BOT.login), ev(2, "unlabeled", "owner", "2026-10-01T10:00:00Z")];
+const released = (events = RELEASED, edit = null, issue = botIssue(), identity = TEAM) => botIssueReleased(identity, issue, events, edit, canWrite);
+
+test("botIssueReleased: an owner release is trusted", () => {
+  assert.equal(released(), true);
+  assert.equal(released(RELEASED, null, botIssue([{ name: "ready" }])), true, "labels as objects");
+});
+
+test("botIssueReleased: the bot removing its own label, or re-adding it after the owner, is untrusted", () => {
+  assert.equal(released([ev(1, "labeled", BOT.login), ev(2, "unlabeled", BOT.login)]), false);
+  assert.equal(released([...RELEASED, ev(3, "labeled", BOT.login)]), false, "re-added and still labelled by events");
+  assert.equal(released([...RELEASED, ev(3, "labeled", BOT.login), ev(4, "unlabeled", BOT.login)]), false);
+});
+
+test("botIssueReleased: a re-add followed by an owner removal is trusted, by event id not array order", () => {
+  const events = [...RELEASED, ev(3, "labeled", BOT.login), ev(4, "unlabeled", "owner")];
+  assert.equal(released(events), true);
+  assert.equal(released([events[3], events[2], events[1], events[0]]), true, "reversed input");
+});
+
+test("botIssueReleased: a body edit after the release needs a write-access editor", () => {
+  assert.equal(released(RELEASED, { lastEditedAt: "2026-10-01T10:05:00Z", editor: { login: BOT.login } }), false, "bot edit after release");
+  assert.equal(released(RELEASED, { lastEditedAt: "2026-10-01T10:05:00Z", editor: { login: "owner" } }), true, "owner edit after a bot edit");
+  assert.equal(released(RELEASED, { lastEditedAt: "2026-10-01T09:59:00Z", editor: { login: BOT.login } }), true, "edit before release");
+});
+
+test("botIssueReleased: an issue that never had lane-filed, or still has it, is untrusted", () => {
+  assert.equal(released([]), false);
+  assert.equal(released([ev(5, "labeled", "owner")].map((e) => ({ ...e, label: { name: "other" } }))), false, "other labels only");
+  assert.equal(released(RELEASED, null, botIssue(["lane-filed"])), false);
+  assert.equal(released(RELEASED, null, botIssue([{ name: "lane-filed" }])), false);
+});
+
+test("botIssueReleased: solo, a second bot, a human author and a non-Bot type are untrusted", () => {
+  assert.equal(released(RELEASED, null, botIssue(), { profile: "solo" }), false);
+  assert.equal(released(RELEASED, null, { user: { login: "other-app[bot]", type: "Bot" }, labels: [] }), false);
+  assert.equal(released(RELEASED, null, { user: { login: "owner", type: "User" }, labels: [] }), false);
+  assert.equal(released(RELEASED, null, { user: { login: BOT.login, type: "User" }, labels: [] }), false);
+});
+
+test("edge: botIssueReleased fails closed on a missing field or an unexpected shape", () => {
+  const edited = (editor) => ({ lastEditedAt: "2026-10-01T10:05:00Z", editor });
+  assert.equal(released(RELEASED, edited(undefined)), false, "missing editor");
+  assert.equal(released(RELEASED, edited(null)), false, "null editor");
+  assert.equal(released(RELEASED, edited({})), false, "editor with no login");
+  assert.equal(released(RELEASED, { editor: { login: "owner" } }), false, "no lastEditedAt");
+  assert.equal(released(RELEASED, { lastEditedAt: "soon", editor: { login: "owner" } }), false, "bad date");
+  assert.equal(released(RELEASED, "edited"), false);
+  assert.equal(botIssueReleased(TEAM, botIssue(), RELEASED, undefined, canWrite), false, "edit undefined is not a never-edited null");
+  assert.equal(released(RELEASED, { lastEditedAt: "2026-10-01T10:00:00Z", editor: { login: BOT.login } }), false, "same second as release");
+  assert.equal(released(RELEASED, { lastEditedAt: "2026-10-01T10:00:00Z", editor: { login: "owner" } }), true);
+  assert.equal(released("events"), false);
+  assert.equal(released([null]), false);
+  assert.equal(released([ev(1, "labeled", BOT.login), { ...ev(2, "unlabeled", "owner"), id: "2" }]), false, "string id");
+  assert.equal(released([ev(1, "labeled", BOT.login), { ...ev(2, "unlabeled", "owner"), created_at: undefined }]), false);
+  assert.equal(released([ev(1, "labeled", BOT.login), { ...ev(2, "unlabeled", undefined) }]), false, "no actor");
+  assert.equal(released(RELEASED, null, { user: BOT }), false, "no labels");
+  assert.equal(released(RELEASED, null, botIssue([5])), false, "label of unknown shape");
+  assert.equal(released(RELEASED, null, null), false);
+  assert.equal(botIssueReleased(TEAM, botIssue(), RELEASED, null, undefined), false, "no canWrite");
+  assert.equal(botIssueReleased(TEAM, botIssue(), RELEASED, null, () => "true"), false, "canWrite must be exactly true");
+  assert.equal(botIssueReleased(undefined, botIssue(), RELEASED, null, canWrite), false);
+  assert.equal(botIssueReleased(TEAM, botIssue(), RELEASED, null, () => { throw new Error("boom"); }), false);
+});
+
+const issueReply = { user: BOT, labels: [] };
+const readApi = ({ issue = issueReply, events = RELEASED, graphql = { data: { repository: { issue: { lastEditedAt: null, editor: null } } } }, fail } = {}) => {
+  const calls = [];
+  const api = (args) => {
+    calls.push(args);
+    if (fail?.(args)) throw new Error("HTTP 500");
+    if (args[0] === "graphql") return typeof graphql === "string" ? graphql : JSON.stringify(graphql);
+    if (args[0].endsWith("/events")) return typeof events === "string" ? events : events.map((e) => JSON.stringify(e)).join("\n");
+    if (args[0].includes("/collaborators/")) return JSON.stringify({ permission: WRITERS.has(args[0].split("/")[4]) ? "write" : "read" });
+    return typeof issue === "string" ? issue : JSON.stringify(issue);
+  };
+  return { api, calls };
+};
+
+test("readBotIssueRelease: reads the issue, its events and its last edit, and trusts an owner release", () => {
+  const { api, calls } = readApi();
+  assert.equal(readBotIssueRelease(api, TEAM, "o/r", 7), true);
+  assert.equal(calls[0][0], "repos/o/r/issues/7");
+  const events = calls.find((a) => a[0] === "repos/o/r/issues/7/events");
+  assert.ok(events.includes("--paginate"));
+  const graphql = calls.find((a) => a[0] === "graphql");
+  assert.ok(graphql.some((a) => a.includes("lastEditedAt") && a.includes("editor { login }")));
+  assert.deepEqual(calls.filter((a) => a[0].includes("/collaborators/")).map((a) => a[0]), ["repos/o/r/collaborators/owner/permission"]);
+});
+
+test("readBotIssueRelease: solo, or team with no bot login, returns false with no API call", () => {
+  for (const identity of [{ profile: "solo" }, undefined, { profile: "team" }, { profile: "team", app: { botLogin: "" } }]) {
+    const { api, calls } = readApi();
+    assert.equal(readBotIssueRelease(api, identity, "o/r", 7), false);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test("readBotIssueRelease: a post-release bot edit read from GraphQL is untrusted, an owner edit trusted", () => {
+  const edit = (login, at = "2026-10-01T11:00:00Z") => ({ data: { repository: { issue: { lastEditedAt: at, editor: login && { login } } } } });
+  assert.equal(readBotIssueRelease(readApi({ graphql: edit(BOT.login) }).api, TEAM, "o/r", 7), false);
+  assert.equal(readBotIssueRelease(readApi({ graphql: edit("owner") }).api, TEAM, "o/r", 7), true);
+});
+
+test("edge: readBotIssueRelease fails closed on an API error, bad JSON, a missing editor or a truncated page", () => {
+  const read = (opts) => readBotIssueRelease(readApi(opts).api, TEAM, "o/r", 7);
+  assert.equal(read({ fail: (a) => a[0] === "repos/o/r/issues/7" }), false, "issue read error");
+  assert.equal(read({ fail: (a) => a[0].endsWith("/events") }), false, "events read error");
+  assert.equal(read({ fail: (a) => a[0] === "graphql" }), false, "graphql error");
+  assert.equal(read({ fail: (a) => a[0].includes("/collaborators/") }), false, "permission error");
+  assert.equal(read({ issue: "not json" }), false);
+  assert.equal(read({ issue: "null" }), false);
+  assert.equal(read({ events: `${JSON.stringify(RELEASED[0])}\n{"id":2,"event":"unla` }), false, "truncated page");
+  assert.equal(read({ graphql: "not json" }), false);
+  assert.equal(read({ graphql: { data: { repository: { issue: null } } } }), false);
+  assert.equal(read({ graphql: { errors: [{ message: "x" }] } }), false);
+  assert.equal(read({ graphql: { data: { repository: { issue: { lastEditedAt: "2026-10-01T11:00:00Z" } } } } }), false, "missing editor");
+  assert.equal(read({ graphql: { data: { repository: { issue: { editor: null } } } } }), false, "missing lastEditedAt");
+  assert.equal(read({ issue: { user: { login: "other-app[bot]", type: "Bot" }, labels: [] } }), false, "a second bot");
+  assert.equal(read({ issue: { user: BOT, labels: [{ name: "lane-filed" }] } }), false, "still labelled");
+  assert.equal(read({ events: [] }), false, "never had lane-filed");
+  assert.equal(readBotIssueRelease(readApi().api, TEAM, "not-a-repo", 7), false);
+  assert.equal(readBotIssueRelease(readApi().api, TEAM, "o/r", "7"), false);
+});
+}
 
 test("authorCanWrite refuses a missing or malformed login without calling the API", () => {
   for (const login of [undefined, null, "", "../../x", "a/b", "dependabot[bot]", "-leo", "a".repeat(40)]) {

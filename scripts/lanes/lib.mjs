@@ -565,6 +565,72 @@ export function isLaneBot(identity, actor) {
   return actor.type === undefined || actor.type === "Bot";
 }
 
+const LANE_FILED = "lane-filed";
+
+/**
+ * ADR 0022 part 1: whether a bot-authored issue was released by a write-access actor. `issue` is `{ user, labels }` (labels
+ * as names or `{ name }`), `events` the issue's events, `edit` `{ lastEditedAt, editor }` or null for a never-edited body,
+ * and `canWrite(login)` is injected (authorCanWrite bound to an api and repo). True only when every clause holds; a
+ * missing field or an unexpected shape is false. An edit in the same second as the release also needs a write-access
+ * editor, since timestamps have no finer grain to tell the order.
+ */
+export function botIssueReleased(identity, issue, events, edit, canWrite) {
+  try {
+    if (typeof canWrite !== "function" || issue === null || typeof issue !== "object") return false;
+    if (!isLaneBot(identity, issue.user) || issue.user.type !== "Bot") return false;
+    if (!Array.isArray(issue.labels) || !Array.isArray(events)) return false;
+    const names = issue.labels.map((l) => (typeof l === "string" ? l : l?.name));
+    if (names.some((n) => typeof n !== "string") || names.includes(LANE_FILED)) return false;
+    const marks = [];
+    for (const e of events) {
+      if (e === null || typeof e !== "object") return false;
+      if ((e.event !== "labeled" && e.event !== "unlabeled") || e.label?.name !== LANE_FILED) continue;
+      if (!Number.isFinite(e.id) || Number.isNaN(Date.parse(e.created_at))) return false;
+      marks.push(e);
+    }
+    if (marks.length === 0) return false;
+    const last = marks.reduce((a, b) => (b.id > a.id ? b : a));
+    const actor = last.actor?.login;
+    if (last.event !== "unlabeled" || typeof actor !== "string" || isLaneBot(identity, last.actor)) return false;
+    if (canWrite(actor) !== true) return false;
+    if (edit === null) return true;
+    if (typeof edit !== "object" || edit === undefined) return false;
+    const editedAt = Date.parse(edit.lastEditedAt);
+    if (Number.isNaN(editedAt)) return false;
+    if (editedAt < Date.parse(last.created_at)) return true;
+    return typeof edit.editor?.login === "string" && !isLaneBot(identity, edit.editor) && canWrite(edit.editor.login) === true;
+  } catch {
+    return false;
+  }
+}
+
+const RELEASE_EVENTS = ".[] | {id, event, created_at, label: {name: .label.name}, actor: {login: .actor.login}} | @json";
+const RELEASE_EDIT = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { lastEditedAt editor { login } } } }";
+
+/**
+ * ADR 0022 part 1: reads what botIssueReleased needs for issue `number` in `repo` (`api` takes `gh api` arguments).
+ * False with no API call unless the identity is team with a bot login; false on any read or parse error, an unexpected
+ * shape or a page that does not parse (a truncated read).
+ */
+export function readBotIssueRelease(api, identity, repo, number) {
+  if (identity?.profile !== "team" || typeof identity?.app?.botLogin !== "string" || identity.app.botLogin === "") return false;
+  try {
+    const [owner, name] = String(repo).split("/");
+    if (!owner || !name || !Number.isInteger(number)) return false;
+    const issue = JSON.parse(api([`repos/${repo}/issues/${number}`]));
+    if (typeof issue?.user?.login !== "string" || !Array.isArray(issue.labels)) return false;
+    if (!isLaneBot(identity, issue.user) || issue.user.type !== "Bot") return false;
+    const events = api([`repos/${repo}/issues/${number}/events`, "--paginate", "--jq", RELEASE_EVENTS]).split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const reply = JSON.parse(api(["graphql", "-f", `query=${RELEASE_EDIT}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-F", `number=${number}`]));
+    const node = reply?.data?.repository?.issue;
+    if (node === null || typeof node !== "object" || !("lastEditedAt" in node) || !("editor" in node)) return false;
+    const edit = node.lastEditedAt === null ? null : { lastEditedAt: node.lastEditedAt, editor: node.editor };
+    return botIssueReleased(identity, { user: issue.user, labels: issue.labels }, events, edit, (login) => authorCanWrite(api, repo, login));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * ADR 0021 part 1: the user owners (`@login`) of a CODEOWNERS file, in order, without the `@`. The first token of a
  * line is its pattern; team entries (`@org/team`), emails and comments are ignored.
