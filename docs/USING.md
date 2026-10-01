@@ -282,3 +282,10 @@ the next run of the `dashboard` workflow the page is at `https://<owner>.github.
 **The site is public**, even for a private repository: anyone with the URL can read every task title, stage and
 blocker reason in the snapshot. The page only reads, and its "waiting on you" list gives you an `/approve N M K` line
 to copy; approving still happens in the owner session.
+
+**Under the team profile** ([ADR 0024](adr/0024-dashboard-review-links-under-team.md)) the page has no `/approve` line.
+Each waiting PR instead shows a "Review in GitHub" link to its files, the gate's reason, and whether your review covers
+the current head, with the note "Approve in GitHub; the gate re-runs on your review." Task cards link to their issue and
+PR, and a failing check links to its run. The snapshot carries the profile, the repository name, one yes/no per PR for
+your review (never a login) and only check links inside this repository; the page checks every link again before it
+makes one, and shows anything else as plain text. Under solo nothing changes.

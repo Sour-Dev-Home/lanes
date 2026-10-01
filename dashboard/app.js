@@ -105,12 +105,58 @@ function renderLegend(doc, ul) {
   });
 }
 
-function renderTask(doc, issue) {
+// ADR 0024. The page links only under the team profile, and only into the snapshot's own repository. The repo is
+// re-validated here, since a snapshot file can be edited or stale.
+var REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+function isTeam(snapshot) {
+  return !!snapshot && snapshot.profile === "team";
+}
+
+// "https://github.com/<repo>/" for a valid repo, "" otherwise.
+function linkBase(snapshot) {
+  var repo = snapshot ? snapshot.repo : undefined;
+  return typeof repo === "string" && REPO_PATTERN.test(repo) ? "https://github.com/" + repo + "/" : "";
+}
+
+// An <a> when `url` starts with `base` and holds no whitespace or control character; otherwise a <span> with the same
+// text, so a bad value shows but never links. The text goes in through textContent, the URL through setAttribute only.
+function linkOrText(doc, base, url, text, cls) {
+  var ok = base !== "" && typeof url === "string" && url.indexOf(base) === 0 && url.length <= 500 && !/[\s\u0000-\u001f\u007f-\u009f]/.test(url);
+  if (!ok) return el(doc, "span", cls, text);
+  var a = el(doc, "a", cls, text);
+  a.setAttribute("href", url);
+  a.setAttribute("rel", "noopener noreferrer");
+  return a;
+}
+
+function wholeNumber(n) {
+  return typeof n === "number" && isFinite(n) && Math.floor(n) === n && n >= 1;
+}
+
+function renderTask(doc, issue, snapshot) {
   var stage = stageOf(issue);
   var li = el(doc, "li", "task stage-" + slug(stage));
-  li.appendChild(el(doc, "span", "num", "#" + issue.number));
+  var team = isTeam(snapshot);
+  var base = team ? linkBase(snapshot) : "";
+  if (team) {
+    li.appendChild(linkOrText(doc, base, wholeNumber(issue.number) ? base + "issues/" + issue.number : "", "#" + issue.number, "num"));
+  } else {
+    li.appendChild(el(doc, "span", "num", "#" + issue.number));
+  }
   li.appendChild(el(doc, "span", "title", issue.title));
   li.appendChild(el(doc, "span", "chip stage-" + slug(stage), stage));
+  if (team && issue.pr && wholeNumber(issue.pr.number)) {
+    li.appendChild(linkOrText(doc, base, base + "pull/" + issue.pr.number, "PR #" + issue.pr.number, "pr-link"));
+  }
+  if (team && issue.pr) {
+    (issue.pr.checks || []).forEach(function (c) {
+      if (!c || c.result !== "fail") return;
+      var p = el(doc, "p", "why", "Failing check: ");
+      p.appendChild(linkOrText(doc, base, c.url, String(c.name), "check-link"));
+      li.appendChild(p);
+    });
+  }
   var blockers = issue.blockedBy || [];
   if (blockers.length) {
     blockers.forEach(function (b) {
@@ -144,12 +190,14 @@ function copyText(text) {
   return Promise.reject(new Error("clipboard unavailable"));
 }
 
-function renderWaiting(doc, box, issues) {
+function renderWaiting(doc, box, issues, snapshot) {
   var waiting = waitingOnOwner(issues);
   if (!waiting.length) {
     box.appendChild(el(doc, "p", "muted", "Nothing is waiting on you."));
     return;
   }
+  var team = isTeam(snapshot);
+  var base = team ? linkBase(snapshot) : "";
   waiting.forEach(function (i) {
     var card = el(doc, "div", "card");
     card.appendChild(el(doc, "span", "num", "PR #" + i.pr.number));
@@ -157,8 +205,18 @@ function renderWaiting(doc, box, issues) {
     (i.blockedBy || []).forEach(function (b) {
       card.appendChild(el(doc, "p", "why", b.reason));
     });
+    if (team) {
+      var p = el(doc, "p", "review");
+      p.appendChild(linkOrText(doc, base, base + "pull/" + i.pr.number + "/files", "Review in GitHub", "review-link"));
+      card.appendChild(p);
+      card.appendChild(el(doc, "p", "why", i.pr.ownerApproved === true ? "your review covers this head" : "your review does not cover this head"));
+    }
     box.appendChild(card);
   });
+  if (team) {
+    box.appendChild(el(doc, "p", "muted", "Approve in GitHub; the gate re-runs on your review."));
+    return;
+  }
   var line = approveLine(issues);
   var row = el(doc, "div", "approve");
   row.appendChild(el(doc, "code", "", line));
@@ -488,11 +546,11 @@ function render(doc, snapshot, now) {
   renderAge(doc, snapshot.generatedAt, now);
   var waiting = doc.getElementById("waiting");
   clear(waiting);
-  renderWaiting(doc, waiting, issues);
+  renderWaiting(doc, waiting, issues, snapshot);
   var tasks = doc.getElementById("tasks");
   clear(tasks);
   issues.forEach(function (i) {
-    tasks.appendChild(renderTask(doc, i));
+    tasks.appendChild(renderTask(doc, i, snapshot));
   });
   var graph = doc.getElementById("graph");
   clear(graph);
@@ -533,5 +591,5 @@ if (typeof document !== "undefined") {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { POLL_MS: POLL_MS, STALE_MS: STALE_MS, STAGES: STAGES, formatGenerated: formatGenerated, staleNote: staleNote, ageText: ageText, waitingNote: waitingNote, renderAge: renderAge, graphNote: graphNote, stageOf: stageOf, renderLegend: renderLegend, renderTask: renderTask, approveLine: approveLine, renderWaiting: renderWaiting, criticalPath: criticalPath, renderGraph: renderGraph, validMetrics: validMetrics, renderMetrics: renderMetrics, loadMetrics: loadMetrics };
+  module.exports = { POLL_MS: POLL_MS, STALE_MS: STALE_MS, STAGES: STAGES, formatGenerated: formatGenerated, staleNote: staleNote, ageText: ageText, waitingNote: waitingNote, renderAge: renderAge, graphNote: graphNote, stageOf: stageOf, renderLegend: renderLegend, renderTask: renderTask, linkBase: linkBase, linkOrText: linkOrText, approveLine: approveLine, renderWaiting: renderWaiting, criticalPath: criticalPath, renderGraph: renderGraph, validMetrics: validMetrics, renderMetrics: renderMetrics, loadMetrics: loadMetrics };
 }

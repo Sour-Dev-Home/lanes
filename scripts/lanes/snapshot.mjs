@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GATE_CONTEXT, loadConfig, parseIssueForm, parseVerdictComment, REVIEWERS, reviewerNames } from "./lib.mjs";
+import { GATE_CONTEXT, loadConfig, nativeCodeOwnerApproval, parseCodeOwnerUsers, parseIdentity, parseIssueForm, parseVerdictComment, REVIEWERS, reviewerNames } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { STATUS_QUERY, gateDescriptions, mergeQueueEntries, prStage } from "./status.mjs";
 
@@ -32,7 +32,29 @@ function checkResult(c) {
   return PASSED.has(value) ? "pass" : "pending";
 }
 
-const checksOf = (pr) => (pr.statusCheckRollup ?? []).map((c) => ({ name: clean(c.name ?? c.context), result: checkResult(c) }));
+// ADR 0024: the snapshot's own repository, as owner/name; anything else is not published.
+const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const URL_MAX = 500;
+const validRepo = (repo) => (typeof repo === "string" && REPO_PATTERN.test(repo) ? repo : undefined);
+
+/**
+ * ADR 0024: a check's link, kept only when it points into this repository on github.com. Whoever posts a status chooses
+ * its targetUrl, so anything else (another repo, http, javascript:, whitespace, control characters) is dropped.
+ */
+function checkUrl(c, repo) {
+  const url = c.detailsUrl ?? c.targetUrl;
+  if (repo === undefined || typeof url !== "string" || url.length > URL_MAX) return undefined;
+  if (!url.startsWith(`https://github.com/${repo}/`) || /[\s\u0000-\u001f\u007f-\u009f]/.test(url)) return undefined;
+  return url;
+}
+
+const checksOf = (pr, repo) =>
+  (pr.statusCheckRollup ?? []).map((c) => {
+    const check = { name: clean(c.name ?? c.context), result: checkResult(c) };
+    const url = checkUrl(c, repo);
+    if (url !== undefined) check.url = url;
+    return check;
+  });
 
 /**
  * The parsed verdict comments on a PR that count: trusted authors, bound to `headSha`, the newest per reviewer.
@@ -90,7 +112,8 @@ function prBlockers(stage, note) {
  * `issues` every open issue with body and labels; `mergeQueue` and `gateDescriptions` are the outputs of status.mjs's
  * mergeQueueEntries and gateDescriptions.
  */
-export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), softPaths = DEFAULT_SOFT_PATHS, reviewers = REVIEWERS, generatedAt }) {
+export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), softPaths = DEFAULT_SOFT_PATHS, reviewers = REVIEWERS, generatedAt, profile, repo: repoName, ownerApprovals = new Map() }) {
+  const repo = validRepo(repoName);
   const queuePosition = new Map(mergeQueue.map((e) => [e.number, e.position]));
   const prOf = new Map();
   // A fork's PR is stranger-controlled (its check names are whatever its workflow calls them, and "Fixes #N" is free),
@@ -105,6 +128,8 @@ export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: 
   const listedNumbers = new Set(listed.map((i) => i.number));
 
   const out = { version: 0, generatedAt, issues: [], edges: [] };
+  if (profile === "solo" || profile === "team") out.profile = profile;
+  if (repo !== undefined) out.repo = repo;
   for (const issue of listed) {
     const labels = issue.labels.map((l) => l.name);
     const tierLabel = labels.find((n) => n.startsWith("tier:"))?.slice(5);
@@ -116,7 +141,9 @@ export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: 
       // The dashboard knows no "conflict" stage: a conflicted PR waits on the owner there.
       item.stage = stage === "conflict" ? "owner" : stage;
       item.blockedBy = prBlockers(stage, note);
-      item.pr = { number: pr.number, headSha: String(pr.headRefOid ?? "").toLowerCase(), checks: checksOf(pr) };
+      item.pr = { number: pr.number, headSha: String(pr.headRefOid ?? "").toLowerCase(), checks: checksOf(pr, repo) };
+      // ADR 0024: a boolean under team only; an unread or missing answer counts as not approved.
+      if (profile === "team") item.pr.ownerApproved = ownerApprovals.get(pr.number) === true;
       const criteria = verdictCriteria(currentVerdicts(pr.comments, item.pr.headSha, reviewers), item.pr.headSha);
       if (criteria.length) item.criteria = criteria;
     } else {
@@ -182,13 +209,49 @@ export function parseInput(text) {
   const gates = input.gateDescriptions ?? {};
   if (gates === null || typeof gates !== "object" || Array.isArray(gates) || Object.values(gates).some((d) => typeof d !== "string")) throw new Error("gateDescriptions must map a PR number to a text");
   if (input.mergeQueue !== undefined && !Array.isArray(input.mergeQueue)) throw new Error("mergeQueue must be an array");
-  return {
+  const parsed = {
     prs: input.prs,
     issues: input.issues,
     mergeQueue: input.mergeQueue ?? [],
     gateDescriptions: new Map(Object.entries(gates).map(([n, d]) => [Number(n), d])),
     generatedAt: typeof input.generatedAt === "string" ? input.generatedAt : new Date().toISOString(),
   };
+  // ADR 0024: the repo and, per PR number, whether a code owner's review covers the head (read by the caller under team).
+  if (typeof input.repo === "string") parsed.repo = input.repo;
+  const approved = input.ownerApproved;
+  if (approved !== null && typeof approved === "object" && !Array.isArray(approved)) parsed.ownerApprovals = new Map(Object.entries(approved).map(([n, ok]) => [Number(n), ok === true]));
+  return parsed;
+}
+
+/**
+ * ADR 0024: PR number -> whether a code owner's native review covers the PR's head, for the team profile. `run` takes
+ * `gh` arguments and returns stdout. Only the boolean is kept (never the reviewer's login), and any failed read of the
+ * default branch's CODEOWNERS or of a PR's reviews leaves that answer false, the safe direction.
+ */
+export function readOwnerApprovals({ prs, repo, run, identity }) {
+  const approvals = new Map();
+  let owners = [];
+  try {
+    owners = parseCodeOwnerUsers(run(["api", `repos/${repo}/contents/.github/CODEOWNERS`, "-H", "Accept: application/vnd.github.raw"]));
+  } catch {
+    // no readable CODEOWNERS: nobody's review counts
+  }
+  for (const pr of prs) {
+    let approved = false;
+    try {
+      if (owners.length && typeof pr.headRefOid === "string" && pr.headRefOid !== "") {
+        const reviews = run(["api", `repos/${repo}/pulls/${pr.number}/reviews`, "--paginate", "--jq", ".[] | {user: {login: .user.login, type: .user.type}, state, commit_id} | @json"])
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line));
+        approved = nativeCodeOwnerApproval(reviews, pr.author?.login, pr.headRefOid, owners, identity).approved === true;
+      }
+    } catch {
+      approved = false;
+    }
+    approvals.set(pr.number, approved);
+  }
+  return approvals;
 }
 
 export function writeSnapshot(snapshot, file) {
@@ -213,11 +276,25 @@ function configuredSoftPaths() {
   return soft;
 }
 
+// The validated `identity` key of the lanes.config.json in the working directory; undefined when there is none.
+function configuredIdentity() {
+  try {
+    return parseIdentity(JSON.parse(readFileSync("lanes.config.json", "utf8"))?.identity);
+  } catch (err) {
+    if (err.code === "ENOENT") return undefined;
+    throw err;
+  }
+}
+
+const ghText = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+
 function main(argv = process.argv.slice(2)) {
   const out = parseOutArg(argv);
   const from = parseFromArg(argv);
+  const identity = configuredIdentity();
+  const profile = identity?.profile;
   if (from) {
-    const snapshot = buildSnapshot({ ...parseInput(readFileSync(from, "utf8")), softPaths: configuredSoftPaths() });
+    const snapshot = buildSnapshot({ ...parseInput(readFileSync(from, "utf8")), softPaths: configuredSoftPaths(), profile });
     if (out) writeSnapshot(snapshot, out);
     else console.log(JSON.stringify(snapshot, null, 2));
     return;
@@ -226,10 +303,18 @@ function main(argv = process.argv.slice(2)) {
   const issues = gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,title,labels,body"]);
   // A blocker missing from a truncated list would read as closed, so refuse rather than publish a wrong "ready".
   if (issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
-  const prs = gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,isCrossRepository,mergeable,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefOid,comments"]);
+  const prs = gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,isCrossRepository,mergeable,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefOid,comments,author"]);
   // Same reason as issues: a PR cut off the list would leave its issue showing a wrong stage.
   if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to list every issue's real stage`);
-  const snapshot = buildSnapshot({ prs, issues, mergeQueue: mergeQueueEntries(reply), gateDescriptions: gateDescriptions(reply), softPaths: configuredSoftPaths(), reviewers: reviewerNames(loadConfig()), generatedAt: new Date().toISOString() });
+  let repo;
+  try {
+    repo = validRepo(gh(["repo", "view", "--json", "nameWithOwner"]).nameWithOwner);
+  } catch {
+    repo = undefined; // links are optional: the snapshot is still useful without them
+  }
+  // Team only, and only for same-repo PRs (the ones the snapshot lists).
+  const ownerApprovals = profile === "team" && repo !== undefined ? readOwnerApprovals({ prs: prs.filter((p) => p.isCrossRepository === false), repo, run: ghText, identity }) : undefined;
+  const snapshot = buildSnapshot({ prs, issues, mergeQueue: mergeQueueEntries(reply), gateDescriptions: gateDescriptions(reply), softPaths: configuredSoftPaths(), reviewers: reviewerNames(loadConfig()), generatedAt: new Date().toISOString(), profile, repo, ownerApprovals });
   if (out) writeSnapshot(snapshot, out);
   else console.log(JSON.stringify(snapshot, null, 2));
 }

@@ -2,10 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { DEFAULT_SOFT_PATHS, RUNNING_LABEL, buildSnapshot, parseFromArg, parseInput, parseOutArg, verdictCriteria, writeSnapshot } from "./snapshot.mjs";
+import { DEFAULT_SOFT_PATHS, RUNNING_LABEL, buildSnapshot, parseFromArg, parseInput, parseOutArg, readOwnerApprovals, verdictCriteria, writeSnapshot } from "./snapshot.mjs";
 import { buildVerdictComment } from "./post-review.mjs";
 import { REVIEWERS } from "./lib.mjs";
 import { STATUS_QUERY } from "./status.mjs";
@@ -276,10 +276,15 @@ test("the command builds a snapshot offline with --from and writes it with --out
   const dir = mkdtempSync(join(tmpdir(), "snapshot-cli-"));
   try {
     writeFileSync(join(dir, "in.json"), JSON.stringify({ prs: [], issues: [issue(1)], generatedAt: NOW }));
-    execFileSync(process.execPath, ["scripts/lanes/snapshot.mjs", "--from", join(dir, "in.json"), "--out", join(dir, "out.json")], { stdio: "pipe" });
+    // Run in the temp directory, so the repository's own lanes.config.json (and its profile) is not read.
+    const script = resolve("scripts/lanes/snapshot.mjs");
+    execFileSync(process.execPath, [script, "--from", join(dir, "in.json"), "--out", join(dir, "out.json")], { stdio: "pipe", cwd: dir });
     assert.deepEqual(JSON.parse(readFileSync(join(dir, "out.json"), "utf8")), build({ issues: [issue(1)] }));
-    const stdout = execFileSync(process.execPath, ["scripts/lanes/snapshot.mjs", "--from", join(dir, "in.json")], { encoding: "utf8" });
+    const stdout = execFileSync(process.execPath, [script, "--from", join(dir, "in.json")], { encoding: "utf8", cwd: dir });
     assert.equal(JSON.parse(stdout).generatedAt, NOW);
+    // The profile comes from the config's identity in the working directory.
+    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity: { profile: "solo" } }));
+    assert.equal(JSON.parse(execFileSync(process.execPath, [script, "--from", join(dir, "in.json")], { encoding: "utf8", cwd: dir })).profile, "solo");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -393,4 +398,98 @@ test("an UNKNOWN mergeable state changes nothing", () => {
 });
 test("the default soft paths include lanes.config.json", () => {
   assert.ok(DEFAULT_SOFT_PATHS.includes("^lanes\\.config\\.json$"));
+});
+
+// ADR 0024: profile, repo, ownerApproved and check urls.
+const REPO = "acme/lanes";
+const withRollup = (rollup, over = {}) => one({ issues: [issue(1)], prs: [pr(5, { statusCheckRollup: rollup })], repo: REPO, ...over }).pr.checks;
+
+test("profile and repo are written when given and valid, and omitted otherwise", () => {
+  const s = build({ profile: "team", repo: REPO });
+  assert.equal(s.profile, "team");
+  assert.equal(s.repo, REPO);
+  const bare = build();
+  assert.equal("profile" in bare, false);
+  assert.equal("repo" in bare, false);
+  for (const repo of ["acme", "https://github.com/a/b", "a/b/c", "a b/c", "", 5, null]) assert.equal("repo" in build({ repo }), false, `edge: repo ${JSON.stringify(repo)}`);
+  assert.equal("profile" in build({ profile: "other" }), false, "edge: unknown profile");
+});
+
+test("ownerApproved is written under team from the approvals map: true, false, and false when unread", () => {
+  const prs = [pr(5), pr(6, { closingIssuesReferences: [{ number: 2 }] }), pr(7, { closingIssuesReferences: [{ number: 3 }] })];
+  const issues = [issue(1), issue(2), issue(3)];
+  const s = build({ issues, prs, profile: "team", ownerApprovals: new Map([[5, true], [6, false]]) });
+  assert.deepEqual(s.issues.map((i) => i.pr.ownerApproved), [true, false, false]);
+});
+
+test("ownerApproved is absent under solo and with no profile, even when approvals are passed", () => {
+  for (const profile of ["solo", undefined]) {
+    const i = one({ issues: [issue(1)], prs: [pr(5)], profile, ownerApprovals: new Map([[5, true]]) });
+    assert.equal("ownerApproved" in i.pr, false);
+  }
+});
+
+test("a check url is kept for this repo from detailsUrl, or from targetUrl when there is no detailsUrl", () => {
+  const checks = withRollup([
+    { name: "verify", conclusion: "SUCCESS", detailsUrl: `https://github.com/${REPO}/actions/runs/1` },
+    { context: "ci/x", state: "SUCCESS", targetUrl: `https://github.com/${REPO}/runs/2` },
+  ]);
+  assert.equal(checks[0].url, `https://github.com/${REPO}/actions/runs/1`);
+  assert.equal(checks[1].url, `https://github.com/${REPO}/runs/2`);
+});
+
+test("a check url is dropped for another repo, javascript:, http, whitespace, control characters, a lookalike prefix or no repo", () => {
+  const bad = [
+    "https://github.com/evil/other/actions/runs/1",
+    "javascript:alert(1)",
+    `http://github.com/${REPO}/runs/1`,
+    `https://github.com/${REPO}/runs/1 x`,
+    `https://github.com/${REPO}/runs/1\n`,
+    `https://github.com/${REPO}/runs/\u001b[31m1`,
+    `https://github.com/${REPO}-fork/runs/1`,
+    `https://evil.example/https://github.com/${REPO}/runs/1`,
+    `https://github.com/${REPO}/${"x".repeat(600)}`,
+    42,
+  ];
+  for (const url of bad) assert.equal("url" in withRollup([{ name: "v", conclusion: "SUCCESS", detailsUrl: url }])[0], false, `edge: ${String(url).slice(0, 40)}`);
+  assert.equal("url" in withRollup([{ name: "v", conclusion: "SUCCESS", detailsUrl: `https://github.com/${REPO}/runs/1` }], { repo: undefined })[0], false, "edge: no repo");
+});
+
+test("parseInput carries repo and the ownerApproved map", () => {
+  const parsed = parseInput(JSON.stringify({ prs: [], issues: [], repo: REPO, ownerApproved: { 5: true, 6: "yes" } }));
+  assert.equal(parsed.repo, REPO);
+  assert.deepEqual([...parsed.ownerApprovals], [[5, true], [6, false]]);
+  assert.equal("ownerApprovals" in parseInput(JSON.stringify({ prs: [], issues: [] })), false);
+});
+
+const approvalReview = (login, state = "APPROVED", commit = SHA) => JSON.stringify({ user: { login, type: "User" }, state, commit_id: commit });
+const fakeRun = ({ codeowners = "* @boss\n", reviews = {} } = {}) => (args) => {
+  const target = args[1];
+  if (target.endsWith("/contents/.github/CODEOWNERS")) {
+    if (codeowners === null) throw new Error("404");
+    return codeowners;
+  }
+  const n = Number(/pulls\/(\d+)\/reviews/.exec(target)[1]);
+  if (reviews[n] === "throw") throw new Error("boom");
+  return reviews[n] ?? "";
+};
+
+test("readOwnerApprovals: true for a code owner's approval on the head, false for a stale one, the author, a stranger or no review", () => {
+  const prs = [5, 6, 7, 8, 9].map((number) => ({ number, headRefOid: SHA, author: { login: "dev" } }));
+  prs[3].author = { login: "boss" }; // the owner authored PR 8: self-approval does not count
+  const run = fakeRun({ reviews: { 5: approvalReview("boss"), 6: approvalReview("boss", "APPROVED", OTHER_SHA), 7: approvalReview("stranger"), 8: approvalReview("boss") } });
+  assert.deepEqual([...readOwnerApprovals({ prs, repo: REPO, run })], [[5, true], [6, false], [7, false], [8, false], [9, false]]);
+});
+
+test("readOwnerApprovals: a failed review read, a missing CODEOWNERS or a missing head sha is false, never a throw", () => {
+  const prs = [{ number: 5, headRefOid: SHA }, { number: 6, headRefOid: SHA }, { number: 7 }];
+  const reviews = { 5: "throw", 6: approvalReview("boss"), 7: approvalReview("boss") };
+  assert.deepEqual([...readOwnerApprovals({ prs, repo: REPO, run: fakeRun({ reviews }) })], [[5, false], [6, true], [7, false]]);
+  assert.deepEqual([...readOwnerApprovals({ prs, repo: REPO, run: fakeRun({ codeowners: null, reviews }) })], [[5, false], [6, false], [7, false]]);
+  assert.deepEqual([...readOwnerApprovals({ prs: [{ number: 5, headRefOid: SHA }], repo: REPO, run: fakeRun({ reviews: { 5: "not json" } }) })], [[5, false]]);
+});
+
+test("readOwnerApprovals never returns a login", () => {
+  const got = readOwnerApprovals({ prs: [{ number: 5, headRefOid: SHA }], repo: REPO, run: fakeRun({ reviews: { 5: approvalReview("boss") } }) });
+  assert.doesNotMatch(JSON.stringify([...got]), /boss/);
 });
