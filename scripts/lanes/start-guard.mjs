@@ -303,6 +303,19 @@ function awkText(words) {
   return at;
 }
 
+/**
+ * The words after awk that may name a command the program runs or whose output a shell runs (#588): `print | "node
+ * queue.mjs"` runs a command from inside the program, and `awk '{print "node queue.mjs"}' | sh` hands its output to a
+ * shell. Neither shows as a command word when the program is read as shell text, so each word is read as text (as a
+ * node -e script is) for the names. A program that neither runs nor feeds a shell is text awk prints, as above.
+ */
+function awkNamedWords(words, piped) {
+  const at = words.findIndex((w) => AWK_RE.test(basename(w)));
+  if (at === -1) return [];
+  const rest = words.slice(at + 1);
+  return piped || rest.some((w) => AWK_RUNS_RE.test(unliteral(w))) ? rest : [];
+}
+
 // The text fields of `gh issue|pr create|comment|edit|close|review`, which gh stores and never runs (#477).
 const GH_PROSE_FLAGS = new Set(["--title", "-t", "--body", "-b", "--comment", "-c"]);
 const GH_PROSE_VERBS = new Set(["create", "comment", "edit", "close", "reopen", "review"]);
@@ -392,6 +405,8 @@ function walk(cmd, depth, visit, onOpaque, onEval, collapse = false) {
     if (!dataOnly) visit(words, stdin);
     const scripts = dataOnly ? new Map() : evalScripts(words);
     const programs = programWords(words);
+    // Only a word that names the queue script or start.mjs is read, so an unresolved `$` in an awk program is no new denial (#588).
+    if (!dataOnly) for (const w of awkNamedWords(words, piped || cmd.includes("<("))) if (/(queue|start)\.mjs/i.test(jsNames(unliteral(w)))) onEval(unliteral(w));
     const prose = proseWords(words);
     // A search's pattern is no script (#404), unless a shell reads the output or a here-string in the call could be
     // mistaken for the pattern (`grep <<< "…" x`, whose here-string grep reads as its input and prints).
