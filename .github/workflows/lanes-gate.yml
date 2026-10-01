@@ -12,6 +12,11 @@ on:
   issues:
     types: [closed]
   merge_group:
+  # ADR 0021 (#561): a native review re-runs the gate through lanes-review-ping. workflow_run always runs this workflow
+  # from the default branch, and the job below checks out the default branch only, like every other trigger.
+  workflow_run:
+    workflows: [lanes-review-ping]
+    types: [completed]
   workflow_dispatch:
     inputs:
       pr:
@@ -25,7 +30,7 @@ permissions:
   issues: write
   statuses: write
 concurrency:
-  group: lanes-gate-${{ github.event.pull_request.head.sha || github.event.sha || github.event.merge_group.head_sha || github.event.inputs.pr || format('issue-{0}', github.event.issue.number) }}
+  group: lanes-gate-${{ github.event.pull_request.head.sha || github.event.sha || github.event.merge_group.head_sha || github.event.workflow_run.head_sha || github.event.inputs.pr || format('issue-{0}', github.event.issue.number) }}
   cancel-in-progress: false
 jobs:
   gate:
@@ -51,3 +56,5 @@ jobs:
           HEAD_REF: ${{ github.event.merge_group.head_ref }}
           GROUP_SHA: ${{ github.event.merge_group.head_sha }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          RUN_PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
