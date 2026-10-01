@@ -1937,11 +1937,12 @@ test("the repo's own lanes.config.json carries its budget: a 300M 24-hour cap (#
   assert.deepEqual(budgetConfig(raw), raw.budget);
 });
 
-// #541: back to solo after trial run 1 (#500), until team lanes really act as the App bot (#540).
-test("the repo's own lanes.config.json runs the solo profile (#541)", () => {
+// #550: the team profile again for trial run 2 (#500), after #540 (PR #543) and #544 (PR #545).
+test("the repo's own lanes.config.json runs the team profile with the lanes App (#550)", () => {
   const raw = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
-  assert.equal(raw.identity, undefined);
-  assert.equal(startConfig(raw).identity, undefined);
+  const identity = { profile: "team", app: { id: 5140388, installationId: 166641484, botLogin: "sour-dev-lanes[bot]" } };
+  assert.deepEqual(raw.identity, identity);
+  assert.deepEqual(startConfig(raw).identity, identity);
 });
 
 // #483: every issue /start decides on is one line of .lanes/starts.jsonl, with only `at`, `issue`, `outcome`, `reason` and `with`.
