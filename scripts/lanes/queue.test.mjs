@@ -449,6 +449,51 @@ test("CLI: each tick cleans up first, then reads, launches with claude --bg /lan
   assert.ok(run.out.some((l) => / #1 → sess-1$/.test(l)));
 });
 
+// #577: the queue passes each issue's label names to launchLane, as /start does.
+const modelArg = (args) => args[args.indexOf("--model") + 1];
+async function queuedLaunch(labels) {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"], { labels })], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  assert.equal(run.launched.length, 1);
+  return run;
+}
+
+test("#577: a model:opus issue launches with --model opus over the tier's model", async () => {
+  const run = await queuedLaunch(["ready", "tier:quick", "model:opus"]);
+  assert.equal(modelArg(run.launched[0].args), "opus");
+  assert.ok(!run.out.some((l) => l.includes("ignored label")), run.out.join("\n"));
+});
+
+test("#577: another model:* label is logged once and ignored", async () => {
+  const plain = await queuedLaunch(["ready", "tier:quick"]);
+  const run = await queuedLaunch(["ready", "tier:quick", "model:haiku"]);
+  assert.deepEqual(run.launched[0].args, plain.launched[0].args);
+  assert.equal(run.out.filter((l) => l.endsWith(" #1: ignored label model:haiku")).length, 1, run.out.join("\n"));
+});
+
+test("#577: edge: an issue with no model:* label launches with the same arguments and no ignored-label line", async () => {
+  const run = await queuedLaunch(["ready", "tier:quick"]);
+  assert.notEqual(modelArg(run.launched[0].args), "opus");
+  assert.ok(!run.out.some((l) => l.includes("ignored label")), run.out.join("\n"));
+});
+
+test("#577: edge: model:opus alongside another model:* label still launches on Opus and logs the other", async () => {
+  const run = await queuedLaunch(["ready", "tier:quick", "model:opus", "model:haiku"]);
+  assert.equal(modelArg(run.launched[0].args), "opus");
+  assert.equal(run.out.filter((l) => l.endsWith(" #1: ignored label model:haiku")).length, 1);
+});
+
+test("#577: a resumed lane (#444) launches with its issue's labels too", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [{ ...issue(7, ["src/a.mjs"], { labels: ["ready", "tier:quick", "model:opus"] }) }], prs: [gatePr(70, 7, "waiting for review/security-reviewer")], sessions: [idleLane(7)] };
+  const run = recoveryRun(world);
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [7]);
+  assert.equal(modelArg(run.launched[0].args), "opus");
+});
+
 test("CLI: exits 0 after three idle ticks in a row, no sooner", async () => {
   const { main } = await import("./queue.mjs");
   const run = fakeRun({ issues: [], prs: [], sessions: [] });
@@ -721,7 +766,7 @@ test("#556: under solo the queue's launch arguments and environment are unchange
   const { main } = await import("./queue.mjs");
   const { launchArgs } = await import("./start.mjs");
   for (const identity of [{ profile: "solo" }, undefined]) {
-    const world = { issues: [issue(1, ["src/a.mjs"], { labels: ["ready", "tier:full", "model:opus", "model:haiku"] })], prs: [], sessions: [] };
+    const world = { issues: [issue(1, ["src/a.mjs"], { labels: ["ready", "tier:full"] })], prs: [], sessions: [] };
     const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
     const env = { PATH: "/bin", GH_TOKEN: "owner-token" };
     const seen = [];
@@ -737,7 +782,7 @@ test("#556: under solo the queue's launch arguments and environment are unchange
     assert.equal(seen.length, 1);
     assert.equal(seen[0].env, env, "the same environment object as before");
     assert.equal(seen[0].cwd, "/repo");
-    assert.ok(run.out.every((l) => !/ignored label/.test(l)), "the queue logs no model labels, as before");
+    assert.ok(run.out.every((l) => !/ignored label/.test(l)), "no model:* label, so none is logged (#577)");
     assert.equal(run.reapers.filter((r) => r.args.includes("--refresh-token")).length, 0);
   }
 });
