@@ -46,7 +46,7 @@ const validRepo = (repo) => (typeof repo === "string" && REPO_PATTERN.test(repo)
 function checkUrl(c, repo) {
   const url = c.detailsUrl ?? c.targetUrl;
   if (repo === undefined || typeof url !== "string" || url.length > URL_MAX) return undefined;
-  if (!url.startsWith(`https://github.com/${repo}/`) || /[\s\u0000-\u001f\u007f-\u009f]/.test(url) || DOT_SEGMENT.test(url.slice(8))) return undefined;
+  if (!url.startsWith(`https://github.com/${repo}/`) || /[\s\u0000-\u001f\u007f-\u009f\\]|%5c|%2f/i.test(url) || DOT_SEGMENT.test(url.slice(8))) return undefined;
   return url;
 }
 

@@ -124,7 +124,7 @@ function linkBase(snapshot) {
 // An <a> when `url` starts with `base` and holds no whitespace or control character; otherwise a <span> with the same
 // text, so a bad value shows but never links. The text goes in through textContent, the URL through setAttribute only.
 function linkOrText(doc, base, url, text, cls) {
-  var ok = base !== "" && typeof url === "string" && url.indexOf(base) === 0 && url.length <= 500 && !/[\s\u0000-\u001f\u007f-\u009f]/.test(url) && !DOT_SEGMENT.test(url.slice(8));
+  var ok = base !== "" && typeof url === "string" && url.indexOf(base) === 0 && url.length <= 500 && !/[\s\u0000-\u001f\u007f-\u009f\\]|%5c|%2f/i.test(url) && !DOT_SEGMENT.test(url.slice(8));
   if (!ok) return el(doc, "span", cls, text);
   var a = el(doc, "a", cls, text);
   a.setAttribute("href", url);

@@ -219,7 +219,7 @@ test("team: a task without a PR links only the issue, and solo task cards have n
 });
 
 test("edge: a malicious check url, another repo, http or whitespace renders as plain text, never an href", () => {
-  const evil = ["javascript:alert(1)", "https://github.com/other/repo/runs/1", `http://github.com/acme/lanes/runs/1`, `${BASE}runs/1 x`, `${BASE}runs/1\n`, `https://github.com/acme/lanes-fork/runs/1`, `${BASE}../../evil/x`, `${BASE}runs/%2e%2E/x`, `${BASE}runs/./1`, `${BASE}runs/..`, "data:text/html,<script>1</script>", 5, undefined];
+  const evil = ["javascript:alert(1)", "https://github.com/other/repo/runs/1", `http://github.com/acme/lanes/runs/1`, `${BASE}runs/1 x`, `${BASE}runs/1\n`, `https://github.com/acme/lanes-fork/runs/1`, `${BASE}../../evil/x`, `${BASE}runs/%2e%2E/x`, `${BASE}runs/./1`, `${BASE}runs/..`, `${BASE}pull/1/..\\..\\..\\other/x`, `${BASE}runs\\1`, `${BASE}runs/%5c..%5cother`, `${BASE}runs/%2F..%2fother`, "data:text/html,<script>1</script>", 5, undefined];
   for (const url of evil) {
     const li = app.renderTask(fakeDoc(), issue(7, "failing", { pr: { ...pr(12), checks: [{ name: "verify", result: "fail", url }] } }), team);
     assert.ok(!links(li).some((a) => a.textContent === "verify"), `edge: ${String(url).slice(0, 30)}`);
