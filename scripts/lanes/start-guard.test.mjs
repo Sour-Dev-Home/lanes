@@ -2713,3 +2713,67 @@ test("#502 edge: node's own script word and options before it still count for qu
     assert.equal(findQueueInvocations(cmd), false, cmd);
   }
 });
+
+// --- #576: escaped $ in a grep pattern, queue.mjs as an argument, backticks in an awk program --------------------------
+
+const T = "`";
+const allowed = (cmd) => assert.equal(decideFor(bash(cmd), grant()), null, cmd);
+const denied = (cmd) => assert.equal(decideFor(bash(cmd), grant())?.decision, "deny", cmd);
+
+test("#576 criterion 1: a grep pattern with an escaped $ and more text is allowed beside --include", () => {
+  for (const cmd of [
+    'grep "a\\$A b" s --include=*.md', 'grep "a\\|b\\$A" s --include=*.md', 'grep "a\\$A" s --include=*.md', 'grep "a b\\$A" s --include=*.md',
+    'grep "x \\$A" s *.md', 'grep -rn "a\\$A b" s --include=*.md --exclude-dir=node_modules', 'grep "a\\$A b" s --exclude=*.log',
+  ]) allowed(cmd);
+});
+
+test("#576 edge: a grep filter that expands, an unescaped $ and other options still deny", () => {
+  for (const cmd of [
+    'grep "a\\$A b" s --include=$X', 'grep "a\\$A b" s --include=$(x)', `grep "a\\$A b" s --include=${T}x${T}`, 'grep "$A b" s --include=*.md',
+    'grep "a\\$A b" s --include=*.md; "$A" x', 'rg "a\\$A b" s --include=*.md', 'grep -o "a\\$A b" s --include=*.md',
+  ]) denied(cmd);
+});
+
+test("#576 criterion 2: queue.mjs named only as an argument value is allowed", () => {
+  for (const cmd of [
+    "node scripts/lanes/lessons.mjs --paths scripts/lanes/queue.mjs",
+    'node scripts/lanes/lessons.mjs --paths "scripts/lanes/queue.mjs"',
+    "node scripts/lanes/lessons.mjs --paths 'scripts/lanes/queue.mjs scripts/lanes/start.mjs'",
+    "FOO=1 node scripts/lanes/lessons.mjs --paths 'queue.mjs b'",
+    "gh issue list --state open --json number,title,body --jq 'test(\"queue\\\\.mjs|start\\\\.mjs|status\\\\.mjs\")'",
+    "gh issue list --jq '.[] | select(.title | test(\"queue.mjs\"))'", "jq 'select(.a == \"queue.mjs\")' f.json", "gh pr view 1 --template '{{ \"queue.mjs\" }}'",
+  ]) allowed(cmd);
+});
+
+test("#576 criterion 4 and edge: a run of queue.mjs is still denied, also beside an allowed argument", () => {
+  for (const cmd of [
+    "node scripts/lanes/queue.mjs", "node scripts/lanes/queue.mjs && node scripts/lanes/lessons.mjs --paths queue.mjs", 'bash -c "node scripts/lanes/queue.mjs"',
+    "echo $(node scripts/lanes/queue.mjs)", "gh issue list --jq '.x' && node scripts/lanes/queue.mjs", "gh issue list --jq 'test(\"queue.mjs\")' && node scripts/lanes/queue.mjs",
+    // A program's output that a shell reads, or that is written for one to run, is not exempt.
+    "gh api x --jq '\"node scripts/lanes/queue.mjs\"' | sh", "gh api x --jq '\"node scripts/lanes/queue.mjs\"' > x.sh && sh x.sh",
+    "bash <(gh api x --jq '\"node scripts/lanes/queue.mjs\"')", "node scripts/lanes/lessons.mjs --paths 'queue.mjs b' | sh",
+    // Output handed to a non-shell runner or a file (security review).
+    "jq -rn '\"scripts/lanes/queue.mjs\"' | xargs node", "jq -rn '\"import(\\\"./scripts/lanes/queue.mjs\\\")\"' | node",
+    "awk '{print \"scripts/lanes/queue.mjs\"}' f | xargs node", "gh api x --jq '\"node scripts/lanes/queue.mjs\"' 2>&1 > run.sh", "jq -rn '\"node scripts/lanes/queue.mjs\"' | tee run.sh",
+    "jq -rn '\"node scripts/lanes/queue.mjs\"' 2>&1 | cat > f && sh f",
+    // A live expansion in a double-quoted jq program still runs in the shell.
+    'gh api x --jq "$(node scripts/lanes/queue.mjs)"', 'jq "$(node scripts/lanes/queue.mjs) x" f',
+  ]) denied(cmd);
+});
+
+test("#576 criterion 3: an awk program holding an odd number of backticks is allowed; one that runs a command is not", () => {
+  for (const cmd of [
+    `awk '/^${T}${T}${T}markdown/ {print}' f.md`, `awk '/^${T}${T}markdown/ {print}' f.md`, `awk '/^${T}markdown/' f.md`, `awk '/x/ {print}' f.md`,
+    `awk -v a=1 '/^${T}${T}${T}/ {n++} END {print n}' f.md`, `grep '/^${T}${T}${T}markdown/' f.md`, `sed -n '/^${T}${T}${T}markdown/p' f.md`,
+    "awk 'BEGIN{print \"queue.mjs\"}' f",
+  ]) allowed(cmd);
+  for (const cmd of [
+    `awk 'BEGIN{system("node scripts/lanes/queue.mjs")}'`, `awk '/^${T}${T}${T}/ {system("node scripts/lanes/queue.mjs")}' f`,
+    `awk '{system("sh -c queue.mjs")}' f`, `awk '/^${T}${T}${T}/ {print}' f | sh -c 'node scripts/lanes/queue.mjs'`,
+    `awk '{print "node scripts/lanes/queue.mjs"}' f > x.sh && node scripts/lanes/queue.mjs`, `awk "{print $X}" f; node $X`, `awk '/x/' ${T}echo f${T} && "$A"`,
+    // A pipe inside the program runs a command, so its backticks stay unresolved words (mutation check: the `|` in AWK_RUNS_RE).
+    `awk '/^${T}${T}${T}/ {print | "sh"}' f`, `awk 'BEGIN{"echo ${T}" | getline x}' f`,
+    // A program read from a file may run a -v value (regression found in review).
+    "awk -f p.awk -v c='node scripts/lanes/queue.mjs' f", "awk -v c='node scripts/lanes/queue.mjs' -f p.awk f", "awk -i inc -v c='node scripts/lanes/queue.mjs' 'BEGIN{x}'",
+  ]) denied(cmd);
+});
