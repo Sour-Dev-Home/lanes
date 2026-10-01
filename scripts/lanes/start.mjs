@@ -661,6 +661,14 @@ export function reaperLog(root, n) {
   return { fd, close: () => closeSync(fd) };
 }
 
+const WORKFLOW_DIR = ".github/workflows/";
+const WORKFLOW_NOTE = (n) => `#${n}: Scope names .github/workflows/: the lane opens its PR without the workflow change and hands it over in a PR comment`;
+
+/** True when a Scope path list names `.github/workflows/` or a file under it (ADR 0023 part 5). */
+export function scopeNamesWorkflows(paths) {
+  return Array.isArray(paths) && paths.some((p) => typeof p === "string" && (p.startsWith(WORKFLOW_DIR) || p === WORKFLOW_DIR.slice(0, -1)));
+}
+
 /**
  * Launches one lane, one attempt, on its tier's model, and starts its reaper (and, under team, its token refresher)
  * once it returns a session id. /start and the owner-run queue both launch through this one function (#556).
@@ -671,11 +679,13 @@ export function reaperLog(root, n) {
  * `reaperLog`, `gh`, and `team` under team. Never throws for a launch or preparation failure.
  * @returns {{ id: string | null, failed: boolean, lines: string[] }}
  */
-export function launchLane(n, deps, { tier, models, labels, identity, root, cwd = root, env, envNote = null }) {
+export function launchLane(n, deps, { tier, models, labels, identity, root, cwd = root, env, envNote = null, scope = [] }) {
   const { opus, ignored } = modelLabels(labels);
   // A label name is untrusted text: control characters (ANSI escapes, newlines) become `?` in the log line.
   const notes = ignored.map((l) => `#${n}: ignored label ${l.replace(/[\x00-\x1f\x7f-\x9f]/g, "?")}`);
   if (envNote) notes.push(`#${n}: ${envNote}`);
+  // ADR 0023 part 5: informational only; the lane's own diff check acts, and the issue still launches.
+  if (identity?.profile === "team" && scopeNamesWorkflows(scope)) notes.push(WORKFLOW_NOTE(n));
   let lane = null;
   if (identity?.profile === "team") {
     lane = prepareTeam(n, identity, deps, env ?? process.env);
@@ -702,13 +712,13 @@ export function launchLane(n, deps, { tier, models, labels, identity, root, cwd 
 
 // Launches each issue from the repository root through launchLane (`tiers`: issue → tier, `labels`: issue → label
 // names). Returns issue → lines, and whether any launch failed.
-function launchAll(numbers, deps, { tiers, models, labels, identity }) {
+function launchAll(numbers, deps, { tiers, models, labels, identity, scopes = new Map() }) {
   const lines = new Map();
   let failed = false;
   const root = numbers.length ? deps.root() : null;
   const { env, note: envNote } = numbers.length && deps.launchEnv ? deps.launchEnv() : { env: undefined, note: null };
   for (const n of numbers) {
-    const launched = launchLane(n, deps, { tier: tiers.get(n), models, labels: labels.get(n), identity, root, env, envNote });
+    const launched = launchLane(n, deps, { tier: tiers.get(n), models, labels: labels.get(n), identity, root, env, envNote, scope: scopes.get(n) ?? [] });
     lines.set(n, launched.lines);
     if (launched.failed) failed = true;
   }
@@ -754,7 +764,8 @@ function autoStart(go, deps, { maxLanes, softPaths, models, identity }) {
   }
   const tiers = new Map(candidates.map((i) => [i.number, tierOf(labelsOf(i))]));
   const labels = new Map(candidates.map((i) => [i.number, labelsOf(i)]));
-  const { lines, failed } = launchAll(start, deps, { tiers, models, labels, identity });
+  const scopes = new Map(candidates.map((i) => [i.number, issuePaths(parseIssueForm(i.body ?? "").fields)]));
+  const { lines, failed } = launchAll(start, deps, { tiers, models, labels, identity, scopes });
   recordDecisions(deps, deps.root(), startDecisions({ started: start, skipped: allSkipped, at: new Date(deps.now()).toISOString() }));
   return { code: failed ? 1 : 0, lines: [...start.flatMap((n) => lines.get(n)), ...skipLines] };
 }
@@ -897,7 +908,7 @@ function startIssues(args, deps, config) {
   const { launch, refused } = planStart({ issues, inFlight, overlaps, running: (n) => runningOverlap.get(n) ?? null, maxLanes: config.maxLanes });
   const tiers = new Map(issues.filter((i) => i.labels).map((i) => [i.number, tierOf(i.labels)]));
   const labels = new Map(issues.filter((i) => i.labels).map((i) => [i.number, i.labels]));
-  const launched = launchAll(launch, deps, { tiers, models: config.models, labels, identity: config.identity });
+  const launched = launchAll(launch, deps, { tiers, models: config.models, labels, identity: config.identity, scopes: pathsOf });
   recordDecisions(deps, deps.root(), startDecisions({ started: launch, skipped: refused, at: new Date(deps.now()).toISOString() }));
   const why = (r) => (r.reason === "already in flight" ? inFlightReason(r.number, prs, sessions, deps.git) : r.reason);
   const lines = new Map([...refused.map((r) => [r.number, [`#${r.number}: refused: ${why(r)}`]]), ...launched.lines]);

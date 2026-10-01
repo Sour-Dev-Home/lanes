@@ -53,6 +53,13 @@ These are decided, not overlooked:
   accident and casual misuse, not a determined lane: a shell can build a command in more ways than any parser
   covers. A newly found bypass is a `minor` follow-up; a regression is `critical`
   ([0004](adr/0004-approve-guard-accepted-risk.md), [0007](adr/0007-start-guard-accepted-risk.md)).
+- **The team App never gets `workflows: write`; the owner's read is the control.** A workflow file pushed to a branch
+  of this repository runs on `push` before any review, and it can raise its own `GITHUB_TOKEN` with a `permissions:`
+  block (for example `statuses: write`) to post `lanes/gate=success` as `github-actions[bot]`, the same creator the real
+  gate posts as. The forged-gate evidence is in [0023](adr/0023-workflow-changes-owner-web-editor.md). So a team lane
+  cannot push a workflow file, and hands it over in a PR comment for the owner to read and commit in the web editor.
+  The owner reading the content before clicking Commit changes is the control: committing it runs its push-triggered
+  workflows. The comment is posted by one fixed command (`node scripts/lanes/handover.mjs`), never free text.
 - **Playwright's on-demand download.** The dashboard visual check runs Playwright through `npx --yes` at a pinned
   version and downloads a browser on first use, on the owner's machine, never in CI
   ([0014](adr/0014-dashboard-running-overlaps-visual.md)).

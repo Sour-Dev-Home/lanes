@@ -64,6 +64,7 @@ Solo is unchanged. Everything below applies only when `identity.profile` is `tea
 - Owner work goes through lanes, so the bot is the author and the owner approves natively. This is the decided route: it needs no bypass actor and no second human.
 - The owner may disable the ruleset temporarily for an emergency (as they did for #554 and #542). That is an owner action in settings, outside lanes, and the gate would still require an approval from someone who is not the author. So an owner-authored PR cannot reach green without a second approver or a lane.
 - A bypass actor, or a second approver, are alternatives listed under Decisions for the owner. Lanes never change rulesets.
+- `require_last_push_approval` is off (the owner turned it off, [ADR 0023](0023-workflow-changes-owner-web-editor.md) part 4), so the owner's web-editor commit of a workflow file does not need a second approver. The gate still counts only an approval on the head SHA.
 
 **5. Amendments (ADR 0019 part 9, now concrete).**
 
