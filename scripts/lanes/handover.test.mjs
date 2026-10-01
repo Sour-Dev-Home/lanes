@@ -152,6 +152,15 @@ test("handover (#607): refuses hidden, bidi and control characters, naming the f
     "backspace": "\u0008",
     "DEL": "\u007f",
     "C1 control U+0085": "\u0085",
+    "deprecated format U+206A": "\u206a",
+    "unassigned format U+2065": "\u2065",
+    "soft hyphen": "\u00ad",
+    "grapheme joiner": "\u034f",
+    "Hangul filler U+3164": "\u3164",
+    "variation selector U+FE0F": "\ufe0f",
+    "interlinear annotation U+FFFA": "\ufffa",
+    "tag character U+E0041": "\u{e0041}",
+    "variation selector U+E0100": "\u{e0100}",
   };
   for (const [name, ch] of Object.entries(classes)) {
     const w = world({ files: { ".github/workflows/ci.yml": `on: push\nname: a${ch}b\n` } });
@@ -160,6 +169,23 @@ test("handover (#607): refuses hidden, bidi and control characters, naming the f
     assert.match(r.lines[0], /\.github\/workflows\/ci\.yml/, name);
     assert.match(r.lines[0], /hidden|control/, name);
     assert.equal(w.posted.length, 0, name);
+  }
+});
+
+test("handover (#607): edge: each range edge is refused and its neighbour outside the range is accepted", () => {
+  const run = (cp) => {
+    const w = world({ files: { ".github/workflows/ci.yml": `on: push\nname: a${String.fromCodePoint(cp)}b\n` } });
+    return { r: handover(["9"], w.deps), w };
+  };
+  for (const cp of [0x00, 0x08, 0x0b, 0x0c, 0x0e, 0x1f, 0x7f, 0x9f, 0xad, 0x34f, 0x61c, 0x115f, 0x1160, 0x180e, 0x200b, 0x200e, 0x200f, 0x2028, 0x2029, 0x202b, 0x202c, 0x202d, 0x2067, 0x2068, 0x206f, 0x3164, 0xfe00, 0xfeff, 0xffa0, 0xfff9, 0xfffb, 0xe0000, 0xe007f, 0xe0100, 0xe01ef]) {
+    const { r, w } = run(cp);
+    assert.equal(r.code, 1, `U+${cp.toString(16)} refused`);
+    assert.equal(w.posted.length, 0);
+  }
+  for (const cp of [0x09, 0x0a, 0x0d, 0x20, 0x7e, 0xa0, 0xa1, 0x2027, 0x202f, 0x2070, 0x3000, 0xe0080, 0xe00ff, 0xe01f0, 0x1f600]) {
+    const { r, w } = run(cp);
+    assert.equal(r.code, 0, `U+${cp.toString(16)} accepted: ${r.lines.join("\n")}`);
+    assert.equal(w.posted.length, 1);
   }
 });
 
