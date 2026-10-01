@@ -185,6 +185,29 @@ test("the verdict comment builder refuses an unknown reviewer", () => {
   assert.throws(() => buildVerdictComment({ ...commentVerdict, reviewer: "owner" }, SHA), /reviewer must be one of/);
 });
 
+// ADR 0023 part 3: `pending` is optional, validated with parsePending when present.
+const pendingEntry = (over = {}) => ({ path: ".github/workflows/ci.yml", sha256: "a".repeat(64), ...over });
+
+test("a verdict with a valid pending list is accepted, and the comment keeps it", () => {
+  const v = verdict({ pending: [pendingEntry()] });
+  const r = validateVerdict(v, { criteriaCount: 2 });
+  assert.equal(r.ok, true, r.errors.join("; "));
+  assert.match(buildVerdictComment(v, "b".repeat(40)), /"pending"/);
+});
+
+test("a verdict without pending is unchanged", () => {
+  assert.equal(validateVerdict(verdict(), { criteriaCount: 2 }).ok, true);
+});
+
+test("edge: a malformed pending is refused with a clear message", () => {
+  const bad = [[], "x", [pendingEntry({ path: "src/a.ts" })], [pendingEntry({ sha256: "XYZ" })], [pendingEntry(), pendingEntry()], [pendingEntry({ path: ".github/workflows/../x.yml" })], [null], null];
+  for (const pending of bad) {
+    const r = validateVerdict(verdict({ pending }), { criteriaCount: 2 });
+    assert.equal(r.ok, false, JSON.stringify(pending));
+    assert.match(r.errors.join(), /pending must be a non-empty list/, JSON.stringify(pending));
+  }
+});
+
 // Reviewer metrics (contracts/review-metrics.schema.json): optional, validated when present.
 const metrics = (over = {}) => ({ tier: "full", minutes: 12.5, tokens: 48000, ...over });
 

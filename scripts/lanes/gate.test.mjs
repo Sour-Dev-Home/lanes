@@ -4,7 +4,7 @@ import { carry, evaluatePr, main, makeGhApi, noteOwnerApproval } from "./gate.mj
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compileConfig, parseAdr } from "./lib.mjs";
+import { compileConfig, parseAdr, pendingFileHash } from "./lib.mjs";
 
 const config = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] } });
 const SHA = "a".repeat(40);
@@ -1609,4 +1609,94 @@ test("edge: a body edit by a writer after the release keeps it", () => {
 test("solo: a released bot issue is not trusted, and an owner-authored issue is unchanged", () => {
   assert.equal(botIssueState(botIssueRoutes(), laneConfig("solo")).state, "failure");
   assert.equal(botIssueState(writeAccessRoutes("leo", undefined)).state, "success");
+});
+
+// ADR 0023 part 3 (#594): reuse a review across the owner's commit of a pending workflow file.
+const WF = ".github/workflows/ci.yml";
+const WF_TEXT = "name: ci\non: push\n";
+const wfDiff = `diff --git a/${WF} b/${WF}\nnew file mode 100644\nindex 0000000..3333333\n--- /dev/null\n+++ b/${WF}\n@@ -0,0 +1,2 @@\n+name: ci\n+on: push\n`;
+const pendingVerdict = (pending) => ({
+  login: "leo",
+  body: `<!-- lanes:verdict test-hunter ${OLD} -->\n\`\`\`json\n${JSON.stringify({ reviewer: "test-hunter", verdict: "success", summary: "s", criteria: [], findings: [], pending }, null, 2)}\n\`\`\``,
+});
+const hashOfWf = pendingFileHash(WF_TEXT);
+const notFound = () => Object.assign(new Error("not found"), { httpStatus: 404 });
+function pendingRoutes({ blob = WF_TEXT, pending = [{ path: WF, sha256: hashOfWf }], since = `1\n${WF}\n`, headDiff = ownDiff("1111111", "-1,1 +1,1") + wfDiff } = {}) {
+  const routes = reuseRoutes({ headDiff, comments: [pendingVerdict(pending)] });
+  routes[sinceRoute(OLD)] = since;
+  routes[sinceRoute(MID)] = since;
+  routes[`repos/o/r/contents/${WF}?ref=${SHA}`] = blob;
+  return routes;
+}
+// A function route throws what it returns (the plain fake api would return it as JSON).
+function throwing(routes) {
+  const { api, posted } = fakeApi(routes);
+  return {
+    api: (a) => {
+      const hit = routes[a[0]];
+      if (typeof hit === "function") throw hit();
+      return api(a);
+    },
+    posted,
+  };
+}
+
+test("pending: reuses the review after an exact paste of the workflow file", () => {
+  const { api } = throwing(pendingRoutes());
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, REUSED);
+});
+
+test("pending: a CRLF paste with no final newline is still reused", () => {
+  const { api } = throwing(pendingRoutes({ blob: "name: ci\r\non: push" }));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, REUSED);
+});
+
+test("pending: a changed byte is refused and the file is named", () => {
+  const { api } = throwing(pendingRoutes({ blob: "name: ci\non: pull_request\n" }));
+  const d = evaluatePr(api, "o/r", 5, config);
+  assert.equal(d.state, "pending");
+  assert.equal(d.description, `${WAIT_HUNTER}: workflow file ${WF} differs from the reviewed copy`);
+});
+
+test("pending: a file not yet committed is refused and named", () => {
+  const routes = pendingRoutes({ headDiff: ownDiff("1111111", "-1,1 +1,1"), since: "0\n" });
+  routes[`repos/o/r/contents/${WF}?ref=${SHA}`] = notFound;
+  const d = evaluatePr(throwing(routes).api, "o/r", 5, config);
+  assert.equal(d.description, `${WAIT_HUNTER}: workflow file ${WF} is not committed yet`);
+});
+
+test("pending: an extra non-pending change is refused", () => {
+  const { api } = throwing(pendingRoutes({ since: `2\n${WF}\nsrc/other.ts\n` }));
+  const d = evaluatePr(api, "o/r", 5, config);
+  assert.equal(d.description, `${WAIT_HUNTER}: src/other.ts changed since the reviewed commit and is not a pending workflow file`);
+});
+
+test("edge: pending, a change to the PR's own diff beyond the workflow file is refused", () => {
+  const { api } = throwing(pendingRoutes({ headDiff: ownDiff("1111111", "-1,1 +1,1", "+z") + wfDiff }));
+  assert.match(evaluatePr(api, "o/r", 5, config).description, /^waiting for review\/test-hunter: the PR's own diff changed/);
+});
+
+test("pending: a read error other than 404 means no reuse, without a named reason", () => {
+  const routes = pendingRoutes();
+  routes[`repos/o/r/contents/${WF}?ref=${SHA}`] = () => Object.assign(new Error("boom"), { httpStatus: 500 });
+  assert.equal(evaluatePr(throwing(routes).api, "o/r", 5, config).description, WAIT_HUNTER);
+});
+
+test("edge: pending, an unreadable blob (empty file) is refused", () => {
+  const { api } = throwing(pendingRoutes({ blob: "\n" }));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, `${WAIT_HUNTER}: workflow file ${WF} is not committed yet`);
+});
+
+test("edge: a malformed pending in the verdict means no reuse", () => {
+  for (const pending of [[], [{ path: "src/a.ts", sha256: hashOfWf }], [{ path: WF, sha256: "nope" }], "x"]) {
+    const { api } = throwing(pendingRoutes({ pending }));
+    assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_HUNTER, JSON.stringify(pending));
+  }
+});
+
+test("pending: a verdict without pending is handled as before", () => {
+  const { api } = throwing(reuseRoutes());
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, REUSED);
+  const { api: api2 } = throwing(reuseRoutes({ headDiff: ownDiff("1111111", "-1,1 +1,1") + wfDiff }));
+  assert.equal(evaluatePr(api2, "o/r", 5, config).description, WAIT_HUNTER);
 });
