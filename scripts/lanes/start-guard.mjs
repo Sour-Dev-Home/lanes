@@ -202,6 +202,9 @@ const SEARCH_LONG = new Set([
   "--line-number", "--recursive", "--ignore-case", "--files-with-matches", "--files-without-match", "--count", "--quiet", "--word-regexp",
   "--invert-match", "--with-filename", "--no-messages", "--fixed-strings", "--extended-regexp", "--smart-case", "--hidden",
 ]);
+// grep's file filters (#576), as -g is rg's: a glob that picks the files searched, never printed nor run. Without a `$`,
+// backtick or whitespace, so one that expands at run time or splits into more words leaves every word read as before.
+const GREP_FILTER_RE = /^--(include|exclude|exclude-dir)=[^$`\s]*$/;
 const SEARCH_NUMBER_RE = /^-[ABCm]$/;
 const SEARCH_FILTER = new Set(["-g", "--glob", "-t", "--type"]);
 
@@ -228,6 +231,7 @@ function searchPatterns(words) {
     else if (SEARCH_NUMBER_RE.test(w) && /^[0-9]+$/.test(words[i + 1] ?? "")) i += 1;
     else if (/^-[ABCm][0-9]+$/.test(w)) continue;
     else if (SEARCH_FILTER.has(w)) i += 1;
+    else if (flags === SEARCH_FLAGS_RE && GREP_FILTER_RE.test(w) && !UNRESOLVED_RE.test(w)) continue;
     else if (!flags.test(w) && !SEARCH_LONG.has(w)) return at;
   }
   if (found.size === 0 && operand !== -1) found.add(operand);
@@ -275,6 +279,23 @@ function programWords(words) {
     if (JQ_RE.test(name) || (GH_RE.test(name) && /^--(jq|template)=/.test(words[i]))) at.add(i);
     else if (GH_RE.test(name) && GH_PROGRAM_FLAGS.has(words[i])) at.add(i + 1);
   }
+  return at;
+}
+
+// An awk program is no shell text either (#576), and runs a command only through system() or a pipe (`print | "sh"`,
+// `"cmd" | getline`). One with neither is text awk matches and prints, so a literal backtick in it (the pattern
+// `/^```markdown/`) is a plain character, not an unresolved word at the start of a command.
+const AWK_RE = /^(awk|gawk|mawk|nawk)(\.exe)?$/i;
+const AWK_RUNS_RE = /system|\|/i;
+
+/** The indexes of a simple command's words that are an awk program or option value, when awk is its command word and none of them can run a command. */
+function awkText(words) {
+  const at = new Set();
+  const cmd = words.findIndex((w) => !ASSIGN_RE.test(w));
+  if (cmd === -1 || !AWK_RE.test(basename(words[cmd]))) return at;
+  const rest = words.slice(cmd + 1);
+  if (rest.some((w) => AWK_RUNS_RE.test(unliteral(w)))) return at;
+  rest.forEach((_, i) => at.add(cmd + 1 + i));
   return at;
 }
 
@@ -363,7 +384,7 @@ function walk(cmd, depth, visit, onOpaque, onEval, collapse = false) {
   }
   const nested = (text) => (depth >= MAX_DEPTH ? onOpaque(text) : walk(text, depth + 1, visit, onOpaque, onEval, collapse));
   const dataOnly = depth === 0 && isDataOnly(lexed);
-  const scan = (words, stdin, piped = false) => {
+  const scan = (words, stdin, piped = false, written = false) => {
     if (!dataOnly) visit(words, stdin);
     const scripts = dataOnly ? new Map() : evalScripts(words);
     const programs = programWords(words);
@@ -371,10 +392,13 @@ function walk(cmd, depth, visit, onOpaque, onEval, collapse = false) {
     // A search's pattern is no script (#404), unless a shell reads the output or a here-string in the call could be
     // mistaken for the pattern (`grep <<< "…" x`, whose here-string grep reads as its input and prints).
     const patterns = piped || cmd.includes("<<<") ? new Set() : searchPatterns(words);
+    // A jq program or Go template is no shell text (#576), so one naming queue.mjs only in its text is no run, unless the
+    // call hands the program's output on: a pipe, a file written, or a process substitution a shell may read.
+    const quiet = piped || written || cmd.includes("<(") ? new Set() : new Set([...programs, ...awkText(words), ...scriptDataWords(words)]);
     const powershellAt = words.findIndex((w) => PS_SHELL_RE.test(basename(w)));
     words.forEach((w, i) => {
       if (scripts.has(i)) onEval(scripts.get(i));
-      else if (isNestedScript(w) && !((dataOnly || patterns.has(i)) && !UNRESOLVED_RE.test(w))) {
+      else if (isNestedScript(w) && !((dataOnly || patterns.has(i) || quiet.has(i)) && !UNRESOLVED_RE.test(w))) {
         // A jq program or Go template keeps its quoted `$` literal: `$s` there is its own variable (#61). PowerShell's
         // text is read with its own rules (#404).
         if (prose.has(i) && !piped && !runsAsShell(words, i)) {
@@ -397,7 +421,7 @@ function walk(cmd, depth, visit, onOpaque, onEval, collapse = false) {
     if (!dataOnly) for (const line of launchedCommands(words)) nested(line);
   };
   for (const [k, words] of resolveSegments(lexed.segments).entries()) {
-    scan(words, lexed.stdin[k], feedsShell(lexed.segments, lexed.pipes, k));
+    scan(words, lexed.stdin[k], feedsShell(lexed.segments, lexed.pipes, k), lexed.writes[k] === true);
     // The command find -exec or xargs runs is a simple command of its own (#113).
     if (!dataOnly) for (const sub of runnerCommands(words)) scan(sub);
   }
@@ -519,6 +543,24 @@ function isScriptData(plain, nodeAt, scripts, i) {
   const script = plain[Math.min(...scripts)] ?? "";
   // Only a script known to take its arguments as data: a runner (`node tsx/cli.mjs queue.mjs`) or launcher runs them (#502).
   return nodeAt === 0 && DATA_SCRIPT_RE.test(script) && !mayBeNode(script) && !scripts.has(i) && !(plain[i].startsWith("-") && (scripts.size === 0 || i < scriptEnd));
+}
+
+/**
+ * The indexes of a simple command's words (assignments counted) that are data for a script that takes its arguments as
+ * data (DATA_SCRIPT_RE): a quoted argument holding several paths (`--paths 'a queue.mjs b'`, #576) is no shell text.
+ */
+function scriptDataWords(words) {
+  const at = new Set();
+  const index = [];
+  words.forEach((w, i) => {
+    if (!ASSIGN_RE.test(w)) index.push(i);
+  });
+  const { plain, nodeAt, scripts } = commandWords(words);
+  if (nodeAt === -1) return at;
+  plain.forEach((_, k) => {
+    if (isScriptData(plain, nodeAt, scripts, k)) at.add(index[k]);
+  });
+  return at;
 }
 
 /**
