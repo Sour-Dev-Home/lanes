@@ -108,6 +108,8 @@ function renderLegend(doc, ul) {
 // ADR 0024. The page links only under the team profile, and only into the snapshot's own repository. The repo is
 // re-validated here, since a snapshot file can be edited or stale.
 var REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+// A "." or ".." part or path segment (also as %2e) would pass a prefix check yet resolve to another path.
+var DOT_SEGMENT = /(^|\/)(\.|%2e){1,2}(\/|\?|#|$)/i;
 
 function isTeam(snapshot) {
   return !!snapshot && snapshot.profile === "team";
@@ -116,13 +118,13 @@ function isTeam(snapshot) {
 // "https://github.com/<repo>/" for a valid repo, "" otherwise.
 function linkBase(snapshot) {
   var repo = snapshot ? snapshot.repo : undefined;
-  return typeof repo === "string" && REPO_PATTERN.test(repo) ? "https://github.com/" + repo + "/" : "";
+  return typeof repo === "string" && REPO_PATTERN.test(repo) && !DOT_SEGMENT.test(repo) ? "https://github.com/" + repo + "/" : "";
 }
 
 // An <a> when `url` starts with `base` and holds no whitespace or control character; otherwise a <span> with the same
 // text, so a bad value shows but never links. The text goes in through textContent, the URL through setAttribute only.
 function linkOrText(doc, base, url, text, cls) {
-  var ok = base !== "" && typeof url === "string" && url.indexOf(base) === 0 && url.length <= 500 && !/[\s\u0000-\u001f\u007f-\u009f]/.test(url);
+  var ok = base !== "" && typeof url === "string" && url.indexOf(base) === 0 && url.length <= 500 && !/[\s\u0000-\u001f\u007f-\u009f]/.test(url) && !DOT_SEGMENT.test(url.slice(8));
   if (!ok) return el(doc, "span", cls, text);
   var a = el(doc, "a", cls, text);
   a.setAttribute("href", url);

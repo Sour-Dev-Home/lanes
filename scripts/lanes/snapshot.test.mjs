@@ -411,7 +411,7 @@ test("profile and repo are written when given and valid, and omitted otherwise",
   const bare = build();
   assert.equal("profile" in bare, false);
   assert.equal("repo" in bare, false);
-  for (const repo of ["acme", "https://github.com/a/b", "a/b/c", "a b/c", "", 5, null]) assert.equal("repo" in build({ repo }), false, `edge: repo ${JSON.stringify(repo)}`);
+  for (const repo of ["acme", "https://github.com/a/b", "a/b/c", "a b/c", "", 5, null, "../x", "a/..", "./.", "a/."]) assert.equal("repo" in build({ repo }), false, `edge: repo ${JSON.stringify(repo)}`);
   assert.equal("profile" in build({ profile: "other" }), false, "edge: unknown profile");
 });
 
@@ -447,6 +447,11 @@ test("a check url is dropped for another repo, javascript:, http, whitespace, co
     `https://github.com/${REPO}/runs/1\n`,
     `https://github.com/${REPO}/runs/\u001b[31m1`,
     `https://github.com/${REPO}-fork/runs/1`,
+    `https://github.com/${REPO}/../../evil/x`,
+    `https://github.com/${REPO}/runs/%2e%2E/x`,
+    `https://github.com/${REPO}/runs/./1`,
+    `https://github.com/${REPO}/runs/..`,
+    `https://github.com/${REPO}/runs/..?x=1`,
     `https://evil.example/https://github.com/${REPO}/runs/1`,
     `https://github.com/${REPO}/${"x".repeat(600)}`,
     42,
@@ -492,4 +497,10 @@ test("readOwnerApprovals: a failed review read, a missing CODEOWNERS or a missin
 test("readOwnerApprovals never returns a login", () => {
   const got = readOwnerApprovals({ prs: [{ number: 5, headRefOid: SHA }], repo: REPO, run: fakeRun({ reviews: { 5: approvalReview("boss") } }) });
   assert.doesNotMatch(JSON.stringify([...got]), /boss/);
+});
+
+test("edge: a check url is kept at exactly 500 characters and dropped at 501", () => {
+  const base = "https://github.com/" + REPO + "/runs/";
+  assert.equal(withRollup([{ name: "v", conclusion: "SUCCESS", detailsUrl: base + "x".repeat(500 - base.length) }])[0].url?.length, 500);
+  assert.equal("url" in withRollup([{ name: "v", conclusion: "SUCCESS", detailsUrl: base + "x".repeat(501 - base.length) }])[0], false);
 });

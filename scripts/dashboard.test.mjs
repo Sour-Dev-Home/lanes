@@ -219,7 +219,7 @@ test("team: a task without a PR links only the issue, and solo task cards have n
 });
 
 test("edge: a malicious check url, another repo, http or whitespace renders as plain text, never an href", () => {
-  const evil = ["javascript:alert(1)", "https://github.com/other/repo/runs/1", `http://github.com/acme/lanes/runs/1`, `${BASE}runs/1 x`, `${BASE}runs/1\n`, `https://github.com/acme/lanes-fork/runs/1`, "data:text/html,<script>1</script>", 5, undefined];
+  const evil = ["javascript:alert(1)", "https://github.com/other/repo/runs/1", `http://github.com/acme/lanes/runs/1`, `${BASE}runs/1 x`, `${BASE}runs/1\n`, `https://github.com/acme/lanes-fork/runs/1`, `${BASE}../../evil/x`, `${BASE}runs/%2e%2E/x`, `${BASE}runs/./1`, `${BASE}runs/..`, "data:text/html,<script>1</script>", 5, undefined];
   for (const url of evil) {
     const li = app.renderTask(fakeDoc(), issue(7, "failing", { pr: { ...pr(12), checks: [{ name: "verify", result: "fail", url }] } }), team);
     assert.ok(!links(li).some((a) => a.textContent === "verify"), `edge: ${String(url).slice(0, 30)}`);
@@ -228,7 +228,7 @@ test("edge: a malicious check url, another repo, http or whitespace renders as p
 });
 
 test("edge: a malicious or malformed repo makes every team link plain text", () => {
-  for (const repo of ["javascript:alert(1)//x/y", "evil.com/x/../..", "a/b/c", "a b/c", "", 5, undefined, "acme/lanes\"onmouseover=\"x"]) {
+  for (const repo of ["javascript:alert(1)//x/y", "evil.com/x/../..", "a/b/c", "a b/c", "", 5, undefined, "acme/lanes\"onmouseover=\"x", "../x", "a/..", "./."]) {
     const snapshot = { profile: "team", repo };
     const box = renderWait([waitingIssue()], snapshot);
     assert.deepEqual(links(box), [], `edge: repo ${JSON.stringify(repo)}`);
@@ -539,4 +539,20 @@ test("boundary: age words flip exactly at 1 and 60 minutes; the waiting note and
   assert.notEqual(app.waitingNote(ago(5 * 60000 + 1), NOW), "");
   assert.equal(app.staleNote(ago(20 * 60000), NOW), "");
   assert.notEqual(app.staleNote(ago(20 * 60000 + 1), NOW), "");
+});
+
+test("edge: only a boolean true counts as the owner's review covering the head", () => {
+  for (const v of ["yes", 1, "true", {}]) {
+    const box = renderWait([waitingIssue({ pr: { ...pr(12), ownerApproved: v } })], team);
+    assert.ok(textOf(box).includes("does not cover this head"), "edge: " + JSON.stringify(v));
+  }
+});
+
+test("edge: a check url is linked at exactly 500 characters and plain text at 501", () => {
+  const base = BASE + "runs/";
+  for (const [len, linked] of [[500, true], [501, false]]) {
+    const url = base + "x".repeat(len - base.length);
+    const li = app.renderTask(fakeDoc(), issue(7, "failing", { pr: { ...pr(12), checks: [{ name: "verify", result: "fail", url }] } }), team);
+    assert.equal(links(li).some((a) => a.textContent === "verify"), linked, "edge: length " + len);
+  }
 });

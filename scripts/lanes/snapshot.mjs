@@ -35,7 +35,9 @@ function checkResult(c) {
 // ADR 0024: the snapshot's own repository, as owner/name; anything else is not published.
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const URL_MAX = 500;
-const validRepo = (repo) => (typeof repo === "string" && REPO_PATTERN.test(repo) ? repo : undefined);
+// A "." or ".." part would let a prefix check pass for a URL that resolves elsewhere; so would a dot segment in the URL.
+const DOT_SEGMENT = /(^|\/)(\.|%2e){1,2}(\/|\?|#|$)/i;
+const validRepo = (repo) => (typeof repo === "string" && REPO_PATTERN.test(repo) && !repo.split("/").some((part) => part === "." || part === "..") ? repo : undefined);
 
 /**
  * ADR 0024: a check's link, kept only when it points into this repository on github.com. Whoever posts a status chooses
@@ -44,7 +46,7 @@ const validRepo = (repo) => (typeof repo === "string" && REPO_PATTERN.test(repo)
 function checkUrl(c, repo) {
   const url = c.detailsUrl ?? c.targetUrl;
   if (repo === undefined || typeof url !== "string" || url.length > URL_MAX) return undefined;
-  if (!url.startsWith(`https://github.com/${repo}/`) || /[\s\u0000-\u001f\u007f-\u009f]/.test(url)) return undefined;
+  if (!url.startsWith(`https://github.com/${repo}/`) || /[\s\u0000-\u001f\u007f-\u009f]/.test(url) || DOT_SEGMENT.test(url.slice(8))) return undefined;
   return url;
 }
 
