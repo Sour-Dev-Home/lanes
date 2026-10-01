@@ -1935,3 +1935,16 @@ test("edge: clears.log escapes carriage returns, stays one line, and is no grant
   assert.equal(log.includes("\r"), false);
   assert.equal(findFreshGrant(dir, 16, NOW), null);
 }));
+
+test("edge: an unwritable clears.log never blocks the prompt or its new grant", () => withDir((dir) => {
+  mkdirSync(join(dir, "clears.log"));
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/approve 7" }), { dir, now: NOW });
+  assert.notEqual(findFreshGrant(dir, 7, NOW), null);
+}));
+
+test("edge: a typed /approve beside a hand-back, on its own line or glued to it, is never treated as automated", () => {
+  const hb = "<agent-message from=\"x\">done</agent-message>";
+  for (const p of [`${hb}\n/approve 7`, `${hb}/approve 7`, `${hb} /start 7`, `/approve 7\n${hb}`, `<system-reminder>r</system-reminder>\n${hb}\r/approve 7`]) {
+    assert.equal(isAutomatedInput(p), false, JSON.stringify(p));
+  }
+});
