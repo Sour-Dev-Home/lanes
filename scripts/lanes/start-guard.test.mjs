@@ -2777,3 +2777,32 @@ test("#576 criterion 3: an awk program holding an odd number of backticks is all
     "awk -f p.awk -v c='node scripts/lanes/queue.mjs' f", "awk -v c='node scripts/lanes/queue.mjs' -f p.awk f", "awk -i inc -v c='node scripts/lanes/queue.mjs' 'BEGIN{x}'",
   ]) denied(cmd);
 });
+
+// --- #588: an awk pipe or awk output piped to a shell that names queue.mjs --------------------------------------------
+
+test("#588 criterion 1: an awk program that pipes into a command naming queue.mjs or start.mjs is denied", () => {
+  for (const cmd of [
+    `awk '{print "x" | "node scripts/lanes/queue.mjs"}' f`, `awk '{print | "node scripts/lanes/start.mjs"}' f`,
+    `awk 'BEGIN{"node scripts/lanes/queue.mjs" | getline x}' f`, `awk 'BEGIN{"node scripts/lanes/queue.mjs" |& getline x}' f`,
+    `gawk '{print |& "node scripts/lanes/queue.mjs"}' f`, `awk '{print "x" | "node scripts/lanes/queue.mjs"}' f && echo ok`,
+    // edge: a pipe inside the program, more words, a wrapper command word
+    `awk -v a=1 '{print $1 | "node scripts/lanes/queue.mjs"}' f`, `env awk '{print | "node scripts/lanes/queue.mjs"}' f`,
+  ]) denied(cmd);
+});
+
+test("#588 criterion 2: awk output piped into a shell is denied when the awk text names queue.mjs", () => {
+  for (const cmd of [
+    `awk '{print "node scripts/lanes/queue.mjs"}' f | sh`, `awk 'BEGIN{print "node scripts/lanes/queue.mjs"}' | bash`,
+    `awk 'BEGIN{print "node scripts/lanes/start.mjs"}' | sh -s`, `awk '{print "node scripts/lanes/queue.mjs"}' f | bash -x`,
+    // edge: the program is split so the name is only whole in the output
+    `awk 'BEGIN{print "node scripts/lanes/" "queue.mjs"}' | sh`,
+  ]) denied(cmd);
+});
+
+test("#588 criterion 3: an awk program with backticks and no call or pipe, and awk piped to a non-shell command, stay allowed", () => {
+  for (const cmd of [
+    `awk '/^${T}${T}${T}markdown/ {print}' f.md`, `awk '/^${T}markdown/ {print}' f.md`, "awk '{print $1}' f | sort", "awk '{print $1}' f | sort -u | head -5",
+    // edge: a pipe into a harmless command, and a shell that reads output naming nothing
+    `awk '{print "x" | "sort"}' f`, "awk '{print $1}' f | sh", "awk 'BEGIN{print \"queue.mjs\"}' f | sort",
+  ]) allowed(cmd);
+});
