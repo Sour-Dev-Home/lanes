@@ -200,7 +200,7 @@ export function localLaunchEnv() {
 
 // ADR 0019 part 3: what a team lane never inherits. Matched case-insensitively, as Windows environment names are.
 // One source (#540): the launcher env drops these, and the settings `env` blanks or sets each exact name, so they cannot drift.
-export const TEAM_SCRUBBED_NAMES = ["LANES_APP_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_CONFIG_DIR", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_TERMINAL_PROMPT", "GITHUB_PERSONAL_ACCESS_TOKEN", "SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND", "GH_HOST", "GH_REPO"];
+export const TEAM_SCRUBBED_NAMES = ["LANES_APP_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_CONFIG_DIR", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_TERMINAL_PROMPT", "GITHUB_PERSONAL_ACCESS_TOKEN", "SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND", "GH_HOST", "GH_REPO", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"];
 // Prefix families cannot be enumerated: the known names below are blanked in the settings `env`, and any other name
 // in them can only matter through git config, which GIT_CONFIG_GLOBAL/SYSTEM (empty) leave with gh's helper alone.
 const TEAM_SCRUBBED_PREFIXES = ["GIT_CONFIG_", "GIT_CREDENTIAL", "GCM_"];
@@ -223,9 +223,19 @@ export function isLaneGhDir(dir, tmp, isLink = () => false) {
  * @param {Record<string, string | undefined>} env
  * @param {{ ghDir: string, emptyConfig: string }} lane
  */
-export function teamLaneEnv(env, { ghDir, emptyConfig }) {
+export function teamLaneEnv(env, { ghDir, emptyConfig, commit }) {
   const kept = Object.fromEntries(Object.entries(env).filter(([k]) => !TEAM_SCRUBBED.some((re) => re.test(k))));
-  return { ...kept, ...teamLaneVars({ ghDir, emptyConfig }) };
+  return { ...kept, ...teamLaneVars({ ghDir, emptyConfig, commit }) };
+}
+
+/**
+ * #553: GitHub's standard identity for an App bot, `<bot user id>+<login>@users.noreply.github.com`, so a team lane's
+ * commits are credited to the bot. Null when the id is not a positive whole number.
+ */
+export function botCommitIdentity(login, id) {
+  const n = typeof id === "number" ? id : /^\d+$/.test(String(id ?? "").trim()) ? Number(String(id).trim()) : NaN;
+  if (typeof login !== "string" || !login || !Number.isSafeInteger(n) || n < 1) return null;
+  return { name: login, email: `${n}+${login}@users.noreply.github.com` };
 }
 
 /**
@@ -233,8 +243,11 @@ export function teamLaneEnv(env, { ghDir, emptyConfig }) {
  * `.git/config`, which GIT_CONFIG_GLOBAL does not override, so git is told to rewrite both ssh forms of github.com to
  * https (where `gh auth git-credential` answers) and `GIT_SSH_COMMAND` fails, so a push never reaches the owner's key.
  */
-export function teamLaneVars({ ghDir, emptyConfig }) {
+export function teamLaneVars({ ghDir, emptyConfig, commit }) {
+  // #553: git config is empty for a team lane, so the bot's commit identity comes from the environment.
+  const identity = commit ? { GIT_AUTHOR_NAME: commit.name, GIT_AUTHOR_EMAIL: commit.email, GIT_COMMITTER_NAME: commit.name, GIT_COMMITTER_EMAIL: commit.email } : {};
   return {
+    ...identity,
     GH_CONFIG_DIR: ghDir,
     GIT_CONFIG_GLOBAL: emptyConfig,
     GIT_CONFIG_SYSTEM: emptyConfig,
@@ -262,14 +275,15 @@ const TEAM_BLANKED = [...TEAM_SCRUBBED_NAMES, ...TEAM_KNOWN_PREFIXED];
  * is started by a host that holds the owner's environment, so the launcher's `env` does not reach the session's tools;
  * a settings file's `env` is applied to the session's tool processes. Holds no secret.
  */
-export function teamLaneSettings({ ghDir, emptyConfig }) {
+export function teamLaneSettings({ ghDir, emptyConfig, commit }) {
   // #544: the deny is the backstop for --strict-mcp-config, should an MCP server load another way.
-  return { env: { ...Object.fromEntries(TEAM_BLANKED.map((k) => [k, ""])), ...teamLaneVars({ ghDir, emptyConfig }) }, permissions: { deny: ["mcp__*"] } };
+  return { env: { ...Object.fromEntries(TEAM_BLANKED.map((k) => [k, ""])), ...teamLaneVars({ ghDir, emptyConfig, commit }) }, permissions: { deny: ["mcp__*"] } };
 }
 
 // Launcher side of the team profile for lane n: checks the key, makes the lane's directory and mints into it. Returns
 // `{ env, dir, repo }`, or `{ failed: <step> }` with the directory removed: it never falls back to the owner's environment.
-// `deps.team` (keyFile, readable, repo, makeDir, removeDir, mintInto) is absent where team is not supported.
+// `deps.team` (keyFile, readable, repo, makeDir, removeDir, mintInto, botUserId, writeSettings) is absent where team is
+// not supported.
 function prepareTeam(n, identity, deps, baseEnv) {
   const team = deps.team;
   if (!team) return { failed: "not supported here" };
@@ -299,16 +313,28 @@ function prepareTeam(n, identity, deps, baseEnv) {
       removeQuietly(team, lane.dir);
       return { failed: `token mint failed: ${reason(err)}` };
     }
+    // #553: the bot's commit identity needs its user id, read with the lane's own fresh token; no id, no launch, and
+    // never the owner's identity in its place.
+    let commit = null;
+    try {
+      commit = botCommitIdentity(identity.app.botLogin, team.botUserId({ dir: lane.dir, login: identity.app.botLogin }));
+    } catch {
+      commit = null;
+    }
+    if (!commit) {
+      removeQuietly(team, lane.dir);
+      return { failed: "could not read the App bot's user id for its commit identity" };
+    }
     // The launcher's env does not reach a --bg session's tools (#540), so the team environment is also delivered as
     // a settings file; a lane that cannot have it never launches.
     const settings = join(lane.dir, "settings.json");
     try {
-      team.writeSettings(settings, teamLaneSettings({ ghDir: lane.dir, emptyConfig: lane.emptyConfig }));
+      team.writeSettings(settings, teamLaneSettings({ ghDir: lane.dir, emptyConfig: lane.emptyConfig, commit }));
     } catch {
       removeQuietly(team, lane.dir);
       return { failed: "could not deliver the team settings to the lane" };
     }
-    return { env: teamLaneEnv(baseEnv, { ghDir: lane.dir, emptyConfig: lane.emptyConfig }), dir: lane.dir, repo, settings };
+    return { env: teamLaneEnv(baseEnv, { ghDir: lane.dir, emptyConfig: lane.emptyConfig, commit }), dir: lane.dir, repo, settings };
   } catch {
     return { failed: "unexpected error" };
   }
@@ -900,6 +926,17 @@ const team = {
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 60_000,
     });
+  },
+  // #553: the bot's numeric user id, asked with the lane's freshly minted token only (its own GH_CONFIG_DIR, no
+  // owner token variables), so the answer never comes from the owner's login.
+  botUserId: ({ dir, login }) => {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !TEAM_SCRUBBED.some((re) => re.test(k))));
+    return execFileSync("gh", ["api", `users/${encodeURIComponent(login)}`, "--jq", ".id"], {
+      env: { ...env, GH_CONFIG_DIR: dir },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    }).trim();
   },
 };
 

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUDGET_DEFAULTS, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, isLaneGhDir, launchEnv, main as runStart, makeRemint, markRunning, parseSessionId, planStart, refreshArgs, refreshLoop, startConfig, teamLaneEnv, teamLaneSettings, TEAM_SCRUBBED_NAMES } from "./start.mjs";
+import { BUDGET_DEFAULTS, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, isLaneGhDir, launchEnv, main as runStart, makeRemint, markRunning, parseSessionId, planStart, refreshArgs, refreshLoop, startConfig, teamLaneEnv, teamLaneSettings, TEAM_SCRUBBED_NAMES, botCommitIdentity } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
@@ -2068,7 +2068,7 @@ test("teamLaneEnv removes the credentials and points gh and git at the lane's ow
 });
 
 // A team launch with every side effect faked: what was minted, where, what claude got, what the refresher was given.
-function teamRun({ env = {}, key = "/keys/app.pem", unreadable = false, mintFail = null, dirFail = false, noRepo = false, settingsFail = false, identity = TEAM, launchFail = [], spawnChild } = {}) {
+function teamRun({ env = {}, key = "/keys/app.pem", unreadable = false, mintFail = null, dirFail = false, noRepo = false, settingsFail = false, botId = "336249257", botIdFail = false, identity = TEAM, launchFail = [], spawnChild } = {}) {
   const f = fakes({ issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } }, launchFail, config: { identity }, spawnChild });
   const made = [];
   const removed = [];
@@ -2076,6 +2076,7 @@ function teamRun({ env = {}, key = "/keys/app.pem", unreadable = false, mintFail
   const claudeEnvs = [];
   const claudeArgs = [];
   const settingsWritten = [];
+  const botLookups = [];
   const team = {
     keyFile: () => key,
     readable: () => {
@@ -2099,6 +2100,11 @@ function teamRun({ env = {}, key = "/keys/app.pem", unreadable = false, mintFail
       minted.push(args);
       if (mintFail) throw new Error(mintFail);
     },
+    botUserId: (args) => {
+      botLookups.push(args);
+      if (botIdFail) throw new Error("HTTP 401");
+      return botId;
+    },
   };
   const claude = (args, opts) => {
     if (args[0] !== "agents") {
@@ -2108,8 +2114,51 @@ function teamRun({ env = {}, key = "/keys/app.pem", unreadable = false, mintFail
     return f.deps.claude(args, opts);
   };
   const deps = { ...f.deps, claude, team, launchEnv: () => ({ env: { PATH: "/bin", ...env }, note: null }) };
-  return { ...f, deps, made, removed, minted, claudeEnvs, claudeArgs, settingsWritten };
+  return { ...f, deps, made, removed, minted, claudeEnvs, claudeArgs, settingsWritten, botLookups };
 }
+
+const BOT_EMAIL = "336249257+sour-dev-lanes[bot]@users.noreply.github.com";
+
+test("team (#553): a team lane commits as the App bot, through both the settings file and the launch env", () => {
+  const t = teamRun({ env: { GIT_AUTHOR_NAME: "Owner", GIT_COMMITTER_EMAIL: "owner@example.com" } });
+  assert.equal(main(["1"], t.deps).code, 0);
+  assert.deepEqual(t.botLookups, [{ dir: "/tmp/lane-1", login: "sour-dev-lanes[bot]" }]);
+  for (const env of [t.settingsWritten[0].settings.env, t.claudeEnvs[0]]) {
+    assert.equal(env.GIT_AUTHOR_NAME, "sour-dev-lanes[bot]");
+    assert.equal(env.GIT_COMMITTER_NAME, "sour-dev-lanes[bot]");
+    assert.equal(env.GIT_AUTHOR_EMAIL, BOT_EMAIL);
+    assert.equal(env.GIT_COMMITTER_EMAIL, BOT_EMAIL);
+    assert.equal(JSON.stringify(env).includes("owner@example.com"), false);
+  }
+});
+
+test("team (#553): a failed or malformed bot user id lookup refuses the launch and removes the directory", () => {
+  for (const opts of [{ botIdFail: true }, { botId: "not-a-number" }, { botId: "0" }, { botId: "" }, { botId: "12.5" }]) {
+    const t = teamRun(opts);
+    const { code, lines } = main(["1"], t.deps);
+    assert.equal(code, 1, JSON.stringify(opts));
+    assert.equal(t.claudeArgs.length, 0, "nothing launched");
+    assert.deepEqual(t.settingsWritten, [], "no settings written");
+    assert.deepEqual(t.removed, ["/tmp/lane-1"]);
+    assert.ok(lines.some((l) => /bot's user id/.test(l)), lines.join("\n"));
+  }
+});
+
+test("edge (#553): botCommitIdentity builds GitHub's noreply address and rejects a bad id or login", () => {
+  assert.deepEqual(botCommitIdentity("sour-dev-lanes[bot]", "336249257\n"), { name: "sour-dev-lanes[bot]", email: BOT_EMAIL });
+  assert.deepEqual(botCommitIdentity("x[bot]", 7), { name: "x[bot]", email: "7+x[bot]@users.noreply.github.com" });
+  for (const id of [0, -1, "1e3", "12a", null, undefined, Number.MAX_SAFE_INTEGER + 2]) assert.equal(botCommitIdentity("x[bot]", id), null, String(id));
+  assert.equal(botCommitIdentity("", 7), null);
+  // Without a commit identity (solo helpers, older callers) the four names are blanked, never left to the host.
+  const { env } = teamLaneSettings({ ghDir: "/g", emptyConfig: "/e" });
+  for (const k of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]) assert.equal(env[k], "", k);
+});
+
+test("edge (#553): a solo launch sets no commit identity", () => {
+  const f = fakes({ issues: { 1: {} } });
+  main(["1"], f.deps);
+  for (const l of f.launches) for (const k of ["GIT_AUTHOR_NAME", "GIT_COMMITTER_EMAIL"]) assert.equal(l.env?.[k], undefined, k);
+});
 
 test("team: each lane gets a scrubbed environment and its own minted config directory", () => {
   const t = teamRun({ env: { GH_TOKEN: "owner", LANES_APP_KEY_FILE: "/keys/app.pem", GITHUB_TOKEN: "owner" } });
