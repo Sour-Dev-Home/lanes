@@ -409,6 +409,15 @@ test("team: a failed read (the approval { approved: false, by: null }) is pendin
   assert.doesNotMatch(d.description, /\/approve/);
 });
 
+test("team: review/owner success with nativeApproval null or missing is pending (#575)", () => {
+  for (const nativeApproval of [null, undefined]) {
+    const input = { config: realTeam, ...clean(["test-hunter", "security-reviewer"]), nativeApproval };
+    input.statuses = [...input.statuses, st("review/owner")];
+    const d = onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"], input);
+    assert.deepEqual(d, { state: "pending", description: "waiting for a code-owner review in GitHub (owner-only path)", stage: "owner" }, String(nativeApproval));
+  }
+});
+
 test("solo: nativeApproval is ignored, so the decision is unchanged", () => {
   const files = ["scripts/lanes/gate.mjs"];
   const d = onReal("full", files, ["test-hunter", "security-reviewer"], { nativeApproval: { approved: true, by: "leo" } });
