@@ -74,8 +74,8 @@ trusted", so a call site that is missed fails closed rather than open.
 { login })` or `authorCanWrite(...)` does. `authorCanWrite` and its `LOGIN` pattern are not loosened, so a bot login
 never reaches the permissions API and every other bot still fails. A verdict comment carries no authority beyond its
 `parseVerdictComment` format: it is still bound to the head SHA and the reviewer name, and the newest per reviewer wins,
-as today. Bot-authored *issues* (gate.mjs:264, `issue-contract.mjs`) are not trusted by this ADR. `authorCanWrite` stays
-as is for them, because issue authorship is a different trust question from reviewing.
+as today. Bot-authored *issues* (gate.mjs, `issue-contract.mjs`) are untrusted by default. The one exception is ADR
+0022: the configured lane bot's issue that a write-access actor released by removing `lane-filed`.
 
 **4. Reuse and owner carry.** Reuse (lib.mjs ~652) filters a prior head's statuses through `trustedStatuses`, so a
 reviewer status the lane bot posted on an earlier commit can be reused, together with its own verdict comment for the

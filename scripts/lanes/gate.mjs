@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   authorCanWrite,
+  readBotIssueRelease,
   diffFingerprint,
   GATE_CONTEXT,
   gateDecision,
@@ -290,7 +291,8 @@ export function decideForPr(api, repo, number, config, adrs = []) {
       // E2: the issues API also returns pull requests; only a `pull_request` key set means it is actually a PR.
       issueIsPr = issue.pull_request !== undefined && issue.pull_request !== null;
       interfaceContract = interfaceContractOf(issue.body);
-      issueAuthorCanWrite = authorCanWrite(api, repo, issue.user?.login);
+      // ADR 0022 part 2: under team, a lane-filed bot issue a write-access actor released counts as a trusted author.
+      issueAuthorCanWrite = authorCanWrite(api, repo, issue.user?.login) || readBotIssueRelease(api, config.identity, repo, Number(closes));
       // Only a trusted task issue's blockers are read: each costs an API call, and a stranger's PR runs this gate.
       // An untrusted issue fails in gateDecision before the blocker check, so the fail-closed default never shows.
       if (issueAuthorCanWrite === true && !issueIsPr && issueState === "open" && issueLabels.includes("ready")) {

@@ -198,7 +198,10 @@ GitHub login or a local path, and says which kind, never the text.
 - **Updating vendored skills.** Never pull agent-skills from upstream main. Pick a commit, re-read the diff for anything that fetches, installs, handles secrets or overrides rules, and change it in a tier-full PR the owner approves.
 - **A lane's own follow-up issues.** `/lane` step 8 files them with the label `lane-filed`; `issue-contract` never adds
   `ready` to one, however complete its contract, even when the owner opened it. Remove `lane-filed` to approve one
-  (the check then adds `ready` on its next run).
+  (the check then adds `ready` on its next run). Under `team` it works the same way for an issue the lane bot opened:
+  once a write-access actor (not the bot) removes `lane-filed`, the check adds `ready` and the gate accepts a PR that
+  closes it. A later edit of its body by anyone without write access withdraws that: the next run removes `ready` and
+  the gate rejects the PR ([0022](adr/0022-release-lane-filed-bot-issues.md)).
 - **"Blocked by" is the source of truth.** On every open or edit of a task issue, `issue-contract` makes the issue's
   native GitHub blocked-by relationships a mirror of its "Blocked by" field: it links what the field lists and unlinks
   everything else, including a relationship you added by hand in GitHub's UI. To change an issue's blockers, edit the

@@ -1551,3 +1551,62 @@ test("team: a status event re-evaluates through the native review and posts only
   assert.equal(posted.length, 1);
   assert.equal(descriptionOf(posted[0]), "approved by code owner @code-owner");
 });
+
+// #580 (ADR 0022 part 2): under team, a lane-filed bot issue that a write-access actor released is a trusted author.
+const botIssueRoutes = ({ labels = ["tier:skip", "ready"], events, edit = { lastEditedAt: null, editor: null } } = {}) => ({
+  ...writeAccessRoutes(BOT, undefined),
+  "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: BOT, type: "Bot" }, labels: labels.map((name) => ({ name })) },
+  "repos/o/r/issues/7/events": (events ?? [
+    { id: 1, event: "labeled", created_at: "2026-10-01T10:00:00Z", label: { name: "lane-filed" }, actor: { login: BOT } },
+    { id: 2, event: "unlabeled", created_at: "2026-10-01T11:00:00Z", label: { name: "lane-filed" }, actor: { login: "leo" } },
+  ]).map((e) => JSON.stringify(e)).join("\n"),
+  graphql: { data: { repository: { issue: edit } } },
+});
+const botIssueState = (routes, cfg = laneConfig("team")) => evaluatePr(fakeApi(routes).api, "o/r", 5, cfg);
+
+test("team: a released lane-filed bot issue passes the author check", () => {
+  assert.equal(botIssueState(botIssueRoutes()).state, "success");
+});
+
+test("team: a bot issue still labelled lane-filed does not pass the author check", () => {
+  const d = botIssueState(botIssueRoutes({ labels: ["tier:skip", "ready", "lane-filed"] }));
+  assert.equal(d.state, "failure");
+  assert.match(d.description, /write access/);
+});
+
+test("team: a bot issue never released does not pass the author check", () => {
+  const d = botIssueState(botIssueRoutes({ events: [] }));
+  assert.equal(d.state, "failure");
+  assert.match(d.description, /write access/);
+});
+
+test("team: a bot self-release does not pass the author check", () => {
+  const events = [
+    { id: 1, event: "labeled", created_at: "2026-10-01T10:00:00Z", label: { name: "lane-filed" }, actor: { login: BOT } },
+    { id: 2, event: "unlabeled", created_at: "2026-10-01T11:00:00Z", label: { name: "lane-filed" }, actor: { login: BOT } },
+  ];
+  assert.equal(botIssueState(botIssueRoutes({ events })).state, "failure");
+});
+
+test("edge: a failed read of the release events fails closed under team", () => {
+  const routes = botIssueRoutes();
+  delete routes["repos/o/r/issues/7/events"];
+  assert.equal(botIssueState(routes).state, "failure");
+});
+
+test("edge: a body edit by a non-writer after the release withdraws it", () => {
+  const edit = { lastEditedAt: "2026-10-01T12:00:00Z", editor: { login: "guest" } };
+  const d = botIssueState(botIssueRoutes({ edit }));
+  assert.equal(d.state, "failure");
+  assert.match(d.description, /write access/);
+});
+
+test("edge: a body edit by a writer after the release keeps it", () => {
+  const edit = { lastEditedAt: "2026-10-01T12:00:00Z", editor: { login: "leo" } };
+  assert.equal(botIssueState(botIssueRoutes({ edit })).state, "success");
+});
+
+test("solo: a released bot issue is not trusted, and an owner-authored issue is unchanged", () => {
+  assert.equal(botIssueState(botIssueRoutes(), laneConfig("solo")).state, "failure");
+  assert.equal(botIssueState(writeAccessRoutes("leo", undefined)).state, "success");
+});

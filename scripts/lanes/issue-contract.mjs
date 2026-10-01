@@ -5,7 +5,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { authorCanWrite, classifyFiles, compileConfig, interfacePaths, parseIssueForm, parseSections, parseValidation, ValidationParseError } from "./lib.mjs";
+import { authorCanWrite, classifyFiles, compileConfig, interfacePaths, parseIssueForm, parseSections, parseValidation, readBotIssueRelease, ValidationParseError } from "./lib.mjs";
 
 const MAX_VALIDATE_LINE = 500;
 
@@ -197,8 +197,12 @@ export function main(env = process.env, run = gh) {
   const labels = JSON.parse(env.ISSUE_LABELS_JSON || "[]");
   // Only a task form needs the permission lookup; a plain issue is left alone without an extra API call.
   if (!issuePlan(env.ISSUE_BODY, labels, false).isTask) return;
-  const canWrite = authorCanWrite((args) => run(["api", ...args]), repo, env.ISSUE_AUTHOR);
-  const plan = issuePlan(env.ISSUE_BODY, labels, canWrite, existsSync("lanes.config.json") ? JSON.parse(readFileSync("lanes.config.json", "utf8")) : undefined);
+  const config = existsSync("lanes.config.json") ? JSON.parse(readFileSync("lanes.config.json", "utf8")) : undefined;
+  const api = (args) => run(["api", ...args]);
+  // ADR 0022 part 2: under team, a lane-filed bot issue a write-access actor released is as trusted as a writer's issue.
+  // The release is read fresh each run, so a later edit by a non-writer withdraws it (the next run removes `ready`).
+  const canWrite = authorCanWrite(api, repo, env.ISSUE_AUTHOR) || readBotIssueRelease(api, config?.identity, repo, Number(n));
+  const plan = issuePlan(env.ISSUE_BODY, labels, canWrite, config);
   const edit = ["issue", "edit", n, "-R", repo];
   if (plan.add.length) edit.push("--add-label", plan.add.join(","));
   if (plan.remove.length) edit.push("--remove-label", plan.remove.join(","));
