@@ -135,6 +135,9 @@ files with Edit, not Write.
      the gate again the same way.
    - `waiting on owner (/approve)`: stop right away, report "waiting on your /approve" with the gate's reason, and
      notify `lanes #<N>: needs /approve: <the lanes/gate reason>` (the status's description), instead of watching.
+   - `waiting for a code-owner review in GitHub` (team profile): stop right away, report "waiting on your review in
+     GitHub" with the gate's reason and the PR URL, and notify `lanes #<N>: needs your GitHub review: <the lanes/gate
+     reason>` (the status's description), instead of watching.
    - Any other `pending` or `failure`: report the gate's description as the lane's end state.
    - `pass`: done. A passing gate needs no notification.
    From Git Bash, prefix `gh pr create`, `gh pr edit` and `gh issue create` with `MSYS_NO_PATHCONV=1` when they pass `--title` or `--body`, or a leading `/` becomes a Windows path.

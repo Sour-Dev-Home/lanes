@@ -30,5 +30,6 @@ restructure decision in `docs/adr/` or `docs/history/`, written so it can later 
    owner's account is an accepted risk there (ADRs 0004 and 0007). The team profile (ADR 0019, 0021) is opt-in and needs
    a GitHub App and a code-owner ruleset.
 8. **No personal data and no absolute local paths** in any commit, issue or PR.
-9. **Surface what waits on the owner.** The owner session names every PR waiting on `/approve` whenever it reports,
-   with the ready `/approve <N>` line.
+9. **Surface what waits on the owner.** The owner session names every PR waiting on the owner whenever it reports:
+   under solo, name each PR waiting on `/approve` with the ready `/approve <N>` line; under team, name each PR waiting
+   for a code-owner review with its URL.

@@ -344,6 +344,24 @@ test("lane.md step 7 stops at once on `waiting on owner (/approve)`, reports it 
   assert.match(step7, /needs \/approve: <the lanes\/gate reason>/);
 });
 
+test("lane.md step 7 stops at once on `waiting for a code-owner review in GitHub`, reports it with the PR URL and notifies", () => {
+  const step7 = laneStep(7).replace(/\s+/g, " ");
+  assert.match(step7, /`waiting for a code-owner review in GitHub`/);
+  assert.match(step7, /report "waiting on your review in GitHub" with the gate's reason and the PR URL/);
+  assert.match(step7, /needs your GitHub review: <the lanes\/gate reason>/);
+});
+
+test("edge: lane.md step 7 keeps the solo `/approve` branch unchanged beside the team one", () => {
+  const step7 = laneStep(7);
+  assert.match(step7, /`waiting on owner \(\/approve\)`: stop right away, report "waiting on your \/approve" with the gate's reason, and\s+notify `lanes #<N>: needs \/approve: <the lanes\/gate reason>`/);
+});
+
+test("CLAUDE.md rule 9 names /approve lines under solo and code-owner review URLs under team", () => {
+  const rule9 = readFileSync("CLAUDE.md", "utf8").match(/^9\. [\s\S]*$/m)[0].replace(/\s+/g, " ");
+  assert.match(rule9, /under solo, name each PR waiting on `\/approve` with the ready `\/approve <N>` line/);
+  assert.match(rule9, /under team, name each PR waiting for a code-owner review with its URL/);
+});
+
 test("lane.md step 7 reports a failed CI check by name, never a success", () => {
   const step7 = laneStep(7);
   assert.match(step7, /a failed or cancelled CI check, report it by name/);
