@@ -28,7 +28,7 @@
    out runs on your default model. This repository sets all three tiers to `sonnet`: issues are scoped
    tightly enough for it, and three independent reviewers check every full-tier lane. Any other key, or a value that is not one word (or starts
    with `-`), refuses the whole run with nothing launched.
-   An issue labelled `model:opus` launches on Opus whatever its tier's model, in `--auto` too. Use it for the issues
+   An issue labelled `model:opus` launches on Opus whatever its tier's model, in `--auto` and in the queue too (a resumed lane as well). Use it for the issues
    where a subtle bug is a security hole: security-critical parsing, guards, and contracts the reviewers found hard.
    Any other `model:*` label is ignored and logged as `#N: ignored label model:<x>`.
    Team lanes (identity profile `team`) run without MCP servers: `start.mjs` launches them with `--strict-mcp-config`

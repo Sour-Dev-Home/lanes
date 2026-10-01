@@ -430,6 +430,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     // #444: over the token budget a dead lane waits too. Its marker is written before it launches, so a crash cannot
     // allow a second relaunch, and the launch runs in the lane's own worktree, where /lane continues its PR.
     const resuming = budgetOver ? [] : resumes;
+    const labelsByIssue = new Map(issues.map((i) => [i.number, labelsOf(i).filter(Boolean)]));
     const launches = [...resuming.map((r) => ({ n: r.number, cwd: r.cwd })), ...plan.launch.map((n) => ({ n, cwd: dir }))];
     const { env: launchEnvironment, note: envNote } = launches.length && deps.launchEnv ? deps.launchEnv() : { env: undefined, note: null };
     for (const { n, cwd } of launches) {
@@ -446,8 +447,8 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       }
       // #556: /start's one-lane launcher: one attempt, then the reaper (ADR 0010) and the running label (ADR 0014); under
       // team (ADR 0019) the App-only environment, --settings, strict MCP and the token refresher, or no launch at all.
-      // The queue reads no model:* labels, as before.
-      const launched = launchLane(n, deps, { tier: tierOf.get(n), models, labels: [], identity, root: dir, cwd, env: launchEnvironment, envNote });
+      // #577: the issue's labels, so `model:opus` launches on Opus as under /start (resumed lanes too).
+      const launched = launchLane(n, deps, { tier: tierOf.get(n), models, labels: labelsByIssue.get(n) ?? [], identity, root: dir, cwd, env: launchEnvironment, envNote });
       for (const line of launched.lines) say(line);
       if (launched.failed) failedLaunches.add(n);
     }
