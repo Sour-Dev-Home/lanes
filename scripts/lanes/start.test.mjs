@@ -2168,6 +2168,29 @@ test("edge (#540): a solo launch passes no --settings", () => {
   assert.equal(f.launches.some((l) => l.args.includes("--settings")), false);
 });
 
+test("team (#544): a team launch passes --strict-mcp-config, never --mcp-config, and the settings deny MCP tools", () => {
+  const t = teamRun({ env: { GH_TOKEN: "owner" } });
+  assert.equal(main(["1"], t.deps).code, 0);
+  const args = t.claudeArgs[0];
+  const i = args.indexOf("--strict-mcp-config");
+  assert.ok(i > args.indexOf("--bg") && i < args.indexOf("/lane 1"));
+  assert.equal(args.includes("--mcp-config"), false);
+  assert.deepEqual(t.settingsWritten[0].settings.permissions.deny, ["mcp__*"]);
+});
+
+test("team (#544): the settings deny MCP tools, and launchArgs adds --strict-mcp-config only when asked", () => {
+  assert.deepEqual(teamLaneSettings({ ghDir: "/g", emptyConfig: "/e" }).permissions, { deny: ["mcp__*"] });
+  assert.deepEqual(launchArgs(18, { strictMcp: true }), [...NAMED(18), "--strict-mcp-config", "/lane 18"]);
+  assert.deepEqual(launchArgs(18, { strictMcp: true, tier: "full", models: { full: "sonnet" } }), [...NAMED(18), "--strict-mcp-config", "--model", "sonnet", "/lane 18"]);
+  assert.deepEqual(launchArgs(18), [...NAMED(18), "/lane 18"]);
+});
+
+test("edge (#544): a solo launch passes neither --strict-mcp-config nor an MCP deny", () => {
+  const f = fakes({ issues: { 1: {} } });
+  main(["1"], f.deps);
+  assert.equal(f.launches.some((l) => l.args.includes("--strict-mcp-config") || l.args.includes("--mcp-config")), false);
+});
+
 test("edge (#540): undeliverable settings remove the lane's directory and launch nothing", () => {
   const t = teamRun({ settingsFail: true });
   assert.equal(main(["1"], t.deps).code, 1);

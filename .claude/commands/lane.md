@@ -22,7 +22,9 @@ files with Edit, not Write.
 0. Identity check (#540), before any other step and before anything touches GitHub: `grep -n '"profile"' lanes.config.json`.
    When the profile is `team`, run `gh auth status` and `git remote get-url --push origin` as separate commands.
    `gh auth status` must name a `lanes-gh-$ARGUMENTS-*` directory (the lane's own config) and the push URL must start
-   with `https://`. Otherwise stop with a message that says which one failed, do nothing on GitHub, and notify
+   with `https://`. Also confirm that no MCP tool is available (no `mcp__github__*` or other `mcp__*` tool in your
+   tool list or deferred-tool list; a team lane launches with `--strict-mcp-config`, #544): one present means the
+   session could act as the owner through it. Otherwise stop with a message that says which one failed (or which MCP tool is present), do nothing on GitHub, and notify
    `lanes #$ARGUMENTS: team identity not in effect`: the session would act as the owner. Record the passing result
    (`identity: team, own gh dir, https push`) in your first status line and in the PR body. Under `solo` skip this step.
 1. `gh issue view $ARGUMENTS --json title,body,labels,state`. Stop and report if it is not open, lacks the `ready`

@@ -31,6 +31,9 @@
    An issue labelled `model:opus` launches on Opus whatever its tier's model, in `--auto` too. Use it for the issues
    where a subtle bug is a security hole: security-critical parsing, guards, and contracts the reviewers found hard.
    Any other `model:*` label is ignored and logged as `#N: ignored label model:<x>`.
+   Team lanes (identity profile `team`) run without MCP servers: `start.mjs` launches them with `--strict-mcp-config`
+   and the lane's settings deny `mcp__*`. A user-level MCP server (a GitHub one, say) holds your own token, so a lane
+   that loaded it could open PRs or review as you and defeat the bot identity. Solo lanes are unchanged.
    The start guard (`scripts/lanes/start-guard.mjs`, two hooks in `.claude/settings.json` next to the approve guard)
    enforces that: it lets `start.mjs` run only for the same issue numbers or the same `--auto` form, within 15 minutes
    of you typing `/start <N ...>`, `/start --auto` or `/start --auto --go` in that session (a `/start --auto` never

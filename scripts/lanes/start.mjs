@@ -139,9 +139,10 @@ function startModels(models) {
  * @param {{ tier?: string, models?: { skip?: string, quick?: string, full?: string }, opus?: boolean }} [options] tier
  *   without `tier:`; opus (the issue's `model:opus` label) launches on Opus over the tier's model
  */
-export function launchArgs(n, { tier, models = {}, opus = false, settings } = {}) {
+export function launchArgs(n, { tier, models = {}, opus = false, settings, strictMcp = false } = {}) {
   const model = opus ? "opus" : TIERS.includes(tier) && Object.hasOwn(models, tier) ? models[tier] : undefined;
-  const named = ["--bg", "--name", `lane-${n}`, ...(settings ? ["--settings", settings] : [])];
+  // #544: --strict-mcp-config with no --mcp-config loads no MCP server, so a team lane holds no owner credential through one.
+  const named = ["--bg", "--name", `lane-${n}`, ...(settings ? ["--settings", settings] : []), ...(strictMcp ? ["--strict-mcp-config"] : [])];
   return model ? [...named, "--model", model, `/lane ${n}`] : [...named, `/lane ${n}`];
 }
 
@@ -262,7 +263,8 @@ const TEAM_BLANKED = [...TEAM_SCRUBBED_NAMES, ...TEAM_KNOWN_PREFIXED];
  * a settings file's `env` is applied to the session's tool processes. Holds no secret.
  */
 export function teamLaneSettings({ ghDir, emptyConfig }) {
-  return { env: { ...Object.fromEntries(TEAM_BLANKED.map((k) => [k, ""])), ...teamLaneVars({ ghDir, emptyConfig }) } };
+  // #544: the deny is the backstop for --strict-mcp-config, should an MCP server load another way.
+  return { env: { ...Object.fromEntries(TEAM_BLANKED.map((k) => [k, ""])), ...teamLaneVars({ ghDir, emptyConfig }) }, permissions: { deny: ["mcp__*"] } };
 }
 
 // Launcher side of the team profile for lane n: checks the key, makes the lane's directory and mints into it. Returns
@@ -648,7 +650,7 @@ function launchAll(numbers, deps, { tiers, models, labels, identity }) {
     let id = null;
     let why = "no session id in output";
     try {
-      id = parseSessionId(deps.claude(launchArgs(n, { tier: tiers.get(n), models, opus, settings: lane?.settings }), launchEnvFor ? { cwd: root, env: launchEnvFor } : { cwd: root }));
+      id = parseSessionId(deps.claude(launchArgs(n, { tier: tiers.get(n), models, opus, settings: lane?.settings, strictMcp: Boolean(lane?.settings) }), launchEnvFor ? { cwd: root, env: launchEnvFor } : { cwd: root }));
     } catch (err) {
       why = reason(err);
     }
