@@ -19,14 +19,19 @@ calls in one turn; read the issue once (step 1) and reuse it rather than calling
 (`gh run watch <id>`), never a polling loop (step 7 explains why `lanes/gate` is never watched); change existing
 files with Edit, not Write.
 
-0. Identity check (#540), before any other step and before anything touches GitHub: `grep -n '"profile"' lanes.config.json`.
-   When the profile is `team`, run `gh auth status` and `git remote get-url --push origin` as separate commands.
-   `gh auth status` must name a `lanes-gh-$ARGUMENTS-*` directory (the lane's own config) and the push URL must start
-   with `https://`. Also confirm that no MCP tool is available (no `mcp__github__*` or other `mcp__*` tool in your
-   tool list or deferred-tool list; a team lane launches with `--strict-mcp-config`, #544): one present means the
-   session could act as the owner through it. Otherwise stop with a message that says which one failed (or which MCP tool is present), do nothing on GitHub, and notify
-   `lanes #$ARGUMENTS: team identity not in effect`: the session would act as the owner. Record the passing result
-   (`identity: team, own gh dir, https push`) in your first status line and in the PR body. Under `solo` skip this step.
+0. Identity check (#540, #552), before any other step and before anything touches GitHub: run
+   `node scripts/lanes/identity-check.mjs` as its own command, exactly so (it is allowed, needs no prompt and prints no
+   secret; never run the gh auth, git remote or git credential commands it wraps, or print the environment, yourself).
+   It prints one JSON line. Under `solo` it is `{"profile":"solo"}` and the rest of this step is skipped. Under `team`
+   it checks that gh takes its token from a `lanes-gh-<N>-*` directory (the lane's own config; its reason must name
+   `lanes-gh-$ARGUMENTS-*`), that the push URL is `https://`, that `git credential fill` answers with the lane's gh
+   token through `gh auth git-credential` only, and that `GH_TOKEN`/`GITHUB_TOKEN` are empty. Also confirm that no MCP
+   tool is available (no `mcp__github__*` or other `mcp__*` tool in your tool list or deferred-tool list; a team lane
+   launches with `--strict-mcp-config`, #544): one present means the session could act as the owner through it. When
+   the command exits non-zero, its reason names another issue, or an MCP tool is present, stop with a message that
+   says which check failed (or which MCP tool is present), do nothing on GitHub, and notify
+   `lanes #$ARGUMENTS: team identity not in effect`: the session would act as the owner. Record the passing JSON line
+   (`identity: <the line>`) in your first status line and in the PR body.
 1. `gh issue view $ARGUMENTS --json title,body,labels,state`. Stop and report if it is not open, lacks the `ready`
    label, or lacks exactly one `tier:*` label. An issue labelled `spike` is findings, not code (ADR 0012): it skips
    test-first (step 5), and its PR adds only a findings file or an ADR draft, no other code.
