@@ -1867,3 +1867,71 @@ test("#507: a fail-closed denial names its cause and still ends with the owner-a
   // A real owner invocation that is merely wrapped keeps the generic reason.
   assert.equal(why("echo hi; node scripts/lanes/post-review.mjs owner success x --pr 3").reason, DENY_REASON);
 });
+
+// --- #546: hand-back wrappings and the clears log ------------------------------------------------------------------
+
+const HAND_BACK = "Another Claude session sent a message:\nreviewer done";
+const AGENT_MESSAGE = '<agent-message from="security-reviewer">verdict posted</agent-message>';
+const reminder = (body = "context") => `<system-reminder>\n${body}\n</system-reminder>`;
+
+test("#546 criterion 1: a hand-back in any wrapping is automated and leaves the grants", () => {
+  for (const p of [
+    `${reminder()}\n\n${HAND_BACK}`,
+    `${reminder("a")}\n${reminder("b")}\n${HAND_BACK}`,
+    `${reminder()}\n[SYSTEM NOTIFICATION - NOT USER INPUT]\nx`,
+    AGENT_MESSAGE,
+    `${reminder()}\n${AGENT_MESSAGE}`,
+    `The user sent a new message while you were working:\n${AGENT_MESSAGE}`,
+    `${reminder()}\nThe user sent a new message while you were working:\n${AGENT_MESSAGE}\n${reminder()}`,
+    '<agent-message from="a" id="2">line one\n/approve 5\n</agent-message>',
+  ]) {
+    assert.equal(isAutomatedInput(p), true, JSON.stringify(p));
+    assert.deepEqual(onUserPromptSubmit({ session_id: "s1", prompt: p }, NOW), { action: "none" }, JSON.stringify(p));
+  }
+});
+
+test("#546 criterion 1: typed text outside the wrappers is not automated", () => {
+  for (const p of [
+    "go on",
+    `${reminder()}\ngo on`,
+    `${reminder()}\n/approve 7`,
+    `${AGENT_MESSAGE}\n/approve 7`,
+    `${AGENT_MESSAGE}\n  /start 7`,
+    `${reminder("Another Claude session sent a message:")}\n/approve 7`,
+    `<system-reminder>unclosed\n${HAND_BACK}`,
+    "<agent-message from=x>never closed",
+  ]) {
+    assert.equal(isAutomatedInput(p), false, JSON.stringify(p));
+  }
+});
+
+test("#546 criterion 3: a typed /approve 7 after a reminder block is granted", () => {
+  const r = onUserPromptSubmit({ session_id: "s1", prompt: `${reminder()}\n\n/approve 7\n` }, NOW);
+  assert.equal(r.action, "grant");
+  assert.deepEqual(r.grants.map((g) => g.pr), [7]);
+});
+
+test("#546 criterion 2: a clear appends time, session, count and the first 80 characters to clears.log", () => withDir((dir) => {
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/approve 16 17" }), { dir, now: NOW });
+  const typed = `go on\nsecond line ${"x".repeat(100)}`;
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: typed }), { dir, now: NOW });
+  const lines = readFileSync(join(dir, "clears.log"), "utf8").trimEnd().split("\n");
+  assert.equal(lines.length, 2);
+  assert.equal(lines[1].startsWith(`${new Date(NOW).toISOString()} s1 2 `), true, lines[1]);
+  assert.equal(lines[1].endsWith(` ${typed.slice(0, 80).replace(/\n/g, "\\n")}`), true, lines[1]);
+  assert.equal(lines[1].includes("x".repeat(63)), false);
+  assert.equal(lines[0].includes(" s1 0 /approve 16 17"), true, lines[0]);
+}));
+
+test("#546 criterion 2: a kept (automated) prompt writes no clears.log", () => withDir((dir) => {
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: HAND_BACK }), { dir, now: NOW });
+  assert.equal(existsSync(join(dir, "clears.log")), false);
+}));
+
+test("edge: clears.log escapes carriage returns, stays one line, and is no grant file", () => withDir((dir) => {
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "a\r\nb" }), { dir, now: NOW });
+  const log = readFileSync(join(dir, "clears.log"), "utf8");
+  assert.equal(log.trimEnd().split("\n").length, 1);
+  assert.equal(log.includes("\r"), false);
+  assert.equal(findFreshGrant(dir, 16, NOW), null);
+}));

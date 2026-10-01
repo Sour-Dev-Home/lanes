@@ -14,7 +14,7 @@
 //     Bash command with the same words, which is scanned as above; the plain form must also hold no character
 //     PowerShell gives a meaning of its own, and a command that cannot be read is denied when it names post-review.
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, REVIEWERS, reviewerNames } from "./lib.mjs";
@@ -95,15 +95,38 @@ export const AUTOMATED_INPUT_PREFIXES = Object.freeze([
 const REMINDER_OPEN = "<system-reminder>";
 const TASK_NOTICE_TAG = "<task-notification>";
 
+const REMINDER_CLOSE = "</system-reminder>";
+const AGENT_MESSAGE_RE = /<agent-message\b[^>]*>[\s\S]*?<\/agent-message>/g;
+const TYPED_COMMAND_LINE_RE = /^[ \t]*\/(?:approve|start)\b/m;
+
+/** The prompt without its leading `<system-reminder>` blocks and the blank space around them (an unclosed block stays). */
+export function withoutLeadingReminders(prompt) {
+  if (typeof prompt !== "string") return prompt;
+  let p = prompt.trimStart();
+  while (p.startsWith(REMINDER_OPEN)) {
+    const end = p.indexOf(REMINDER_CLOSE);
+    if (end === -1) break;
+    p = p.slice(end + REMINDER_CLOSE.length).trimStart();
+  }
+  return p;
+}
+
 /**
- * True for a prompt that starts (after leading whitespace) with one of AUTOMATED_INPUT_PREFIXES, exact case, or with
- * a `<system-reminder>` block that holds a `<task-notification>` (#492).
+ * True for a prompt that starts, after any leading `<system-reminder>` blocks and blank lines, with one of
+ * AUTOMATED_INPUT_PREFIXES (exact case); for a `<system-reminder>` block that holds a `<task-notification>` (#492); and
+ * for a prompt holding a closed `<agent-message ...>` hand-back however it is wrapped, unless a `/approve` or `/start`
+ * line stands outside the hand-back and reminder blocks (#546).
  */
 export function isAutomatedInput(prompt) {
   if (typeof prompt !== "string") return false;
-  const p = prompt.trimStart();
+  const p = withoutLeadingReminders(prompt);
   if (AUTOMATED_INPUT_PREFIXES.some((w) => p.startsWith(w))) return true;
-  return p.startsWith(REMINDER_OPEN) && p.includes(TASK_NOTICE_TAG);
+  const t = prompt.trimStart();
+  if (t.startsWith(REMINDER_OPEN) && t.includes(TASK_NOTICE_TAG)) return true;
+  if (!AGENT_MESSAGE_RE.test(p)) return false;
+  AGENT_MESSAGE_RE.lastIndex = 0;
+  const outside = p.replace(AGENT_MESSAGE_RE, "\n").replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "\n");
+  return !TYPED_COMMAND_LINE_RE.test(outside);
 }
 
 /**
@@ -116,7 +139,7 @@ export function onUserPromptSubmit(input, now = Date.now()) {
   const sessionId = input?.session_id;
   if (typeof sessionId !== "string" || !SESSION_RE.test(sessionId)) return { action: "none" };
   if (isAutomatedInput(input.prompt)) return { action: "none" };
-  const prs = parseApprovePrompts(input.prompt);
+  const prs = parseApprovePrompts(withoutLeadingReminders(input.prompt));
   if (prs === null) return { action: "clear", sessionId };
   const at = new Date(now).toISOString();
   return { action: "grant", sessionId, grants: prs.map((pr) => ({ sessionId, pr, at })) };
@@ -133,18 +156,32 @@ function clearSessionGrants(dir, sessionId) {
   try {
     names = readdirSync(dir);
   } catch {
-    return;
+    return 0;
   }
   const prefix = `${sessionId}.`;
+  let cleared = 0;
   for (const name of names) {
     if (name === `${sessionId}.json` || (name.startsWith(prefix) && name.endsWith(".json") && PR_RE.test(name.slice(prefix.length, -".json".length)))) {
       // One file that cannot be deleted must not stop the rest, nor the new grants written after the clear.
       try {
         rmSync(join(dir, name), { force: true });
+        cleared += 1;
       } catch {
         // It still lapses after GRANT_TTL_MS and is spent by its one run.
       }
     }
+  }
+  return cleared;
+}
+
+/** Appends one line to `<dir>/clears.log` for a clear: time, session, grants cleared, the prompt's first 80 characters (#546). */
+function logClear(dir, sessionId, cleared, prompt, now) {
+  const head = String(prompt ?? "").slice(0, 80).replace(/\\/g, "\\\\").replace(/\r/g, "\\r").replace(/\n/g, "\\n");
+  try {
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(join(dir, "clears.log"), `${new Date(now).toISOString()} ${sessionId} ${cleared} ${head}\n`);
+  } catch {
+    // The log is evidence for a later look; a prompt is never blocked for it.
   }
 }
 
@@ -1140,7 +1177,7 @@ export function runHook(event, raw, { dir, now = Date.now() }) {
     try {
       const r = onUserPromptSubmit(JSON.parse(raw), now);
       // Every prompt that is not an automated input starts from no grants: a new list replaces the last one (#275).
-      if (r.action !== "none") clearSessionGrants(dir, r.sessionId);
+      if (r.action !== "none") logClear(dir, r.sessionId, clearSessionGrants(dir, r.sessionId), JSON.parse(raw).prompt, now);
       if (r.action === "grant") {
         mkdirSync(dir, { recursive: true });
         for (const g of r.grants) writeFileSync(join(dir, grantFileName(r.sessionId, g.pr)), `${JSON.stringify(g)}\n`);
