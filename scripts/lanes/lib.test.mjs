@@ -99,6 +99,10 @@ test("botIssueReleased: a re-add followed by an owner removal is trusted, by eve
 test("botIssueReleased: a body edit after the release needs a write-access editor", () => {
   assert.equal(released(RELEASED, { lastEditedAt: "2026-10-01T10:05:00Z", editor: { login: BOT.login } }), false, "bot edit after release");
   assert.equal(released(RELEASED, { lastEditedAt: "2026-10-01T10:05:00Z", editor: { login: "owner" } }), true, "owner edit after a bot edit");
+  const slug = BOT.login.replace("[bot]", "");
+  const anyone = () => true;
+  assert.equal(botIssueReleased(TEAM, botIssue(), RELEASED, { lastEditedAt: "2026-10-01T10:05:00Z", editor: { login: slug } }, anyone), false, "GraphQL bot editor without [bot]");
+  assert.equal(botIssueReleased(TEAM, botIssue(), [ev(1, "labeled", BOT.login), ev(2, "unlabeled", slug)], null, anyone), false, "bare bot slug as releaser");
   assert.equal(released(RELEASED, { lastEditedAt: "2026-10-01T09:59:00Z", editor: { login: BOT.login } }), true, "edit before release");
 });
 

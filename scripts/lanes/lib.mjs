@@ -591,14 +591,16 @@ export function botIssueReleased(identity, issue, events, edit, canWrite) {
     if (marks.length === 0) return false;
     const last = marks.reduce((a, b) => (b.id > a.id ? b : a));
     const actor = last.actor?.login;
-    if (last.event !== "unlabeled" || typeof actor !== "string" || isLaneBot(identity, last.actor)) return false;
+    // GraphQL names a bot without its `[bot]` suffix, so the bare App slug counts as the bot too.
+    const isBot = (a) => isLaneBot(identity, a) || a?.login === identity.app.botLogin.replace(/\[bot\]$/, "");
+    if (last.event !== "unlabeled" || typeof actor !== "string" || isBot(last.actor)) return false;
     if (canWrite(actor) !== true) return false;
     if (edit === null) return true;
     if (typeof edit !== "object" || edit === undefined) return false;
     const editedAt = Date.parse(edit.lastEditedAt);
     if (Number.isNaN(editedAt)) return false;
     if (editedAt < Date.parse(last.created_at)) return true;
-    return typeof edit.editor?.login === "string" && !isLaneBot(identity, edit.editor) && canWrite(edit.editor.login) === true;
+    return typeof edit.editor?.login === "string" && !isBot(edit.editor) && canWrite(edit.editor.login) === true;
   } catch {
     return false;
   }
