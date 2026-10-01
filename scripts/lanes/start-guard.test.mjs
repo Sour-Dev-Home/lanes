@@ -2796,6 +2796,8 @@ test("#588 criterion 2: awk output piped into a shell is denied when the awk tex
     `awk 'BEGIN{print "node scripts/lanes/start.mjs"}' | sh -s`, `awk '{print "node scripts/lanes/queue.mjs"}' f | bash -x`,
     // edge: the program is split so the name is only whole in the output
     `awk 'BEGIN{print "node scripts/lanes/" "queue.mjs"}' | sh`,
+    // edge (test-hunter): a shell reading the awk output through process substitution
+    `bash <(awk 'BEGIN{print "node scripts/lanes/queue.mjs"}')`,
   ]) denied(cmd);
 });
 

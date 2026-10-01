@@ -406,7 +406,7 @@ function walk(cmd, depth, visit, onOpaque, onEval, collapse = false) {
     const scripts = dataOnly ? new Map() : evalScripts(words);
     const programs = programWords(words);
     // Only a word that names the queue script or start.mjs is read, so an unresolved `$` in an awk program is no new denial (#588).
-    if (!dataOnly) for (const w of awkNamedWords(words, piped)) if (/(queue|start)\.mjs/i.test(jsNames(unliteral(w)))) onEval(unliteral(w));
+    if (!dataOnly) for (const w of awkNamedWords(words, piped || cmd.includes("<("))) if (/(queue|start)\.mjs/i.test(jsNames(unliteral(w)))) onEval(unliteral(w));
     const prose = proseWords(words);
     // A search's pattern is no script (#404), unless a shell reads the output or a here-string in the call could be
     // mistaken for the pattern (`grep <<< "…" x`, whose here-string grep reads as its input and prints).
