@@ -17,7 +17,7 @@ import { main as checkBlockers } from "./blockers.mjs";
 import { cleanupMerged } from "./cleanup.mjs";
 import { TIERS, laneIssueOf, parseIdentity, parseIssueForm } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
-import { idleLaneRecovery, idleLaneSession, laneWorktree, worktreeUnsaved } from "./status.mjs";
+import { SAFE_SESSION_ID, idleLaneRecovery, idleLaneSession, laneWorktree, worktreeUnsaved } from "./status.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { grantPath, grantRefusal, readGrant } from "./start-guard.mjs";
 
@@ -574,7 +574,7 @@ function inFlightReason(n, prs, sessions, runGit) {
   const pr = prs.find((p) => Number(branchIssue(p.headRefName)) === n);
   if (!pr) {
     const s = newestLaneSession(sessions, n);
-    if (!s || typeof s.id !== "string" || !idleLaneSession(s)) return "already in flight";
+    if (!s || typeof s.id !== "string" || !SAFE_SESSION_ID.test(s.id) || !idleLaneSession(s)) return "already in flight";
     return `already in flight: lane session ${s.id} is idle with no PR; ${idleLaneRecovery(s.id, n, worktreeUnsaved(laneWorktree(s.cwd, n), runGit))}`;
   }
   if (!deadLaneSession(sessions, n).dead) return "already in flight";

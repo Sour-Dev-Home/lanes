@@ -1408,6 +1408,10 @@ test("#571: edge: the newest session decides, and a session with no readable id 
   assert.deepEqual(main(["6"], fakes({ issues, sessions: [older, newer] }).deps).lines, ["#6: refused: already in flight"]);
   assert.deepEqual(main(["6"], fakes({ issues, sessions: [newer, { ...older, startedAt: 3 }] }).deps).lines, [STALLED("old", 6)]);
   assert.deepEqual(main(["6"], fakes({ issues, sessions: [{ ...older, id: undefined }] }).deps).lines, ["#6: refused: already in flight"]);
+  // An id that is not a plain token is never printed inside the `claude stop` command.
+  for (const id of ["a b", "x; rm -rf ~", "-x", "a\nb", ""]) {
+    assert.deepEqual(main(["6"], fakes({ issues, sessions: [{ ...older, id }] }).deps).lines, ["#6: refused: already in flight"], JSON.stringify(id));
+  }
 });
 
 test("#571: the refusal adds 'worktree has unsaved changes' from git -C <worktree> status --porcelain, and a read failure adds nothing", () => {

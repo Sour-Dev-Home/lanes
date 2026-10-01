@@ -620,6 +620,12 @@ test("#571: a busy session is running, not stopped, and a prompt wait stays a pr
   assert.deepEqual(summarize({ prs: [], issues: [issue(10)], merged: [], sessions: prompt, laneBranches: branches(10) }).waitingOnOwner.map((i) => i.stage), ["running"]);
 });
 
+test("#571: edge: a session id that is not a plain token is never printed in the stop command", () => {
+  const sessions = laneSessions([agent("x; rm -rf ~", wt("issue-10-x"), { status: "idle", state: "blocked" })], ROOT);
+  const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions, laneBranches: branches(10) });
+  assert.equal(s.waitingOnOwner[0].note, "no PR yet: a lane session is idle; stop it and run /start 10 again");
+});
+
 test("#571: idleLaneSession is idle in any state but not on a permission prompt or busy", () => {
   assert.equal(idleLaneSession({ status: "idle", state: "blocked" }), true);
   assert.equal(idleLaneSession({ status: "idle", state: "working" }), true);

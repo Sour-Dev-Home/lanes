@@ -209,7 +209,7 @@ function latestLaneAgents(agents, repoRoot) {
 export const STALLED_MINUTES = 30;
 // PR stages where the lane still owes something: a failing check to fix, or a reviewer's verdict to post.
 const OWED_STAGES = new Set(["starting", "failing", "gate", "review"]);
-const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+export const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 // Issue N → whole minutes since the transcript of its busy lane session was last written, for those at or past
 // STALLED_MINUTES. The transcript is found the way lane-cost.mjs finds it (the root's project folder, then the
@@ -375,7 +375,9 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
     if (!taken.has(issue.number) && labels.includes("ready") && branches.length && idle) {
       const item = { number: issue.number, title: issue.title, stage: "stopped", note: `no PR yet: restart with /start ${issue.number}` };
       // #571: /start refuses an issue with a session, so the note names the session and the recovery /start gives.
-      out.waitingOnOwner.push(session ? { ...item, note: `no PR yet: session ${session.id} is idle; ${idleLaneRecovery(session.id, issue.number, session.unsaved)}`, session: { id: session.id, state: session.state } } : item);
+      // An id that is not a plain token is never printed inside a command the owner would paste.
+      const note = SAFE_SESSION_ID.test(session?.id ?? "") ? `no PR yet: session ${session.id} is idle; ${idleLaneRecovery(session.id, issue.number, session.unsaved)}` : session && `no PR yet: a lane session is idle; stop it and run /start ${issue.number} again`;
+      out.waitingOnOwner.push(session ? { ...item, note, session: { id: session.id, state: session.state } } : item);
       // Its branch still holds work on the issue's paths, so other issues on those paths wait for it.
       runningIssues.push(issue);
       continue;
