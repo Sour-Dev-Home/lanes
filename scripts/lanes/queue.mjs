@@ -113,7 +113,7 @@ export function planTick({ issues = [], prs = [], sessions = [], maxLanes = STAR
  * @param {{ number: number, reason: string }[]} waiting planTick's `waiting`
  * @returns {string[]} lines, without a time stamp
  */
-export function waitingDigest(prs, waiting, now, seen = new Map()) {
+export function waitingDigest(prs, waiting, now, seen = new Map(), team = false) {
   const byNumber = new Map(prs.map((pr) => [pr.number, pr]));
   const rows = waiting.map((w) => {
     const pr = byNumber.get(w.number) ?? {};
@@ -124,10 +124,13 @@ export function waitingDigest(prs, waiting, now, seen = new Map()) {
   // PR text is untrusted: control characters (ANSI escapes) are dropped before it reaches the owner's terminal.
   const plain = (text) => String(text ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
   const title = (pr) => plain(pr.title);
-  const approvable = rows.filter((r) => prStage(r.pr, undefined, r.pr.gateDescription).stage === "owner").map((r) => r.number);
+  const ownerWait = (r) => prStage(r.pr, undefined, r.pr.gateDescription).stage === "owner";
+  // Under team ADR 0021 retired /approve: a PR waiting on the owner's review gets its GitHub files URL instead.
+  const reviewUrl = (r) => (team && ownerWait(r) && typeof r.pr.url === "string" && r.pr.url.startsWith("https://") ? ` — ${plain(r.pr.url)}/files` : "");
+  const approvable = team ? [] : rows.filter(ownerWait).map((r) => r.number);
   return [
     `waiting on you (${rows.length}):`,
-    ...rows.map((r) => `  #${r.number} ${title(r.pr)} — waiting ${formatAge(r.since, now)} — ${plain(r.reason)}`),
+    ...rows.map((r) => `  #${r.number} ${title(r.pr)} — waiting ${formatAge(r.since, now)} — ${plain(r.reason)}${reviewUrl(r)}`),
     ...(approvable.length ? [approveLine(approvable)] : []),
   ];
 }
@@ -213,7 +216,7 @@ function readSnapshot(deps, root) {
   const issues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body,assignees"]));
   // A blocker missing from a truncated list would read as closed, and a lane's claim would be lost.
   if (issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to plan from`);
-  const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,title,headRefName,files,mergeable,statusCheckRollup,isCrossRepository"]));
+  const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", "number,title,url,headRefName,files,mergeable,statusCheckRollup,isCrossRepository"]));
   if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to count lanes in flight`);
   const gate = JSON.parse(deps.gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${GATE_QUERY}`]));
   const descriptions = gateDescriptions(gate);
@@ -412,7 +415,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     const current = new Map(plan.waiting.map((w) => [w.number, w.reason]));
     for (const line of plan.lines) if (!WAIT_LINE.test(line)) say(line);
     const changed = current.size !== waits.size || [...current].some(([n, r]) => waits.get(n) !== r);
-    if (changed) for (const line of waitingDigest(snapshot.prs, plan.waiting, now(), firstWaiting)) say(line);
+    if (changed) for (const line of waitingDigest(snapshot.prs, plan.waiting, now(), firstWaiting, identity?.profile === "team")) say(line);
     for (const n of [...firstWaiting.keys()]) if (!current.has(n)) firstWaiting.delete(n);
     for (const n of current.keys()) if (!firstWaiting.has(n)) firstWaiting.set(n, now());
     waits.clear();

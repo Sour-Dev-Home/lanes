@@ -1634,3 +1634,48 @@ test("edge: a diff that cannot be read launches nothing that tick, like a failed
   assert.equal(await main([], { ...run.deps, git: git.git }), 0);
   assert.deepEqual(run.launched.map((l) => l.tick), [1]);
 });
+
+const teamGate = "waiting for a code-owner review in GitHub";
+const teamRows = (nums) => nums.map((n) => ({ ...pr(n, n, ["a"], [gate("PENDING", teamGate)]), title: `t${n}`, url: `https://github.com/o/r/pull/${n}`, gateSince: 0 }));
+
+test("#604: under team the digest lists each review wait with its files URL and prints no /approve line", async () => {
+  const { waitingDigest } = await import("./queue.mjs");
+  const prs = teamRows([5, 6]);
+  const lines = waitingDigest(prs, prs.map((p) => ({ number: p.number, reason: teamGate })), 60_000, new Map(), true);
+  assert.deepEqual(lines, [
+    "waiting on you (2):",
+    `  #5 t5 — waiting 1m — ${teamGate} — https://github.com/o/r/pull/5/files`,
+    `  #6 t6 — waiting 1m — ${teamGate} — https://github.com/o/r/pull/6/files`,
+  ]);
+});
+
+test("#604: under solo the digest keeps its /approve line and adds no URL", async () => {
+  const { waitingDigest } = await import("./queue.mjs");
+  const prs = teamRows([5]).map((p) => ({ ...p, statusCheckRollup: [gate("PENDING", "waiting on owner: review/owner")] }));
+  const lines = waitingDigest(prs, [{ number: 5, reason: "waiting on owner: review/owner" }], 60_000);
+  assert.equal(lines.at(-1), "/approve 5");
+  assert.ok(!lines.join("\n").includes("https://"));
+});
+
+test("edge: under team a digest with nothing waiting is empty, and a failing PR gets no URL", async () => {
+  const { waitingDigest } = await import("./queue.mjs");
+  assert.deepEqual(waitingDigest([], [], 5, new Map(), true), []);
+  const failing = { ...pr(5, 5, ["a"], [{ name: "test", conclusion: "FAILURE" }]), title: "t", url: "https://github.com/o/r/pull/5" };
+  assert.deepEqual(waitingDigest([failing], [{ number: 5, reason: "failing: test" }], 60_000, new Map([[5, 0]]), true), ["waiting on you (1):", "  #5 t — waiting 1m — failing: test"]);
+});
+
+test("#604: planTick treats the team gate wording as a wait on the owner", async () => {
+  const { planTick } = await import("./queue.mjs");
+  const plan = planTick({ issues: [], prs: teamRows([5]), sessions: [] });
+  assert.deepEqual(plan.waiting, [{ number: 5, reason: teamGate }]);
+});
+
+test("edge: under team a review wait with a missing or non-https url gets no link", async () => {
+  const { waitingDigest } = await import("./queue.mjs");
+  for (const url of [undefined, null, 5, "http://github.com/o/r/pull/5", "javascript:alert(1)"]) {
+    const prs = teamRows([5]).map((p) => ({ ...p, url }));
+    const lines = waitingDigest(prs, [{ number: 5, reason: teamGate }], 60_000, new Map(), true);
+    assert.equal(lines.length, 2);
+    assert.ok(!lines[1].includes("/files"), String(url));
+  }
+});
