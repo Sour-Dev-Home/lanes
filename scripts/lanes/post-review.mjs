@@ -12,7 +12,7 @@ import { linkSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { configuredReviewers, findFreshGrant, grantDir, isFreshGrant, profileForGrantDir, readGrant, TEAM_REASON } from "./approve-guard.mjs";
-import { parseIssueForm, parsePrBody, REVIEWERS, reviewContext } from "./lib.mjs";
+import { parseIssueForm, parsePending, parsePrBody, REVIEWERS, reviewContext } from "./lib.mjs";
 
 const RESULTS = ["pass", "fail", "not-applicable"];
 const SEVERITIES = ["critical", "important", "minor"];
@@ -112,6 +112,10 @@ export function validateVerdict(v, { criteriaCount, names = REVIEWERS }) {
     if (typeof f?.fixed !== "boolean") errors.push(`finding ${i + 1}: fixed must be true or false`);
   });
   if (v.metrics !== undefined) errors.push(...metricsErrors(v.metrics));
+  // ADR 0023 part 3: workflow files the owner will commit; the gate reuses this review when they match these hashes.
+  if (v.pending !== undefined && parsePending(v) === null) {
+    errors.push("pending must be a non-empty list of { path: .github/workflows/<file>, sha256: 64 lowercase hex } with no repeated or .. path");
+  }
   if (v.verdict === "success") {
     if (criteria.some((c) => c?.result === "fail")) errors.push("success is refused: a criterion fails");
     if (findings.some((f) => (f?.severity === "critical" || f?.severity === "important") && f?.fixed !== true)) {

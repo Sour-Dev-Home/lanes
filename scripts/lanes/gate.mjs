@@ -18,8 +18,11 @@ import {
   moduleMapProblem,
   nativeCodeOwnerApproval,
   parseCodeOwnerUsers,
+  parsePending,
   parsePrBody,
   parseVerdictComment,
+  pendingFileHash,
+  pendingReuseBlockedBy,
   REVIEWERS,
   reviewerNames,
   reusableReviewers,
@@ -126,12 +129,20 @@ const COMPARE_FILES_CAP = 300;
  * and nothing changed between it and the head that the reviewer checks against (`reuseBlockedBy`, given the PR's
  * `files` and the gate's `adrs`). Fails closed per reviewer: any API error, an empty diff, or a changed-file list that
  * may be cut short means no reuse for it; a commit list that does not end at the head means no reuse at all.
+ *
+ * ADR 0023 part 3: when the reviewer's trusted verdict comment on that commit carries `pending` (workflow files the
+ * owner commits in the web editor), the head's own diff may differ by those files alone. Each pending file is read at
+ * the head and hashed with `pendingFileHash`, and `pendingReuseBlockedBy` decides. A refusal for that reason is
+ * recorded in `blocked` (a Map from reviewer to reason) when given, for the gate to name. A `pending` that is
+ * malformed, or a file that cannot be read, means no reuse.
  */
-export function reusableReviews(api, repo, number, pr, reviewers, { files = [], adrs = [], config = undefined } = {}) {
+export function reusableReviews(api, repo, number, pr, reviewers, { files = [], adrs = [], config = undefined, blocked = undefined } = {}) {
   if (!Array.isArray(reviewers) || reviewers.length === 0) return [];
   const w = reviewWalk(api, repo, number, pr, config);
   if (w === null) return [];
-  const { head, ownDiff, changedSince, statusesAt, walk } = w;
+  const { head, ownDiff, rawDiff, changedSince, statusesAt, walk } = w;
+  let verdicts;
+  const verdictsOnce = () => (verdicts ??= trustedVerdicts(api, repo, number, reviewerNames(config ?? {}), config?.identity));
   const out = [];
   for (const reviewer of reviewers) {
     const context = reviewContext(reviewer);
@@ -139,7 +150,24 @@ export function reusableReviews(api, repo, number, pr, reviewers, { files = [], 
       const sha = walk.find((s) => statusesAt(s).has(context));
       if (sha === undefined) continue;
       const status = statusesAt(sha).get(context);
-      if (status.state !== "success" || ownDiff(sha) !== ownDiff(head)) continue;
+      if (status.state !== "success") continue;
+      const earlier = verdictsOnce().findLast((v) => v.reviewer === reviewer && v.sha === sha);
+      if (earlier?.verdict && Object.hasOwn(earlier.verdict, "pending")) {
+        const pending = parsePending(earlier.verdict);
+        if (pending === null) continue;
+        const paths = pending.map((p) => p.path);
+        const since = changedSince(sha);
+        if (reuseBlockedBy(reviewer, since.filter((f) => !paths.includes(f)), files, adrs) !== null) continue;
+        const headHashes = new Map(pending.map(({ path }) => [path, pendingBlobHash(api, repo, path, head)]));
+        const reason = pendingReuseBlockedBy({ pending: earlier.verdict.pending, changedSince: since, headHashes, earlierDiff: rawDiff(sha), headDiff: rawDiff(head) });
+        if (reason !== null) {
+          blocked?.set(reviewer, reason);
+          continue;
+        }
+        out.push({ sha, status });
+        continue;
+      }
+      if (ownDiff(sha) !== ownDiff(head)) continue;
       if (reuseBlockedBy(reviewer, changedSince(sha), files, adrs) !== null) continue;
       out.push({ sha, status });
     } catch {
@@ -147,6 +175,20 @@ export function reusableReviews(api, repo, number, pr, reviewers, { files = [], 
     }
   }
   return out;
+}
+
+/**
+ * `pendingFileHash` of `path`'s blob at `ref`, or null when the file is not committed there (HTTP 404). Any other
+ * failure throws, so the caller fails closed. An unhashable blob (empty, invalid UTF-8) is null too: it never matches.
+ */
+function pendingBlobHash(api, repo, path, ref) {
+  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  try {
+    return pendingFileHash(api([`repos/${repo}/contents/${encoded}?ref=${ref}`, "-H", "Accept: application/vnd.github.raw"]));
+  } catch (e) {
+    if (e?.httpStatus === 404) return null;
+    throw e;
+  }
 }
 
 /**
@@ -189,11 +231,12 @@ function reviewWalk(api, repo, number, pr, config = undefined) {
       return seen.get(sha);
     };
   };
-  const ownDiff = once((sha) => {
+  const rawDiff = once((sha) => {
     const diff = api([`repos/${repo}/compare/${base}...${sha}`, "-H", "Accept: application/vnd.github.diff"]);
     if (typeof diff !== "string" || diff === "") throw new Error(`no diff for ${sha}`);
-    return diffFingerprint(diff);
+    return diff;
   });
+  const ownDiff = once((sha) => diffFingerprint(rawDiff(sha)));
   const changedSince = once((sha) => {
     const [count, ...names] = api([`repos/${repo}/compare/${sha}...${head}`, "--jq", "(.files | length), (.files[] | .filename, (.previous_filename // empty))"])
       .split("\n")
@@ -211,7 +254,7 @@ function reviewWalk(api, repo, number, pr, config = undefined) {
   } catch {
     return null;
   }
-  return { head, ownDiff, changedSince, statusesAt, walk };
+  return { head, ownDiff, rawDiff, changedSince, statusesAt, walk };
 }
 
 /**
@@ -304,7 +347,8 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   }
   const statuses = statusesOf(api, repo, pr.head.sha);
   const candidates = reusableReviewers({ issueLabels, files, statuses, config, adrs, interfaceContract });
-  const reused = candidates.length > 0 ? reusableReviews(api, repo, number, pr, candidates, { files, adrs, config }) : [];
+  const pendingBlocked = new Map();
+  const reused = candidates.length > 0 ? reusableReviews(api, repo, number, pr, candidates, { files, adrs, config, blocked: pendingBlocked }) : [];
   // ADR 0021: under team the owner stage is a native code-owner review, read live here so a merge_group run re-reads it
   // against the queued head. Under solo nothing is read and the decision is unchanged. Team never passes null.
   const team = config.identity?.profile === "team";
@@ -329,6 +373,9 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     ownerDiff: ownerDiffFor(api, repo, pr, files),
   };
   let decision = gateDecision(inputs);
+  // ADR 0023 part 3: a review refused for a pending workflow file names that file's reason instead of the bare wait.
+  const waiting = decision.state === "pending" && decision.stage === "review" ? /^waiting for review\/(\S+)$/.exec(decision.description) : null;
+  if (waiting && pendingBlocked.has(waiting[1])) decision = { ...decision, description: `${decision.description}: ${pendingBlocked.get(waiting[1])}` };
   // #493: an earlier owner approval is only looked for when the gate waits on the owner and the head has no trusted
   // review/owner status of its own; every other outcome (a reviewer still owed included) is final without it.
   // Under team there is no review/owner status to carry: the native review decides.
