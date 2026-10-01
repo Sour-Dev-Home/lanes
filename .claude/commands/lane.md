@@ -25,11 +25,10 @@ files with Edit, not Write.
    It prints one JSON line. Under `solo` it is `{"profile":"solo"}` and the rest of this step is skipped. Under `team`
    it checks that gh takes its token from a `lanes-gh-<N>-*` directory (the lane's own config; its reason must name
    `lanes-gh-$ARGUMENTS-*`), that the push URL is `https://`, that `git credential fill` answers with the lane's gh
-   token through `gh auth git-credential` only, and that `GH_TOKEN`/`GITHUB_TOKEN` are empty. Also confirm that no MCP
-   tool is available (no `mcp__github__*` or other `mcp__*` tool in your tool list or deferred-tool list; a team lane
-   launches with `--strict-mcp-config`, #544): one present means the session could act as the owner through it. When
-   the command exits non-zero, its reason names another issue, or an MCP tool is present, stop with a message that
-   says which check failed (or which MCP tool is present), do nothing on GitHub, and notify
+   token through `gh auth git-credential` only, and that `GH_TOKEN`/`GITHUB_TOKEN` are empty. Separately, if any `mcp__`
+   tool is available (in your tool list or deferred-tool list; a team lane launches with `--strict-mcp-config`, #544),
+   stop, name the tool, and do nothing on GitHub and send the notification below: it could act as the owner. When the command exits non-zero or its
+   reason names another issue, stop with a message that says which check failed, do nothing on GitHub, and notify
    `lanes #$ARGUMENTS: team identity not in effect`: the session would act as the owner. Record the passing JSON line
    (`identity: <the line>`) in your first status line and in the PR body.
 1. `gh issue view $ARGUMENTS --json title,body,labels,state`. Stop and report if it is not open, lacks the `ready`
