@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AUTOMATED_INPUT_PREFIXES, configuredReviewersFrom, DENY_REASON, DEPTH_REASON, POST_REVIEW_ARGS_REASON, POWERSHELL_REASON, REVIEWER_NAME_REASON, RUNTIME_PROGRAM_REASON, GRANT_TTL_MS, UNPARSED_REASON, WMI_REASON, decidePreToolUse as decideWithReason, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, readGrant, runHook, TAG_REASON, validGrant } from "./approve-guard.mjs";
+import { AUTOMATED_INPUT_PREFIXES, CLEARS_LOG_MAX_BYTES,configuredReviewersFrom, DENY_REASON, DEPTH_REASON, POST_REVIEW_ARGS_REASON, POWERSHELL_REASON, REVIEWER_NAME_REASON, RUNTIME_PROGRAM_REASON, GRANT_TTL_MS, UNPARSED_REASON, WMI_REASON, decidePreToolUse as decideWithReason, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, readGrant, runHook, TAG_REASON, validGrant } from "./approve-guard.mjs";
 import { WRAPPERS, automatedInputLeavesTheGrant } from "./shell-lex.fixtures.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
@@ -1947,4 +1947,77 @@ test("edge: a typed /approve beside a hand-back, on its own line or glued to it,
   for (const p of [`${hb}\n/approve 7`, `${hb}/approve 7`, `${hb} /start 7`, `/approve 7\n${hb}`, `<system-reminder>r</system-reminder>\n${hb}\r/approve 7`]) {
     assert.equal(isAutomatedInput(p), false, JSON.stringify(p));
   }
+});
+
+// --- #548: linear automated-input scan, escaped and capped clears.log, gh text arguments ---------------------------
+
+test("#548 criterion 1: 50,000 unclosed <agent-message openers are scanned in under 500 ms", () => {
+  const p = "<agent-message from=x>".repeat(50000);
+  const t = performance.now();
+  assert.equal(isAutomatedInput(p), false);
+  assert.ok(performance.now() - t < 500, `took ${performance.now() - t} ms`);
+});
+
+test("#548 criterion 1: 50,000 unclosed <system-reminder> openers beside a hand-back are scanned in under 500 ms", () => {
+  const p = `<agent-message from=x>ok</agent-message>${"<system-reminder>".repeat(50000)}`;
+  const t = performance.now();
+  assert.equal(isAutomatedInput(p), true);
+  assert.ok(performance.now() - t < 500, `took ${performance.now() - t} ms`);
+});
+
+test("edge: 50,000 openers with no '>' and an <agent-messages> look-alike stay linear and are no hand-back", () => {
+  const t = performance.now();
+  assert.equal(isAutomatedInput("<agent-message".repeat(50000)), false);
+  assert.equal(isAutomatedInput("<agent-messages>x</agent-message>"), false);
+  assert.ok(performance.now() - t < 500);
+});
+
+test("edge: a closed hand-back after an unclosed opener still counts, and a typed /approve outside a reminder still wins", () => {
+  assert.equal(isAutomatedInput("<agent-message from=a>one</agent-message>"), true);
+  assert.equal(isAutomatedInput("<agent-message from=x>\n<agent-message from=y>z</agent-message>"), true);
+  assert.equal(isAutomatedInput("<agent-message from=y>z</agent-message><system-reminder>\n/approve 5\n</system-reminder>"), true);
+  assert.equal(isAutomatedInput("<agent-message from=y>z</agent-message>\n<system-reminder>unclosed\n/approve 5"), false);
+});
+
+test("#548 criterion 2: clears.log escapes ESC, NUL, DEL, C1 controls and U+2028/U+2029", () => withDir((dir) => {
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "a\u001b[31m\u0000b c d\u0085e\u007ff\tg\\h" }), { dir, now: NOW });
+  const log = readFileSync(join(dir, "clears.log"), "utf8");
+  assert.equal(log.trimEnd().endsWith(" a\\x1b[31m\\x00b\\u2028c\\u2029d\\x85e\\x7ff\\x09g\\\\h"), true, log);
+  assert.equal(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\p{Zl}\p{Zp}]/u.test(log), false);
+}));
+
+test("#548 criterion 3: clears.log is cut to its newest half past 1 MB and the new line is appended", () => withDir((dir) => {
+  const file = join(dir, "clears.log");
+  const line = `${"o".repeat(98)}\n`;
+  writeFileSync(file, line.repeat(Math.ceil((CLEARS_LOG_MAX_BYTES + 1000) / line.length)));
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "fresh" }), { dir, now: NOW });
+  const log = readFileSync(file, "utf8");
+  assert.ok(log.length <= CLEARS_LOG_MAX_BYTES / 2 + 200, `${log.length}`);
+  assert.equal(log.startsWith("o".repeat(98)), true);
+  assert.equal(log.trimEnd().endsWith(" s1 0 fresh"), true);
+}));
+
+test("edge: a clears.log under the cap is only appended to", () => withDir((dir) => {
+  const file = join(dir, "clears.log");
+  writeFileSync(file, "old line\n");
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "next" }), { dir, now: NOW });
+  assert.equal(readFileSync(file, "utf8").startsWith("old line\n"), true);
+}));
+
+test("#548 criterion 4: gh issue/pr text naming post-review owner is allowed, a real run is still denied", () => {
+  for (const c of [
+    'gh issue create --title "post-review owner and /approve refuse under team: x" --body-file f',
+    "gh pr create --title 'run node scripts/lanes/post-review.mjs owner --pr 5' --body-file f",
+    'gh pr create --title x --body "fix post-review owner handling"',
+    'gh issue create --title="post-review owner fails" --body-file f',
+    'gh issue create -t "post-review owner" -b "post-review"',
+  ]) assert.equal(decideBash(c), null, c);
+  for (const c of [
+    "node scripts/lanes/post-review.mjs owner --pr 5",
+    "gh issue create --title x && node scripts/lanes/post-review.mjs owner --pr 5",
+    'gh issue create --title "$(node scripts/lanes/post-review.mjs owner --pr 5)"',
+    'gh issue create --title "`node scripts/lanes/post-review.mjs owner --pr 5`"',
+    'gh issue create --title x --body-file "$(node scripts/lanes/post-review.mjs owner --pr 5)"',
+    "bash -c \"gh issue create --title 'post-review owner'\"; node scripts/lanes/post-review.mjs owner --pr 5",
+  ]) assert.notEqual(decideBash(c), null, c);
 });
