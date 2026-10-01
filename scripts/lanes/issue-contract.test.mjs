@@ -117,6 +117,63 @@ test("main fails closed when the author's permission cannot be read", () => {
   assert.deepEqual(labelEdit(calls2), ["issue", "edit", "9", "-R", "o/r", "--add-label", "tier:full"]);
 });
 
+// #580 (ADR 0022 part 2): under team (the repository's own config), a released lane-filed bot issue is trusted.
+const BOT = JSON.parse(readFileSync("lanes.config.json", "utf8")).identity.app.botLogin;
+const labeledBy = (login, id, event = "labeled") => ({ id, event, created_at: `2026-10-01T1${id}:00:00Z`, label: { name: "lane-filed" }, actor: { login } });
+function fakeBotIssue({ labels = [], events = [labeledBy(BOT, 1), labeledBy("leo", 2, "unlabeled")], edit = { lastEditedAt: null, editor: null }, fail = false } = {}) {
+  const calls = [];
+  const run = (args) => {
+    calls.push(args);
+    const path = args.find((a) => a.startsWith("repos/")) ?? "";
+    if (path === "repos/o/r/collaborators/leo/permission") return JSON.stringify({ permission: "admin" });
+    if (path.startsWith("repos/o/r/collaborators/")) throw ghError("gh: Not Found (HTTP 404)\n");
+    if (fail && path === "repos/o/r/issues/9/events") throw ghError("gh: HTTP 502\n");
+    if (path === "repos/o/r/issues/9") return JSON.stringify({ user: { login: BOT, type: "Bot" }, labels: labels.map((name) => ({ name })) });
+    if (path === "repos/o/r/issues/9/events") return events.map((e) => JSON.stringify(e)).join("\n");
+    if (args[1] === "graphql") return JSON.stringify({ data: { repository: { issue: edit } } });
+    return "";
+  };
+  return { run, calls };
+}
+const botEnv = { ...env, ISSUE_AUTHOR: BOT };
+
+test("team: main adds ready for a lane-filed bot issue a write-access actor released", () => {
+  const { run, calls } = fakeBotIssue();
+  main(botEnv, run);
+  assert.deepEqual(labelEdit(calls), ["issue", "edit", "9", "-R", "o/r", "--add-label", "tier:full,ready"]);
+});
+
+test("team: main never adds ready for a bot issue still lane-filed, never released or self-released", () => {
+  const selfReleased = [labeledBy(BOT, 1), labeledBy(BOT, 2, "unlabeled")];
+  for (const [name, opts] of [["still lane-filed", { labels: ["lane-filed"] }], ["never released", { events: [] }], ["self-released", { events: selfReleased }]]) {
+    const { run, calls } = fakeBotIssue(opts);
+    main({ ...botEnv, ISSUE_LABELS_JSON: JSON.stringify(opts.labels ?? []) }, run);
+    assert.ok(!labelEdit(calls)?.join(",").includes("ready"), name);
+  }
+});
+
+test("edge: main fails closed when the release cannot be read", () => {
+  const { run, calls } = fakeBotIssue({ fail: true });
+  main(botEnv, run);
+  assert.ok(!labelEdit(calls)?.join(",").includes("ready"));
+});
+
+test("edge: a body edit by a non-writer after the release removes ready on the next run", () => {
+  const edit = { lastEditedAt: "2026-10-01T15:00:00Z", editor: { login: "guest" } };
+  const { run, calls } = fakeBotIssue({ edit });
+  main({ ...botEnv, ISSUE_LABELS_JSON: JSON.stringify(["ready", "tier:full"]) }, run);
+  const e = labelEdit(calls);
+  assert.equal(e[e.indexOf("--remove-label") + 1], "ready");
+  assert.ok(!e[e.indexOf("--add-label") + 1]?.includes("ready"));
+});
+
+test("owner-authored issues are unchanged and read no release", () => {
+  const { run, calls } = fakeGh("admin");
+  main(env, run);
+  assert.deepEqual(labelEdit(calls), ["issue", "edit", "9", "-R", "o/r", "--add-label", "tier:full,ready"]);
+  assert.ok(!calls.some((a) => a.some((x) => String(x).includes("/events"))));
+});
+
 // #11: "Blocked by" is the source of truth; GitHub's native blocked-by relationships are a mirror of it.
 test("blockerDiff: add only, remove only, both, no change, and none", () => {
   const cur = (...ns) => ns.map((n) => ({ id: 1000 + n, number: n }));

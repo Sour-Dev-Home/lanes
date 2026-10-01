@@ -21,11 +21,14 @@ private channel in a public issue that contains no details.
 | **Untrusted issue text steering a lane** | Invariant I4: an issue a lane filed carries `lane-filed` and never becomes `ready` until the owner removes the label; auto-release was considered and rejected | [0015](adr/0015-owner-input.md), [0008](adr/0008-module-map.md) |
 | **Secrets or personal data in published files** | The `PII_PATTERNS` repository secret feeds a scan (the `security` check and the pre-push `preflight`) for personal data and absolute local paths; the dashboard publisher runs the same check on what it publishes ([ADR 0012](adr/0012-endgame-workflow.md), [0013](adr/0013-lane-metrics.md)); setup is in [USING.md](USING.md) | [0012](adr/0012-endgame-workflow.md), [0013](adr/0013-lane-metrics.md) |
 
-**Who counts as a trusted author.** Two parts ([0020](adr/0020-gate-trusts-the-lane-app-bot.md)): a human with write permission on
+**Who counts as a trusted author.** Three cases ([0020](adr/0020-gate-trusts-the-lane-app-bot.md),
+[0022](adr/0022-release-lane-filed-bot-issues.md)): a human with write permission on
 the repository, or, only under the `team` identity profile, the configured App bot (`identity.app.botLogin`, matched
 exactly). The bot counts for reviewer output alone: a `review/<reviewer>` status or a verdict comment for a configured
 reviewer, never `review/owner`, which only a human with write permission can post. Any other bot, such as
-`github-actions[bot]`, counts for nothing, and under `solo` no bot does.
+`github-actions[bot]`, counts for nothing, and under `solo` no bot does. The third case, also team only, is a
+lane-bot issue released by a write-access actor (not the bot) removing `lane-filed`: the issue check and the gate trust
+it as an author until someone without write access edits its body.
 
 **Approving under the `team` profile** ([0021](adr/0021-team-native-code-owner-review.md)). There is no `/approve` and no
 `review/owner`: the owner approves the PR in GitHub. The gate counts a review only if it is `APPROVED` on the PR's
