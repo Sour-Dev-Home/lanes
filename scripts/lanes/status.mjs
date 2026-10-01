@@ -149,10 +149,38 @@ const normalPath = (p) => {
   return /^[a-z]:\//i.test(slashed) ? slashed.toLowerCase() : slashed;
 };
 
-// Issue N → `{ id, state, waiting }` for each background session whose cwd is inside a worktree of `repoRoot`
+// #571: the one test for "this lane session has stopped": idle (any `state`, `blocked` included) and not on a permission
+// prompt. /status and /start both decide through it, so they cannot disagree about the same session.
+export function idleLaneSession(agent) {
+  return agent?.status === "idle" && agent.waitingFor !== PROMPT_WAITING_FOR;
+}
+
+// #571: the recovery both /status and /start give for an idle lane session with no PR.
+export function idleLaneRecovery(id, n, unsaved = false) {
+  return `message it to continue, or stop it (claude stop ${id}) and run /start ${n} again${unsaved ? "; worktree has unsaved changes" : ""}`;
+}
+
+// The `issue-<N>[-slug]` worktree folder a session's cwd is in (cwd may be a subfolder), or null: a lane that entered its
+// worktree by path reports the repository root, and then there is no folder to read.
+export function laneWorktree(cwd, n) {
+  return new RegExp(`^(.*/\\.claude/worktrees/issue-${Number(n)}(?:-[^/]*)?)(?:/|$)`).exec(normalPath(String(cwd ?? "")))?.[1] ?? null;
+}
+
+// #571: whether the worktree has uncommitted changes, read with `git -C <dir> status --porcelain` only. A read failure
+// (or no worktree) is false: it adds nothing and never changes a refusal.
+export function worktreeUnsaved(dir, run = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 })) {
+  if (!dir) return false;
+  try {
+    return String(run(["-C", dir, "status", "--porcelain"])).trim() !== "";
+  } catch {
+    return false;
+  }
+}
+
+// Issue N → `{ id, state, waiting, stopped }` for each background session whose cwd is inside a worktree of `repoRoot`
 // named `issue-<N>-…`, or bare `issue-<N>` (#134). Two sessions on one issue: the most recently started wins.
 export function laneSessions(agents, repoRoot) {
-  return new Map([...latestLaneAgents(agents, repoRoot)].map(([n, { agent: a }]) => [n, { id: a.id, state: a.state, waiting: a.state === PROMPT_STATE && a.waitingFor === PROMPT_WAITING_FOR }]));
+  return new Map([...latestLaneAgents(agents, repoRoot)].map(([n, { agent: a }]) => [n, { id: a.id, state: a.state, waiting: a.state === PROMPT_STATE && a.waitingFor === PROMPT_WAITING_FOR, stopped: idleLaneSession(a) }]));
 }
 
 // #390: the running lane sessions as `{ issue, sessionId, cwd }`, for lane-cost.mjs's loadBudget.
@@ -221,7 +249,7 @@ function silentLanes(agents, repoRoot, wanted, { home = homedir(), now = Date.no
 const runClaudeAgents = () => execFileSync("claude", ["agents", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
 
 // `{ sessions }` from `claude agents --json`, or `{ sessions: empty, sessionsUnavailable: reason }` when it cannot be read.
-export function loadSessions(repoRoot, run = runClaudeAgents) {
+export function loadSessions(repoRoot, run = runClaudeAgents, runGit) {
   let stdout;
   try {
     stdout = run();
@@ -234,7 +262,12 @@ export function loadSessions(repoRoot, run = runClaudeAgents) {
     agents = JSON.parse(stdout);
   } catch {}
   if (!Array.isArray(agents)) return { sessions: new Map(), sessionsUnavailable: "claude agents --json printed invalid JSON" };
-  return { sessions: laneSessions(agents, repoRoot) };
+  const sessions = laneSessions(agents, repoRoot);
+  // #571: a stopped session's worktree is read once, so the note can say its work is unsaved.
+  for (const [n, { agent: a }] of latestLaneAgents(agents, repoRoot)) {
+    if (sessions.get(n)?.stopped && worktreeUnsaved(laneWorktree(a.cwd, n), runGit)) sessions.get(n).unsaved = true;
+  }
+  return { sessions };
 }
 
 const LANE_BRANCH = /^issue-(\d+)(?:-.*)?$/;
@@ -332,7 +365,7 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
     if (!taken.has(issue.number) && branches.some((b) => prBranches.has(b))) taken.add(issue.number);
     const session = taken.has(issue.number) ? undefined : sessions.get(issue.number);
     // A lane that pushed or kept a branch and then stopped (e.g. at a usage limit) opens no PR: the owner restarts it.
-    const idle = !session || (session.state === PROMPT_STATE && !session.waiting);
+    const idle = !session || session.stopped;
     // A lane found every criterion already met on main and took the issue out of the ready pool (#136). An open PR
     // or a busy session on the issue still shows as such.
     if (labels.includes("needs-owner") && !taken.has(issue.number) && idle) {
@@ -341,7 +374,8 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
     }
     if (!taken.has(issue.number) && labels.includes("ready") && branches.length && idle) {
       const item = { number: issue.number, title: issue.title, stage: "stopped", note: `no PR yet: restart with /start ${issue.number}` };
-      out.waitingOnOwner.push(session ? { ...item, session: { id: session.id, state: session.state } } : item);
+      // #571: /start refuses an issue with a session, so the note names the session and the recovery /start gives.
+      out.waitingOnOwner.push(session ? { ...item, note: `no PR yet: session ${session.id} is idle; ${idleLaneRecovery(session.id, issue.number, session.unsaved)}`, session: { id: session.id, state: session.state } } : item);
       // Its branch still holds work on the issue's paths, so other issues on those paths wait for it.
       runningIssues.push(issue);
       continue;

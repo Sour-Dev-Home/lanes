@@ -17,6 +17,7 @@ import { main as checkBlockers } from "./blockers.mjs";
 import { cleanupMerged } from "./cleanup.mjs";
 import { TIERS, laneIssueOf, parseIdentity, parseIssueForm } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
+import { idleLaneRecovery, idleLaneSession, laneWorktree, worktreeUnsaved } from "./status.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { grantPath, grantRefusal, readGrant } from "./start-guard.mjs";
 
@@ -449,6 +450,16 @@ const branchIssue = (name) => String(name ?? "").match(/^issue-(\d+)-/)?.[1];
 // An entry with no `kind` is not a background session here, as before.
 const sessionIssue = (s) => (s?.kind === "background" ? (laneIssueOf(s) ?? undefined) : undefined);
 
+// The newest session of issue `n`'s lane, or null when none is listed.
+function newestLaneSession(sessions, n) {
+  let newest = null;
+  for (const s of sessions) {
+    if (Number(laneIssueOf(s)) !== n || (newest && (newest.startedAt ?? 0) > (s.startedAt ?? 0))) continue;
+    newest = s;
+  }
+  return newest;
+}
+
 /**
  * #444: whether issue `n`'s lane session is dead: none is listed, or the newest one is idle with no prompt pending
  * (the same test recovery uses for a lane that ended). A busy or blocked session is alive. Pure.
@@ -457,11 +468,7 @@ const sessionIssue = (s) => (s?.kind === "background" ? (laneIssueOf(s) ?? undef
  * @returns {{ dead: boolean, session: object | null }} `session` is the newest one, or null when none is listed
  */
 export function deadLaneSession(sessions, n) {
-  let newest = null;
-  for (const s of sessions) {
-    if (Number(laneIssueOf(s)) !== n || (newest && (newest.startedAt ?? 0) > (s.startedAt ?? 0))) continue;
-    newest = s;
-  }
+  const newest = newestLaneSession(sessions, n);
   return { dead: !newest || (newest.status === "idle" && newest.state !== "blocked"), session: newest };
 }
 
@@ -562,9 +569,15 @@ function readInFlight(deps, fields) {
 }
 
 // #444: "already in flight" for an issue whose only lane is an open PR with no live session says so, and how to resume it.
-function inFlightReason(n, prs, sessions) {
+// #571: with no open PR, a newest session that is idle is a stalled lane: name it and the recovery /status gives too.
+function inFlightReason(n, prs, sessions, runGit) {
   const pr = prs.find((p) => Number(branchIssue(p.headRefName)) === n);
-  if (!pr || !deadLaneSession(sessions, n).dead) return "already in flight";
+  if (!pr) {
+    const s = newestLaneSession(sessions, n);
+    if (!s || typeof s.id !== "string" || !idleLaneSession(s)) return "already in flight";
+    return `already in flight: lane session ${s.id} is idle with no PR; ${idleLaneRecovery(s.id, n, worktreeUnsaved(laneWorktree(s.cwd, n), runGit))}`;
+  }
+  if (!deadLaneSession(sessions, n).dead) return "already in flight";
   return `already in flight: dead lane with open PR #${pr.number} and no live session; run the queue (node scripts/lanes/queue.mjs) in your terminal to resume it in its worktree once, if its checks or reviews are still owed and nothing there is unsaved`;
 }
 
@@ -725,7 +738,7 @@ function autoStart(go, deps, { maxLanes, softPaths, models, identity }) {
   const candidates = [];
   for (const issue of ready) {
     const why = busy.has(issue.number)
-      ? inFlightReason(issue.number, prs, sessions)
+      ? inFlightReason(issue.number, prs, sessions, deps.git)
       : refusal({ state: "OPEN", labels: labelsOf(issue), assignees: loginsOf(issue), blockers: checkBlockers([String(issue.number)], deps.gh) });
     if (why) skipped.push({ number: issue.number, reason: why });
     else candidates.push(issue);
@@ -886,7 +899,7 @@ function startIssues(args, deps, config) {
   const labels = new Map(issues.filter((i) => i.labels).map((i) => [i.number, i.labels]));
   const launched = launchAll(launch, deps, { tiers, models: config.models, labels, identity: config.identity });
   recordDecisions(deps, deps.root(), startDecisions({ started: launch, skipped: refused, at: new Date(deps.now()).toISOString() }));
-  const why = (r) => (r.reason === "already in flight" ? inFlightReason(r.number, prs, sessions) : r.reason);
+  const why = (r) => (r.reason === "already in flight" ? inFlightReason(r.number, prs, sessions, deps.git) : r.reason);
   const lines = new Map([...refused.map((r) => [r.number, [`#${r.number}: refused: ${why(r)}`]]), ...launched.lines]);
   return { code: refused.length || launched.failed ? 1 : 0, lines: numbers.flatMap((n) => lines.get(n)) };
 }

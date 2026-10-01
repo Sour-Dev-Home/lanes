@@ -1373,6 +1373,57 @@ for (const status of ["idle", "busy"]) {
   });
 }
 
+// #571: a stalled lane (idle session, no PR) is refused with the session and the recovery /status gives.
+const STALLED = (id, n) => `#${n}: refused: already in flight: lane session ${id} is idle with no PR; message it to continue, or stop it (claude stop ${id}) and run /start ${n} again`;
+const stalledCwd = "/repo/.claude/worktrees/issue-6-x";
+
+test("#571: an idle/blocked session with no PR (lane-558's shape) is refused naming the session and both recoveries", () => {
+  const sessions = [{ kind: "background", id: "bg-558", name: "lane-6", status: "idle", state: "blocked", cwd: stalledCwd }];
+  const { deps, launches } = fakes({ issues: { 6: { body: form({ scope: "In: `f.mjs`." }) } }, sessions });
+  const { code, lines } = main(["6"], deps);
+  assert.equal(code, 1);
+  assert.deepEqual(lines, [STALLED("bg-558", 6)]);
+  assert.doesNotMatch(lines[0], /restart with/);
+  assert.equal(launches.length, 0);
+});
+
+test("#571: idle in any state is stalled, busy and prompt-waiting stay plain already in flight, and --auto uses the same text", () => {
+  const issues = { 6: { body: form({ scope: "In: `f.mjs`." }) } };
+  for (const state of ["blocked", "prompt", "working"]) {
+    const sessions = [{ kind: "background", id: "s1", status: "idle", state, cwd: stalledCwd }];
+    assert.deepEqual(main(["6"], fakes({ issues, sessions }).deps).lines, [STALLED("s1", 6)], state);
+    const viaAuto = main(["--auto"], fakes({ issues: autoIssues(), sessions: [{ ...sessions[0], cwd: "/repo/.claude/worktrees/issue-6" }] }).deps).lines;
+    assert.ok(viaAuto.includes(STALLED("s1", 6).replace(": refused: ", ": skipped: ")), viaAuto.join("\n"));
+  }
+  for (const extra of [{ status: "busy", state: "working" }, { status: "waiting", state: "blocked", waitingFor: "permission prompt" }]) {
+    const sessions = [{ kind: "background", id: "s1", cwd: stalledCwd, ...extra }];
+    assert.deepEqual(main(["6"], fakes({ issues, sessions }).deps).lines, ["#6: refused: already in flight"]);
+  }
+});
+
+test("#571: edge: the newest session decides, and a session with no readable id keeps the plain reason", () => {
+  const issues = { 6: { body: form({ scope: "In: `f.mjs`." }) } };
+  const older = { kind: "background", id: "old", status: "idle", state: "blocked", startedAt: 1, cwd: stalledCwd };
+  const newer = { kind: "background", id: "new", status: "busy", state: "working", startedAt: 2, cwd: stalledCwd };
+  assert.deepEqual(main(["6"], fakes({ issues, sessions: [older, newer] }).deps).lines, ["#6: refused: already in flight"]);
+  assert.deepEqual(main(["6"], fakes({ issues, sessions: [newer, { ...older, startedAt: 3 }] }).deps).lines, [STALLED("old", 6)]);
+  assert.deepEqual(main(["6"], fakes({ issues, sessions: [{ ...older, id: undefined }] }).deps).lines, ["#6: refused: already in flight"]);
+});
+
+test("#571: the refusal adds 'worktree has unsaved changes' from git -C <worktree> status --porcelain, and a read failure adds nothing", () => {
+  const issues = { 6: { body: form({ scope: "In: `f.mjs`." }) } };
+  const sessions = [{ kind: "background", id: "s1", status: "idle", state: "blocked", cwd: `${stalledCwd}/scripts` }];
+  const dirty = fakes({ issues, sessions });
+  const calls = [];
+  dirty.deps.git = (args) => (calls.push(args), " M f.mjs\n");
+  assert.deepEqual(main(["6"], dirty.deps).lines, [`${STALLED("s1", 6)}; worktree has unsaved changes`]);
+  assert.deepEqual(calls, [["-C", stalledCwd, "status", "--porcelain"]]);
+  const failing = fakes({ issues, sessions });
+  failing.deps.git = () => { throw new Error("not a git repository"); };
+  assert.deepEqual(main(["6"], failing.deps).lines, [STALLED("s1", 6)]);
+  assert.equal(failing.launches.length, 0);
+});
+
 test("edge: a session in a bare issue-60 folder does not put #6 in flight", () => {
   const { deps } = fakes({ issues: autoIssues(), sessions: [{ kind: "background", cwd: "/repo/.claude/worktrees/issue-60" }] });
   const lines = main(["--auto"], deps).lines;
