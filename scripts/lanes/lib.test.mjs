@@ -1239,7 +1239,8 @@ test("gateDecision trusts the lane bot's reviewer statuses under team, but never
   const names = requiredReviewers("full", classifyFiles(PIN_FILES, ownerCfg));
   const botPassed = names.map((n) => botStatus(n));
   const args = { ownerDiff: "additive", statuses: botPassed };
-  assert.equal(gateDecision(pinPr({ ...args, config: teamCfg })).state, "success");
+  assert.equal(gateDecision(pinPr({ ...args, config: teamCfg, nativeApproval: approvedBy })).state, "success");
+  assert.equal(gateDecision(pinPr({ ...args, config: teamCfg })).state, "pending", "team: an unread native approval is pending (#575)");
   assert.notEqual(gateDecision(pinPr({ ...args, config: ownerCfg })).state, "success", "no identity: no bot trusted");
   assert.notEqual(gateDecision(pinPr({ ...args, config: { ...ownerCfg, identity: { profile: "solo" } } })).state, "success");
   assert.notEqual(gateDecision(pinPr({ ...args, config: { ...ownerCfg, identity: { profile: "team", app: { id: 1, installationId: 2 } } } })).state, "success");
@@ -1367,17 +1368,24 @@ test("team gateDecision with no owner reason does not need a native review and s
   assert.equal(gateDecision(teamPr({ statuses: [] })).stage, "review");
 });
 
-test("team gateDecision with nativeApproval null or absent (transitional) keeps today's owner stage", () => {
-  const today = gateDecision({ ...needsPr(), config: ownerCfg });
-  assert.equal(today.description, "waiting on owner (/approve) (needs the owner)");
+test("team gateDecision with nativeApproval null or absent is pending, never the solo owner stage (#575)", () => {
   for (const nativeApproval of [undefined, null]) {
-    assert.deepEqual(gateDecision(needsPr({ nativeApproval })), today, String(nativeApproval));
+    const d = gateDecision(needsPr({ nativeApproval }));
+    assert.deepEqual([d.state, d.stage, d.description], ["pending", "owner", teamWait("needs the owner")], String(nativeApproval));
   }
-  // review/owner success passes, the carry passes and the additive exemption applies, as today
+  // review/owner success, the carry and the additive exemption do not pass it either
   const ownerStatus = { ...ownerOk, creator: human };
-  assert.equal(gateDecision(needsPr({ statuses: [...passed(["test-hunter"]), ownerStatus], nativeApproval: null })).description, "approved by owner");
-  assert.match(gateDecision(needsPr({ ownerCarry: { sha: OWNED, status: ownerStatus, same: true }, nativeApproval: null })).description, /carried from/);
-  assert.equal(gateDecision(teamPr({ files: PIN_FILES, ownerDiff: "additive", nativeApproval: null })).state, "success");
+  for (const nativeApproval of [undefined, null]) {
+    const withOwner = gateDecision(needsPr({ statuses: [...passed(["test-hunter"]), ownerStatus], nativeApproval }));
+    assert.deepEqual([withOwner.state, withOwner.stage, withOwner.description], ["pending", "owner", teamWait("needs the owner")], `review/owner ${nativeApproval}`);
+    const carried = gateDecision(needsPr({ ownerCarry: { sha: OWNED, status: ownerStatus, same: true }, nativeApproval }));
+    assert.deepEqual([carried.state, carried.stage, carried.description], ["pending", "owner", teamWait("needs the owner")], `carry ${nativeApproval}`);
+    const exempt = gateDecision(teamPr({ files: PIN_FILES, ownerDiff: "additive", nativeApproval }));
+    assert.deepEqual([exempt.state, exempt.stage], ["pending", "owner"], `exempt ${nativeApproval}`);
+    assert.match(exempt.description, /^waiting for a code-owner review in GitHub \(owner-only path\)/);
+  }
+  // edge: a non-object nativeApproval (a bare true) is not an approval either
+  assert.equal(gateDecision(needsPr({ nativeApproval: true })).state, "pending");
 });
 
 test("team gateDecision with a nativeApproval object ignores a review/owner success; only approved true passes", () => {

@@ -894,10 +894,9 @@ function blockerStatus(blockers, closes) {
  * has the head's `diffFingerprint`: only `same === true` counts as the owner's approval, and only once every required
  * reviewer has passed on the head; otherwise it only changes what the gate says while it waits on the owner, and
  * `prNumber` names the PR in the `/approve` line. `nativeApproval` (ADR 0021) is `nativeCodeOwnerApproval`'s
- * `{ approved, by }`; under the team profile an object replaces review/owner, the carry and the ADR 0015 exemption at
- * every point the gate would wait on the owner, and only `approved === true` passes. TRANSITIONAL: null (the default,
- * "not read") keeps today's owner stage under team too, so the gate cannot lock before gate.mjs reads reviews (#559,
- * which never passes null under team; #575 removes this fallback). Solo ignores `nativeApproval` entirely.
+ * `{ approved, by }`; under the team profile it replaces review/owner, the carry and the ADR 0015 exemption at every
+ * point the gate would wait on the owner, and only `approved === true` passes: null (the default, "not read") or a
+ * missing value is pending, never a pass. Solo ignores `nativeApproval` entirely.
  */
 export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, ownerDiff = null, ownerCarry = null, prNumber = null, nativeApproval = null }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
@@ -947,8 +946,8 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
     }
   }
   // ADR 0021: under team, once the gate passes a native approval object, the owner stage is a native code-owner review
-  // and review/owner and the carry are ignored. Null (unread) keeps the solo stage for now (see the JSDoc; #575).
-  const team = config.identity?.profile === "team" && nativeApproval !== null && typeof nativeApproval === "object";
+  // and review/owner and the carry are ignored. A null or missing approval (unread) is pending, never the solo stage.
+  const team = config.identity?.profile === "team";
   let carried = null;
   if (!team) {
     if (latest.get(reviewContext("owner"))?.state === "success") {
