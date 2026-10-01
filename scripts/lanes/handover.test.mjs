@@ -136,6 +136,87 @@ test("handover (#595): edge: invalid UTF-8, an oversized comment and an unsafe b
   }
 });
 
+test("handover (#607): refuses hidden, bidi and control characters, naming the file and posting nothing", () => {
+  const classes = {
+    "bidi embedding U+202A": "\u202a",
+    "bidi override U+202E": "\u202e",
+    "bidi isolate U+2066": "\u2066",
+    "bidi isolate U+2069": "\u2069",
+    "bidi mark U+200F": "\u200f",
+    "zero-width space U+200B": "\u200b",
+    "zero-width joiner U+200D": "\u200d",
+    "word joiner U+2060": "\u2060",
+    "byte order mark U+FEFF": "\ufeff",
+    "NUL": "\u0000",
+    "escape": "\u001b",
+    "backspace": "\u0008",
+    "DEL": "\u007f",
+    "C1 control U+0085": "\u0085",
+    "deprecated format U+206A": "\u206a",
+    "unassigned format U+2065": "\u2065",
+    "soft hyphen": "\u00ad",
+    "grapheme joiner": "\u034f",
+    "Hangul filler U+3164": "\u3164",
+    "variation selector U+FE0F": "\ufe0f",
+    "interlinear annotation U+FFFA": "\ufffa",
+    "tag character U+E0041": "\u{e0041}",
+    "variation selector U+E0100": "\u{e0100}",
+  };
+  for (const [name, ch] of Object.entries(classes)) {
+    const w = world({ files: { ".github/workflows/ci.yml": `on: push\nname: a${ch}b\n` } });
+    const r = handover(["9"], w.deps);
+    assert.equal(r.code, 1, `${name}: ${r.lines.join("\n")}`);
+    assert.match(r.lines[0], /\.github\/workflows\/ci\.yml/, name);
+    assert.match(r.lines[0], /hidden|control/, name);
+    assert.equal(w.posted.length, 0, name);
+  }
+});
+
+test("handover (#607): edge: each range edge is refused and its neighbour outside the range is accepted", () => {
+  const run = (cp) => {
+    const w = world({ files: { ".github/workflows/ci.yml": `on: push\nname: a${String.fromCodePoint(cp)}b\n` } });
+    return { r: handover(["9"], w.deps), w };
+  };
+  for (const cp of [0x00, 0x08, 0x0b, 0x0c, 0x0e, 0x1f, 0x7f, 0x9f, 0xad, 0x34f, 0x61c, 0x115f, 0x1160, 0x180e, 0x200b, 0x200e, 0x200f, 0x2028, 0x2029, 0x202b, 0x202c, 0x202d, 0x2067, 0x2068, 0x206f, 0x3164, 0xfe00, 0xfeff, 0xffa0, 0xfff9, 0xfffb, 0xe0000, 0xe007f, 0xe0100, 0xe01ef]) {
+    const { r, w } = run(cp);
+    assert.equal(r.code, 1, `U+${cp.toString(16)} refused`);
+    assert.equal(w.posted.length, 0);
+  }
+  for (const cp of [0x09, 0x0a, 0x0d, 0x20, 0x7e, 0xa0, 0xa1, 0x2027, 0x202f, 0x2070, 0x3000, 0xe0080, 0xe00ff, 0xe01f0, 0x1f600]) {
+    const { r, w } = run(cp);
+    assert.equal(r.code, 0, `U+${cp.toString(16)} accepted: ${r.lines.join("\n")}`);
+    assert.equal(w.posted.length, 1);
+  }
+});
+
+test("handover (#607): edge: only tab, LF and CR controls are accepted; the second file's name is the one refused", () => {
+  const ok = world({ files: { ".github/workflows/ci.yml": "on: push\r\njobs:\n\tx: 1\n" } });
+  assert.equal(handover(["9"], ok.deps).code, 0);
+  assert.equal(ok.posted.length, 1);
+  const two = world({
+    status: ["M", ".github/workflows/ci.yml", "A", ".github/workflows/new.yml"],
+    files: { ".github/workflows/ci.yml": "on: push\n", ".github/workflows/new.yml": "on: x\u202e\n" },
+  });
+  const r = handover(["9"], two.deps);
+  assert.equal(r.code, 1);
+  assert.match(r.lines[0], /new\.yml/);
+  assert.equal(two.posted.length, 0);
+});
+
+test("handover (#607): edge: the comment is accepted at exactly 60000 characters and refused one over", () => {
+  const path = ".github/workflows/ci.yml";
+  const overhead = handoverComment({ repo: "owner/lanes", branch: "issue-9-x", files: [{ path, status: "M", text: "" }] }).length;
+  const at = world({ files: { [path]: "x".repeat(60000 - overhead) } });
+  assert.equal(handover(["9"], at.deps).code, 0);
+  assert.equal(at.posted.length, 1);
+  assert.equal(at.posted[0].body.length, 60000);
+  const over = world({ files: { [path]: "x".repeat(60000 - overhead + 1) } });
+  const r = handover(["9"], over.deps);
+  assert.equal(r.code, 1);
+  assert.match(r.lines[0], /too large/);
+  assert.equal(over.posted.length, 0);
+});
+
 test("handover (#595): edge: a bad or missing PR number is a usage error and reads nothing", () => {
   for (const argv of [[], ["x"], ["0"], ["9", "10"], ["-1"], ["9;rm"]]) {
     const w = world();
