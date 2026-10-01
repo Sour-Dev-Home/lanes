@@ -380,7 +380,7 @@ test("real config: review/owner success still passes anything, owner-only includ
 
 test("real config under the team profile: an owner-only path waits for a native code-owner review (ADR 0021)", () => {
   assert.equal(realTeam.identity?.profile, "team");
-  const input = { config: realTeam, ...clean(["test-hunter", "security-reviewer"]) };
+  const input = { config: realTeam, ...clean(["test-hunter", "security-reviewer"]), nativeApproval: { approved: false, by: null } };
   const d = onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"], input);
   assert.deepEqual(d, { state: "pending", description: "waiting for a code-owner review in GitHub (owner-only path)", stage: "owner" });
   assert.equal(onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"], { ...input, nativeApproval: { approved: true, by: "leo" } }).state, "success");

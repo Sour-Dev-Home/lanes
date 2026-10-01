@@ -1386,8 +1386,7 @@ test("team: a lane-bot review/owner status never satisfies the owner stage", () 
   const base = routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`];
   routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`] = [...base, botStatus("review/owner")];
   const { api } = fakeApi(routes);
-  // ADR 0021: under team the owner stage is a native code-owner review (nothing read yet means pending).
-  assert.equal(evaluatePr(api, "o/r", 5, cfg).description, "waiting for a code-owner review in GitHub (owner-only path)");
+  assert.equal(evaluatePr(api, "o/r", 5, cfg).description, "waiting on owner (/approve) (owner-only path)");
 });
 
 test("team: a lane-bot review/test-hunter status on an earlier reviewed commit is reused; under solo it is not", () => {
