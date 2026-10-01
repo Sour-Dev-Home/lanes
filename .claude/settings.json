@@ -10,6 +10,7 @@
       "Bash(node scripts/lanes/status.mjs:*)",
       "Bash(node scripts/lanes/reviewers.mjs:*)",
       "Bash(node scripts/lanes/blockers.mjs:*)",
+      "Bash(node scripts/lanes/identity-check.mjs)",
       "Bash(node scripts/lanes/delivery-metrics.mjs:*)",
       "Bash(node scripts/lanes/post-review.mjs test-hunter:*)",
       "Bash(node scripts/lanes/post-review.mjs ui-reviewer:*)",
