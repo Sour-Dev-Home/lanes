@@ -2021,3 +2021,30 @@ test("#548 criterion 4: gh issue/pr text naming post-review owner is allowed, a 
     "bash -c \"gh issue create --title 'post-review owner'\"; node scripts/lanes/post-review.mjs owner --pr 5",
   ]) assert.notEqual(decideBash(c), null, c);
 });
+
+test("edge: clears.log of exactly the cap is kept whole, one byte past it is cut", () => withDir((dir) => {
+  const file = join(dir, "clears.log");
+  const line = `${"o".repeat(98)}\n`;
+  const fill = (n) => line.repeat(Math.floor(n / line.length)) + "x".repeat(n % line.length - 1) + (n % line.length ? "\n" : "");
+  writeFileSync(file, fill(CLEARS_LOG_MAX_BYTES));
+  assert.equal(readFileSync(file).length, CLEARS_LOG_MAX_BYTES);
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "at" }), { dir, now: NOW });
+  assert.ok(readFileSync(file).length > CLEARS_LOG_MAX_BYTES, "at the cap nothing is cut");
+  writeFileSync(file, `${fill(CLEARS_LOG_MAX_BYTES)}\n`);
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "past" }), { dir, now: NOW });
+  assert.ok(readFileSync(file).length <= CLEARS_LOG_MAX_BYTES / 2 + 200, "past the cap it is cut");
+}));
+
+test("edge: gh --title/--body with a live substitution, a flag it does not exempt, or a non-gh command is still denied", () => {
+  const P = "node scripts/lanes/post-review.mjs owner --pr 5";
+  for (const c of [
+    `gh issue create --title 'a'"$(${P})"`,
+    `gh issue create --title x ${P}`,
+    `gh pr create --title x --label ${P}`,
+    `gh issue create --title x -F "${P}"`,
+    `gh pr create --editor "${P}" --title x`,
+    `gh alias set x '!${P}'`,
+    `FOO=1 gh issue create --title x; ${P}`,
+    `echo --title "post-review owner"; ${P}`,
+  ]) assert.notEqual(decideBash(c), null, c);
+});
