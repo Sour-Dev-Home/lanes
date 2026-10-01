@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adrGoverns, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { adrGoverns, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -1100,7 +1100,9 @@ test("gateDecision trusts the lane bot's reviewer statuses under team, but never
   const names = requiredReviewers("full", classifyFiles(PIN_FILES, ownerCfg));
   const botPassed = names.map((n) => botStatus(n));
   const args = { ownerDiff: "additive", statuses: botPassed };
-  assert.equal(gateDecision(pinPr({ ...args, config: teamCfg })).state, "success");
+  // ADR 0021: under team the pin files' owner-only path waits on a native code-owner review, not the additive exemption.
+  assert.equal(gateDecision(pinPr({ ...args, config: teamCfg })).state, "pending");
+  assert.equal(gateDecision(pinPr({ ...args, config: teamCfg, nativeApproval: { approved: true, by: "leo" } })).state, "success");
   assert.notEqual(gateDecision(pinPr({ ...args, config: ownerCfg })).state, "success", "no identity: no bot trusted");
   assert.notEqual(gateDecision(pinPr({ ...args, config: { ...ownerCfg, identity: { profile: "solo" } } })).state, "success");
   assert.notEqual(gateDecision(pinPr({ ...args, config: { ...ownerCfg, identity: { profile: "team", app: { id: 1, installationId: 2 } } } })).state, "success");
@@ -1117,4 +1119,112 @@ test("gateDecision reuse takes a lane-bot status under team and refuses it other
   const base = pinPr({ ownerDiff: "additive", statuses: others, verdicts: praised(names).map((v) => (v.reviewer === "test-hunter" ? { ...v, sha } : v)), reused });
   assert.match(gateDecision({ ...base, config: { ...ownerCfg, identity: TEAM_ID } }).description, /reused test-hunter/);
   assert.doesNotMatch(gateDecision({ ...base, config: ownerCfg }).description, /reused test-hunter/);
+});
+
+// #558, ADR 0021: the team profile's owner stage is a native code-owner review.
+const HEAD = "d".repeat(40);
+const review = (login, state = "APPROVED", commit_id = HEAD, type = "User") => ({ user: { login, type }, state, commit_id });
+const OWNERS = ["leo", "Mia"];
+
+test("nativeCodeOwnerApproval approves a code owner's APPROVED review on the head", () => {
+  assert.deepEqual(nativeCodeOwnerApproval([review("leo")], "lane-author", HEAD, OWNERS, TEAM_ID), { approved: true, by: "leo" });
+});
+
+test("nativeCodeOwnerApproval never approves an older SHA, the author, the lane bot or a non-owner", () => {
+  const no = { approved: false, by: null };
+  assert.deepEqual(nativeCodeOwnerApproval([review("leo", "APPROVED", "e".repeat(40))], "x", HEAD, OWNERS, TEAM_ID), no);
+  assert.deepEqual(nativeCodeOwnerApproval([review("leo")], "leo", HEAD, OWNERS, TEAM_ID), no);
+  assert.deepEqual(nativeCodeOwnerApproval([review(BOT, "APPROVED", HEAD, "Bot")], "x", HEAD, [BOT], TEAM_ID), no);
+  assert.deepEqual(nativeCodeOwnerApproval([review("eve")], "x", HEAD, OWNERS, TEAM_ID), no);
+});
+
+test("nativeCodeOwnerApproval lets a later CHANGES_REQUESTED or DISMISSED supersede, and a later approval win", () => {
+  for (const state of ["CHANGES_REQUESTED", "DISMISSED"]) {
+    assert.equal(nativeCodeOwnerApproval([review("leo"), review("leo", state)], "x", HEAD, OWNERS, TEAM_ID).approved, false, state);
+  }
+  assert.equal(nativeCodeOwnerApproval([review("leo", "CHANGES_REQUESTED"), review("leo")], "x", HEAD, OWNERS, TEAM_ID).approved, true);
+  // Another owner's later rejection does not undo this owner's approval.
+  assert.deepEqual(nativeCodeOwnerApproval([review("leo"), review("Mia", "CHANGES_REQUESTED")], "x", HEAD, OWNERS, TEAM_ID), { approved: true, by: "leo" });
+});
+
+test("edge: nativeCodeOwnerApproval matches owners exactly and fails closed on empty or malformed input", () => {
+  const no = { approved: false, by: null };
+  assert.deepEqual(nativeCodeOwnerApproval([review("LEO")], "x", HEAD, OWNERS, TEAM_ID), no);
+  assert.deepEqual(nativeCodeOwnerApproval([review("leo")], "x", HEAD, [], TEAM_ID), no);
+  for (const reviews of [null, undefined, "x", [], [null], [{}], [{ user: null, state: "APPROVED", commit_id: HEAD }]]) {
+    assert.deepEqual(nativeCodeOwnerApproval(reviews, "x", HEAD, OWNERS, TEAM_ID), no, JSON.stringify(reviews));
+  }
+  assert.deepEqual(nativeCodeOwnerApproval([review("leo")], "x", undefined, OWNERS, TEAM_ID), no);
+  assert.deepEqual(nativeCodeOwnerApproval([review("leo")], "x", HEAD, null, TEAM_ID), no);
+});
+
+test("edge: nativeCodeOwnerApproval treats a login that equals the bot as the bot only under team", () => {
+  assert.equal(nativeCodeOwnerApproval([review(BOT, "APPROVED", HEAD, "Bot")], "x", HEAD, [BOT], TEAM_ID).approved, false);
+  assert.equal(nativeCodeOwnerApproval([review(BOT, "APPROVED", HEAD, "Bot")], "x", HEAD, [BOT], undefined).approved, true);
+  assert.equal(nativeCodeOwnerApproval([review(BOT, "APPROVED", HEAD, "Bot")], "x", HEAD, [BOT], { profile: "solo" }).approved, true);
+});
+
+test("parseCodeOwnerUsers returns user owners and ignores teams, emails and comments", () => {
+  const text = ["# owners", "* @leo @Mia # trailing comment @ghost", "/docs/ @acme/docs-team a@b.co", "", "  # @indented", "*.md @leo @new-user\r", "/x @org/t @solo-1"].join("\n");
+  assert.deepEqual(parseCodeOwnerUsers(text), ["leo", "Mia", "new-user", "solo-1"]);
+});
+
+test("edge: parseCodeOwnerUsers yields nothing for empty, comment-only, team-only or non-string input", () => {
+  for (const t of ["", "# only a comment\n", "* @org/team\n", "@leo\n", null, undefined, 5]) {
+    assert.deepEqual(parseCodeOwnerUsers(t), [], String(t));
+  }
+});
+
+const teamCfg = { ...ownerCfg, identity: TEAM_ID };
+const teamPr = (over = {}) => pinPr({ config: teamCfg, files: ["src/a.ts"], ...over });
+const approvedBy = { approved: true, by: "leo" };
+const needsPr = (over = {}) => teamPr({ prBody: quickPr.prBody.replace("## Needs the owner\nnothing", "## Needs the owner\ndecide x"), ...over });
+const teamWait = (reason) => `waiting for a code-owner review in GitHub (${reason})`;
+
+test("team gateDecision waits for a native review for each of the four owner reasons and passes with one", () => {
+  const cases = {
+    "owner-only path": teamPr({ files: ["lanes.config.json"] }),
+    "needs the owner": needsPr(),
+    "breaking contract change": teamPr({ prBody: quickPr.prBody.replace("## Contract changes\nnone", "## Contract changes\nbreaking"), files: ["contracts/x.ts"], issueLabels: ["tier:full", "ready", "contract:breaking"] }),
+  };
+  for (const [reason, input] of Object.entries(cases)) {
+    for (const nativeApproval of [undefined, null, { approved: false, by: null }, { approved: "yes", by: "leo" }, {}]) {
+      const d = gateDecision({ ...input, nativeApproval });
+      assert.deepEqual([d.state, d.stage, d.description], ["pending", "owner", teamWait(reason)], `${reason} ${JSON.stringify(nativeApproval)}`);
+    }
+    const ok = gateDecision({ ...input, nativeApproval: approvedBy });
+    assert.deepEqual([ok.state, ok.stage], ["success", "ready"], reason);
+  }
+  const quick = { ...quickPr, config: teamCfg, files: ["contracts/x.ts"], prBody: quickPr.prBody.replace("## Contract changes\nnone", "## Contract changes\nadditive"), statuses: passed(requiredReviewers("quick", classifyFiles(["contracts/x.ts"], ownerCfg))) };
+  assert.equal(gateDecision(quick).description, teamWait("contract change"));
+  assert.equal(gateDecision({ ...quick, nativeApproval: approvedBy }).state, "success");
+});
+
+test("team gateDecision: a full-tier blocker waits for a native review", () => {
+  const d = gateDecision(teamPr({ verdicts: [] }));
+  assert.equal(d.description, teamWait(`no verdict for head from ${requiredReviewers("full", classifyFiles(["src/a.ts"], ownerCfg))[0]}`));
+  assert.equal(gateDecision(teamPr({ verdicts: [], nativeApproval: approvedBy })).state, "success");
+});
+
+test("team gateDecision never says /approve, and ignores review/owner statuses, the carry and ADR 0015's exemption", () => {
+  const input = needsPr({ statuses: [...passed(["test-hunter"]), { ...ownerOk, creator: human }] });
+  const d = gateDecision({ ...input, ownerCarry: { sha: OWNED, status: ownerOk, same: true }, prNumber: 9 });
+  assert.equal(d.state, "pending");
+  assert.doesNotMatch(d.description, /approve/);
+  const onlyOwner = gateDecision(teamPr({ files: PIN_FILES, ownerDiff: "additive" }));
+  assert.equal(onlyOwner.description, teamWait("owner-only path"));
+  assert.equal(gateDecision(teamPr({ files: PIN_FILES, ownerDiff: "additive", nativeApproval: approvedBy })).state, "success");
+});
+
+test("team gateDecision with no owner reason does not need a native review and still needs its reviewers", () => {
+  assert.equal(gateDecision(teamPr()).description, "unattended-eligible (tier:full), reviews in");
+  assert.equal(gateDecision(teamPr({ statuses: [] })).stage, "review");
+});
+
+test("solo gateDecision ignores nativeApproval and keeps the /approve wording", () => {
+  const solo = pinPr({ files: ["lanes.config.json"] });
+  const today = gateDecision(solo);
+  assert.equal(today.description, "waiting on owner (/approve) (owner-only path)");
+  assert.deepEqual(gateDecision({ ...solo, nativeApproval: approvedBy }), today);
+  assert.deepEqual(gateDecision({ ...solo, config: { ...ownerCfg, identity: { profile: "solo" } }, nativeApproval: approvedBy }), today);
 });
