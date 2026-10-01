@@ -14,7 +14,7 @@ import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWork
 import { GATE_CONTEXT, laneIssueOf } from "./lib.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
-import { appendStarts, budgetConfig, inFlightIssues, startDecisions, deadLaneSession, launchArgs, localLaunchEnv, markRunning, parseSessionId, reaperLog, START_DEFAULTS, startConfig, startReaper } from "./start.mjs";
+import { appendStarts, budgetConfig, inFlightIssues, startDecisions, deadLaneSession, launchLane, localLaunchEnv, reaperLog, START_DEFAULTS, startConfig, teamSteps } from "./start.mjs";
 import { approveLine, formatAge, gateDescriptions, gateSince, liveLanes, prStage, stalledLanes } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
@@ -295,8 +295,8 @@ function recoverLanes(snapshot, { deps, dir, say, attempted, told }) {
  * reads in a row, 2 for an argument, a bad config, or a run inside Claude. `deps` holds fakes in tests: `env`,
  * `gh(args)` and `claude(args, { cwd })` return stdout, `root()` the main checkout, `config()` the parsed
  * lanes.config.json (undefined when missing), `cleanup()` cleanupMerged's lines, `spawn` and `reaperLog(root, n)` for
- * each launched lane's reaper (as in start.mjs), `now()` ms, `sleep(ms)` a promise,
- * `print(line)`.
+ * each launched lane's reaper (as in start.mjs), `team` the team profile's steps (start.mjs's launchLane, #556), `now()`
+ * ms, `sleep(ms)` a promise, `print(line)`.
  */
 export async function main(argv, deps = DEFAULT_DEPS) {
   const { env, gh, claude, root, config, cleanup, now, sleep, print } = deps;
@@ -316,12 +316,6 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     print(`cannot read lanes.config.json: ${reason(err)}`);
     return 2;
   }
-  // #512 (ADR 0019): a queued lane would inherit the owner's GH_TOKEN, git credentials and LANES_APP_KEY_FILE, so a team
-  // profile fails closed until the queue uses /start's App-only preparation.
-  if (settings.identity?.profile === "team") {
-    print('queue.mjs refuses to launch under identity.profile "team": a queued lane would run with the owner\'s credentials; launch lanes with /start until the queue uses the App-only environment (#512)');
-    return 2;
-  }
   let caps;
   try {
     caps = budgetConfig(config());
@@ -329,7 +323,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     print(`cannot read lanes.config.json: ${reason(err)}`);
     return 2;
   }
-  const { maxLanes, softPaths, models } = settings;
+  const { maxLanes, softPaths, models, identity } = settings;
   // #535: Node loads the lanes scripts once, so the commit they came from is recorded now and compared every tick.
   let startedAt = null;
   if (deps.git) {
@@ -450,27 +444,12 @@ export async function main(argv, deps = DEFAULT_DEPS) {
         }
         say(`#${n}: ${resume.reason}; resuming once`);
       }
-      if (envNote) say(`#${n}: ${envNote}`);
-      // One attempt only: a launch that printed no id may still have started, and a retry could start it twice.
-      let id = null;
-      let why = "no session id in output";
-      try {
-        id = parseSessionId(claude(launchArgs(n, { tier: tierOf.get(n), models }), launchEnvironment ? { cwd, env: launchEnvironment } : { cwd }));
-      } catch (err) {
-        why = reason(err);
-      }
-      if (id) {
-        say(`#${n} → ${id}`);
-        // ADR 0010: the reaper cleans the lane up after it merges, even once the queue has exited.
-        const reaperFailed = startReaper(n, id, deps, dir);
-        if (reaperFailed) say(reaperFailed);
-        // ADR 0014: the owner-side label marks the running lane; a failure is said and changes nothing else.
-        const marked = markRunning(n, deps);
-        if (marked.includes(": label not set: ")) say(marked);
-      } else {
-        failedLaunches.add(n);
-        say(`#${n}: launch failed: ${why}, not retried`);
-      }
+      // #556: /start's one-lane launcher: one attempt, then the reaper (ADR 0010) and the running label (ADR 0014); under
+      // team (ADR 0019) the App-only environment, --settings, strict MCP and the token refresher, or no launch at all.
+      // The queue reads no model:* labels, as before.
+      const launched = launchLane(n, deps, { tier: tierOf.get(n), models, labels: [], identity, root: dir, cwd, env: launchEnvironment, envNote });
+      for (const line of launched.lines) say(line);
+      if (launched.failed) failedLaunches.add(n);
     }
     idleTicks = plan.idle ? idleTicks + 1 : 0;
     if (idleTicks >= IDLE_TICKS) {
@@ -535,6 +514,8 @@ const DEFAULT_DEPS = {
   root: repoRoot,
   spawn,
   reaperLog,
+  // #556: the team profile's owner-side steps, as /start runs them; the key comes from this shell's LANES_APP_KEY_FILE.
+  team: teamSteps,
   recordStarts: appendStarts,
   config: () => {
     let text;

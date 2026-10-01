@@ -55,6 +55,11 @@
    0 after three idle ticks in a row (nothing in flight, nothing to launch); Ctrl-C stops it at any time. Each lane it
    launches gets the same detached reaper `/start` starts (ADR 0010, logged to `.lanes/reap/<N>.log`), so a lane that
    merges after the queue exits is still cleaned up; a reaper that fails to start prints one line and the queue goes on.
+   **The queue works under the team profile** when you run it in a shell with `LANES_APP_KEY_FILE` set: it launches
+   each lane through the same launcher as `/start` (`launchLane` in `start.mjs`), so a queued team lane gets its own
+   minted token, the settings file, `--strict-mcp-config`, the bot commit identity and the token refresher, and never
+   your credentials. When that preparation fails (no `LANES_APP_KEY_FILE`, a mint failure, no bot user id) the queue
+   prints `#N: launch failed: team profile: <reason>`, launches nothing for that issue and does not try it again.
    **The queue stops itself after a lanes merge.** It records the commit its scripts came from at startup; each tick
    it fetches `origin/main`, and when `scripts/lanes/` or `lanes.config.json` differ from that commit it launches
    nothing and exits 3 with `lanes scripts changed since the queue started (<old>..<new>): git pull --ff-only, then

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BUDGET_DEFAULTS, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, isLaneGhDir, launchEnv, main as runStart, makeRemint, markRunning, parseSessionId, planStart, refreshArgs, refreshLoop, startConfig, teamLaneEnv, teamLaneSettings, TEAM_SCRUBBED_NAMES, botCommitIdentity } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
+import { launchLane, teamSteps } from "./start.mjs";
 
 const CAP = START_DEFAULTS.maxLanes;
 
@@ -2496,4 +2497,99 @@ test("--auto skips an assigned ready issue with the same reason", () => {
   const { lines } = main(["--auto", "--go"], deps);
   assert.ok(lines.includes("#1: skipped: assigned to owner"));
   assert.equal(launches.length, 0);
+});
+
+// #556: launchLane is the one-lane launcher /start and the queue share.
+function laneDeps({ team = null, output = "backgrounded · s-1\n", throws = null } = {}) {
+  const launches = [];
+  const spawned = [];
+  const labels = [];
+  const deps = {
+    claude: (args, opts) => {
+      launches.push({ args, opts });
+      if (throws) throw Object.assign(new Error("spawn failed"), { stderr: throws });
+      return output;
+    },
+    spawn: (cmd, args) => {
+      spawned.push(args);
+      return { pid: 1, on() {}, unref() {} };
+    },
+    reaperLog: () => ({ fd: 9, close() {} }),
+    gh: (args) => {
+      labels.push(args);
+      return "";
+    },
+    ...(team ? { team } : {}),
+  };
+  return { deps, launches, spawned, labels };
+}
+
+const laneTeam = (over = {}) => ({
+  keyFile: () => "/keys/app.pem",
+  readable: () => {},
+  repo: () => "lanes",
+  makeDir: (n) => ({ dir: `/tmp/lane-${n}`, emptyConfig: `/tmp/lane-${n}/empty` }),
+  removeDir: () => {},
+  writeSettings: () => {},
+  mintInto: () => {},
+  botUserId: () => "336249257",
+  ...over,
+});
+
+test("launchLane (#556): solo launches once from root with the given env, starts the reaper and marks the issue", () => {
+  const t = laneDeps();
+  const env = { PATH: "/bin" };
+  const r = launchLane(4, t.deps, { tier: "full", models: { full: "sonnet" }, labels: [], root: "/repo", env });
+  assert.deepEqual(r, { id: "s-1", failed: false, lines: ["#4 → s-1"] });
+  assert.deepEqual(t.launches, [{ args: launchArgs(4, { tier: "full", models: { full: "sonnet" } }), opts: { cwd: "/repo", env } }]);
+  assert.deepEqual(t.spawned.map((a) => a[0]), [join("/repo", "scripts", "lanes", "reap.mjs")]);
+  assert.deepEqual(t.labels, [["issue", "edit", "4", "--add-label", "lane:running"]]);
+});
+
+test("launchLane (#556): team prepares the lane, passes --settings and --strict-mcp-config and starts the refresher", () => {
+  const t = laneDeps({ team: laneTeam() });
+  const r = launchLane(4, t.deps, { tier: "quick", models: {}, labels: ["model:opus"], identity: TEAM, root: "/repo", env: { PATH: "/bin", GH_TOKEN: "owner" } });
+  assert.equal(r.failed, false);
+  const { args, opts } = t.launches[0];
+  assert.deepEqual(args, launchArgs(4, { tier: "quick", models: {}, opus: true, settings: join("/tmp/lane-4", "settings.json"), strictMcp: true }));
+  assert.equal(opts.env.GH_TOKEN, undefined);
+  assert.equal(opts.env.GH_CONFIG_DIR, "/tmp/lane-4");
+  assert.equal(t.spawned.filter((a) => a.includes("--refresh-token")).length, 1);
+});
+
+test("launchLane (#556): a team preparation failure launches nothing and returns the reason", () => {
+  const t = laneDeps({ team: laneTeam({ keyFile: () => undefined }) });
+  const r = launchLane(4, t.deps, { labels: [], identity: TEAM, root: "/repo", env: { GH_TOKEN: "owner" } });
+  assert.deepEqual(r, { id: null, failed: true, lines: ["#4: launch failed: team profile: LANES_APP_KEY_FILE is not set"] });
+  assert.deepEqual(t.launches, []);
+  assert.deepEqual(t.spawned, []);
+});
+
+test("launchLane (#556): edge: cwd launches the session elsewhere while the reaper and refresher run from root", () => {
+  const t = laneDeps({ team: laneTeam() });
+  launchLane(4, t.deps, { labels: [], identity: TEAM, root: "/repo", cwd: "/repo/.claude/worktrees/issue-4-x", env: {} });
+  assert.equal(t.launches[0].opts.cwd, "/repo/.claude/worktrees/issue-4-x");
+  assert.equal(t.spawned.length, 2);
+  for (const args of t.spawned) assert.ok(args[0].startsWith(join("/repo", "scripts", "lanes")), args[0]);
+});
+
+test("launchLane (#556): edge: no env launches with only cwd; ignored labels and the env note lead the lines", () => {
+  const t = laneDeps();
+  const r = launchLane(4, t.deps, { labels: ["model:haiku"], root: "/repo", envNote: "PATH note" });
+  assert.deepEqual(t.launches[0].opts, { cwd: "/repo" });
+  assert.deepEqual(r.lines, ["#4: ignored label model:haiku", "#4: PATH note", "#4 → s-1"]);
+});
+
+test("launchLane (#556): edge: a failed launch under team removes the lane's directory and is not retried", () => {
+  const removed = [];
+  const t = laneDeps({ team: laneTeam({ removeDir: (d) => removed.push(d) }), throws: "claude: not logged in" });
+  const r = launchLane(4, t.deps, { labels: [], identity: TEAM, root: "/repo", env: {} });
+  assert.deepEqual(r, { id: null, failed: true, lines: ["#4: launch failed: claude: not logged in, not retried"] });
+  assert.equal(t.launches.length, 1);
+  assert.deepEqual(removed, ["/tmp/lane-4"]);
+  assert.deepEqual(t.spawned, []);
+});
+
+test("teamSteps (#556): the real team steps are exported for the queue", () => {
+  assert.deepEqual(Object.keys(teamSteps).sort(), ["botUserId", "keyFile", "makeDir", "mintInto", "readable", "removeDir", "repo", "writeSettings"]);
 });
