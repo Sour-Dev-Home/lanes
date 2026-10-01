@@ -556,6 +556,7 @@ function isScriptData(plain, nodeAt, scripts, i) {
  */
 function scriptDataWords(words) {
   const at = new Set();
+  if (!words.some((w) => DATA_SCRIPT_RE.test(w))) return at;
   const index = [];
   words.forEach((w, i) => {
     if (!ASSIGN_RE.test(w)) index.push(i);
