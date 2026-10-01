@@ -1156,6 +1156,22 @@ export function configuredReviewersFrom(from) {
   }
 }
 
+export const TEAM_REASON = "under the team profile, approve the PR in GitHub (ADR 0021)";
+
+/**
+ * The identity profile of the checkout holding `grantDir` (<root>/.lanes/approve, #560): "team" or "solo" from that
+ * root's lanes.config.json. No config file or no identity key is solo; a config that exists but cannot be read or is
+ * invalid is "team", so a broken config never re-opens the owner grant.
+ */
+export function profileForGrantDir(grantDirPath) {
+  const file = join(grantDirPath, "..", "..", "lanes.config.json");
+  try {
+    return loadConfig(file).identity?.profile === "team" ? "team" : "solo";
+  } catch (e) {
+    return e?.code === "ENOENT" ? "solo" : "team";
+  }
+}
+
 /** configuredReviewersFrom for the checkout holding this script. */
 export function configuredReviewers() {
   return configuredReviewersFrom(fileURLToPath(new URL(".", import.meta.url)));
@@ -1246,13 +1262,14 @@ export function findFreshGrant(dir, pr, now = Date.now()) {
 export const preToolUseOutput = (decision, reason) => JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: decision, permissionDecisionReason: reason } });
 
 /** One hook call: `event` is user-prompt-submit or pre-tool-use, `raw` the hook's stdin. Returns what to print. */
-export function runHook(event, raw, { dir, now = Date.now() }) {
+export function runHook(event, raw, { dir, now = Date.now(), profile = profileForGrantDir(dir) }) {
   if (event === "user-prompt-submit") {
     try {
       const r = onUserPromptSubmit(JSON.parse(raw), now);
       // Every prompt that is not an automated input starts from no grants: a new list replaces the last one (#275).
       if (r.action !== "none") logClear(dir, r.sessionId, clearSessionGrants(dir, r.sessionId), JSON.parse(raw).prompt, now);
-      if (r.action === "grant") {
+      // Team: the owner approves in GitHub (ADR 0021), so a /approve prompt clears grants but writes none (#560).
+      if (r.action === "grant" && profile !== "team") {
         mkdirSync(dir, { recursive: true });
         for (const g of r.grants) writeFileSync(join(dir, grantFileName(r.sessionId, g.pr)), `${JSON.stringify(g)}\n`);
       }
@@ -1270,6 +1287,8 @@ export function runHook(event, raw, { dir, now = Date.now() }) {
       const lookup = (pr) => (safe && PR_RE.test(pr) ? readGrant(join(dir, grantFileName(sessionId, pr))) : null);
       const d = decidePreToolUse(input, lookup, now);
       if (d === null) return "";
+      // Team: no owner post is ever allowed, and the generic denial names the team reason (#560).
+      if (profile === "team" && (d.decision === "allow" || d.reason === DENY_REASON)) return preToolUseOutput("deny", TEAM_REASON);
       // An allow keeps the grant: post-review.mjs claims it when it runs (#180) and deletes it only after the review/owner status is posted (#81).
       return preToolUseOutput(d.decision, d.reason);
     } catch {

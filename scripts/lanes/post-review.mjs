@@ -11,7 +11,7 @@ import { execFileSync } from "node:child_process";
 import { linkSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { configuredReviewers, findFreshGrant, grantDir, isFreshGrant, readGrant } from "./approve-guard.mjs";
+import { configuredReviewers, findFreshGrant, grantDir, isFreshGrant, profileForGrantDir, readGrant, TEAM_REASON } from "./approve-guard.mjs";
 import { parseIssueForm, parsePrBody, REVIEWERS, reviewContext } from "./lib.mjs";
 
 const RESULTS = ["pass", "fail", "not-applicable"];
@@ -254,8 +254,10 @@ function restoreGrant(marker) {
  * Runs the CLI. `run` stands in for `gh` in tests. With `--file` the verdict comment is posted before the status: the
  * status event re-runs lanes/gate, which must find the comment then (#42). A failed comment throws before any status.
  */
-export function main(argv = process.argv.slice(2), { run = gh, log = console.log, warn = console.warn, grantDir: dir = grantDir(), now = Date.now(), reviewers = configuredReviewers() } = {}) {
+export function main(argv = process.argv.slice(2), { run = gh, log = console.log, warn = console.warn, grantDir: dir = grantDir(), now = Date.now(), reviewers = configuredReviewers(), profile = profileForGrantDir(dir) } = {}) {
   const parsed = parseArgs(argv);
+  // ADR 0021 part 3: under team the owner approves in GitHub; nothing is claimed or posted (#560).
+  if (!parsed.file && parsed.positional[0] === "owner" && profile === "team") throw new Error(TEAM_REASON);
   // #180: the grant is claimed before any gh call, so two racing runs cannot both spend it.
   const marker = !parsed.file && parsed.positional[0] === "owner" ? claimGrant(requireOwnerGrant(parsed.pr, dir, now), parsed.pr) : null;
   let pr;

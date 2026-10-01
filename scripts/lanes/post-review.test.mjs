@@ -741,3 +741,40 @@ test("main posts a configured reviewer's skipped status and refuses an unknown n
   assert.throws(() => main(["compliance-reviewer", "skipped", "no change"], { run: again.run, ...quiet, reviewers: CONFIGURED.slice(0, 4) }), /reviewer must be one of/);
   assert.deepEqual(again.writes, []);
 });
+
+// --- the team profile: the owner status post refuses (#560, ADR 0021 part 3) ---------------------------------------------
+test("team: the owner post refuses, claims no grant and posts nothing", () => {
+  const gh = fakeGh();
+  const dir = grantDirWith({ "s1.json": grantFor(12) });
+  assert.throws(() => main(approval("--sha", HEAD), { run: gh.run, ...quiet, grantDir: dir, now: NOW, profile: "team" }), /^Error: under the team profile, approve the PR in GitHub \(ADR 0021\)$/);
+  assert.deepEqual(gh.writes, []);
+  assert.deepEqual(readdirSync(dir), ["s1.json"]);
+});
+
+test("team: a reviewer verdict posts with --file and a skipped reviewer status is unchanged", () => {
+  const gh = fakeGh();
+  main(["--file", verdictFile()], { run: gh.run, ...quiet, profile: "team" });
+  assert.deepEqual(gh.writes.map((w) => w.kind), ["comment", "status"]);
+  const gh2 = fakeGh();
+  main(["ui-reviewer", "skipped", "no visible change"], { run: gh2.run, ...quiet, grantDir: grantDirWith(), now: NOW, profile: "team" });
+  assert.deepEqual(gh2.writes.map((w) => w.kind), ["status"]);
+});
+
+test("solo: the owner approval with a fresh grant posts as before", () => {
+  const gh = fakeGh();
+  const dir = grantDirWith({ "s1.json": grantFor(12) });
+  main(approval(), { run: gh.run, ...quiet, grantDir: dir, now: NOW, profile: "solo" });
+  assert.deepEqual(gh.writes.map((w) => w.kind), ["status"]);
+});
+
+test("edge: the profile comes from the config beside the grant directory when none is passed", () => {
+  const root = mkdtempSync(join(tmpdir(), "post-review-team-"));
+  const { identity: _unused, ...base } = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
+  writeFileSync(join(root, "lanes.config.json"), JSON.stringify({ ...base, identity: { profile: "team", app: { id: 1, installationId: 2, botLogin: "x-lanes[bot]" } } }));
+  const dir = join(root, ".lanes", "approve");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "s1.json"), JSON.stringify(grantFor(12)));
+  const gh = fakeGh();
+  assert.throws(() => main(approval(), { run: gh.run, ...quiet, grantDir: dir, now: NOW }), /approve the PR in GitHub/);
+  assert.deepEqual(gh.writes, []);
+});

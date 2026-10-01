@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AUTOMATED_INPUT_PREFIXES, CLEARS_LOG_MAX_BYTES,configuredReviewersFrom, DENY_REASON, DEPTH_REASON, POST_REVIEW_ARGS_REASON, POWERSHELL_REASON, REVIEWER_NAME_REASON, RUNTIME_PROGRAM_REASON, GRANT_TTL_MS, UNPARSED_REASON, WMI_REASON, decidePreToolUse as decideWithReason, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, readGrant, runHook, TAG_REASON, validGrant } from "./approve-guard.mjs";
+import { AUTOMATED_INPUT_PREFIXES, CLEARS_LOG_MAX_BYTES,configuredReviewersFrom, DENY_REASON, DEPTH_REASON, POST_REVIEW_ARGS_REASON, POWERSHELL_REASON, REVIEWER_NAME_REASON, RUNTIME_PROGRAM_REASON, GRANT_TTL_MS, UNPARSED_REASON, WMI_REASON, decidePreToolUse as decideWithReason, findFreshGrant, findOwnerInvocations, grantDir, isAutomatedInput, isFreshGrant, onUserPromptSubmit, parseApprovePrompt, parseApprovePrompts, powershellAsBash, profileForGrantDir, readGrant, runHook, TAG_REASON, TEAM_REASON, validGrant } from "./approve-guard.mjs";
 import { WRAPPERS, automatedInputLeavesTheGrant } from "./shell-lex.fixtures.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
@@ -2048,3 +2048,55 @@ test("edge: gh --title/--body with a live substitution, a flag it does not exemp
     `echo --title "post-review owner"; ${P}`,
   ]) assert.notEqual(decideBash(c), null, c);
 });
+
+// --- the team profile: the owner approves in GitHub, no grant is written (#560, ADR 0021) ---------------------------------
+// A full, valid config (loadConfig rejects a partial one) with the identity under test.
+const BASE_CONFIG = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
+const { identity: _unused, ...NO_IDENTITY_CONFIG } = BASE_CONFIG;
+const TEAM_CONFIG = { ...NO_IDENTITY_CONFIG, identity: { profile: "team", app: { id: 1, installationId: 2, botLogin: "x-lanes[bot]" } } };
+function withCheckout(config, fn) {
+  const root = mkdtempSync(join(tmpdir(), "approve-profile-"));
+  try {
+    if (config !== null) writeFileSync(join(root, "lanes.config.json"), typeof config === "string" ? config : JSON.stringify(config));
+    fn(join(root, ".lanes", "approve"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("team: /approve writes no grant but still clears the session's earlier grants", () => withDir((dir) => {
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/approve 16" }), { dir, now: NOW, profile: "solo" });
+  assert.equal(existsSync(join(dir, "s1.16.json")), true);
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/approve 17" }), { dir, now: NOW, profile: "team" });
+  assert.deepEqual(readdirSync(dir).filter((n) => n.endsWith(".json")), []);
+}));
+
+test("team: an owner post is denied with the team reason, even with a grant on disk; other commands are untouched", () => withDir((dir) => {
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/approve 16" }), { dir, now: NOW, profile: "solo" });
+  const out = JSON.parse(runHook("pre-tool-use", JSON.stringify(bash(OWNER)), { dir, now: NOW + 1000, profile: "team" }));
+  assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
+  assert.equal(out.hookSpecificOutput.permissionDecisionReason, TEAM_REASON);
+  const other = JSON.parse(runHook("pre-tool-use", JSON.stringify(bash(`${OWNER}; echo`)), { dir, now: NOW, profile: "team" }));
+  assert.equal(other.hookSpecificOutput.permissionDecisionReason, TEAM_REASON);
+  assert.equal(runHook("pre-tool-use", JSON.stringify(bash("npm test")), { dir, now: NOW, profile: "team" }), "");
+}));
+
+test("solo: grants and denials are as before", () => withDir((dir) => {
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/approve 16" }), { dir, now: NOW, profile: "solo" });
+  assert.equal(decision(runHook("pre-tool-use", JSON.stringify(bash(OWNER)), { dir, now: NOW + 1000, profile: "solo" })), "allow");
+  const denied = JSON.parse(runHook("pre-tool-use", JSON.stringify(bash(OWNER.replace("--pr 16", "--pr 99"))), { dir, now: NOW + 1000, profile: "solo" }));
+  assert.equal(denied.hookSpecificOutput.permissionDecisionReason, DENY_REASON);
+}));
+
+test("profileForGrantDir reads the main checkout's config: team, solo, missing is solo, broken is team (edge)", () => {
+  withCheckout(TEAM_CONFIG, (dir) => assert.equal(profileForGrantDir(dir), "team"));
+  withCheckout({ ...NO_IDENTITY_CONFIG, identity: { profile: "solo" } }, (dir) => assert.equal(profileForGrantDir(dir), "solo"));
+  withCheckout(NO_IDENTITY_CONFIG, (dir) => assert.equal(profileForGrantDir(dir), "solo"));
+  withCheckout(null, (dir) => assert.equal(profileForGrantDir(dir), "solo"));
+  withCheckout("{not json", (dir) => assert.equal(profileForGrantDir(dir), "team"));
+});
+
+test("runHook takes its profile from the checkout's config when none is passed (edge)", () => withCheckout(TEAM_CONFIG, (dir) => {
+  runHook("user-prompt-submit", JSON.stringify({ session_id: "s1", prompt: "/approve 16" }), { dir, now: NOW });
+  assert.equal(existsSync(join(dir, "s1.16.json")), false);
+}));
