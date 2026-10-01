@@ -1,0 +1,13 @@
+# ADR 0021: a native review has no status event, so this workflow only exists to complete. lanes-gate runs on its
+# workflow_run, always on the default branch's scripts. It holds no permission, checks out nothing and reads no secret,
+# so a PR's own copy of it cannot decide anything: the gate takes only the PR number and head SHA from the event.
+name: lanes-review-ping
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+permissions: {}
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ping

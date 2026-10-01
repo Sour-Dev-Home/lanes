@@ -72,6 +72,28 @@ test("lanes-gate keeps its permissions to reading, posting statuses and issue co
   assert.equal((yml.match(/permissions:/g) ?? []).length, 1, "no job-level permissions");
 });
 
+// #561 (ADR 0021): a native review pings the default branch's gate without a PR's own workflow deciding anything.
+test("lanes-review-ping runs on pull_request_review with no permissions, checkout, secrets or action, and one no-op step", () => {
+  const yml = readFileSync(".github/workflows/lanes-review-ping.yml", "utf8");
+  assert.match(yml, /^name: lanes-review-ping$/m);
+  assert.match(yml, /\non:\n {2}pull_request_review:\n {4}types: \[submitted, edited, dismissed\]\n/);
+  assert.match(yml, /\npermissions: \{\}\n/);
+  assert.doesNotMatch(yml, /actions\/checkout|uses:|secrets\.|GH_TOKEN|GITHUB_TOKEN/);
+  assert.equal((yml.match(/^\s+- run: /gm) ?? []).length, 1);
+  assert.deepEqual(yml.match(/^\s+- run: .*/gm), ["      - run: echo ping"]);
+});
+
+test("lanes-gate also runs on workflow_run of lanes-review-ping, still on the default branch's scripts", () => {
+  const yml = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
+  assert.match(yml, /\n {2}workflow_run:\n {4}workflows: \[lanes-review-ping\]\n {4}types: \[completed\]\n/);
+  assert.match(yml, /pull_request_target:/);
+  assert.match(yml, /\n {2}merge_group:/);
+  assert.match(yml, /\n {2}workflow_dispatch:/);
+  assert.match(yml, /\n {2}issues:\n {4}types: \[closed\]/);
+  assert.match(yml, /\n {2}status:\n/);
+  assert.match(yml, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
+});
+
 test("lanes-gate checks out only the default branch and runs only gate.mjs, for every trigger", () => {
   const yml = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
   assert.equal((yml.match(/actions\/checkout@/g) ?? []).length, 1);
