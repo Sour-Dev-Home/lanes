@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
-import { approveLine, formatAge, gateDescriptions, gateSince, idleLaneSession, laneBranches, laneSessions, laneWorktree, worktreeUnsaved, liveLanes, loadLaneBranches, loadSessions, mergeQueueEntries, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, trustedRollups, waitingApprovals } from "./status.mjs";
+import { approveLine, prStage, formatAge, gateDescriptions, gateSince, idleLaneSession, laneBranches, laneSessions, laneWorktree, worktreeUnsaved, liveLanes, loadLaneBranches, loadSessions, mergeQueueEntries, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, trustedRollups, waitingApprovals } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -1151,4 +1151,54 @@ test("a lane-bot reviewer status counts under team and not under solo; other che
   assert.deepEqual(names(team), ["lanes/gate", "review/test-hunter"]);
   assert.deepEqual(names({ identity: { profile: "solo" }, modules: { entries: [] } }), ["lanes/gate"]);
   assert.deepEqual(names({ modules: { entries: [] } }), ["lanes/gate"]);
+});
+
+const TEAM_WAIT = "waiting for a code-owner review in GitHub";
+const teamCtx = { owners: ["boss"], identity: { profile: "team", app: { id: 1, installationId: 2, botLogin: "lanes[bot]" } } };
+const nativeReview = (login, state, oid) => ({ author: { login }, state, commit: { oid } });
+const teamPr = (number, reviews = [], extra = {}) => pr(number, [gate("PENDING", TEAM_WAIT)], { author: { login: "lanes[bot]" }, headRefOid: "abc", latestReviews: reviews, ...extra });
+
+test("#604: prStage puts the team wording in the owner stage, as the solo wording", () => {
+  assert.deepEqual(prStage(pr(1, [gate("PENDING", TEAM_WAIT)]), undefined), { stage: "owner", note: TEAM_WAIT });
+  assert.equal(prStage(pr(1, [gate("PENDING", `${TEAM_WAIT} (tier:full)`)]), undefined).stage, "owner");
+  assert.equal(prStage(pr(1, [gate("PENDING", "waiting on owner (/approve)")]), undefined).stage, "owner");
+});
+
+test("#604: under team a PR waiting for a code-owner review is WAITING ON YOU", () => {
+  const s = summarize({ prs: [teamPr(7)], issues: [], merged: [], team: teamCtx });
+  assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage, i.note]), [[7, "owner", TEAM_WAIT]]);
+  assert.deepEqual(s.inFlight, []);
+});
+
+test("#604: a team PR approved by a code owner on its head is in flight", () => {
+  const s = summarize({ prs: [teamPr(7, [nativeReview("boss", "APPROVED", "abc")])], issues: [], merged: [], team: teamCtx });
+  assert.deepEqual(s.waitingOnOwner, []);
+  assert.deepEqual(s.inFlight.map((i) => i.number), [7]);
+});
+
+test("edge: a team approval on an older head, by a non-owner, by the lane bot or superseded does not count", () => {
+  const cases = [
+    [nativeReview("boss", "APPROVED", "old")],
+    [nativeReview("someone", "APPROVED", "abc")],
+    [nativeReview("lanes[bot]", "APPROVED", "abc")],
+    [nativeReview("boss", "APPROVED", "abc"), nativeReview("boss", "CHANGES_REQUESTED", "abc")],
+  ];
+  for (const reviews of cases) {
+    const s = summarize({ prs: [teamPr(7, reviews, { author: { login: "other" } })], issues: [], merged: [], team: teamCtx });
+    assert.deepEqual(s.waitingOnOwner.map((i) => i.number), [7], JSON.stringify(reviews));
+  }
+});
+
+test("edge: a team PR with no review data, and one approved only by its own author, still wait", () => {
+  const bare = pr(7, [gate("PENDING", TEAM_WAIT)]);
+  assert.deepEqual(summarize({ prs: [bare], issues: [], merged: [], team: teamCtx }).waitingOnOwner.map((i) => i.number), [7]);
+  const self = teamPr(7, [nativeReview("boss", "APPROVED", "abc")], { author: { login: "boss" } });
+  assert.deepEqual(summarize({ prs: [self], issues: [], merged: [], team: teamCtx }).waitingOnOwner.map((i) => i.number), [7]);
+});
+
+test("#604: under team a review/owner status is not an approval; under solo it still is", () => {
+  const withStatus = [gate("PENDING", TEAM_WAIT), ownerApproved()];
+  assert.deepEqual(summarize({ prs: [pr(7, withStatus)], issues: [], merged: [], team: teamCtx }).waitingOnOwner.map((i) => i.number), [7]);
+  const solo = summarize({ prs: [pr(8, [gate("PENDING", "waiting on owner (/approve)"), ownerApproved()])], issues: [], merged: [] });
+  assert.deepEqual(solo.inFlight.map((i) => i.number), [8]);
 });

@@ -5,7 +5,7 @@ import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GATE_CONTEXT, laneIssueOf, loadConfig, parseIssueForm, parsePrBody, reviewContext, reviewerNames, trustedStatuses } from "./lib.mjs";
+import { GATE_CONTEXT, laneIssueOf, loadConfig, nativeCodeOwnerApproval, parseCodeOwnerUsers, parseIssueForm, parsePrBody, reviewContext, reviewerNames, trustedStatuses } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { BUDGET_DEFAULTS, budgetConfig, loadBudget, projectFolder } from "./lane-cost.mjs";
 import { claimedPaths } from "./pick.mjs";
@@ -13,6 +13,8 @@ import { claimedPaths } from "./pick.mjs";
 const ISSUE_LIMIT = 1000;
 const FAILED = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"]);
 export const CONFLICT_NOTE = "conflict: rebase needed";
+// The `lanes/gate` description's start while a team PR waits on a code owner's native review (ADR 0021).
+export const TEAM_OWNER_WAIT = "waiting for a code-owner review in GitHub";
 
 // A PR that enters the merge queue loses its `autoMergeRequest`, so queue membership is checked first.
 // `gh pr list` leaves StatusContext descriptions out of `statusCheckRollup`, so the gate's comes from `gateDescription`.
@@ -31,7 +33,8 @@ export function prStage(pr, queuePosition, gateDescription) {
   if (gate.state === "SUCCESS") return pr.autoMergeRequest ? { stage: "queued", note: "auto-merge on" } : { stage: "ready", note: "auto-merge is off" };
   const description = gate.description ?? gateDescription ?? "";
   if (gate.state === "FAILURE" || gate.state === "ERROR") return { stage: "contract", note: description };
-  if (description.startsWith("waiting on owner")) return { stage: "owner", note: description };
+  // The solo wording, and the team wording (a code-owner review in GitHub, ADR 0021).
+  if (description.startsWith("waiting on owner") || description.startsWith(TEAM_OWNER_WAIT)) return { stage: "owner", note: description };
   // The gate waits for a reviewer's status: the lane owes it, not the owner, whatever the body asks for.
   if (/^waiting for review\/\S/.test(description)) return { stage: "gate", note: description };
   return { stage: "review", note: description };
@@ -60,7 +63,19 @@ export function trustedRollups(prs, reply, config) {
   });
 }
 
-const ownerApproved = (pr) => (pr.statusCheckRollup ?? []).some((c) => c.context === reviewContext("owner") && c.state === "SUCCESS");
+// Solo: a `review/owner` success on the head. Team (`team` is `{ owners, identity }`): the PR's native review on its
+// head, as the gate reads it (`gh pr list`'s `latestReviews`, `author` and `headRefOid`); an unreadable one is no approval.
+function ownerApproved(pr, team) {
+  if (!team) return (pr.statusCheckRollup ?? []).some((c) => c.context === reviewContext("owner") && c.state === "SUCCESS");
+  const reviews = (pr.latestReviews ?? []).map((r) => ({ user: { login: r?.author?.login }, state: r?.state, commit_id: r?.commit?.oid }));
+  return nativeCodeOwnerApproval(reviews, pr.author?.login, pr.headRefOid, team.owners, team.identity).approved;
+}
+
+// The team context for `summarize` from the config and the CODEOWNERS text: undefined under solo.
+export function teamContext(config, codeOwnersText) {
+  if (config?.identity?.profile !== "team") return undefined;
+  return { owners: parseCodeOwnerUsers(codeOwnersText ?? ""), identity: config.identity };
+}
 
 // The open issues that block `number`, direct ones first, then theirs. Only open issues count, and only open
 // issues are followed; `number` itself appears last when it sits on a cycle.
@@ -326,8 +341,8 @@ const withSession = (item, session) => {
 // `mergeQueue` is the output of mergeQueueEntries (null or missing: no merge queue); `gateDescriptions` that of
 // gateDescriptions (missing: the rollup's own descriptions only). `sessions` and `sessionsUnavailable` come from
 // loadSessions (missing: no sessions). `laneBranches` is the output of laneBranches (missing: no branches known).
-export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map(), sessions: loaded = new Map(), stalled = new Map(), idle: idleLanesFound = new Map(), sessionsUnavailable, laneBranches = new Map(), branchesUnavailable }) {
-  // `stalled` is the output of stalledLanes (issue N → minutes silent).
+export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map(), sessions: loaded = new Map(), stalled = new Map(), idle: idleLanesFound = new Map(), sessionsUnavailable, laneBranches = new Map(), branchesUnavailable, team }) {
+  // `team` is teamContext's output (missing: solo). `stalled` is the output of stalledLanes (issue N → minutes silent).
   const sessions = new Map([...loaded].map(([n, s]) => [n, stalled.has(n) ? { ...s, stalledMin: stalled.get(n) } : s]));
   const out = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
   const taken = new Set();
@@ -349,9 +364,9 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
     const asksForApprove = /\/approve\b/i.test(needs);
     if (session?.waiting || hung || stage === "conflict") out.waitingOnOwner.push(withSession(item, session));
     else if (stage === "gate") out.inFlight.push(withSession(item, session));
-    else if (stage === "owner") (ownerApproved(pr) ? out.inFlight : out.waitingOnOwner).push(withSession(item, session));
+    else if (stage === "owner") (ownerApproved(pr, team) ? out.inFlight : out.waitingOnOwner).push(withSession(item, session));
     else if (needs && !/^nothing\b/i.test(needs)) {
-      if (ownerApproved(pr) && asksForApprove) out.inFlight.push(withSession(item, session));
+      if (ownerApproved(pr, team) && asksForApprove) out.inFlight.push(withSession(item, session));
       else out.waitingOnOwner.push(withSession({ ...item, note: `needs: ${needs.split("\n")[0]}` }, session));
     } else out.inFlight.push(withSession(item, session));
   }
@@ -556,8 +571,13 @@ async function main(argv = process.argv.slice(2)) {
   const repoRoot = dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
   let rawAgents;
   const reply = gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${STATUS_QUERY}`]);
+  const config = loadConfig();
+  // CODEOWNERS is the checkout's (the default branch's), as the gate reads it; unreadable means no owner, so no approval.
+  let codeOwners = "";
+  try { codeOwners = readFileSync(join(repoRoot, ".github", "CODEOWNERS"), "utf8"); } catch {}
   const data = {
-    prs: trustedRollups(gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,mergeable,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefName,files"]), reply, loadConfig()),
+    team: teamContext(config, codeOwners),
+    prs: trustedRollups(gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,body,mergeable,statusCheckRollup,autoMergeRequest,closingIssuesReferences,headRefName,files,author,headRefOid,latestReviews"]), reply, config),
     issues: gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,title,labels,body"]),
     merged: gh(["pr", "list", "--state", "merged", "--search", `merged:>=${since}`, "--limit", "100", "--json", "number,title"]),
     mergeQueue: mergeQueueEntries(reply),
