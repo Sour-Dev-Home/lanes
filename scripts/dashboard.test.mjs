@@ -159,6 +159,109 @@ test("edge: renderWaiting says nothing waits when the list is empty", () => {
   assert.match(textOf(box), /nothing/i);
 });
 
+// ADR 0024: the team view.
+const links = (n) => { const out = []; walk(n, (x) => { if (x.tag === "a") out.push(x); }); return out; };
+const team = { profile: "team", repo: "acme/lanes" };
+const BASE = "https://github.com/acme/lanes/";
+const waitingIssue = (extra = {}) => issue(1, "owner", { pr: { ...pr(11), ownerApproved: true }, blockedBy: [{ kind: "owner", ref: "review/owner", reason: "waiting for a code-owner review in GitHub" }], ...extra });
+const renderWait = (issues, snapshot) => {
+  const d = fakeDoc();
+  const box = d.createElement("div");
+  app.renderWaiting(d, box, issues, snapshot);
+  return box;
+};
+
+test("team: the waiting box has a Review in GitHub link, the reason, coverage text and the approve note, and no copy line or button", () => {
+  const box = renderWait([waitingIssue()], team);
+  const [a] = links(box);
+  assert.equal(a.attrs.href, `${BASE}pull/11/files`);
+  assert.equal(a.attrs.rel, "noopener noreferrer");
+  assert.equal(a.textContent, "Review in GitHub");
+  const text = textOf(box);
+  assert.match(text, /waiting for a code-owner review in GitHub/);
+  assert.match(text, /your review covers this head/);
+  assert.match(text, /Approve in GitHub; the gate re-runs on your review\./);
+  assert.doesNotMatch(text, /\/approve 11|Paste the line/);
+  walk(box, (n) => assert.notEqual(n.tag, "button"));
+});
+
+test("team: a PR whose review does not cover the head, or has no ownerApproved, says so", () => {
+  for (const approved of [false, undefined]) {
+    const text = textOf(renderWait([waitingIssue({ pr: { ...pr(11), ownerApproved: approved } })], team));
+    assert.match(text, /your review does not cover this head/);
+  }
+});
+
+test("solo and a missing profile leave the waiting box unchanged: copy line, Copy button, text, no links", () => {
+  for (const snapshot of [{ profile: "solo", repo: "acme/lanes" }, { repo: "acme/lanes" }, undefined]) {
+    const box = renderWait([waitingIssue()], snapshot);
+    assert.ok(textOf(box).includes("/approve 11"));
+    assert.match(textOf(box), /Paste the line into the owner session/);
+    assert.deepEqual(links(box), []);
+    let button = false;
+    walk(box, (n) => { if (n.tag === "button") button = true; });
+    assert.ok(button);
+  }
+});
+
+test("team: task cards link to the issue and the PR, and a failing check links to its url", () => {
+  const run = `${BASE}actions/runs/9`;
+  const li = app.renderTask(fakeDoc(), issue(7, "failing", { pr: { ...pr(12), checks: [{ name: "verify", result: "fail", url: run }, { name: "lint", result: "pass", url: `${BASE}actions/runs/8` }] } }), team);
+  assert.deepEqual(links(li).map((a) => [a.textContent, a.attrs.href]), [["#7", `${BASE}issues/7`], ["PR #12", `${BASE}pull/12`], ["verify", run]]);
+  for (const a of links(li)) assert.equal(a.attrs.rel, "noopener noreferrer");
+});
+
+test("team: a task without a PR links only the issue, and solo task cards have no links", () => {
+  assert.deepEqual(links(app.renderTask(fakeDoc(), issue(7, "ready"), team)).map((a) => a.attrs.href), [`${BASE}issues/7`]);
+  const failing = issue(7, "failing", { pr: { ...pr(12), checks: [{ name: "verify", result: "fail", url: `${BASE}actions/runs/9` }] } });
+  assert.deepEqual(links(app.renderTask(fakeDoc(), failing, { profile: "solo", repo: "acme/lanes" })), []);
+  assert.deepEqual(links(app.renderTask(fakeDoc(), failing)), []);
+});
+
+test("edge: a malicious check url, another repo, http or whitespace renders as plain text, never an href", () => {
+  const evil = ["javascript:alert(1)", "https://github.com/other/repo/runs/1", `http://github.com/acme/lanes/runs/1`, `${BASE}runs/1 x`, `${BASE}runs/1\n`, `https://github.com/acme/lanes-fork/runs/1`, `${BASE}../../evil/x`, `${BASE}runs/%2e%2E/x`, `${BASE}runs/./1`, `${BASE}runs/..`, `${BASE}pull/1/..\\..\\..\\other/x`, `${BASE}runs\\1`, `${BASE}runs/%5c..%5cother`, `${BASE}runs/%2F..%2fother`, "data:text/html,<script>1</script>", 5, undefined];
+  for (const url of evil) {
+    const li = app.renderTask(fakeDoc(), issue(7, "failing", { pr: { ...pr(12), checks: [{ name: "verify", result: "fail", url }] } }), team);
+    assert.ok(!links(li).some((a) => a.textContent === "verify"), `edge: ${String(url).slice(0, 30)}`);
+    assert.ok(textOf(li).includes("verify"));
+  }
+});
+
+test("edge: a malicious or malformed repo makes every team link plain text", () => {
+  for (const repo of ["javascript:alert(1)//x/y", "evil.com/x/../..", "a/b/c", "a b/c", "", 5, undefined, "acme/lanes\"onmouseover=\"x", "../x", "a/..", "./."]) {
+    const snapshot = { profile: "team", repo };
+    const box = renderWait([waitingIssue()], snapshot);
+    assert.deepEqual(links(box), [], `edge: repo ${JSON.stringify(repo)}`);
+    assert.ok(textOf(box).includes("Review in GitHub"));
+    const li = app.renderTask(fakeDoc(), issue(7, "failing", { pr: { ...pr(12), checks: [{ name: "verify", result: "fail", url: `${BASE}runs/1` }] } }), snapshot);
+    assert.deepEqual(links(li), []);
+  }
+});
+
+test("edge: a non-integer issue or PR number is never put into a link", () => {
+  const li = app.renderTask(fakeDoc(), issue("7/../x", "ready", { pr: { number: "9; rm", checks: [] } }), team);
+  assert.deepEqual(links(li), []);
+});
+
+test("edge: a hostile title and check name in the team view stay text; links hold no markup", () => {
+  const evil = `<img src=x onerror=alert(1)>`;
+  const li = app.renderTask(fakeDoc(), issue(7, "failing", { title: evil, pr: { ...pr(12), checks: [{ name: evil, result: "fail", url: `${BASE}runs/1` }] } }), team);
+  assert.ok(textOf(li).includes(evil));
+  walk(li, (n) => assert.ok(!/^(img|script)$/.test(n.tag), n.tag));
+});
+
+test("linkBase accepts owner/name only and returns the github.com prefix", () => {
+  assert.equal(app.linkBase({ repo: "acme/lanes" }), BASE);
+  assert.equal(app.linkBase({ repo: "acme" }), "");
+  assert.equal(app.linkBase({}), "");
+  assert.equal(app.linkBase(undefined), "");
+});
+
+test("app.js sets href only through setAttribute and never assigns .href", () => {
+  assert.doesNotMatch(src, /\.href\s*=|\.src\s*=|location\s*=/);
+  assert.equal([...src.matchAll(/setAttribute\("href"/g)].length, 1);
+});
+
 test("criticalPath is the longest blocking chain, and ignores edges to unlisted issues", () => {
   const edges = [{ from: 1, to: 2 }, { from: 2, to: 3 }, { from: 1, to: 4 }, { from: 9, to: 3 }];
   assert.deepEqual(JSON.parse(JSON.stringify(app.criticalPath([1, 2, 3, 4], edges))), [1, 2, 3]);
@@ -436,4 +539,20 @@ test("boundary: age words flip exactly at 1 and 60 minutes; the waiting note and
   assert.notEqual(app.waitingNote(ago(5 * 60000 + 1), NOW), "");
   assert.equal(app.staleNote(ago(20 * 60000), NOW), "");
   assert.notEqual(app.staleNote(ago(20 * 60000 + 1), NOW), "");
+});
+
+test("edge: only a boolean true counts as the owner's review covering the head", () => {
+  for (const v of ["yes", 1, "true", {}]) {
+    const box = renderWait([waitingIssue({ pr: { ...pr(12), ownerApproved: v } })], team);
+    assert.ok(textOf(box).includes("does not cover this head"), "edge: " + JSON.stringify(v));
+  }
+});
+
+test("edge: a check url is linked at exactly 500 characters and plain text at 501", () => {
+  const base = BASE + "runs/";
+  for (const [len, linked] of [[500, true], [501, false]]) {
+    const url = base + "x".repeat(len - base.length);
+    const li = app.renderTask(fakeDoc(), issue(7, "failing", { pr: { ...pr(12), checks: [{ name: "verify", result: "fail", url }] } }), team);
+    assert.equal(links(li).some((a) => a.textContent === "verify"), linked, "edge: length " + len);
+  }
 });

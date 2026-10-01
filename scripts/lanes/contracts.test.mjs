@@ -6,7 +6,7 @@ import { buildVerdictComment, validateVerdict } from "./post-review.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const issue = (over = {}) => {
   const f = { Goal: "Add the snapshot schema", "Acceptance criteria": "- [ ] schema validates a sample\n- [ ] rejects a missing id", "Interface contract": "contracts/snapshot.ts", Scope: "In: contracts/. Out: UI.", "Blocked by": "none", Tier: "quick", ...over };
@@ -259,11 +259,14 @@ const snapshotSchema = JSON.parse(readFileSync("contracts/snapshot.schema.json",
 const SNAP_SHA = "0123456789abcdef0123456789abcdef01234567";
 const snapForm = (blockedBy) => `### Goal\n\ng\n\n### Acceptance criteria\n\n- [ ] a\n\n### Interface contract\n\nx\n\n### Scope\n\nIn: a.\n\n### Blocked by\n\n${blockedBy}\n\n### Tier\n\nfull\n`;
 // snapshot.mjs belongs to another module, so it is run as a command (`--from` builds offline, without gh), not imported.
-const builtSnapshot = () => {
+// It runs in a temp directory whose lanes.config.json holds `identity`, so the profile is the test's, not this repo's.
+const TEAM_IDENTITY = { profile: "team", app: { id: 1, installationId: 2, botLogin: "lanes-bot[bot]" } };
+const builtSnapshot = (identity = TEAM_IDENTITY) => {
   const dir = mkdtempSync(join(tmpdir(), "snapshot-contract-"));
   try {
     writeFileSync(join(dir, "input.json"), JSON.stringify(snapshotInput));
-    execFileSync(process.execPath, ["scripts/lanes/snapshot.mjs", "--from", join(dir, "input.json"), "--out", join(dir, "snapshot.json")], { stdio: "pipe" });
+    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity }));
+    execFileSync(process.execPath, [resolve("scripts/lanes/snapshot.mjs"), "--from", join(dir, "input.json"), "--out", join(dir, "snapshot.json")], { stdio: "pipe", cwd: dir });
     return JSON.parse(readFileSync(join(dir, "snapshot.json"), "utf8"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -271,6 +274,8 @@ const builtSnapshot = () => {
 };
 const snapshotInput = {
     generatedAt: "2026-09-28T12:00:00.000Z",
+    repo: "owner/lanes",
+    ownerApproved: { 9: true },
     issues: [
       { number: 1, title: "A", labels: [{ name: "ready" }, { name: "tier:full" }], body: snapForm("none") },
       { number: 2, title: "B", labels: [{ name: "ready" }, { name: "tier:quick" }], body: snapForm("#1") },
@@ -281,7 +286,7 @@ const snapshotInput = {
         number: 9,
         headRefOid: SNAP_SHA,
         isCrossRepository: false,
-        statusCheckRollup: [{ name: "verify", conclusion: "FAILURE" }, { context: "lanes/gate", state: "PENDING", description: "waiting on owner (/approve)" }],
+        statusCheckRollup: [{ name: "verify", conclusion: "FAILURE", detailsUrl: "https://github.com/owner/lanes/actions/runs/1" }, { context: "lanes/gate", state: "PENDING", description: "waiting on owner (/approve)" }],
         closingIssuesReferences: [{ number: 3 }],
         comments: [{ authorAssociation: "OWNER", body: buildVerdictComment({ reviewer: "test-hunter", verdict: "success", summary: "s", criteria: [{ index: 1, result: "pass", evidence: "e" }], findings: [] }, SNAP_SHA) }],
       },
@@ -290,7 +295,9 @@ const snapshotInput = {
 
 test("the snapshot schema defines every top-level and per-issue field, required ones listed, no other keys", () => {
   assert.deepEqual([...snapshotSchema.required].sort(), ["edges", "generatedAt", "issues", "overlaps", "version"]);
-  assert.deepEqual(Object.keys(snapshotSchema.properties).sort(), ["edges", "generatedAt", "issues", "overlaps", "version"]);
+  assert.deepEqual(Object.keys(snapshotSchema.properties).sort(), ["edges", "generatedAt", "issues", "overlaps", "profile", "repo", "version"]);
+  assert.deepEqual(snapshotSchema.properties.profile.enum, ["solo", "team"]);
+  assert.equal(snapshotSchema.properties.repo.pattern, "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$");
   const pair = snapshotSchema.properties.overlaps.items;
   assert.deepEqual([...pair.required].sort(), ["a", "b"]);
   assert.deepEqual(Object.keys(pair.properties).sort(), ["a", "b"]);
@@ -301,7 +308,13 @@ test("the snapshot schema defines every top-level and per-issue field, required 
   assert.deepEqual(Object.keys(issue.properties).sort(), ["blockedBy", "criteria", "number", "pr", "stage", "tier", "title"]);
   assert.deepEqual(issue.properties.tier.enum, ["skip", "quick", "full", "unknown"]);
   assert.deepEqual(issue.properties.blockedBy.items.properties.kind.enum, ["issue", "check", "review", "owner", "queue"]);
-  assert.deepEqual(Object.keys(issue.properties.pr.properties).sort(), ["checks", "headSha", "number"]);
+  assert.deepEqual(Object.keys(issue.properties.pr.properties).sort(), ["checks", "headSha", "number", "ownerApproved"]);
+  assert.equal(issue.properties.pr.properties.ownerApproved.type, "boolean");
+  assert.deepEqual(Object.keys(issue.properties.pr.properties.checks.items.properties).sort(), ["name", "result", "url"]);
+  assert.deepEqual(issue.properties.pr.properties.checks.items.required, ["name", "result"]);
+  assert.deepEqual(issue.properties.pr.required, ["number", "headSha", "checks"]);
+  assert.equal(snapshotSchema.properties.version.const, 0);
+  assert.match(snapshotSchema.description, /no logins, emails, bodies or comments/);
   assert.deepEqual(Object.keys(issue.properties.criteria.items.properties).sort(), ["index", "result"]);
   assert.deepEqual(Object.keys(snapshotSchema.properties.edges.items.properties).sort(), ["from", "to"]);
 });
@@ -312,6 +325,17 @@ test("a snapshot built by snapshot.mjs conforms to the schema, and it exercises 
   const three = s.issues.find((i) => i.number === 3);
   assert.ok(three.pr && three.criteria && three.blockedBy.length, "the sample covers pr, criteria and blockedBy");
   assert.ok(s.edges.length, "the sample covers edges");
+  assert.equal(s.profile, "team");
+  assert.equal(s.repo, "owner/lanes");
+  assert.equal(three.pr.ownerApproved, true);
+  assert.equal(three.pr.checks[0].url, "https://github.com/owner/lanes/actions/runs/1");
+});
+
+test("a solo snapshot has the profile but no ownerApproved, and still conforms", () => {
+  const s = builtSnapshot({ profile: "solo" });
+  assert.equal(schemaAccepts(snapshotSchema, s), true);
+  assert.equal(s.profile, "solo");
+  assert.equal("ownerApproved" in s.issues.find((i) => i.number === 3).pr, false);
 });
 
 test("every stage snapshot.mjs can emit is in the schema's stage enum", () => {
@@ -390,7 +414,11 @@ test("the snapshot schema rejects a bad snapshot, field by field", () => {
     ["an unknown check result", (s) => (three(s).pr.checks[0].result = "green")],
     ["a criterion index of 0", (s) => (three(s).criteria[0].index = 0)],
     ["an unknown criterion result", (s) => (three(s).criteria[0].result = "maybe")],
-    ["an edge missing to", (s) => delete s.edges[0].to],
+    ["an unknown profile", (s) => (s.profile = "enterprise")],
+    ["a repo with a scheme", (s) => (s.repo = "https://github.com/a/b")],
+    ["a non-boolean ownerApproved", (s) => (three(s).pr.ownerApproved = "yes")],
+    ["a non-string check url", (s) => (three(s).pr.checks[0].url = 5)],
+    ["an edge missing to",(s) => delete s.edges[0].to],
     ["issues that is not an array", (s) => (s.issues = {})],
   ];
   for (const [name, fn] of cases) assert.equal(schemaAccepts(snapshotSchema, mutate(fn)), false, name);
