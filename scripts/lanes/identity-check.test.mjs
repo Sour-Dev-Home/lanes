@@ -251,6 +251,14 @@ test("criterion 4: lanes.config.json registers identity-check in the queue modul
   assert.ok(queue.paths.includes("scripts/lanes/identity-check."));
 });
 
+test("edge: accounts from two different lanes-gh directories fail ghDir, naming no issue number", () => {
+  const status = authOk + "\n  ✓ Logged in to github.com account other (C:\\t\\lanes-gh-999-abc123\\hosts.yml)";
+  const r = check({ run: fakeRun({ "gh auth status": { stdout: status } }) });
+  assert.equal(r.code, 1);
+  assert.deepEqual(failed(r.parsed), ["ghDir"]);
+  assert.ok(!r.line.includes("999"));
+});
+
 test("edge: a runner that throws on every command fails each team check, not the script", () => {
   const run = () => { throw new Error(`boom ${TOKEN}`); };
   const r = identityCheck({ readConfig: () => TEAM, run, env: {} });

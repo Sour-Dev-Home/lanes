@@ -28,6 +28,7 @@ Scripts that import `node:child_process` (each call site runs `gh`, `git`, `clau
 - `scripts/lanes/delivery-metrics.mjs`
 - `scripts/lanes/diff-coverage.mjs`
 - `scripts/lanes/gate.mjs`
+- `scripts/lanes/identity-check.mjs` (runs fixed `gh` and `git` commands with no outside text; prints no secret)
 - `scripts/lanes/install.mjs` (asks `gh repo view` whether the target is public)
 - `scripts/lanes/issue-contract.mjs`
 - `scripts/lanes/lane-metrics.mjs`
