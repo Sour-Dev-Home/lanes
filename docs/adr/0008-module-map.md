@@ -83,6 +83,13 @@ split it or add a blocking contract issue itself, before showing the draft to th
   runs the report, and the report says the hotspots are unavailable when it fails; `npx jscpd` needs the registry
   reachable, and runs pinned to 5.3.3 with `npm_config_ignore_scripts=true`.
 
+## Amendment (2026-10-01)
+
+Issues are sized by changed lines, not by module, and may span modules (`docs/history/2026-09-30-lane-size-and-cost.md`).
+The issue-contract module check the Decision describes (refusing `ready` when an issue's paths resolve to more than
+one module) was never implemented and is withdrawn. The map still drives boundary checks, reviewers, lessons and
+affected tests.
+
 ## Governs
 
 - lanes.config.json
