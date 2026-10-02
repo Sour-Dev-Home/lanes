@@ -274,6 +274,19 @@ test("workflows mode masks the token before exporting it and names only the step
   await assert.rejects(runWorkflows({ ...env, GITHUB_ENV: "" }, { fetch, log() {}, appendFile() {} }), /no GITHUB_ENV/);
 });
 
+test("edge: workflows mode refuses a token that could inject another env line, and an installation id of 0", async () => {
+  const env = { APP_ID: "1", APP_KEY: keyPem, LANES_REPO: "o/lanes", GITHUB_ENV: "env-file" };
+  const evil = async (url) =>
+    new Response(JSON.stringify(url.endsWith("/installation") ? { id: 9 } : { token: "ghs_a\nPATH=/evil", expires_at: "2026-10-01T10:00:00Z" }), { status: 200 });
+  const events = [];
+  await assert.rejects(runWorkflows(env, { fetch: evil, log: (l) => events.push(l), appendFile: (f, c) => events.push(c) }), /invalid token/);
+  assert.deepEqual(events, []);
+  await assert.rejects(
+    findInstallationId({ appId: 1, keyPem, repo: "o/lanes", fetch: lookupFetch([], { lookup: { status: 200, body: { id: 0 } } }) }),
+    /malformed response/,
+  );
+});
+
 test("edge: the CLI refuses a missing mode and prints only the step when the key is bad", () => {
   const run = (a, env) => spawnSync(process.execPath, ["scripts/lanes/app-token.mjs", ...a], { env: { PATH: process.env.PATH, ...env }, encoding: "utf8" });
   assert.equal(run([], {}).status, 2);
