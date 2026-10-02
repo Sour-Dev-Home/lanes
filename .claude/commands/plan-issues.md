@@ -40,8 +40,10 @@ You are the planner. The idea: $ARGUMENTS
    Scope must also hold the files the criteria force a lane to change, or the lane edits files outside it (as #82 did).
    With a module map, the issue that creates a new file the map does not claim adds the file's prefix (for example
    `scripts/lanes/release.`) to the named module's `paths` in `lanes.config.json` and lists `lanes.config.json` in its
-   Scope "In"; there is no separate issue for it. Always grep the existing tests for strings the draft
-   changes (a permission, env name, pinned text), and add each test that pins one to Scope.
+   Scope "In"; there is no separate issue for it. Always run `node scripts/lanes/scope-tests.mjs --paths <path>... --strings <text>...`
+   for each drafted issue, with the issue's Scope "In" paths and every string, command, path or permission the criteria
+   change (workflow lines included, such as a `verify.yml` step); add each listed test to Scope "In", and show the
+   added tests in the draft.
    For each new issue, propose blockers among the open issues and PRs from step 2 whose Scope, Interface contract or
    goal overlaps it (for a PR, its changed files against the new issue's Scope). Put them in a separate table, one
    line each, `Blocked by existing: #N, because <one-line reason>`, so the owner confirms or removes each. Below it,

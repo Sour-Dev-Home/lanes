@@ -69,6 +69,8 @@ export const MANIFEST = [
   "scripts/lanes/post-review.mjs",
   "scripts/lanes/reviewers.mjs",
   "scripts/lanes/status.mjs",
+  "scripts/lanes/scope-tests.mjs",
+  "scripts/lanes/affected-tests.mjs",
   "scripts/lanes/setup-repo.mjs",
   "scripts/lanes/delivery-metrics.mjs",
   "scripts/lanes/graphql-lib.mjs",
