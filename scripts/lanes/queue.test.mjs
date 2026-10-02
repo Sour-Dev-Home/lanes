@@ -943,7 +943,9 @@ test("#344: edge: with no launchEnv (other platforms) the team lane's environmen
   const { seen } = await launchOptions(null);
   assert.equal(seen.length, 1);
   assert.equal(seen[0].env.GH_CONFIG_DIR, "/tmp/lane-1");
-  assert.equal(seen[0].env.PATH, process.env.PATH);
+  // Windows keeps the variable as `Path` in a copied env object, so the key is matched case-insensitively.
+  const pathOf = (env) => env[Object.keys(env).find((k) => k.toLowerCase() === "path")];
+  assert.equal(pathOf(seen[0].env), pathOf(process.env));
 });
 
 test("#344: edge: an adjusted env with no note prints exactly what no launchEnv prints", async () => {
