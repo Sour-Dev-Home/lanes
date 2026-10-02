@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildStatus, buildVerdictComment, checkSha, configuredReviewersFrom, mainCheckoutFrom, main, metricsWarning, parseArgs, TEAM_REASON, validateVerdict } from "./post-review.mjs";
+import { buildStatus, buildVerdictComment, checkSha, configuredReviewers, configuredReviewersFrom, mainCheckoutFrom, main, metricsWarning, parseArgs, TEAM_REASON, validateVerdict } from "./post-review.mjs";
 
 test("skipped is a success whose description starts with skipped", () => {
   assert.deepEqual(buildStatus("ui-reviewer", "skipped", "no visible change"), { context: "review/ui-reviewer", state: "success", description: "skipped: no visible change" });
@@ -591,4 +591,42 @@ test("edge: --file with owner as the verdict's reviewer is refused as an unknown
   const gh = fakeGh();
   assert.throws(() => main(["--file", verdictFile(verdict({ reviewer: "owner" }))], { run: gh.run, ...quiet }), /reviewer must be one of/);
   assert.deepEqual(gh.writes, []);
+});
+
+const cfgRepo = (text) => {
+  const dir = mkdtempSync(join(tmpdir(), "post-review-cfg2-"));
+  execFileSync("git", ["init", "-q", dir]);
+  mkdirSync(join(dir, "scripts", "lanes"), { recursive: true });
+  if (text !== undefined) writeFileSync(join(dir, "lanes.config.json"), text);
+  return dir;
+};
+const cfgWith = (names) => JSON.stringify({
+  requiredChecks: ["verify"],
+  paths: { skip: [], contract: [], sensitive: [], ui: [] },
+  modules: { entries: [{ id: "m", paths: ["x/"], imports: [], risk: "normal", reviewers: names }] },
+});
+const BUILT_IN_FOUR = CONFIGURED.slice(0, 4);
+
+test("a missing, unreadable or invalid config leaves only the built-in four (#463)", () => {
+  for (const text of [undefined, "{not json", "[]", "{}", JSON.stringify({ requiredChecks: [] })]) {
+    assert.deepEqual(configuredReviewersFrom(join(cfgRepo(text), "scripts", "lanes")), BUILT_IN_FOUR, String(text));
+  }
+});
+
+test("a config that lists owner never makes it a configured reviewer (#463)", () => {
+  const names = configuredReviewersFrom(join(cfgRepo(cfgWith(["owner", "compliance-reviewer"])), "scripts", "lanes"));
+  assert.ok(!names.includes("owner"));
+  assert.deepEqual(names, CONFIGURED);
+});
+
+test("a config name that is not a plain agent name leaves only the built-in four (#463)", () => {
+  for (const bad of ["Owner", "OWNER", "owner ", "review/owner", "", "9lives", "a_b"]) {
+    assert.deepEqual(configuredReviewersFrom(join(cfgRepo(cfgWith(["compliance-reviewer", bad])), "scripts", "lanes")), BUILT_IN_FOUR, JSON.stringify(bad));
+  }
+});
+
+test("edge: configuredReviewers reads the checkout holding the script and never offers owner", () => {
+  const names = configuredReviewers();
+  assert.ok(names.includes("test-hunter"));
+  assert.ok(!names.includes("owner"));
 });
