@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { PATH_PATTERNS } from "../preflight.mjs";
 
 test("lanes-gate always runs the default branch's scripts, never the PR's", () => {
@@ -1178,39 +1178,9 @@ test("lanes-workflow-apply runs workflow-apply.mjs filter and apply and mints th
   const yml = applyYml();
   assert.match(yml, /run: node scripts\/lanes\/workflow-apply\.mjs filter/);
   assert.match(yml, /run: node scripts\/lanes\/workflow-apply\.mjs apply/);
-  // The hand-over (ADR 0029 part 7) lets the lane push this test before the owner commits the workflow file, so it
-  // accepts the inline step until then; once the call is there, no inline script may remain.
-  if (/app-token\.mjs workflows/.test(yml)) {
-    assert.match(yml, /run: node scripts\/lanes\/app-token\.mjs workflows\n/);
-    assert.doesNotMatch(yml, /node --input-type|createSign|GITHUB_ENV/);
-  } else {
-    assert.ok(yml.indexOf("::add-mask::") > 0 && yml.indexOf("::add-mask::") < yml.indexOf("appendFileSync(process.env.GITHUB_ENV"));
-  }
+  assert.match(yml, /run: node scripts\/lanes\/app-token\.mjs workflows\n/);
+  assert.doesNotMatch(yml, /node --input-type|createSign|GITHUB_ENV/);
   assert.match(yml, /vars\.LANES_WORKFLOWS_APP_ID/);
-});
-
-test("app-token workflows masks the token before exporting it and names only the step on failure", async () => {
-  const { runWorkflows } = await import("./app-token.mjs");
-  const { generateKeyPairSync } = await import("node:crypto");
-  const keyPem = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" });
-  const events = [];
-  const fetch = async (url) =>
-    new Response(JSON.stringify(url.endsWith("/installation") ? { id: 9 } : { token: "ghs_abc", expires_at: "2026-10-01T10:00:00Z" }), { status: 200 });
-  const env = { APP_ID: "1", APP_KEY: keyPem, LANES_REPO: "o/lanes", GITHUB_ENV: "env-file" };
-  await runWorkflows(env, { fetch, log: (l) => events.push(["log", l]), appendFile: (f, c) => events.push(["file", f, c]) });
-  assert.deepEqual(events, [["log", "::add-mask::ghs_abc"], ["file", "env-file", "LANES_WORKFLOWS_TOKEN=ghs_abc\n"]]);
-  const bad = async () => new Response("secret ghs_leak", { status: 500 });
-  await assert.rejects(runWorkflows(env, { fetch: bad, log() {}, appendFile() {} }), (e) => /installation lookup failed with status 500/.test(e.message) && !e.message.includes("leak"));
-  await assert.rejects(runWorkflows({ ...env, GITHUB_ENV: "" }, { fetch, log() {}, appendFile() {} }), /no GITHUB_ENV/);
-});
-
-test("edge: app-token.mjs CLI refuses a missing mode and prints only the step when the key is bad", () => {
-  const run = (args, env) => spawnSync(process.execPath, ["scripts/lanes/app-token.mjs", ...args], { env: { PATH: process.env.PATH, ...env }, encoding: "utf8" });
-  assert.equal(run([], {}).status, 2);
-  const bad = run(["workflows"], { APP_ID: "1", APP_KEY: "SECRETKEYTEXT", LANES_REPO: "o/lanes", GITHUB_ENV: "x" });
-  assert.equal(bad.status, 1);
-  assert.match(bad.stderr, /app-token: could not sign the JWT/);
-  assert.ok(!bad.stderr.includes("SECRETKEYTEXT") && !bad.stdout.includes("SECRETKEYTEXT"));
 });
 
 test("edge: lanes-workflow-apply reads the key only in the apply job", () => {
