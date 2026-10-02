@@ -1718,7 +1718,8 @@ test("edge: pending, the outside-Scope note keeps the workflow-file reason and e
   routes["repos/o/r/issues/7"] = { ...issue, body: `${issue.body}\n### Scope\n\nIn: docs/only.md\n` };
   const d = evaluatePr(throwing(routes).api, "o/r", 5, config);
   assert.equal(d.state, "pending");
-  assert.match(d.description, new RegExp(`^${WAIT_HUNTER}: workflow file ${WF.replace(/[./]/g, "\\$&")} differs from the reviewed copy; \\d+ files outside Scope, see PR body$`));
+  assert.ok(d.description.startsWith(`${WAIT_HUNTER}: workflow file ${WF} differs from the reviewed copy; `), d.description);
+  assert.match(d.description, /; \d+ files outside Scope, see PR body$/);
 });
 
 test("pending: a file not yet committed is refused and named", () => {
