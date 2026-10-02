@@ -898,7 +898,7 @@ test("edge: the config's maxLanes caps the launches", async () => {
   assert.deepEqual(run.launched.filter((l) => l.tick === 0).length, 2);
 });
 
-test("CLI: conflicting issues launch one after the other, a newly ready issue joins, then three idle ticks end the run", async () => {
+test("CLI: conflicting issues launch one after the other, a newly ready issue joins, then three idle ticks lengthen the tick", async () => {
   const { main } = await import("./queue.mjs");
   const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/a.mjs"]), issue(3, ["src/c.mjs"], { labels: ["tier:quick"] })], prs: [], sessions: [] };
   const close = (n) => (world.issues = world.issues.filter((i) => i.number !== n));
@@ -1648,6 +1648,28 @@ for (const [name, opts, code, message, pulled] of [
     assert.equal(git.calls.some((c) => c[0] === "pull"), pulled);
   });
 }
+
+test("edge: a git read that throws while checking a restart precondition exits 3 naming it, not a crash", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+  const git = fakeGit({ remote: "bbbbbbb2222", changed: ["scripts/lanes/queue.mjs"] });
+  const inner = git.git;
+  const flaky = (args) => {
+    if (args[0] === "status") throw new Error("status exploded");
+    return inner(args);
+  };
+  assert.equal(await main([], { ...run.deps, git: flaky }), 3);
+  assert.match(run.out.at(-1), CANNOT_RESTART);
+  assert.match(run.out.at(-1), /status exploded/);
+  assert.deepEqual(run.launched, []);
+});
+
+test("edge: a sleep that rejects with something other than a stop request is not swallowed", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] });
+  run.deps.sleep = async () => { throw new Error("timer broke"); };
+  await assert.rejects(main([], run.deps), /timer broke/);
+});
 
 test("the supervisor spawns one new child with the same arguments after a child exits 10, and exits with the next code", async () => {
   const { main } = await import("./queue.mjs");
