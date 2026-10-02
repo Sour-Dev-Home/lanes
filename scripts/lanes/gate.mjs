@@ -14,6 +14,7 @@ import {
   isLaneBot,
   issuePaths,
   parseIssueForm,
+  pathsOverlap,
   latestByContext,
   loadAdrs,
   loadConfig,
@@ -34,7 +35,6 @@ import {
   trustedStatuses,
 } from "./lib.mjs";
 import { parseBlockedBy, readBlockerReport } from "./blockers.mjs";
-import { pathsOverlap } from "./paths.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;

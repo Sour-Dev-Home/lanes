@@ -306,6 +306,12 @@ export function issuePaths({ contract = "", scope = "" }) {
   return paths;
 }
 
+// Two path lists overlap when they share a path, or one names a directory (`dir/`) holding a path the other names.
+export function pathsOverlap(a, b) {
+  const within = (dir, p) => dir.endsWith("/") && p.startsWith(dir);
+  return a.some((x) => b.some((y) => x === y || within(x, y) || within(y, x)));
+}
+
 const ISSUE_FIELDS = ["goal", "acceptance criteria", "interface contract", "scope", "blocked by", "tier"];
 
 export function parseIssueForm(body) {
