@@ -33,7 +33,6 @@
 /.claude/agents/ @SourE-dev
 /.claude/commands/lane.md @SourE-dev
 /.claude/commands/night.md @SourE-dev
-/.claude/commands/approve.md @SourE-dev
 /docs/adr/ @SourE-dev
 /package.json @SourE-dev
 /package-lock.json @SourE-dev

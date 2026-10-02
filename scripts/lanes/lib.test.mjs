@@ -272,7 +272,7 @@ const OWNER_SAMPLES = {
   "^\\.githooks/": [".githooks/pre-push", "scripts/githooks/x.mjs"],
   "^lanes\\.config\\.json$": ["lanes.config.json", "templates/lanes.config.json"],
   "^\\.claude/agents/": [".claude/agents/test-hunter.md", ".claude/agents.md"],
-  "^\\.claude/commands/(lane|night|approve)\\.md$": [".claude/commands/night.md", ".claude/commands/lanes.md"],
+  "^\\.claude/commands/(lane|night)\\.md$":[".claude/commands/night.md", ".claude/commands/lanes.md"],
   "^docs/adr/": ["docs/adr/0003-x.md", "docs/adrs.md"],
   "^package(-lock)?\\.json$": ["package-lock.json", "frontend/package.json"],
   "(^|/)(pnpm-lock\\.yaml|yarn\\.lock)$": ["frontend/yarn.lock", "pnpm-lock.yaml.bak"],
