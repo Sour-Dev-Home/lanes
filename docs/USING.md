@@ -144,7 +144,7 @@ comments; a lane cannot grant it to itself.
 | Lane → owner | The PR template | `lanes/gate` (all sections, `Closes #N`, contract word) |
 | Idea → issues | `/plan-issues` draft in `.lanes/plans/`, approved by the owner | Nothing is created on GitHub before approval |
 | Reviewer → gate | A JSON verdict (pass or fail per acceptance criterion, findings with `fixed`), posted as `review/<name>` | `post-review.mjs --file` refuses invalid or dishonest-looking verdicts; `lanes/gate` requires the reviewers per tier and diff |
-| Owner → merge | `review/owner` status | `lanes/gate`; dropped automatically by any new push |
+| Owner → merge | code-owner review in GitHub | `lanes/gate`; stops counting after any new push |
 
 ## Metrics
 
@@ -207,7 +207,7 @@ comment for a problem that is still active, once. With several open `lanes-healt
 
 ## When a team lane changes a workflow file
 
-Under the team profile a lane cannot push `.github/workflows/` (the App has no `workflows` permission; see
+A lane cannot push `.github/workflows/` (the App has no `workflows` permission; see
 [ADR 0023](adr/0023-workflow-changes-owner-web-editor.md) and `docs/SECURITY.md`). The steps are all
 in the browser:
 
@@ -255,16 +255,17 @@ Free, environments have no required reviewers: skip both steps and keep the copy
   other's "Blocked by", or merge them into one issue.
 - **Wrong tier.** A `tier:skip` issue whose PR touches code fails the gate. Fix the issue's tier label, then re-run
   the gate: `gh workflow run lanes-gate -f pr=<N>` (label changes on the issue do not re-trigger it by themselves).
-- **Pushing after approval.** Any new commit drops `review/owner` and the reviewer statuses (they are per commit).
+- **Pushing after approval.** Any new commit drops your code-owner review and the reviewer statuses (they are per commit).
   Reviewers post after the final push; if you asked for a change, approve again after it lands.
 - **The first run of a new check.** A required check that has never run blocks every PR. After adding a workflow,
   land it on `main` before adding its name to `requiredChecks`.
 - **Required checks must also run on `merge_group`.** A workflow without that trigger never reports in the merge queue,
   and the queue times out.
-- **Lanes are trusted; the gate stops mistakes and strangers, not a hostile lane.** Lanes, schedules and the owner all
-  act as one GitHub account, and a lane can push branches and run code (tests, workflows). What the gate does stop:
-  - honest mistakes: a missing review, a wrong tier, an incomplete contract, a lane posting the owner's approval by
-    accident (the approve guard on `post-review.mjs owner`, below);
+- **Lanes are trusted; the gate stops mistakes and strangers, not a hostile lane.** Lanes and schedules act as the App
+  bot and the owner as their own account, and a lane can push branches and run code (tests, workflows). What the gate
+  does stop:
+  - honest mistakes: a missing review, a wrong tier, an incomplete contract, a lane approving its own work (only a
+    code-owner review in GitHub counts);
   - strangers: only issues opened by someone with write, maintain or admin permission on the repository ever become
     `ready`, and the gate rejects a PR linked to anyone else's issue, so outside text never reaches an unattended lane.
     Both checks read the author's permission from `repos/{repo}/collaborators/{login}/permission`, never

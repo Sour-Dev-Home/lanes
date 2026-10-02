@@ -43,14 +43,13 @@ architecture-advisor, each a fresh session), a security reviewer that cites a ve
 
 These are decided, not overlooked:
 
-- **One shared GitHub identity.** Lanes run as the owner's own GitHub account, with no second account, GitHub App or
-  restricted token, so adopting lanes needs no extra setup. A determined lane could therefore forge the owner's
-  approval by calling the GitHub API directly. The grant check and the visible approval comment shrink the window;
-  they do not close it ([0004](adr/0004-approve-guard-accepted-risk.md)).
-- **The guards parse command text on a best-effort basis.** The approve guard and the start guard defend against
-  accident and casual misuse, not a determined lane: a shell can build a command in more ways than any parser
-  covers. A newly found bypass is a `minor` follow-up; a regression is `critical`
-  ([0004](adr/0004-approve-guard-accepted-risk.md), [0007](adr/0007-start-guard-accepted-risk.md)).
+- **One App, one key.** Lanes act as the GitHub App bot ([0019](adr/0019-team-identity-profile.md)) and hold only an
+  installation token, never the owner's, so they cannot post the owner's review; GitHub enforces the code-owner
+  ruleset. The residual risk is a stolen App private key, which stays in `~/.lanes/` outside the repository
+  ([0025](adr/0025-retire-solo-profile.md)).
+- **The start guard parses command text on a best-effort basis.** It defends against accident and casual misuse, not
+  a determined lane: a shell can build a command in more ways than any parser covers. A newly found bypass is a
+  `minor` follow-up; a regression is `critical` ([0007](adr/0007-start-guard-accepted-risk.md)).
 - **The team App never gets `workflows: write`; the owner's read is the control.** A workflow file pushed to a branch
   of this repository runs on `push` before any review, and it can raise its own `GITHUB_TOKEN` with a `permissions:`
   block (for example `statuses: write`) to post `lanes/gate=success` as `github-actions[bot]`, the same creator the real

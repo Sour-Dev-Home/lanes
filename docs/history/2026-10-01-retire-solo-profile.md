@@ -34,7 +34,8 @@ Line counts are from the commits that did the removal, as git reports them.
 
 The removal lanes (#613, #614, #624, #654) deleted about 5,600 lines and added about 1,500, most of the additions being
 the refusal, the moved helpers and the tests that pin them. This record and ADRs 0004, 0015, 0002, 0007 and 0019,
-CLAUDE.md and the two docs (#617) finish the change.
+CLAUDE.md and the two docs (#617) finish the change. ADR 0025 part 11 lists CLAUDE.md rule 1 among the amended rules,
+but by the time of this record rule 1 held no approve-guard text, so it is unchanged; rules 6, 7 and 9 were amended.
 
 ## What stayed
 
