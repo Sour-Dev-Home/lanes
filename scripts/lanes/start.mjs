@@ -1,25 +1,14 @@
 // scripts/lanes/start.mjs
-// /start: removes merged lanes (cleanup.mjs), then checks each requested issue the way /lane does and launches the
-// rest as background lanes.
-// Usage: node scripts/lanes/start.mjs <N> [<N> ...]. Exit 0: every requested issue launched. 1: something was
-// refused or failed to launch. 2: bad arguments or config, or the lanes in flight could not be counted (nothing launched).
-// Or: node scripts/lanes/start.mjs --auto [--go]. Picks from every ready issue with pickStartable and prints the plan;
-// only --go launches it. Exit 0: printed (and, with --go, every pick launched). 1: a launch failed. 2: as above.
-// The cap and the soft paths come from the `start` block of lanes.config.json.
+// The launch helpers the owner's queue (queue.mjs) uses: launchLane, the team-profile steps and the token refresher
+// (`--refresh-token`, spawned by the queue). `/start` is retired (ADR 0030): the queue is the only launcher, and this
+// file refuses a command-line run from a Claude session or a lane worktree (launchRefusal).
 import { execFileSync, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { accessSync, appendFileSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, closeSync, constants as fsConstants, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mintInstallationToken, writeGhHosts } from "./app-token.mjs";
-import { main as checkBlockers } from "./blockers.mjs";
-import { cleanupMerged } from "./cleanup.mjs";
-import { TIERS, laneIssueOf, parseIdentity, parseIssueForm } from "./lib.mjs";
-import { claimedPaths, pickStartable } from "./pick.mjs";
-import { SAFE_SESSION_ID, idleLaneRecovery, idleLaneSession, laneWorktree, worktreeUnsaved } from "./status.mjs";
-import { issuePaths, pathsOverlap } from "./paths.mjs";
-import { grantPath, grantRefusal, readGrant } from "./start-guard.mjs";
+import { TIERS, laneIssueOf, parseIdentity } from "./lib.mjs";
 
 export const START_DEFAULTS = Object.freeze({
   maxLanes: 8,
@@ -62,23 +51,11 @@ export function appendStarts(root, lines) {
   appendFileSync(join(dir, "starts.jsonl"), lines.map((l) => `${JSON.stringify(l)}\n`).join(""));
 }
 
-// Best-effort: `deps.recordStarts(root, lines)` is absent in tests that do not look at the log, and a failed write is
-// swallowed, so recording never changes a launch.
-function recordDecisions(deps, root, decisions) {
-  try {
-    deps.recordStarts?.(root, decisions);
-  } catch {
-    // The log is evidence for phase 2, not a gate.
-  }
-}
-
 const MAX_LANES_LIMIT = 10;
 // A lane PATH with more entries than this is reported at launch (#416).
 const PATH_NOTE_ABOVE = 60;
 // A model name is one word that cannot start with `-`, so claude never reads it as a flag.
 const MODEL_NAME = /^[^\s-]\S*$/;
-const PR_LIMIT = 1000;
-const ISSUE_LIMIT = 1000;
 
 /**
  * The `start` block of a parsed lanes.config.json, each missing key (or the whole block) filled from START_DEFAULTS.
@@ -144,9 +121,6 @@ export function launchArgs(n, { tier, models = {}, opus = false, settings, stric
   const named = ["--bg", "--name", `lane-${n}`, ...(settings ? ["--settings", settings] : []), ...(strictMcp ? ["--strict-mcp-config"] : [])];
   return model ? [...named, "--model", model, `/lane ${n}`] : [...named, `/lane ${n}`];
 }
-
-// The tier of an issue from its label names (`tier:quick` → `quick`), or undefined.
-const tierOf = (labels) => labels.find((l) => l.startsWith("tier:"))?.slice("tier:".length);
 
 // The model:* labels of an issue: whether `model:opus` is set, and the other model:* labels, which are ignored.
 // Only the one literal label selects a model, so a label can never pass an arbitrary string to `claude --model`.
@@ -504,112 +478,7 @@ export function inFlightIssues({ prs, sessions, finished = [] }) {
   return [...found].sort((a, b) => a - b);
 }
 
-// #522: gh's `assignees` as logins. An entry with no readable login still counts as a claim, and a non-list value is
-// one too: fail closed, never read a malformed field as unassigned.
-function assigneeLogins(raw) {
-  if (raw === undefined || raw === null) return [];
-  return (Array.isArray(raw) ? raw : [null]).map((a) => a?.login || "unknown");
-}
-
-// The first reason this issue cannot start on its own, or null. `blockers` is blockers.mjs's `{ code, message }`.
-function refusal(issue) {
-  if (issue.error) return issue.error;
-  if (issue.state !== "OPEN") return "not open";
-  if (!issue.labels.includes("ready")) return "lacks ready";
-  // A lane found nothing to build and handed it to the owner (#136); it waits for them to close or rewrite it.
-  if (issue.labels.includes("needs-owner")) return "needs-owner";
-  // #522: the owner claims an issue it will do itself by assigning it.
-  if (issue.assignees?.length) return `assigned to ${issue.assignees.join(", ")}`;
-  if (issue.labels.filter((l) => l.startsWith("tier:")).length !== 1) return "no single tier:* label";
-  if (issue.blockers?.code !== 0) return String(issue.blockers?.message ?? "cannot check blockers").replace(/^#\d+: /, "");
-  return null;
-}
-
-/**
- * Which requested issues to launch. Pure.
- * @param {{
- *   issues: { number: number, state?: string, labels?: string[], blockers?: { code: number, message: string }, error?: string }[],
- *   inFlight: number[],
- *   overlaps: (a: number, b: number) => boolean,
- *   running?: (n: number) => string | null,
- *   maxLanes?: number,
- * }} input issues in request order; `error` marks one that could not be read; `running` gives the reason an issue
- *   overlaps running work (open lane PRs, running lanes), or null; `maxLanes` is start.maxLanes
- * @returns {{ launch: number[], refused: { number: number, reason: string }[] }} both in request order
- */
-export function planStart({ issues, inFlight, overlaps, running = () => null, maxLanes = START_DEFAULTS.maxLanes }) {
-  const reasons = new Map();
-  const busy = new Set(inFlight);
-  for (const issue of issues) {
-    const reason = refusal(issue) ?? (busy.has(issue.number) ? "already in flight" : running(issue.number));
-    if (reason) reasons.set(issue.number, reason);
-  }
-
-  // Only issues that could otherwise start are compared, and an overlapping pair is refused together.
-  const candidates = issues.map((i) => i.number).filter((n) => !reasons.has(n));
-  const overlapping = new Map(candidates.map((n) => [n, candidates.filter((m) => m !== n && overlaps(n, m))]));
-  for (const [n, others] of overlapping) {
-    if (others.length) reasons.set(n, `overlaps ${others.map((m) => `#${m}`).join(", ")}`);
-  }
-
-  let slots = maxLanes - busy.size;
-  const launch = [];
-  for (const n of candidates) {
-    if (reasons.has(n)) continue;
-    if (slots > 0) {
-      launch.push(n);
-      slots--;
-    } else reasons.set(n, `cap of ${maxLanes} lanes in flight`);
-  }
-  const refused = issues.filter((i) => reasons.has(i.number)).map((i) => ({ number: i.number, reason: reasons.get(i.number) }));
-  return { launch, refused };
-}
-
 const reason = (err) => String(err?.stderr || err?.message || err).trim().split("\n")[0];
-
-const USAGE = "usage: start.mjs <issue number> [<issue number> ...], or start.mjs --auto [--go]";
-
-// The open PRs (with `fields`) and the issues with a lane in flight. Throws when either cannot be read.
-function readInFlight(deps, fields) {
-  const root = deps.root();
-  const prs = JSON.parse(deps.gh(["pr", "list", "--state", "open", "--limit", String(PR_LIMIT), "--json", fields]));
-  // A truncated list could hide a lane in flight and let the cap be passed, so refuse instead.
-  if (prs.length >= PR_LIMIT) throw new Error(`${PR_LIMIT}+ open PRs: too many to count lanes in flight`);
-  const sessions = JSON.parse(deps.claude(["agents", "--json", "--cwd", root], { cwd: root }));
-  return { prs, sessions, inFlight: inFlightIssues({ prs, sessions, finished: finishedIssues(deps, prs, sessions) }) };
-}
-
-// #444: "already in flight" for an issue whose only lane is an open PR with no live session says so, and how to resume it.
-// #571: with no open PR, a newest session that is idle is a stalled lane: name it and the recovery /status gives too.
-function inFlightReason(n, prs, sessions, runGit) {
-  const pr = prs.find((p) => Number(branchIssue(p.headRefName)) === n);
-  if (!pr) {
-    const s = newestLaneSession(sessions, n);
-    if (!s || typeof s.id !== "string" || !SAFE_SESSION_ID.test(s.id) || !idleLaneSession(s)) return "already in flight";
-    return `already in flight: lane session ${s.id} is idle with no PR; ${idleLaneRecovery(s.id, n, worktreeUnsaved(laneWorktree(s.cwd, n), runGit))}`;
-  }
-  if (!deadLaneSession(sessions, n).dead) return "already in flight";
-  return `already in flight: dead lane with open PR #${pr.number} and no live session; run the queue (node scripts/lanes/queue.mjs) in your terminal to resume it in its worktree once, if its checks or reviews are still owed and nothing there is unsaved`;
-}
-
-// The issues of sessions with no open PR whose lane is finished: a merged `issue-<N>-` PR, or the issue closed.
-// Throws when the merged PRs cannot be read. An issue that cannot be read is not finished, so it keeps its slot.
-function finishedIssues(deps, prs, sessions) {
-  const open = new Set(prs.map((pr) => Number(branchIssue(pr.headRefName))));
-  const idle = [...new Set(sessions.map(sessionIssue).filter(Boolean))].filter((n) => !open.has(n));
-  if (!idle.length) return [];
-  // A truncated list only misses merged PRs; the issue's own state is still checked below.
-  const merged = JSON.parse(deps.gh(["pr", "list", "--state", "merged", "--limit", String(PR_LIMIT), "--json", "headRefName"]));
-  const mergedIssues = new Set(merged.map((pr) => Number(branchIssue(pr.headRefName))));
-  return idle.filter((n) => {
-    if (mergedIssues.has(n)) return true;
-    try {
-      return JSON.parse(deps.gh(["issue", "view", String(n), "--json", "state"])).state === "CLOSED";
-    } catch {
-      return false;
-    }
-  });
-}
 
 // Spawns lane n's reaper (ADR 0010): `node scripts/lanes/reap.mjs --issue n --session id` from the root, detached,
 // its output appended to `.lanes/reap/<n>.log`, and unref'd so it outlives this process. Returns null, or the line
@@ -718,217 +587,7 @@ export function launchLane(n, deps, { tier, models, labels, identity, root, cwd 
   return { id, failed: false, lines: [...notes, `#${n} → ${id}`, ...(reaperFailed ? [reaperFailed] : []), ...(refresherFailed ? [refresherFailed] : []), ...(marked.includes(": label not set: ") ? [marked] : [])] };
 }
 
-// Launches each issue from the repository root through launchLane (`tiers`: issue → tier, `labels`: issue → label
-// names). Returns issue → lines, and whether any launch failed.
-function launchAll(numbers, deps, { tiers, models, labels, identity, scopes = new Map() }) {
-  const lines = new Map();
-  let failed = false;
-  const root = numbers.length ? deps.root() : null;
-  const { env, note: envNote } = numbers.length && deps.launchEnv ? deps.launchEnv() : { env: undefined, note: null };
-  for (const n of numbers) {
-    const launched = launchLane(n, deps, { tier: tiers.get(n), models, labels: labels.get(n), identity, root, env, envNote, scope: scopes.get(n) ?? [] });
-    lines.set(n, launched.lines);
-    if (launched.failed) failed = true;
-  }
-  return { lines, failed };
-}
-
-// --auto: every ready issue is checked the way /lane does, then pickStartable chooses among the rest against the
-// paths open PRs change and running lanes claim. Prints the plan; launches it only with `go`.
-function autoStart(go, deps, { maxLanes, softPaths, models, identity }) {
-  let prs, sessions, inFlight, openIssues;
-  try {
-    ({ prs, sessions, inFlight } = readInFlight(deps, "number,headRefName,files"));
-    openIssues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,labels,body,assignees"]));
-    // A blocker missing from a truncated list would not rank, and a running issue's claim would be lost.
-    if (openIssues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to plan from`);
-  } catch (err) {
-    return { code: 2, lines: [`cannot gather the plan, nothing launched: ${reason(err)}`] };
-  }
-
-  const labelsOf = (issue) => (issue.labels ?? []).map((l) => l.name);
-  const loginsOf = (issue) => assigneeLogins(issue.assignees);
-  const ready = openIssues.filter((i) => labelsOf(i).includes("ready"));
-  if (!ready.length) return { code: 0, lines: ["no ready issues to start"] };
-
-  const busy = new Set(inFlight);
-  const skipped = [];
-  const candidates = [];
-  for (const issue of ready) {
-    const why = busy.has(issue.number)
-      ? inFlightReason(issue.number, prs, sessions, deps.git)
-      : refusal({ state: "OPEN", labels: labelsOf(issue), assignees: loginsOf(issue), blockers: checkBlockers([String(issue.number)], deps.gh) });
-    if (why) skipped.push({ number: issue.number, reason: why });
-    else candidates.push(issue);
-  }
-  const claimed = claimedPaths({ openPrs: prs, runningIssues: openIssues.filter((i) => busy.has(i.number)) });
-  const { start, skipped: notPicked } = pickStartable({ candidates, claimed, openIssues, maxLanes, inFlightCount: busy.size, softPaths });
-  const allSkipped = [...skipped, ...notPicked].sort((a, b) => a.number - b.number);
-  const skipLines = allSkipped.map((s) => `#${s.number}: skipped: ${s.reason}`);
-
-  if (!go) {
-    const trailer = start.length ? `dry run, nothing launched: /start --auto --go launches the ${start.length} marked would start` : "dry run: nothing to start";
-    return { code: 0, lines: [...start.map((n) => `#${n}: would start`), ...skipLines, trailer] };
-  }
-  const tiers = new Map(candidates.map((i) => [i.number, tierOf(labelsOf(i))]));
-  const labels = new Map(candidates.map((i) => [i.number, labelsOf(i)]));
-  const scopes = new Map(candidates.map((i) => [i.number, issuePaths(parseIssueForm(i.body ?? "").fields)]));
-  const { lines, failed } = launchAll(start, deps, { tiers, models, labels, identity, scopes });
-  recordDecisions(deps, deps.root(), startDecisions({ started: start, skipped: allSkipped, at: new Date(deps.now()).toISOString() }));
-  return { code: failed ? 1 : 0, lines: [...start.flatMap((n) => lines.get(n)), ...skipLines] };
-}
-
-/**
- * Checks this session's /start grant, removes merged lanes, then reads the issues, plans and launches, and deletes
- * the grant. `deps` holds fakes in tests: `gh(args)` and `claude(args, { cwd })` return stdout, `root()` the main
- * repository root, `config()` the parsed lanes.config.json (undefined when there is none), `cleanup({ dryRun })`
- * cleanupMerged's lines, `spawn(cmd, args, options)` a child_process.spawn child, `reaperLog(root, n)` lane n's reaper
- * log opened for appending, as `{ fd, close }`, `session()` this session's id, `grantDir()` the directory of grant
- * files, `now()` the time in ms, and optionally `removeGrant(file)`. Returns the exit code and the lines to print,
- * cleanup's first.
- */
-export function main(argv, deps = { gh, claude, root: repoRoot, config: readConfig, cleanup: cleanupMerged, spawn, reaperLog, session, grantDir, now: Date.now, launchEnv: localLaunchEnv, recordStarts: appendStarts, team }) {
-  const args = argv.map((a) => String(a).replace(/^#/, ""));
-  const auto = args[0] === "--auto";
-  if (auto ? args.length > 2 || (args.length === 2 && args[1] !== "--go") : !args.length || args.some((a) => !/^[1-9]\d*$/.test(a))) {
-    return { code: 2, lines: [USAGE] };
-  }
-  const go = args[1] === "--go";
-
-  // ADR 0007: whatever reached this script, it launches nothing without the owner's fresh /start for these arguments.
-  const sessionId = deps.session();
-  const file = grantPath(deps.grantDir(), sessionId);
-  // A repeated number launches once, so it is compared once.
-  const run = auto ? { auto: go ? "go" : "dry" } : { issues: [...new Set(args.map(Number))] };
-  const refused = grantRefusal(file ? readGrant(file) : null, sessionId, run, deps.now());
-  if (refused) return { code: 2, lines: [`nothing launched: ${refused}`] };
-  // Claimed by an atomic rename before anything runs, so of two overlapping runs only one gets it (#217). The claimed
-  // copy is checked again in case the owner typed a new /start between the check above and the rename.
-  const claimed = `${file}.claimed-${randomUUID()}`;
-  try {
-    renameSync(file, claimed);
-  } catch (err) {
-    return { code: 2, lines: [`nothing launched: ${err.code === "ENOENT" ? "the /start grant was already used by another run" : `the /start grant could not be claimed: ${reason(err)}`}`] };
-  }
-  const changed = grantRefusal(readGrant(claimed), sessionId, run, deps.now());
-  if (changed) {
-    try {
-      if (!existsSync(file)) renameSync(claimed, file);
-    } catch {
-      // The grant stays claimed and unused; the owner types /start again.
-    }
-    return { code: 2, lines: [`nothing launched: ${changed}`] };
-  }
-
-  let result;
-  let notRemoved = null;
-  try {
-    result = startRun(auto, go, args, deps);
-  } finally {
-    // Single use, even when the run stopped early: a second run needs the owner's /start again.
-    try {
-      (deps.removeGrant ?? rmSync)(claimed);
-    } catch (err) {
-      notRemoved = reason(err);
-    }
-  }
-  if (notRemoved === null) return result;
-  return { code: Math.max(result.code, 1), lines: [...result.lines, `the /start grant could not be removed: ${notRemoved}`] };
-}
-
-// The run once the grant is accepted: config, cleanup, then the plan and its launches.
-function startRun(auto, go, args, deps) {
-  let config;
-  try {
-    const raw = deps.config();
-    try {
-      config = startConfig(raw);
-    } catch (err) {
-      return { code: 2, lines: [`nothing launched: ${err.message}`] };
-    }
-  } catch (err) {
-    return { code: 2, lines: [`cannot read lanes.config.json, nothing launched: ${reason(err)}`] };
-  }
-  // Merged lanes go first, so their sessions no longer count as in flight; only --auto without --go is a dry run.
-  const cleaned = cleanupLines(deps, auto && !go);
-  const { code, lines } = auto ? autoStart(go, deps, config) : startIssues(args, deps, config);
-  return { code, lines: [...cleaned, ...lines] };
-}
-
-// cleanupMerged's lines, best-effort: a throw, or a step it reports failed, becomes `cleanup failed: <reason>`, and
-// never changes the start run's plan or exit code.
-function cleanupLines(deps, dryRun) {
-  try {
-    const lines = deps.cleanup({ dryRun });
-    if (!Array.isArray(lines)) throw new Error("cleanup returned no lines");
-    return lines.map((line) => (line.startsWith("failed ") ? `cleanup failed: ${line.slice("failed ".length)}` : line));
-  } catch (err) {
-    return [`cleanup failed: ${reason(err)}`];
-  }
-}
-
-// <N...>: checks each requested issue the way /lane does and launches what passes.
-function startIssues(args, deps, config) {
-  const numbers = [...new Set(args.map(Number))];
-  let prs, inFlight, sessions;
-  try {
-    ({ prs, inFlight, sessions } = readInFlight(deps, "number,headRefName,files"));
-  } catch (err) {
-    return { code: 2, lines: [`cannot count lanes in flight, nothing launched: ${reason(err)}`] };
-  }
-  // A running lane without a PR claims its issue's Scope, so the open issues' bodies are needed as in --auto.
-  let openIssues;
-  try {
-    openIssues = JSON.parse(deps.gh(["issue", "list", "--state", "open", "--limit", String(ISSUE_LIMIT), "--json", "number,body"]));
-    if (openIssues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to read running lanes`);
-  } catch (err) {
-    return { code: 2, lines: [`cannot check running lanes, nothing launched: ${reason(err)}`] };
-  }
-  const claimed = claimedPaths({ openPrs: prs, runningIssues: openIssues.filter((i) => inFlight.includes(i.number)) });
-
-  const issues = [];
-  const pathsOf = new Map();
-  const runningOverlap = new Map();
-  for (const n of numbers) {
-    let view;
-    try {
-      view = JSON.parse(deps.gh(["issue", "view", String(n), "--json", "number,state,labels,body,assignees"]));
-    } catch {
-      issues.push({ number: n, error: "not found or unreadable" });
-      continue;
-    }
-    const form = parseIssueForm(view.body ?? "").fields;
-    // As in /status: an issue whose Scope names no paths is left out of overlap comparisons.
-    if (issuePaths({ scope: form.scope }).length) {
-      pathsOf.set(n, issuePaths(form));
-      // The same check --auto makes: pickStartable on this one issue against what running work claims.
-      const { skipped } = pickStartable({ candidates: [{ number: n, body: view.body }], claimed, openIssues: [], maxLanes: 1, inFlightCount: 0, softPaths: config.softPaths });
-      const hit = skipped.find((s) => s.reason.startsWith("overlaps running "));
-      if (hit) runningOverlap.set(n, hit.reason);
-    }
-    issues.push({ number: n, state: view.state, labels: (view.labels ?? []).map((l) => l.name), assignees: assigneeLogins(view.assignees), blockers: checkBlockers([String(n)], deps.gh) });
-  }
-  // Soft paths never count, as in pickStartable for --auto.
-  const soft = config.softPaths.map((s) => new RegExp(s));
-  const hard = (paths) => paths.filter((p) => !soft.some((re) => re.test(p)));
-  const overlaps = (a, b) => pathsOf.has(a) && pathsOf.has(b) && pathsOverlap(hard(pathsOf.get(a)), hard(pathsOf.get(b)));
-
-  const { launch, refused } = planStart({ issues, inFlight, overlaps, running: (n) => runningOverlap.get(n) ?? null, maxLanes: config.maxLanes });
-  const tiers = new Map(issues.filter((i) => i.labels).map((i) => [i.number, tierOf(i.labels)]));
-  const labels = new Map(issues.filter((i) => i.labels).map((i) => [i.number, i.labels]));
-  const launched = launchAll(launch, deps, { tiers, models: config.models, labels, identity: config.identity, scopes: pathsOf });
-  recordDecisions(deps, deps.root(), startDecisions({ started: launch, skipped: refused, at: new Date(deps.now()).toISOString() }));
-  const why = (r) => (r.reason === "already in flight" ? inFlightReason(r.number, prs, sessions, deps.git) : r.reason);
-  const lines = new Map([...refused.map((r) => [r.number, [`#${r.number}: refused: ${why(r)}`]]), ...launched.lines]);
-  return { code: refused.length || launched.failed ? 1 : 0, lines: numbers.flatMap((n) => lines.get(n)) };
-}
-
-// The grant the start guard's UserPromptSubmit hook writes: `.lanes/start/<session>.json` beside these scripts, the
-// same directory the hook resolves from its own file.
-const session = () => process.env.CLAUDE_CODE_SESSION_ID;
-const grantDir = () => fileURLToPath(new URL("../../.lanes/start/", import.meta.url));
 const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-const claude = (args, { cwd, env }) => execFileSync("claude", args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 // The main checkout, even when run from a worktree: the parent of the shared .git directory.
 const repoRoot = () => dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
 // The main checkout's lanes.config.json, parsed; undefined when it does not exist (the defaults apply).
@@ -1022,10 +681,45 @@ async function runRefresher(argv) {
   return 0;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === "--refresh-token") {
-  process.exitCode = await runRefresher(process.argv.slice(3));
-} else if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const { code, lines } = main(process.argv.slice(2));
-  for (const line of lines) console.log(line);
-  process.exitCode = code;
+export const LAUNCH_REFUSAL = "lanes are launched only by the owner's queue in their own terminal (ADR 0030)";
+
+/**
+ * ADR 0030 parts 1 and 3: the one refusal shared by the queue and this file's command line. Returns LAUNCH_REFUSAL when
+ * `env` has CLAUDECODE or CLAUDE_CODE_CHILD_SESSION set (any non-empty value), or when `file` (the script's own
+ * `import.meta.url` or path, never the working directory) lies under a `.claude/worktrees/` directory; else null.
+ */
+export function launchRefusal(env, file) {
+  if (env.CLAUDECODE || env.CLAUDE_CODE_CHILD_SESSION) return LAUNCH_REFUSAL;
+  if (file === undefined) return null;
+  // The URL's own path, not fileURLToPath: that throws for a URL whose path is not a local one on this platform.
+  const path = String(file).startsWith("file:") ? decodeURIComponent(new URL(file).pathname) : String(file);
+  // Case-insensitive: Windows and default macOS filesystems ignore case in a path.
+  return /(^|\/)\.claude\/worktrees\//i.test(path.replaceAll("\\", "/")) ? LAUNCH_REFUSAL : null;
+}
+
+/**
+ * Whether the module at `url` is the script node was started with (`argv1`). Real paths on both sides: Node resolves
+ * `import.meta.url` through symlinks (macOS's tmpdir /var is /private/var), but `process.argv[1]` keeps the path as typed.
+ * False with no `argv1` or a path that cannot be resolved.
+ */
+export function isEntryScript(argv1, url) {
+  if (!argv1) return false;
+  try {
+    return realpathSync(argv1) === realpathSync(fileURLToPath(url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryScript(process.argv[1], import.meta.url)) {
+  const refused = launchRefusal(process.env, import.meta.url);
+  if (refused) {
+    console.error(refused);
+    process.exitCode = 2;
+  } else if (process.argv[2] === "--refresh-token") {
+    process.exitCode = await runRefresher(process.argv.slice(3));
+  } else {
+    console.error("start.mjs has no command line besides --refresh-token; the queue (node scripts/lanes/queue.mjs) launches lanes");
+    process.exitCode = 2;
+  }
 }

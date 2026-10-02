@@ -763,11 +763,11 @@ test("adr.md's issue-or-PR-number mode still files its own issue and PR and link
   assert.match(ideaMode, /without filing an issue or opening a PR yourself/);
 });
 
-// #115: /health, /status and /start run the lanes scripts from an up-to-date main, so a stale checkout never reports
-// or acts with old code. Each file's pull step comes before its first lanes script run.
+// #115: /health and /status run the lanes scripts from an up-to-date main, so a stale checkout never reports
+// or acts with old code. Each file's pull step comes before its first lanes script run. (/start is retired, #675.)
 const commandText = (name) => readFileSync(`.claude/commands/${name}.md`, "utf8").replace(/\s+/g, " ");
 
-for (const name of ["health", "status", "start"]) {
+for (const name of ["health", "status"]) {
   test(`${name}.md pulls main with --ff-only, only on a clean main, before running any lanes script`, () => {
     const md = commandText(name);
     const pull = md.indexOf("git pull --ff-only");
@@ -787,23 +787,6 @@ for (const name of ["health", "status", "start"]) {
     );
   });
 }
-
-// Edge: a lane or a schedule must stop before touching git, so start.md's refusal stays ahead of its pull step.
-test("start.md still refuses a lane or a schedule before its pull step", () => {
-  const md = commandText("start");
-  assert.ok(md.indexOf("stop now") < md.indexOf("git pull --ff-only"));
-});
-
-// Edge (beyond the criteria): start-guard.mjs allows start.mjs only as a standalone plain command (#51). If a model
-// chained the new pull step onto the start.mjs run (`git pull --ff-only && node scripts/lanes/start.mjs ...`), the
-// guard would deny the whole compound command and /start would stop working. start.md must say to run the git
-// commands on their own instead.
-test("start.md tells the model to run its pull step on its own, never chained to the guarded start.mjs run", () => {
-  assert.match(
-    commandText("start"),
-    /Run each of these git commands on its own, never chained to the `start\.mjs` run below/,
-  );
-});
 
 // #232: CI also runs the suite on Windows and on Node 24
 const verifyYml = () => readFileSync(".github/workflows/verify.yml", "utf8");

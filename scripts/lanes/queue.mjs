@@ -18,7 +18,7 @@ import { GATE_CONTEXT, TEAM_REQUIRED_MESSAGE, laneIssueOf, parseIssueForm } from
 import { issuePaths } from "./paths.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
-import { appendStarts, budgetConfig, inFlightIssues, startDecisions, deadLaneSession, launchLane, localLaunchEnv, reaperLog, START_DEFAULTS, startConfig, teamSteps } from "./start.mjs";
+import { appendStarts, budgetConfig, inFlightIssues, isEntryScript, startDecisions, deadLaneSession, launchLane, localLaunchEnv, launchRefusal, reaperLog, START_DEFAULTS, startConfig, teamSteps } from "./start.mjs";
 import { QUEUE_EVENTS, formatAge, gateDescriptions, gateSince, liveLanes, mergeGroupFailures, prStage, queueFailedNote, queueRemovals, stalledLanes } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
@@ -340,7 +340,8 @@ function recoverLanes(snapshot, { deps, dir, say, attempted, told }) {
  * The queue CLI. Every TICK_MS: cleanupMerged, then reads issues, PRs and sessions, runs planTick, launches its picks
  * (one attempt each; a failed issue is not tried again this run) and prints its lines, each time-stamped. An owner
  * wait prints once per change. Resolves to the exit code (ADR 0026): 0 when a `sleep` rejects with `code: "QUEUE_STOP"`
- * (Ctrl+C), 2 for an argument, a bad config, or a run inside Claude, 3 or 4 for scripts that are stale with no restart,
+ * (Ctrl+C), 2 for an argument, a bad config, or a run inside Claude or from a lane worktree (start.mjs's launchRefusal
+ * on `env` and `deps.file`, the script's own URL; with no `file` only `env` is checked), 3 or 4 for scripts that are stale with no restart,
  * 10 for a restart (child only). With `deps.runChild(argv, env)` and no LANES_QUEUE_CHILD in `env` it is the supervisor:
  * it spawns children until one exits with other than 10. `deps` holds fakes in tests: `env`,
  * `gh(args)` and `claude(args, { cwd })` return stdout, `root()` the main checkout, `config()` the parsed
@@ -350,13 +351,14 @@ function recoverLanes(snapshot, { deps, dir, say, attempted, told }) {
  */
 export async function main(argv, deps = DEFAULT_DEPS) {
   const { env, gh, claude, root, config, cleanup, now, sleep, print } = deps;
-  if (argv.length) {
-    print(USAGE);
+  // ADR 0030 parts 1 and 3: a lane, any other Claude session, or a copy under .claude/worktrees must not run the queue.
+  const refused = launchRefusal(env, deps.file);
+  if (refused) {
+    print(refused);
     return 2;
   }
-  // ADR 0007 part 3: a lane or any other Claude session must not run the queue.
-  if (env.CLAUDECODE) {
-    print("queue.mjs refuses to run inside Claude (CLAUDECODE is set): run it in your own terminal");
+  if (argv.length) {
+    print(USAGE);
     return 2;
   }
   // ADR 0026 part 3: the first process only supervises; each child runs the loop below and exits RESTART_CODE to be replaced.
@@ -500,7 +502,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       // The log is evidence for phase 2, not a gate.
     }
     const tierOf = new Map(issues.map((i) => [i.number, labelsOf(i).find((l) => l?.startsWith("tier:"))?.slice("tier:".length)]));
-    // #344: as /start does (#337), Windows lanes launch with Git's POSIX tools first on PATH; a note says when not.
+    // #344: as the retired /start did (#337), Windows lanes launch with Git's POSIX tools first on PATH; a note says when not.
     // #444: over the token budget a dead lane waits too. Its marker is written before it launches, so a crash cannot
     // allow a second relaunch, and the launch runs in the lane's own worktree, where /lane continues its PR.
     const resuming = budgetOver ? [] : resumes;
@@ -520,9 +522,9 @@ export async function main(argv, deps = DEFAULT_DEPS) {
         }
         say(`#${n}: ${resume.reason}; resuming once`);
       }
-      // #556: /start's one-lane launcher: one attempt, then the reaper (ADR 0010) and the running label (ADR 0014); under
+      // #556: start.mjs's one-lane launcher: one attempt, then the reaper (ADR 0010) and the running label (ADR 0014); under
       // team (ADR 0019) the App-only environment, --settings, strict MCP and the token refresher, or no launch at all.
-      // #577: the issue's labels, so `model:opus` launches on Opus as under /start (resumed lanes too).
+      // #577: the issue's labels, so `model:opus` launches on Opus (resumed lanes too).
       const launched = launchLane(n, deps, { tier: tierOf.get(n), models, labels: labelsByIssue.get(n) ?? [], identity, root: dir, cwd, env: launchEnvironment, envNote, scope: scopeByIssue.get(n) ?? [] });
       for (const line of launched.lines) say(line);
       if (launched.failed) failedLaunches.add(n);
@@ -589,6 +591,7 @@ const DEFAULT_RECOVERY = {
 
 const DEFAULT_DEPS = {
   env: process.env,
+  file: import.meta.url,
   launchEnv: localLaunchEnv,
   recovery: DEFAULT_RECOVERY,
   gh: run("gh"),
@@ -598,7 +601,7 @@ const DEFAULT_DEPS = {
   root: repoRoot,
   spawn,
   reaperLog,
-  // #556: the team profile's owner-side steps, as /start runs them; the key comes from this shell's LANES_APP_KEY_FILE.
+  // #556: the team profile's owner-side steps; the key comes from this shell's LANES_APP_KEY_FILE.
   team: teamSteps,
   recordStarts: appendStarts,
   config: () => {
@@ -624,7 +627,7 @@ const DEFAULT_DEPS = {
     }),
 };
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (isEntryScript(process.argv[1], import.meta.url)) {
   // Ctrl+C reaches the supervisor and its child through the shared console; each ends the run with exit 0.
   for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => process.exit(0));
   process.exitCode = await main(process.argv.slice(2));

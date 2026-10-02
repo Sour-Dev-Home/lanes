@@ -584,25 +584,27 @@ test("laneSessions maps both issue-<N> and issue-<N>-<slug> folders to N, and ne
 
 // #121: a lane that stopped before opening its PR (a pushed or local issue-<N>-* branch, no PR, no busy session).
 const idleAgent = (id, cwd) => agent(id, cwd, { status: "idle", state: "blocked" });
-const RESTART = (n) => `no PR yet: restart with /start ${n}`;
+// #675: /start is retired; with no session the queue relaunches the issue (ADR 0030).
+const RESTART = () => "no PR yet: the queue relaunches it";
 const branches = (n, ...names) => new Map([[n, names.length ? names : [`issue-${n}-x`]]]);
 
 test("a pushed branch with no PR and no busy session is WAITING ON YOU as stopped", () => {
   const s = summarize({ prs: [], issues: [issue(10), issue(11)], merged: [], sessions: new Map(), laneBranches: branches(10) });
   assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage, i.note]), [[10, "stopped", RESTART(10)]]);
   assert.deepEqual([s.inFlight, s.ready.map((i) => i.number)], [[], [11]]);
-  assert.match(render(s, "24h"), /WAITING ON YOU \(1\)\n  #10 \[stopped\] issue 10 — no PR yet: restart with \/start 10\n/);
+  assert.match(render(s, "24h"), /WAITING ON YOU \(1\)\n  #10 \[stopped\] issue 10 — no PR yet: the queue relaunches it\n/);
+  assert.doesNotMatch(render(s, "24h"), /\/start/);
 });
 
-// #571: with a session the note names it and gives the recovery /start gives; "restart with /start" only with no session.
-const RECOVER = (id, n) => `no PR yet: session ${id} is idle; message it to continue, or stop it (claude stop ${id}) and run /start ${n} again`;
+// #571, #675: with a session the note names it and gives the recovery: message it, or stop it so the queue relaunches.
+const RECOVER = (id) => `no PR yet: session ${id} is idle; message it to continue, or stop it (claude stop ${id}) so the queue relaunches it`;
 
-test("#571: a stopped lane with an idle session names the session and both recoveries, never 'restart with /start'", () => {
+test("#571: a stopped lane with an idle session names the session and both recoveries, never /start", () => {
   for (const state of ["blocked", "prompt", "done"]) {
     const sessions = laneSessions([agent("42c93c57", wt("issue-10-x"), { status: "idle", state })], ROOT);
     const s = summarize({ prs: [], issues: [issue(10), issue(11)], merged: [], sessions, laneBranches: branches(10) });
-    assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage, i.note]), [[10, "stopped", RECOVER("42c93c57", 10)]], state);
-    assert.doesNotMatch(render(s, "24h"), /restart with/, state);
+    assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage, i.note]), [[10, "stopped", RECOVER("42c93c57")]], state);
+    assert.doesNotMatch(render(s, "24h"), /restart with|\/start/, state);
   }
 });
 
@@ -617,7 +619,7 @@ test("#571: a busy session is running, not stopped, and a prompt wait stays a pr
 test("#571: edge: a session id that is not a plain token is never printed in the stop command", () => {
   const sessions = laneSessions([agent("x; rm -rf ~", wt("issue-10-x"), { status: "idle", state: "blocked" })], ROOT);
   const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions, laneBranches: branches(10) });
-  assert.equal(s.waitingOnOwner[0].note, "no PR yet: a lane session is idle; stop it and run /start 10 again");
+  assert.equal(s.waitingOnOwner[0].note, "no PR yet: a lane session is idle; message it, or stop it so the queue relaunches it");
 });
 
 test("#571: idleLaneSession is idle in any state but not on a permission prompt or busy", () => {
@@ -635,12 +637,12 @@ test("#571: the note adds 'worktree has unsaved changes' when git status --porce
   const dirty = loadSessions(ROOT, () => JSON.stringify(agents), (args) => (calls.push(args), " M a.mjs\n"));
   assert.deepEqual(calls, [["-C", `${ROOT.replace(/\\/g, "/").toLowerCase()}/.claude/worktrees/issue-10-x`, "status", "--porcelain"]]);
   const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions: dirty.sessions, laneBranches: branches(10) });
-  assert.equal(s.waitingOnOwner[0].note, `${RECOVER("42c93c57", 10)}; worktree has unsaved changes`);
+  assert.equal(s.waitingOnOwner[0].note, `${RECOVER("42c93c57")}; worktree has unsaved changes`);
   const clean = loadSessions(ROOT, () => JSON.stringify(agents), () => "");
   const failed = loadSessions(ROOT, () => JSON.stringify(agents), () => { throw new Error("git failed"); });
   for (const { sessions } of [clean, failed]) {
     const t = summarize({ prs: [], issues: [issue(10)], merged: [], sessions, laneBranches: branches(10) });
-    assert.equal(t.waitingOnOwner[0].note, RECOVER("42c93c57", 10));
+    assert.equal(t.waitingOnOwner[0].note, RECOVER("42c93c57"));
   }
 });
 
@@ -700,7 +702,7 @@ test("edge: several needs-owner issues are each listed once, in issue order", ()
 test("--json carries the stopped stage, with the idle session when there is one", () => {
   const sessions = laneSessions([idleAgent("42c93c57", wt("issue-10-x"))], ROOT);
   const s = summarize({ prs: [], issues: [issue(10)], merged: [], sessions, laneBranches: branches(10) });
-  assert.deepEqual(JSON.parse(JSON.stringify(s)).waitingOnOwner, [{ number: 10, title: "issue 10", stage: "stopped", note: RECOVER("42c93c57", 10), session: { id: "42c93c57", state: "blocked" } }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(s)).waitingOnOwner, [{ number: 10, title: "issue 10", stage: "stopped", note: RECOVER("42c93c57"), session: { id: "42c93c57", state: "blocked" } }]);
 });
 
 test("a lane whose session is busy is running, not stopped", () => {
