@@ -778,13 +778,13 @@ test("verify.yml's final job is named verify, needs the test matrix, and fails t
 });
 
 // #413: pull requests run the affected tests, the queue and main run everything, macOS runs at merge only
-test("verify.yml's pull_request step runs node --test over affected-tests.mjs's files, or npm test on ALL, with enough history", () => {
+test("verify.yml's pull_request step runs npm run test:files over affected-tests.mjs's files (#621), or npm test on ALL, with enough history", () => {
   const yml = verifyYml();
   assert.match(yml, /fetch-depth: 0/);
   assert.match(yml, /- if: github\.event_name == 'pull_request'\n\s+shell: bash\n/);
   assert.match(yml, /node scripts\/lanes\/affected-tests\.mjs "origin\/\$BASE_REF"/);
   assert.match(yml, /BASE_REF: \$\{\{ github\.base_ref \}\}/);
-  assert.match(yml, /"\$files" = "ALL" \]; then\n\s+npm test\n\s+else\n\s+node --test \$files\n/);
+  assert.match(yml, /"\$files" = "ALL" \]; then\n\s+npm test\n\s+else\n\s+npm run test:files -- \$files\n/);
 });
 
 test("edge: verify.yml treats an empty affected-tests answer as ALL, never as a bare node --test", () => {

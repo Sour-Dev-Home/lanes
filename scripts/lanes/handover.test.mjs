@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { handover, handoverComment } from "./handover.mjs";
-import { pendingFileHash } from "./lib.mjs";
+import { TEAM_REQUIRED_MESSAGE, pendingFileHash } from "./lib.mjs";
 
 const HEAD = "a".repeat(40);
 const TEAM_CFG = JSON.stringify({ identity: { profile: "team", app: { id: 1, installationId: 2, botLogin: "x[bot]" } } });
@@ -73,13 +73,15 @@ test("handover (#595): posts one comment for the final commit's files and prints
   assert.ok(w.calls.includes("show HEAD:.github/workflows/ci.yml"), "content comes from git show HEAD:<path>");
 });
 
-test("handover (#595): solo prints that the hand-over is team only and posts nothing", () => {
-  const w = world({ config: SOLO_CFG });
-  const r = handover(["9"], w.deps);
-  assert.equal(r.code, 0);
-  assert.match(r.lines[0], /team only/);
-  assert.equal(w.posted.length, 0);
-  assert.deepEqual(w.calls, []);
+test("handover (#595): a solo or missing identity is refused with the team-required message and posts nothing", () => {
+  for (const config of [SOLO_CFG, "{}"]) {
+    const w = world({ config });
+    const r = handover(["9"], w.deps);
+    assert.equal(r.code, 2);
+    assert.ok(r.lines[0].startsWith(TEAM_REQUIRED_MESSAGE), r.lines[0]);
+    assert.equal(w.posted.length, 0);
+    assert.deepEqual(w.calls, []);
+  }
 });
 
 test("handover (#595): refuses when HEAD~1 is not the PR's head on GitHub", () => {

@@ -130,24 +130,9 @@ test("XSS fixture: a hostile title, ref and reason land only in text, never as e
   walk(svg, (n) => assert.ok(!/^(img|script)$/.test(n.tag), n.tag));
 });
 
-test("approveLine lists the PR numbers of tasks waiting on the owner, sorted, and is empty when none", () => {
-  const list = [issue(1, "owner", { pr: pr(11) }), issue(2, "ready"), issue(3, "owner", { pr: pr(7) })];
-  assert.equal(app.approveLine(list), "/approve 7 11");
-  assert.equal(app.approveLine([issue(2, "ready")]), "");
-});
-
-test("edge: approveLine skips an owner task with no PR and any non-integer number", () => {
-  assert.equal(app.approveLine([issue(1, "owner"), issue(2, "owner", { pr: { number: "9; rm", checks: [] } })]), "");
-});
-
-test("renderWaiting shows the line with a copy button, and the page cannot post anything", () => {
-  const d = fakeDoc();
-  const box = d.createElement("div");
-  app.renderWaiting(d, box, [issue(1, "owner", { pr: pr(11), blockedBy: [{ kind: "owner", ref: "review/owner", reason: "waiting on owner (/approve)" }] })]);
-  assert.ok(textOf(box).includes("/approve 11"));
-  let button = false;
-  walk(box, (n) => { if (n.tag === "button") button = true; });
-  assert.ok(button);
+test("the page has no approve line, no Copy button and cannot post anything", () => {
+  assert.equal(app.approveLine, undefined);
+  assert.doesNotMatch(src, /approveLine|clipboard|"Copy"/);
   assert.doesNotMatch(src, /method\s*:\s*["']POST|XMLHttpRequest|api\.github\.com|sendBeacon|WebSocket/i);
   assert.equal([...src.matchAll(/fetch\(/g)].length, 1);
 });
@@ -192,15 +177,13 @@ test("team: a PR whose review does not cover the head, or has no ownerApproved, 
   }
 });
 
-test("solo and a missing profile leave the waiting box unchanged: copy line, Copy button, text, no links", () => {
-  for (const snapshot of [{ profile: "solo", repo: "acme/lanes" }, { repo: "acme/lanes" }, undefined]) {
+test("edge: a missing snapshot or repo shows the waiting box with no links, no copy line and no button", () => {
+  for (const snapshot of [{ profile: "team" }, undefined]) {
     const box = renderWait([waitingIssue()], snapshot);
-    assert.ok(textOf(box).includes("/approve 11"));
-    assert.match(textOf(box), /Paste the line into the owner session/);
+    assert.match(textOf(box), /Approve in GitHub/);
+    assert.doesNotMatch(textOf(box), /\/approve 11|Paste the line/);
     assert.deepEqual(links(box), []);
-    let button = false;
-    walk(box, (n) => { if (n.tag === "button") button = true; });
-    assert.ok(button);
+    walk(box, (n) => assert.notEqual(n.tag, "button"));
   }
 });
 
@@ -211,10 +194,9 @@ test("team: task cards link to the issue and the PR, and a failing check links t
   for (const a of links(li)) assert.equal(a.attrs.rel, "noopener noreferrer");
 });
 
-test("team: a task without a PR links only the issue, and solo task cards have no links", () => {
+test("team: a task without a PR links only the issue, and a task with no snapshot has no links", () => {
   assert.deepEqual(links(app.renderTask(fakeDoc(), issue(7, "ready"), team)).map((a) => a.attrs.href), [`${BASE}issues/7`]);
   const failing = issue(7, "failing", { pr: { ...pr(12), checks: [{ name: "verify", result: "fail", url: `${BASE}actions/runs/9` }] } });
-  assert.deepEqual(links(app.renderTask(fakeDoc(), failing, { profile: "solo", repo: "acme/lanes" })), []);
   assert.deepEqual(links(app.renderTask(fakeDoc(), failing)), []);
 });
 

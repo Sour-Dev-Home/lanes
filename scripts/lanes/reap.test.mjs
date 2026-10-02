@@ -735,6 +735,17 @@ test("edge: the trap it registers releases the lock", () =>
     await assert.rejects(main(ARGS, w.deps), /stop/);
   }));
 
+// #621: lane 8's session id and branch as whole tokens; the mkdtemp folder (`reap-test-XXXXXX`) can contain `s8`.
+const touchesLane8 = (call) => /(^|\s)s8(\s|$)|issue-8-/.test(call);
+
+test("touchesLane8 matches the session and branch, not a temp folder name that contains s8", () => {
+  assert.ok(touchesLane8("claude rm s8"));
+  assert.ok(touchesLane8("git branch -D issue-8-slug"));
+  assert.ok(touchesLane8("git worktree remove /tmp/reap-test-abc/wt/issue-8-slug"));
+  assert.ok(!touchesLane8("git worktree remove /tmp/reap-test-s8Xk2q/wt/issue-7-slug"));
+  assert.ok(!touchesLane8("claude rm s7"));
+});
+
 // Criteria 3 and 5: polls every 5 minutes; a lane merged after two polls is removed once.
 test("a lane merged after two polls is removed once, through cleanup's rules, log saved first", () =>
   withRoot(async (root) => {
@@ -746,7 +757,7 @@ test("a lane merged after two polls is removed once, through cleanup's rules, lo
     // Only lane 7: lane 8 (merged too) and the empty orphan folder are left for cleanup.mjs itself.
     assert.deepEqual(w.order, ["log s7", "claude rm", "git worktree", "git branch"]);
     assert.ok(w.calls.includes("claude rm s7"));
-    assert.ok(!w.calls.some((c) => /s8|issue-8/.test(c)));
+    assert.ok(!w.calls.some((c) => touchesLane8(c)));
     const log = logLines(root);
     assert.match(log[0], /^2026-09-28T12:00:00\.000Z started: issue #7, session s7$/);
     assert.match(log.at(-1), /^2026-09-28T12:11:00\.000Z removed: /);

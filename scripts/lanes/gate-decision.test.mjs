@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compileConfig, gateDecision, isBotStatus, loadConfig, nativeCodeOwnerApproval, parseAdr, reusableReviewers, reuseBlockedBy } from "./lib.mjs";
+import { classifyFiles, compileConfig, gateDecision, isBotStatus, loadConfig, nativeCodeOwnerApproval, parseAdr, requiredReviewers, reusableReviewers, reuseBlockedBy } from "./lib.mjs";
 
 const config = compileConfig({
   requiredChecks: ["verify"],
@@ -720,4 +720,55 @@ test("edge: gateDecision stays pure with blockers (same input, same output, inpu
   const copy = structuredClone(b);
   assert.deepEqual(run({ blockers: b }), run({ blockers: b }));
   assert.deepEqual(b, copy);
+});
+
+// ---- #636: liveness, against the repo's real lanes.config.json: an owner-path PR can always reach success ----
+
+const liveCases = [
+  { reason: "owner-only path", tier: "full", files: ["scripts/lanes/gate.mjs"], verdicts: true, wait: "owner-only path" },
+  { reason: "needs the owner text", tier: "quick", files: ["scripts/lanes/status.mjs"], needsOwner: "sign off", wait: "needs the owner" },
+  { reason: "contract change", tier: "quick", files: ["contracts/x.json"], contract: "additive", wait: "contract change" },
+  { reason: "full-tier PR", tier: "full", files: ["scripts/lanes/status.mjs"], wait: "no verdict for head from test-hunter" },
+];
+// Every reviewer the diff requires has passed on the head; the PR is otherwise clean.
+function liveInputs(c, nativeApproval) {
+  const required = requiredReviewers(c.tier, classifyFiles(c.files, real), c.files, real.modules);
+  return {
+    config: real,
+    prBody: body(c.contract ?? "none").replace("## Needs the owner\nnothing", `## Needs the owner\n${c.needsOwner ?? "nothing"}`),
+    issueLabels: [`tier:${c.tier}`, "ready"],
+    headSha: HEAD,
+    files: c.files,
+    statuses: required.map((n) => st(`review/${n}`)),
+    verdicts: c.verdicts ? required.map((n) => verdict(n)) : [],
+    ...(nativeApproval === undefined ? {} : { nativeApproval }),
+  };
+}
+const APPROVED = { approved: true, by: "code-owner" };
+// The check the liveness tests share: approved reaches success, unapproved is pending (never failure), at the owner stage.
+function assertLive(decide, c) {
+  const ok = decide(liveInputs(c, APPROVED));
+  assert.equal(ok.state, "success", `${c.reason}: approved PR must pass, got ${ok.state}: ${ok.description}`);
+  assert.equal(ok.stage, "ready");
+  for (const none of [null, { approved: false, by: null }, undefined]) {
+    const d = decide(liveInputs(c, none));
+    assert.equal(d.state, "pending", `${c.reason}: unapproved PR must be pending, got ${d.state}: ${d.description}`);
+    assert.equal(d.stage, "owner");
+    assert.equal(d.description, `waiting for a code-owner review in GitHub (${c.wait})`);
+  }
+}
+
+for (const c of liveCases) {
+  test(`liveness: ${c.reason} reaches success with a native code-owner approval, and is pending without`, () => {
+    assertLive((inputs) => run(inputs), c);
+  });
+}
+
+test("liveness: the check fails when the native approval is not passed to gateDecision (the #573 shape)", () => {
+  const dropsApproval = (inputs) => run({ ...inputs, nativeApproval: undefined });
+  for (const c of liveCases) assert.throws(() => assertLive(dropsApproval, c), assert.AssertionError);
+});
+
+test("edge: liveness holds for every owner reason at once (owner path, contract, needs-owner text, full tier)", () => {
+  assertLive((inputs) => run(inputs), { reason: "all", tier: "full", files: ["scripts/lanes/gate.mjs", "contracts/x.json"], contract: "additive", needsOwner: "sign off", wait: "owner-only path" });
 });

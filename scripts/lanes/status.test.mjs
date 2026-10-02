@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { TEAM_REQUIRED_MESSAGE } from "./lib.mjs";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
-import { approveLine, prStage, formatAge, gateDescriptions, gateSince, idleLaneSession, laneBranches, laneSessions, laneWorktree, worktreeUnsaved, liveLanes, loadLaneBranches, loadSessions, mergeQueueEntries, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, trustedRollups, waitingApprovals } from "./status.mjs";
+import { prStage, formatAge, gateDescriptions, gateSince, idleLaneSession, laneBranches, laneSessions, laneWorktree, worktreeUnsaved, liveLanes, loadLaneBranches, loadSessions, mergeGroupFailures, mergeQueueEntries, queueRemovals, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, trustedRollups, waitingApprovals } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -15,7 +15,7 @@ const pr = (number, rollup, extra = {}) => ({ number, title: `pr ${number}`, bod
 test("stages come from lanes/gate and failing checks", () => {
   const s = summarize({
     prs: [
-      pr(1, [gate("PENDING", "waiting on owner (/approve)")]),
+      pr(1, [gate("PENDING", "waiting for a code-owner review in GitHub")]),
       pr(2, [gate("PENDING", "waiting for review/test-hunter")]),
       pr(3, [gate("SUCCESS", "ok")], { autoMergeRequest: {} }),
       pr(4, [{ __typename: "CheckRun", name: "verify", status: "COMPLETED", conclusion: "FAILURE" }]),
@@ -66,9 +66,9 @@ const gateReply = (nodes) => ({ data: { repository: { mergeQueue: null, pullRequ
 const gateNode = (number, status) => ({ number, commits: { nodes: [{ commit: { status } }] } });
 
 test("a PR whose gate says waiting on owner is WAITING ON YOU even though the rollup omits the description", () => {
-  const reply = gateReply([gateNode(8, { context: { state: "PENDING", description: "waiting on owner (/approve)" } }), gateNode(9, { context: { state: "PENDING", description: "waiting for review/test-hunter" } })]);
+  const reply = gateReply([gateNode(8, { context: { state: "PENDING", description: "waiting for a code-owner review in GitHub" } }), gateNode(9, { context: { state: "PENDING", description: "waiting for review/test-hunter" } })]);
   const s = summarize({ prs: [pr(8, [bareGate("PENDING")]), pr(9, [bareGate("PENDING")])], issues: [], merged: [], gateDescriptions: gateDescriptions(reply) });
-  assert.deepEqual(s.waitingOnOwner, [{ number: 8, title: "pr 8", stage: "owner", note: "waiting on owner (/approve)" }]);
+  assert.deepEqual(s.waitingOnOwner, [{ number: 8, title: "pr 8", stage: "owner", note: "waiting for a code-owner review in GitHub" }]);
   assert.deepEqual(s.inFlight, [{ number: 9, title: "pr 9", stage: "gate", note: "waiting for review/test-hunter" }]);
 });
 
@@ -138,24 +138,13 @@ test("a PR whose gate waits for a reviewer after the owner approved is IN FLIGHT
   assert.deepEqual(itemOf(s, 7), { number: 7, title: "pr 7", stage: "gate", note: "waiting for review/architecture-advisor" });
 });
 
-test("a PR with review/owner=success on its head is never WAITING ON YOU for /approve", () => {
-  const prs = [
-    pr(8, [gate("PENDING", "waiting on owner (/approve)"), ownerApproved()]),
-    pr(9, [gate("PENDING", "waiting for blocker #3 (open)"), ownerApproved()], { body: body("/approve after the rename") }),
-    pr(10, [ownerApproved()], { body: body("/approve") }),
-  ];
-  const s = summarize({ prs, issues: [], merged: [] });
-  assert.deepEqual(s.waitingOnOwner, []);
-  assert.deepEqual(s.inFlight.map((i) => i.number), [8, 9, 10]);
-});
-
 test("a PR that genuinely waits on /approve is still WAITING ON YOU", () => {
   const prs = [
-    pr(11, [gate("PENDING", "waiting on owner (/approve) (tier:full)")]),
+    pr(11, [gate("PENDING", "waiting for a code-owner review in GitHub (tier:full)")]),
     pr(12, [gate("PENDING", "waiting for blocker #3 (open)")], { body: body("pick a name for the package") }),
   ];
   const s = summarize({ prs, issues: [], merged: [] });
-  assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage, i.note]), [[11, "owner", "waiting on owner (/approve) (tier:full)"], [12, "review", "needs: pick a name for the package"]]);
+  assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage, i.note]), [[11, "owner", "waiting for a code-owner review in GitHub (tier:full)"], [12, "review", "needs: pick a name for the package"]]);
 });
 
 test("status --json carries the gate stage and reason", () => {
@@ -168,7 +157,7 @@ test("status --json carries the gate stage and reason", () => {
 
 test("edge: a review/owner status that is not success does not count as an approval", () => {
   for (const state of ["PENDING", "EXPECTED"]) {
-    const s = summarize({ prs: [pr(14, [gate("PENDING", "waiting on owner (/approve)"), ownerApproved(state)])], issues: [], merged: [] });
+    const s = summarize({ prs: [pr(14, [gate("PENDING", "waiting for a code-owner review in GitHub"), ownerApproved(state)])], issues: [], merged: [] });
     assert.equal(placement(s, 14), "owner", state);
   }
 });
@@ -808,12 +797,13 @@ test("prStage is exported and classifies each stage", async () => {
   assert.deepEqual(prStage(pr(4, [gate("SUCCESS", "ok")])), { stage: "ready", note: "auto-merge is off" });
   assert.deepEqual(prStage(pr(5, [gate("FAILURE", "tier label missing")])), { stage: "contract", note: "tier label missing" });
   const noDescription = [{ context: "lanes/gate", state: "PENDING" }];
-  assert.deepEqual(prStage(pr(6, noDescription), undefined, "waiting on owner: review/owner"), { stage: "owner", note: "waiting on owner: review/owner" });
+  assert.deepEqual(prStage(pr(6, noDescription), undefined, "waiting for a code-owner review in GitHub"), { stage: "owner", note: "waiting for a code-owner review in GitHub" });
+  assert.equal(prStage(pr(9, noDescription), undefined, "waiting on owner (/approve)").stage, "review", "the solo wording is no owner stage");
   assert.deepEqual(prStage(pr(7, [gate("PENDING", "waiting for review/test-hunter")])), { stage: "gate", note: "waiting for review/test-hunter" });
   assert.deepEqual(prStage(pr(8, [gate("PENDING", "waiting on reviewers")])), { stage: "review", note: "waiting on reviewers" });
 });
 
-const ownerGate = gate("PENDING", "waiting on owner (/approve)");
+const ownerGate = gate("PENDING", "waiting for a code-owner review in GitHub");
 const waitingBody = (needs, contract = "none") => body(needs).replace("## Contract changes\nnone", `## Contract changes\n${contract}`);
 const waitingPr = (number, extra = {}) => pr(number, [ownerGate], { body: waitingBody("Approve the new label"), files: [{ path: "a" }, { path: "b" }], ...extra });
 const waitingOf = (prs) => renderWaiting(waitingApprovals(prs, summarize({ prs, issues: [], merged: [] })));
@@ -840,9 +830,7 @@ test("edge: --waiting on a PR body without a Needs the owner section says so", (
   assert.match(out, /Contract changes: \(none stated\)/);
 });
 
-test("edge: --waiting skips a PR the owner already approved and an issue waiting on the owner", () => {
-  const approved = waitingPr(7, { statusCheckRollup: [ownerGate, { __typename: "StatusContext", context: "review/owner", state: "SUCCESS" }] });
-  assert.equal(waitingOf([approved]), "none");
+test("edge: --waiting skips an issue waiting on the owner", () => {
   const s = summarize({ prs: [], issues: [{ number: 5, title: "t", labels: [{ name: "needs-owner" }], body: "" }], merged: [] });
   assert.equal(renderWaiting(waitingApprovals([], s)), "none");
 });
@@ -889,12 +877,8 @@ test("edge: formatAge is never negative and rolls minutes into hours and days", 
   assert.equal(formatAge(0, 48 * 3600_000), "2d 0h");
 });
 
-test("approveLine lists at most 10 numbers and is empty for none", () => {
-  const prs = Array.from({ length: 12 }, (_, i) => waitingPr(i + 1));
-  const numbers = waitingApprovals(prs, summarize({ prs, issues: [], merged: [] })).map((w) => w.number);
-  assert.equal(numbers.length, 12);
-  assert.equal(approveLine(numbers), "/approve 1 2 3 4 5 6 7 8 9 10");
-  assert.equal(approveLine([]), "");
+test("status.mjs exports no approveLine", async () => {
+  assert.equal((await import("./status.mjs")).approveLine, undefined);
 });
 
 // Stalled: a busy session whose transcript has not been written for 30 minutes or more (#338).
@@ -968,7 +952,7 @@ test("a CONFLICTING PR shows conflict: rebase needed and waits on the owner; UNK
 });
 test("edge: a conflicted PR stays on the owner's list even after review/owner passed", () => {
   const approved = { __typename: "StatusContext", context: "review/owner", state: "SUCCESS" };
-  const s = summarize({ prs: [pr(1, [gate("PENDING", "waiting on owner (/approve)"), approved], { mergeable: "CONFLICTING" })], issues: [], merged: [], mergeQueue: [] });
+  const s = summarize({ prs: [pr(1, [gate("PENDING", "waiting for a code-owner review in GitHub"), approved], { mergeable: "CONFLICTING" })], issues: [], merged: [], mergeQueue: [] });
   assert.deepEqual(s.waitingOnOwner.map((i) => i.number), [1]);
 });
 
@@ -1035,7 +1019,7 @@ test("idle: 45 minutes idle with a review owed is reported under WAITING ON YOU 
 });
 
 test("idle: idle 45 minutes with nothing owed is not reported", () => {
-  const s = owedSummary("waiting on owner (/approve)", 45);
+  const s = owedSummary("waiting for a code-owner review in GitHub", 45);
   assert.equal(stalledItems(s).length, 0);
   assert.doesNotMatch(JSON.stringify(s), /idle 45/);
 });
@@ -1135,13 +1119,13 @@ const replyWith = (number, contexts) => ({ data: { repository: { pullRequests: {
 const review = (name) => ({ __typename: "StatusContext", context: `review/${name}`, state: "SUCCESS" });
 const team = { identity: { profile: "team", app: { id: 1, installationId: 2, botLogin: "lanes-bot[bot]" } }, modules: { entries: [] } };
 const waiting = (prs, reply, config) => summarize({ prs: trustedRollups(prs, reply, config), issues: [], merged: [] }).waitingOnOwner.map((i) => i.number);
-const owing = () => [gate("PENDING", "waiting on owner (/approve)"), review("owner")];
+const owing = () => [gate("PENDING", "waiting for a code-owner review in GitHub"), review("owner")];
 
-test("a bot review/owner (lane bot or github-actions[bot]) leaves the PR WAITING ON YOU; the owner's own moves it", () => {
+test("a review/owner status, from a bot or anyone, leaves the PR WAITING ON YOU", () => {
   for (const login of ["lanes-bot[bot]", "github-actions[bot]"]) {
     assert.deepEqual(waiting([pr(8, owing())], replyWith(8, [ctx("review/owner", login)]), team), [8], login);
   }
-  assert.deepEqual(waiting([pr(8, owing())], replyWith(8, [ctx("review/owner", "someone", "User")]), team), []);
+  assert.deepEqual(waiting([pr(8, owing())], replyWith(8, [ctx("review/owner", "someone", "User")]), team), [8]);
 });
 
 test("edge: a review/owner whose creator cannot be read, or a PR missing from the reply, is untrusted", () => {
@@ -1163,10 +1147,10 @@ const teamCtx = { owners: ["boss"], identity: { profile: "team", app: { id: 1, i
 const nativeReview = (login, state, oid) => ({ author: { login }, state, commit: { oid } });
 const teamPr = (number, reviews = [], extra = {}) => pr(number, [gate("PENDING", TEAM_WAIT)], { author: { login: "lanes[bot]" }, headRefOid: "abc", latestReviews: reviews, ...extra });
 
-test("#604: prStage puts the team wording in the owner stage, as the solo wording", () => {
+test("#604: prStage puts the team wording in the owner stage", () => {
   assert.deepEqual(prStage(pr(1, [gate("PENDING", TEAM_WAIT)]), undefined), { stage: "owner", note: TEAM_WAIT });
   assert.equal(prStage(pr(1, [gate("PENDING", `${TEAM_WAIT} (tier:full)`)]), undefined).stage, "owner");
-  assert.equal(prStage(pr(1, [gate("PENDING", "waiting on owner (/approve)")]), undefined).stage, "owner");
+  assert.equal(prStage(pr(1, [gate("PENDING", "waiting for a code-owner review in GitHub")]), undefined).stage, "owner");
 });
 
 test("#604: under team a PR waiting for a code-owner review is WAITING ON YOU", () => {
@@ -1201,11 +1185,11 @@ test("edge: a team PR with no review data, and one approved only by its own auth
   assert.deepEqual(summarize({ prs: [self], issues: [], merged: [], team: teamCtx }).waitingOnOwner.map((i) => i.number), [7]);
 });
 
-test("#604: under team a review/owner status is not an approval; under solo it still is", () => {
+test("#604: a review/owner status is never an approval, with or without a team context", () => {
   const withStatus = [gate("PENDING", TEAM_WAIT), ownerApproved()];
-  assert.deepEqual(summarize({ prs: [pr(7, withStatus)], issues: [], merged: [], team: teamCtx }).waitingOnOwner.map((i) => i.number), [7]);
-  const solo = summarize({ prs: [pr(8, [gate("PENDING", "waiting on owner (/approve)"), ownerApproved()])], issues: [], merged: [] });
-  assert.deepEqual(solo.inFlight.map((i) => i.number), [8]);
+  for (const team of [teamCtx, undefined]) {
+    assert.deepEqual(summarize({ prs: [pr(7, withStatus)], issues: [], merged: [], team }).waitingOnOwner.map((i) => i.number), [7]);
+  }
 });
 
 test("edge: teamContext is undefined under solo or no config, and reads code owners under team", async () => {
@@ -1236,4 +1220,65 @@ test("status.mjs prints the team-required line instead of data for a missing con
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// #621: the merge queue removes a PR whose merge group fails; /status says so.
+const qNode = (number, ...events) => ({ number, timelineItems: { nodes: events.map(([t, at]) => ({ __typename: t, createdAt: at })) } });
+const qReply = (...nodes) => ({ data: { repository: { pullRequests: { nodes } } } });
+const REMOVED_EV = "RemovedFromMergeQueueEvent";
+const ADDED_EV = "AddedToMergeQueueEvent";
+const greenPr = (n) => pr(n, [gate("SUCCESS", "all reviews passed")]);
+
+test("queueRemovals keeps a PR whose latest queue event is a removal, whatever order the events arrive in", () => {
+  const removals = queueRemovals(qReply(qNode(5, [REMOVED_EV, "2026-10-02T02:36:00Z"], [ADDED_EV, "2026-10-02T02:30:00Z"]), qNode(6, [REMOVED_EV, "2026-10-02T02:36:00Z"], [ADDED_EV, "2026-10-02T02:40:00Z"]), qNode(7)));
+  assert.deepEqual([...removals], [[5, { at: Date.parse("2026-10-02T02:36:00Z") }]]);
+});
+
+test("edge: queueRemovals ignores a PR in the queue now, events with a bad time, and a malformed reply", () => {
+  assert.equal(queueRemovals(qReply(qNode(5, [REMOVED_EV, "2026-10-02T02:36:00Z"])), [5]).size, 0);
+  assert.equal(queueRemovals(qReply(qNode(5, [REMOVED_EV, "not a time"], [REMOVED_EV, undefined]))).size, 0);
+  assert.equal(queueRemovals(undefined).size, 0);
+  assert.equal(queueRemovals({ data: null }).size, 0);
+});
+
+test("a removed PR is [queue failed] under WAITING ON YOU with the time and the failed check's name and link", () => {
+  const removals = queueRemovals(qReply(qNode(5, [REMOVED_EV, "2026-10-02T02:36:12Z"])));
+  const queueFailures = mergeGroupFailures([{ headBranch: "gh-readonly-queue/main/pr-5-abc", workflowName: "verify", url: "https://github.com/o/r/actions/runs/9", createdAt: "2026-10-02T02:35:00Z" }]);
+  const s = summarize({ prs: [greenPr(5)], issues: [], merged: [], removals, queueFailures });
+  assert.equal(placement(s, 5), "owner");
+  assert.equal(itemOf(s, 5).stage, "queue failed");
+  assert.match(render(s, "24h"), /#5 \[queue failed\] pr 5 — removed from the merge queue at 2026-10-02 02:36 UTC: verify failed in the merge group \(https:\/\/github\.com\/o\/r\/actions\/runs\/9\)/);
+});
+
+test("a removed PR without a readable merge-group run still shows the time", () => {
+  const s = summarize({ prs: [greenPr(5)], issues: [], merged: [], removals: queueRemovals(qReply(qNode(5, [REMOVED_EV, "2026-10-02T02:36:12Z"]))) });
+  assert.equal(itemOf(s, 5).note, "removed from the merge queue at 2026-10-02 02:36 UTC");
+});
+
+test("a PR removed then re-added shows as queued again", () => {
+  const reply = qReply(qNode(5, [REMOVED_EV, "2026-10-02T02:36:00Z"], [ADDED_EV, "2026-10-02T02:40:00Z"]));
+  const s = summarize({ prs: [greenPr(5)], issues: [], merged: [], mergeQueue: [{ number: 5, position: 0 }], removals: queueRemovals(reply, [5]) });
+  assert.equal(stageOf(s, 5).stage, "queued");
+});
+
+test("a merged PR (not in the open list) with a removal in its history is only MERGED", () => {
+  const s = summarize({ prs: [], issues: [], merged: [{ number: 5, title: "pr 5" }], removals: queueRemovals(qReply(qNode(5, [REMOVED_EV, "2026-10-02T02:36:00Z"]))) });
+  assert.equal(s.waitingOnOwner.length, 0);
+  assert.equal(s.merged[0].number, 5);
+});
+
+test("mergeGroupFailures keeps the newest failed run per PR, only an https link, and tolerates bad input", () => {
+  const f = mergeGroupFailures([
+    { headBranch: "gh-readonly-queue/main/pr-5-a", workflowName: "old", url: "https://x/1", createdAt: "2026-10-02T01:00:00Z" },
+    { headBranch: "gh-readonly-queue/main/pr-5-b", workflowName: "verify", url: "javascript:alert(1)", createdAt: "2026-10-02T02:00:00Z" },
+    { headBranch: "main", workflowName: "x", createdAt: "2026-10-02T03:00:00Z" },
+    null,
+  ]);
+  assert.deepEqual([...f], [[5, { name: "verify" }]]);
+  assert.equal(mergeGroupFailures(undefined).size, 0);
+});
+
+test("edge: mergeGroupFailures drops a plain http link (only https is kept)", () => {
+  const f = mergeGroupFailures([{ headBranch: "gh-readonly-queue/main/pr-8-a", workflowName: "verify", url: "http://example.test/1", createdAt: "2026-10-02T02:00:00Z" }]);
+  assert.deepEqual([...f], [[8, { name: "verify" }]]);
 });
