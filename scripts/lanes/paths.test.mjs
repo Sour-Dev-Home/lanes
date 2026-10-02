@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
+import { issuePaths as libIssuePaths } from "./lib.mjs";
+
+test("paths.mjs re-exports lib.mjs's issuePaths unchanged", () => {
+  assert.equal(issuePaths, libIssuePaths);
+});
 
 test("issuePaths reads backticked and bare paths from the contract and Scope's In: part, ignoring Out:", () => {
   const paths = issuePaths({

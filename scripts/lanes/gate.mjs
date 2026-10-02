@@ -12,6 +12,8 @@ import {
   gateDecision,
   interfaceContractOf,
   isLaneBot,
+  issuePaths,
+  parseIssueForm,
   latestByContext,
   loadAdrs,
   loadConfig,
@@ -32,6 +34,7 @@ import {
   trustedStatuses,
 } from "./lib.mjs";
 import { parseBlockedBy, readBlockerReport } from "./blockers.mjs";
+import { pathsOverlap } from "./paths.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -276,6 +279,8 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   let issueIsPr = false;
   // #241: the paths the issue's Interface contract names need the architecture-advisor; unread, it names none.
   let interfaceContract = "";
+  // #635: the issue's claimed paths; an issue that claims none leaves every file uncovered, so it notes nothing.
+  let scopePaths = [];
   // Fails closed until the issue's "Blocked by" has been read.
   let blockers = { ok: false, open: [], unreadable: [], error: "issue unreadable" };
   if (closes !== null) {
@@ -286,6 +291,7 @@ export function decideForPr(api, repo, number, config, adrs = []) {
       // E2: the issues API also returns pull requests; only a `pull_request` key set means it is actually a PR.
       issueIsPr = issue.pull_request !== undefined && issue.pull_request !== null;
       interfaceContract = interfaceContractOf(issue.body);
+      scopePaths = issuePaths(parseIssueForm(issue.body ?? "").fields);
       // ADR 0022 part 2: under team, a lane-filed bot issue a write-access actor released counts as a trusted author.
       issueAuthorCanWrite = authorCanWrite(api, repo, issue.user?.login) || readBotIssueRelease(api, config.identity, repo, Number(closes));
       // Only a trusted task issue's blockers are read: each costs an API call, and a stranger's PR runs this gate.
@@ -320,6 +326,7 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     interfaceContract,
     reused,
     blockers,
+    outsideScope: scopePaths.length > 0 ? files.filter((f) => !pathsOverlap([f], scopePaths)) : [],
   };
   let decision = gateDecision(inputs);
   // ADR 0023 part 3: a review refused for a pending workflow file names that file's reason instead of the bare wait.

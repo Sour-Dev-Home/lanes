@@ -29,6 +29,31 @@ const run = (over) =>
     ...over,
   });
 
+// #635: files outside the issue's Scope are noted in the description, never a state change
+test("outsideScope appends a count note for none, one and several files, keeping the state", () => {
+  const plain = run({});
+  assert.equal(plain.description, run({ outsideScope: [] }).description);
+  assert.equal(plain.description, run({ outsideScope: undefined }).description);
+  for (const outsideScope of [["a.md"], ["a.md", "b.md", "c.md"]]) {
+    const d = run({ outsideScope });
+    assert.equal(d.description, `${plain.description}; ${outsideScope.length} files outside Scope, see PR body`);
+    assert.equal(d.state, plain.state);
+    assert.equal(d.stage, plain.stage);
+  }
+});
+
+test("outsideScope leaves failure and pending states as they are and keeps the note inside 140 characters", () => {
+  const failing = run({ prBody: "no closing keyword", outsideScope: ["a.md"] });
+  assert.equal(failing.state, "failure");
+  assert.match(failing.description, /; 1 files outside Scope, see PR body$/);
+  const pending = run({ issueLabels: ["tier:full", "ready"], outsideScope: ["a.md"] });
+  assert.equal(pending.state, run({ issueLabels: ["tier:full", "ready"] }).state);
+  const long = run({ issueLabels: ["tier:skip", "ready"], files: ["x".repeat(200) + ".ts"], outsideScope: ["a.md"] });
+  assert.equal(long.state, "failure");
+  assert.ok(long.description.length <= 140);
+  assert.match(long.description, /; 1 files outside Scope, see PR body$/);
+});
+
 test("no Closes #N fails", () => {
   assert.equal(run({ prBody: body().replace("Closes #7", "") }).state, "failure");
 });

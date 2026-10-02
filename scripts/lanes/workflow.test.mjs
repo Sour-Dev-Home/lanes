@@ -532,6 +532,14 @@ test("test-hunter.md adds a case beyond the criteria and listed edge cases, or s
   assert.match(example.summary, /^Extra case: \S/);
 });
 
+// #635: the gate notes files outside Scope; the template and the lane explain each one
+test("the PR template has an Outside Scope section and lane.md step 7 tells the lane to fill it", () => {
+  const section = readFileSync(".github/pull_request_template.md", "utf8").replace(/\r\n/g, "\n").match(/## Outside Scope\n([\s\S]*?)(\n## |$)/)[1];
+  assert.match(section, /nothing/);
+  assert.match(section, /One line per changed file/);
+  assert.match(laneStep(7), /"Outside Scope" with one line per changed file outside the issue's Scope "In" saying why, or "nothing"/);
+});
+
 test("the PR template's Tests added comment mentions `edge:` lines", () => {
   const section = readFileSync(".github/pull_request_template.md", "utf8").match(/## Tests added\n([\s\S]*?)\n## /)[1];
   assert.match(section, /edge: <case>/);
