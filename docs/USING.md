@@ -168,6 +168,48 @@ For the portfolio, export by hand and commit the file yourself: `node scripts/la
 <date> --out docs/metrics/<date>.json`. `--out` refuses to write when the output holds an email, an @-mention, your
 GitHub login or a local path, and says which kind, never the text.
 
+The public dashboard also shows weekly trends (ADR 0027 part 7): per ISO week, the merge-queue removals, failed or
+errored statuses on merged PRs (gate failures), CI re-attempts (flakes) and failed reviewer rounds, for the last 8
+weeks. `snapshot.mjs` reads them from GitHub on every run and publishes only the counts: no PR number, title, login or
+check name, and never the health issue's text. If GitHub cannot be read, the snapshot is published without them.
+
+## The lanes-health issue
+
+One open issue labelled `lanes-health` is your alert inbox (ADR 0027). A scheduled job in the dashboard workflow runs
+`scripts/lanes/health.mjs` and keeps it current: the body says `healthy` or `N problems`, lists each active problem
+with when it was first seen and the last heartbeat time, and each new problem is posted once as a comment, so GitHub
+notifies you. When every problem clears, the body says `healthy` and one recovery comment is posted.
+
+**Watch it for notifications.** Open the issue and choose Watch, then Custom, then Issues (or subscribe to the issue
+itself) so GitHub emails you and sends mobile notifications for each comment. Nothing else is needed: no account, app
+or chat integration. The body is rewritten on each change; your own comments are never touched.
+
+**What each problem means:**
+
+| Problem | Meaning | What to do |
+| --- | --- | --- |
+| `queue-removed` | A PR left the merge queue and was not re-queued | Find why in the PR's checks, fix it, and re-queue it |
+| `approved-stuck` | Approved and gate-green, but not merged after `approvedStuckMinutes` | Look at the PR's merge-queue state and its required checks |
+| `gate-failure` | `lanes/gate` is failing, or a merge-group check failed | Open the PR and read the gate's reason |
+| `no-progress` | Issues are ready, nothing is in flight and the queue has not reported in `noProgressMinutes` | Check that the queue is running (`/status`); start it again if it stopped |
+| `flake` | A check failed and then passed on the same commit (shown for 7 days) | Nothing unless it recurs; then follow the runbook |
+| `stalled:<id>` and other queue findings | The queue's own heartbeat reports a stopped or idle lane session | Run `/status` and follow its recovery line |
+
+[docs/OPERATIONS.md](OPERATIONS.md) has the step-by-step page for each.
+
+**The heartbeat.** The queue keeps one comment on the issue that starts `<!-- lanes:heartbeat -->`, with the time, the
+queue version and its local findings. It edits that comment on each tick (an edit sends no notification). The watchdog
+trusts it only when the lane bot wrote it, and `no-progress` fires when it is older than `noProgressMinutes`. While the
+queue is not running the heartbeat age is the only signal for local problems.
+
+**Thresholds.** `approvedStuckMinutes` and `noProgressMinutes` are in `lanes.config.json` under `health` (30 each by
+default; a value that is not a positive number falls back to its default). The dashboard cron runs every 5 minutes and
+GitHub may delay scheduled runs, so the times are approximate.
+
+**When you close the issue.** The watchdog reopens it only when a problem is active, and never creates a second one
+while a closed `lanes-health` issue exists. If you edit the body by hand, the next run rewrites it and may repeat the
+comment for a problem that is still active, once. With several open `lanes-health` issues the lowest number is used.
+
 ## When a team lane changes a workflow file
 
 Under the team profile a lane cannot push `.github/workflows/` (the App has no `workflows` permission; see

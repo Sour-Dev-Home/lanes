@@ -285,6 +285,16 @@ const snapshotInput = {
     generatedAt: "2026-09-28T12:00:00.000Z",
     repo: "owner/lanes",
     ownerApproved: { 9: true },
+    trendInput: {
+      prs: [
+        {
+          mergedAt: "2026-09-28T10:00:00Z",
+          timelineItems: { nodes: [{ createdAt: "2026-09-28T09:00:00Z" }] },
+          comments: { nodes: [] },
+          lastCommit: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: [{ __typename: "StatusContext", state: "FAILURE", createdAt: "2026-09-27T09:00:00Z" }, { __typename: "CheckRun", checkSuite: { workflowRun: { runAttempt: 2 } } }] } } } }] },
+        },
+      ],
+    },
     issues: [
       { number: 1, title: "A", labels: [{ name: "ready" }, { name: "tier:full" }], body: snapForm("none") },
       { number: 2, title: "B", labels: [{ name: "ready" }, { name: "tier:quick" }], body: snapForm("#1") },
@@ -304,7 +314,11 @@ const snapshotInput = {
 
 test("the snapshot schema defines every top-level and per-issue field, required ones listed, no other keys", () => {
   assert.deepEqual([...snapshotSchema.required].sort(), ["edges", "generatedAt", "issues", "overlaps", "version"]);
-  assert.deepEqual(Object.keys(snapshotSchema.properties).sort(), ["edges", "generatedAt", "issues", "overlaps", "profile", "repo", "version"]);
+  assert.deepEqual(Object.keys(snapshotSchema.properties).sort(), ["edges", "generatedAt", "issues", "overlaps", "profile", "repo", "trends", "version"]);
+  const row = snapshotSchema.properties.trends.items;
+  assert.deepEqual([...row.required].sort(), ["flakes", "gateFailures", "queueRemovals", "reviewRounds", "week"]);
+  assert.deepEqual(Object.keys(row.properties).sort(), [...row.required].sort());
+  assert.equal(row.additionalProperties, false);
   assert.deepEqual(snapshotSchema.properties.profile.enum, ["solo", "team"]);
   assert.equal(snapshotSchema.properties.repo.pattern, "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$");
   const pair = snapshotSchema.properties.overlaps.items;
@@ -338,6 +352,20 @@ test("a snapshot built by snapshot.mjs conforms to the schema, and it exercises 
   assert.equal(s.repo, "owner/lanes");
   assert.equal(three.pr.ownerApproved, true);
   assert.equal(three.pr.checks[0].url, "https://github.com/owner/lanes/actions/runs/1");
+  assert.equal(s.trends.length, 8, "the sample covers trends");
+  assert.deepEqual(s.trends.at(-1), { week: "2026-W40", queueRemovals: 1, gateFailures: 0, flakes: 1, reviewRounds: 0 });
+  assert.deepEqual(s.trends.at(-2), { week: "2026-W39", queueRemovals: 0, gateFailures: 1, flakes: 0, reviewRounds: 0 });
+});
+
+test("edge: the schema rejects a trend row with an extra field, a negative count or a malformed week, and a snapshot without trends is valid", () => {
+  const s = builtSnapshot();
+  const row = { week: "2026-W39", queueRemovals: 0, gateFailures: 0, flakes: 0, reviewRounds: 0 };
+  assert.equal(schemaAccepts(snapshotSchema, { ...s, trends: [row] }), true);
+  for (const bad of [{ ...row, pr: 12 }, { ...row, flakes: -1 }, { ...row, week: "2026-39" }, { ...row, week: "2026-W54" }, { ...row, gateFailures: 1.5 }]) {
+    assert.equal(schemaAccepts(snapshotSchema, { ...s, trends: [bad] }), false, JSON.stringify(bad));
+  }
+  const { trends: _omit, ...without } = s;
+  assert.equal(schemaAccepts(snapshotSchema, without), true);
 });
 
 // ADR 0025: a config that is not team writes no snapshot; the command prints the refusal line instead.

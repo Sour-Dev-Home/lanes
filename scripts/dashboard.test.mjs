@@ -538,3 +538,53 @@ test("edge: a check url is linked at exactly 500 characters and plain text at 50
     assert.equal(links(li).some((a) => a.textContent === "verify"), linked, "edge: length " + len);
   }
 });
+
+// ADR 0027 part 7: the weekly trends panel. index.html has no trends section, so renderTrends adds one before #metrics.
+function trendsDoc({ withMetrics = true } = {}) {
+  const doc = fakeDoc();
+  const parent = doc.createElement("main");
+  const byId = {};
+  parent.insertBefore = (node, ref) => { parent.children.splice(parent.children.indexOf(ref), 0, node); node.parentNode = parent; };
+  if (withMetrics) {
+    const metrics = doc.createElement("section");
+    metrics.parentNode = parent;
+    parent.children.push(metrics);
+    byId.metrics = metrics;
+  }
+  doc.getElementById = (id) => byId[id] ?? parent.children.find((c) => c.attrs?.id === id) ?? null;
+  return { doc, parent };
+}
+const trendRow = (week, extra = {}) => ({ week, queueRemovals: 1, gateFailures: 2, flakes: 3, reviewRounds: 4, ...extra });
+
+test("renderTrends adds a Weekly trends table before the metrics panel, one row per week, counts as text", () => {
+  const { doc, parent } = trendsDoc();
+  assert.equal(app.renderTrends(doc, [trendRow("2026-W39"), trendRow("2026-W40", { flakes: 0 })]), true);
+  assert.equal(parent.children[0].attrs.id, "trends");
+  const rows = [];
+  walk(parent.children[0], (n) => { if (n.tag === "tr") rows.push(textOf(n).replace(/\s+/g, " ").trim()); });
+  assert.deepEqual(rows, ["Week Queue removals Gate failures Flakes Failed review rounds", "2026-W39 1 2 3 4", "2026-W40 1 2 0 4"]);
+  assert.match(textOf(parent.children[0]), /Weekly trends/);
+});
+
+test("edge: renderTrends with no, empty or malformed trends hides the panel and renders no table", () => {
+  for (const bad of [undefined, null, [], "x", [{ week: "2026-W39" }], [trendRow("last week")], [trendRow("2026-W39", { flakes: -1 })], [trendRow("2026-W39", { flakes: "3" })]]) {
+    const { doc, parent } = trendsDoc();
+    assert.equal(app.renderTrends(doc, bad), false, JSON.stringify(bad));
+    assert.equal(parent.children[0].hidden, true);
+    let tables = 0;
+    walk(parent, (n) => { if (n.tag === "table") tables++; });
+    assert.equal(tables, 0);
+  }
+});
+
+test("edge: renderTrends skips only the bad rows, and does nothing when the page has no metrics panel to sit beside", () => {
+  assert.equal(app.validTrends([trendRow("2026-W39"), { week: "x" }, null, trendRow("2026-W40")]).length, 2);
+  const { doc } = trendsDoc({ withMetrics: false });
+  assert.equal(app.renderTrends(doc, [trendRow("2026-W39")]), false);
+});
+
+test("XSS fixture: a hostile week text never reaches the page, and nothing in the trends panel is markup", () => {
+  const { doc, parent } = trendsDoc();
+  app.renderTrends(doc, [trendRow("<img src=x onerror=alert(1)>"), trendRow("2026-W40")]);
+  assert.ok(!textOf(parent).includes("onerror"));
+});

@@ -93,6 +93,22 @@
         }
       }
     },
+    "trends": {
+      "description": "Weekly trend counts (ADR 0027 part 7), oldest week first, every week of a bounded window present, read from GitHub on each run. Counts only: no PR number, title, login or check name. Omitted when GitHub could not be read.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["week", "queueRemovals", "gateFailures", "flakes", "reviewRounds"],
+        "additionalProperties": false,
+        "properties": {
+          "week": { "description": "The ISO 8601 week, YYYY-Www.", "type": "string", "pattern": "^\\d{4}-W(0[1-9]|[1-4]\\d|5[0-3])$" },
+          "queueRemovals": { "description": "Merge-queue removal events in the week.", "type": "integer", "minimum": 0 },
+          "gateFailures": { "description": "Failed or errored status contexts on merged PRs' heads, by the status's time.", "type": "integer", "minimum": 0 },
+          "flakes": { "description": "Workflow-run re-attempts on merged PRs' heads, by merge time.", "type": "integer", "minimum": 0 },
+          "reviewRounds": { "description": "Failed reviewer rounds (rounds minus 1 per verdict), by merge time.", "type": "integer", "minimum": 0 }
+        }
+      }
+    },
     "overlaps": {
       "description": "Every pair of open ready or running issues without a pull request whose Scope paths overlap (soft paths excluded), the check pick.mjs and status.mjs run (ADR 0014). a < b, so a pair appears once; contracts.test.mjs enforces the order, which a schema cannot. No file path is published. Always present, an empty list when nothing overlaps.",
       "type": "array",

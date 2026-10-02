@@ -114,7 +114,7 @@ function prBlockers(stage, note) {
  * `issues` every open issue with body and labels; `mergeQueue` and `gateDescriptions` are the outputs of status.mjs's
  * mergeQueueEntries and gateDescriptions.
  */
-export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), softPaths = DEFAULT_SOFT_PATHS, reviewers = REVIEWERS, generatedAt, repo: repoName, ownerApprovals = new Map() }) {
+export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), softPaths = DEFAULT_SOFT_PATHS, reviewers = REVIEWERS, generatedAt, repo: repoName, ownerApprovals = new Map(), trends }) {
   const repo = validRepo(repoName);
   const queuePosition = new Map(mergeQueue.map((e) => [e.number, e.position]));
   const prOf = new Map();
@@ -164,7 +164,141 @@ export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: 
   }
   out.edges.sort((a, b) => a.from - b.from || a.to - b.to);
   out.overlaps = overlapPairs(issues, prOf, softPaths);
+  if (trends !== undefined) out.trends = trends;
   return out;
+}
+
+export const TREND_WEEKS = 8; // the bounded window: this many ISO weeks, the current one included
+const DAY_MS = 86_400_000;
+const WEEK_MS = 7 * DAY_MS;
+
+// ADR 0008: the queue module may not import the metrics modules, so the week arithmetic and the one query the trends
+// need live here rather than being borrowed from delivery-metrics.mjs and review-metrics.mjs.
+/** Monday 00:00 UTC of the week that contains the instant, as ISO text. */
+function weekStart(iso) {
+  const date = new Date(iso);
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - ((date.getUTCDay() + 6) % 7))).toISOString();
+}
+
+/** The ISO 8601 week of an instant as YYYY-Www (the year is the week's Thursday's). */
+export function isoWeekLabel(iso) {
+  const monday = new Date(weekStart(iso));
+  const thursday = new Date(monday.getTime() + 3 * DAY_MS);
+  const year = thursday.getUTCFullYear();
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const week = 1 + Math.round(((thursday - jan4) / DAY_MS - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
+  return `${year}-W${String(week).padStart(2, "0")}`;
+}
+
+/**
+ * Pure: weekly counts for the last `weeks` ISO weeks ending with the week of `now`, oldest first, every week present
+ * (zeros included). Counts only, so no PR number, title, login or check name can reach the row (ADR 0027 part 7).
+ * - queueRemovals: merge-queue removal events, by the removal's time.
+ * - gateFailures: failed or errored status contexts on a merged PR's head, by the status's time.
+ * - flakes: workflow-run re-attempts (attempt - 1 summed) on a merged PR's head, by the PR's merge time.
+ * - reviewRounds: failed reviewer rounds (`rounds - 1` per verdict), by the PR's merge time.
+ * @param {{ prs: ReturnType<typeof normalizeTrendPr>[], now: Date, weeks?: number }} input
+ */
+export function buildTrends({ prs, now, weeks = TREND_WEEKS }) {
+  const firstStart = Date.parse(weekStart(new Date(now.getTime() - (weeks - 1) * WEEK_MS).toISOString()));
+  const rows = new Map();
+  for (let i = 0; i < weeks; i += 1) {
+    const iso = new Date(firstStart + i * WEEK_MS).toISOString();
+    rows.set(weekStart(iso), { week: isoWeekLabel(iso), queueRemovals: 0, gateFailures: 0, flakes: 0, reviewRounds: 0 });
+  }
+  const add = (at, field, n) => {
+    if (!(n > 0) || typeof at !== "string" || Number.isNaN(Date.parse(at)) || Date.parse(at) > now.getTime()) return;
+    const row = rows.get(weekStart(at));
+    if (row) row[field] += n;
+  };
+  for (const pr of prs.filter((p) => p !== undefined)) {
+    for (const at of pr.queueRemoved ?? []) add(at, "queueRemovals", 1);
+    for (const s of pr.statuses ?? []) if (s.state === "failure" || s.state === "error") add(s.at, "gateFailures", 1);
+    add(pr.mergedAt, "flakes", (pr.checkRunAttempts ?? []).reduce((sum, a) => sum + (a - 1), 0));
+    add(pr.mergedAt, "reviewRounds", pr.failedRounds);
+  }
+  return [...rows.values()];
+}
+
+const asList = (value) => (Array.isArray(value) ? value : []);
+const isoTime = (value) => (typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value : undefined);
+
+/**
+ * The ONLY place a merged-PR GraphQL node is read for the trends. Only times, states, attempt numbers and a failed-round
+ * count leave it: no number, title, login, check name or comment text.
+ * @returns {{ mergedAt: string, queueRemoved: string[], statuses: { state: string, at: string }[], checkRunAttempts: number[], failedRounds: number } | undefined}
+ */
+export function normalizeTrendPr(node, names = REVIEWERS) {
+  const mergedAt = isoTime(node?.mergedAt);
+  if (mergedAt === undefined) return undefined;
+  const contexts = asList(node.lastCommit?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes);
+  // A reviewer re-run before posting is a failed round: `rounds - 1` per verdict comment, 0 for one without `rounds`.
+  const failedRounds = asList(node.comments?.nodes).reduce((sum, c) => {
+    const rounds = parseVerdictComment(c?.body, names)?.verdict?.metrics?.rounds;
+    return sum + (Number.isInteger(rounds) && rounds >= 1 ? rounds - 1 : 0);
+  }, 0);
+  return {
+    mergedAt,
+    queueRemoved: asList(node.timelineItems?.nodes).map((e) => isoTime(e?.createdAt)).filter((t) => t !== undefined),
+    statuses: contexts
+      .filter((c) => c?.__typename === "StatusContext" && isoTime(c.createdAt) !== undefined)
+      .map((c) => ({ state: String(c.state ?? "").toLowerCase(), at: c.createdAt })),
+    checkRunAttempts: contexts.filter((c) => c?.__typename === "CheckRun").map((c) => Number(c.checkSuite?.workflowRun?.runAttempt)).filter((n) => Number.isInteger(n) && n >= 1),
+    failedRounds,
+  };
+}
+
+// Verdict comments are posted last, so the last 100 comments hold them. No author, login, title or body is selected
+// beyond what normalizeTrendPr reduces to counts.
+const TRENDS_QUERY = `query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: MERGED, first: 30, after: $cursor, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        mergedAt updatedAt
+        timelineItems(first: 100, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { nodes { ... on RemovedFromMergeQueueEvent { createdAt } } }
+        comments(last: 100) { nodes { body } }
+        lastCommit: commits(last: 1) {
+          nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+            __typename
+            ... on StatusContext { state createdAt }
+            ... on CheckRun { checkSuite { workflowRun { runAttempt } } }
+          } } } } }
+        }
+      }
+    }
+  }
+}`;
+
+function fetchTrendPrs(from, repo) {
+  const [owner, name] = repo.split("/");
+  const prs = [];
+  let cursor = null;
+  for (;;) {
+    const args = ["api", "graphql", "-f", `query=${TRENDS_QUERY}`, "-F", `owner=${owner}`, "-F", `name=${name}`];
+    if (cursor !== null) args.push("-F", `cursor=${cursor}`);
+    const reply = gh(args);
+    if (reply.errors) throw new Error("graphql errors");
+    const page = reply.data.repository.pullRequests;
+    prs.push(...page.nodes.map((node) => normalizeTrendPr(node)).filter((pr) => pr !== undefined));
+    // Ordered by update time: once a whole page was last touched before the window, nothing older can have merged in it.
+    const stale = page.nodes.length > 0 && page.nodes.every((node) => new Date(node.updatedAt) < from);
+    if (!page.pageInfo.hasNextPage || stale) return prs;
+    cursor = page.pageInfo.endCursor;
+  }
+}
+
+/** The trends for the window, read from GitHub on each run; undefined when they cannot be read (the snapshot is still useful without them). */
+function readTrends(repo, now) {
+  if (repo === undefined) return undefined;
+  try {
+    const from = new Date(Date.parse(weekStart(new Date(now.getTime() - (TREND_WEEKS - 1) * WEEK_MS).toISOString())));
+    return buildTrends({ prs: fetchTrendPrs(from, repo), now });
+  } catch {
+    // Never print the error: it may quote gh output.
+    console.error("snapshot: trends could not be read; publishing without them");
+    return undefined;
+  }
 }
 
 /**
@@ -219,6 +353,9 @@ export function parseInput(text) {
   };
   // ADR 0024: the repo and, per PR number, whether a code owner's review covers the head (read by the caller under team).
   if (typeof input.repo === "string") parsed.repo = input.repo;
+  // ADR 0027 part 7, offline: `trendInput.prs` are merged-PR GraphQL nodes (TRENDS_QUERY's shape), counted at generatedAt.
+  const t = input.trendInput;
+  if (t !== null && typeof t === "object" && Array.isArray(t.prs)) parsed.trends = buildTrends({ prs: t.prs.map((node) => normalizeTrendPr(node)).filter((pr) => pr !== undefined), now: new Date(parsed.generatedAt) });
   const approved = input.ownerApproved;
   if (approved !== null && typeof approved === "object" && !Array.isArray(approved)) parsed.ownerApprovals = new Map(Object.entries(approved).map(([n, ok]) => [Number(n), ok === true]));
   return parsed;
@@ -317,7 +454,8 @@ function main(argv = process.argv.slice(2)) {
   }
   // Only for same-repo PRs (the ones the snapshot lists).
   const ownerApprovals = repo !== undefined ? readOwnerApprovals({ prs: prs.filter((p) => p.isCrossRepository === false), repo, run: ghText, identity }) : undefined;
-  const snapshot = buildSnapshot({ prs, issues, mergeQueue: mergeQueueEntries(reply), gateDescriptions: gateDescriptions(reply), softPaths: configuredSoftPaths(), reviewers: reviewerNames(loadConfig()), generatedAt: new Date().toISOString(), repo, ownerApprovals });
+  const now = new Date();
+  const snapshot = buildSnapshot({ prs, issues, mergeQueue: mergeQueueEntries(reply), gateDescriptions: gateDescriptions(reply), softPaths: configuredSoftPaths(), reviewers: reviewerNames(loadConfig()), generatedAt: now.toISOString(), repo, ownerApprovals, trends: readTrends(repo, now) });
   if (out) writeSnapshot(snapshot, out);
   else console.log(JSON.stringify(snapshot, null, 2));
 }
