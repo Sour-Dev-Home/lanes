@@ -319,7 +319,7 @@ function awkText(words) {
 // Programs that only print or filter the words they are given and never run them (#669), so a `$` or backtick the shell
 // kept literal inside single quotes stays text for them: `echo '$(date)'`, `head -n 1 '$x'`. A program that runs its
 // words (a shell, eval, node -e, xargs, find -exec, sed's `e`) is not here and is read as before.
-const TEXT_COMMANDS = new Set(["echo", "printf", "cat", "head", "tail", "wc", "cut", "tr", "uniq"]);
+const TEXT_COMMANDS = new Set(["echo", "printf", "cat", "head", "tail", "wc", "cut", "tr"]); // not uniq: `uniq - f` writes a file a later `sh f` runs
 
 /** The indexes of a simple command's words whose literal `$` and backticks are text: every argument of a TEXT_COMMANDS program, or an awk program that cannot run a command (awkText). */
 function literalTextWords(words) {
@@ -342,6 +342,8 @@ function outputStaysText({ segments, writes, pipes }, k) {
   for (let i = k; i < segments.length; i += 1) {
     if (writes[i] !== false) return false;
     if (i > k && !TEXT_SINKS.has(basename(segments[i][0] ?? "").replace(/\.exe$/i, ""))) return false;
+    // `sort -o f` / `--output=f` writes a file without a redirect, for a later `bash f` to run.
+    if (i > k && basename(segments[i][0] ?? "") === "sort" && segments[i].some((w) => /^--output|^-[A-Za-z]*o/.test(w))) return false;
     if (pipes?.[i] !== true) return true;
   }
   return false;
