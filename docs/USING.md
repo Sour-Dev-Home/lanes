@@ -66,7 +66,8 @@
    nothing and exits 3 with `lanes scripts changed since the queue started (<old>..<new>): git pull --ff-only, then
    restart the queue`. Run that, then start the queue again (a running Node process never reloads its scripts, so
    without this it would keep launching lanes with old guards). A failed fetch prints a line and launches nothing
-   that tick; the queue keeps running and tries again.
+   that tick; the queue keeps running and tries again. The queue runs on your machine, so it stops when the machine
+   sleeps; what to do about that and other stops is in [docs/OPERATIONS.md](OPERATIONS.md).
 3. **Watch with `/status`**: WAITING ON YOU, IN FLIGHT (each PR's stage), READY TO START, MERGED.
    A `Notification` hook (`scripts/lanes/notify-hook.mjs`) pops a notification when a lane stops at a permission
    prompt or needs input (with the `claude attach <id>` to reach it), or finishes with its PR waiting on you or failing.
@@ -83,7 +84,8 @@
    the author and you approve natively; a PR you push yourself cannot be approved by you.
 5. **At night** a scheduled cloud session runs `/night`: up to 3 skip or quick tasks, merged only if CI finds them
    unattended-eligible. In the morning read the digest comment on the "Lanes digest" issue, and `/approve` the rest.
-6. **Weekly `/health`** files issues for stale work, a red main and flaky checks.
+6. **Weekly `/health`** files issues for stale work, a red main and flaky checks. When the queue or a lane misbehaves,
+   [docs/OPERATIONS.md](OPERATIONS.md) has one "if X happens, do Y" page per situation.
 7. **Clean up merged lanes** with `node scripts/lanes/cleanup.mjs` (`--dry-run` to see the plan first). It removes
    three kinds: merged lanes, closed-issue lanes (no PR, nothing unpushed) and empty orphan folders under
    `.claude/worktrees`. For each `issue-<N>-…` lane whose PR merged at exactly its local branch tip and whose worktree
