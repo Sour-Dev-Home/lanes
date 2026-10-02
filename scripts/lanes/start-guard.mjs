@@ -1,10 +1,10 @@
 // scripts/lanes/start-guard.mjs — the barrier between a session and launching lanes (#51, from the #18 security review).
-// Wired in .claude/settings.json next to approve-guard.mjs, as two hooks:
+// Wired in .claude/settings.json as hooks:
 //   UserPromptSubmit: node scripts/lanes/start-guard.mjs user-prompt-submit
 //     a prompt that is exactly `/start <N> [<N> ...]` writes a grant { sessionId, issues, at } to
 //     .lanes/start/<session>.json, and one that is exactly `/start --auto` or `/start --auto --go` writes
 //     { sessionId, auto: "dry" | "go", at } (#76); any other prompt in that session deletes it, except an automated input
-//     (approve-guard's AUTOMATED_INPUT_PREFIXES), which neither creates nor deletes one (#262).
+//     (shell-lex.mjs's AUTOMATED_INPUT_PREFIXES), which neither creates nor deletes one (#262).
 //   PreToolUse (Bash): node scripts/lanes/start-guard.mjs pre-tool-use
 //     `start.mjs` is allowed only as the plain `node scripts/lanes/start.mjs <N ...>` or
 //     `node scripts/lanes/start.mjs --auto [--go]`, only with a grant from this session under 15 minutes old for the
@@ -19,7 +19,7 @@
 //     it stands (#197); and the command find -exec or xargs runs is read, with what they hand it unresolved (#113).
 //     Text piped into a shell (`cat <<'EOF' | sh`, `echo '…' | bash`) has its backticks read live (#246).
 //   PreToolUse (PowerShell) runs the same hook (#61): the command is read with PowerShell's rules (powershellAsBash in
-//     approve-guard.mjs) and scanned as the Bash command with the same words, under the same grant rules; one that
+//     shell-lex.mjs) and scanned as the Bash command with the same words, under the same grant rules; one that
 //     cannot be read is denied when it names start.mjs, queue.mjs or --bg. Raw-text checks drop quotes first, so a
 //     name split by quoting (st"art.mjs, --"bg") still reads whole. A jq program or gh --jq/--template value keeps its
 //     `$` literal. A node -e script that names a target still counts as a run (owner decision, 2026-09-28).
@@ -33,10 +33,10 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isAutomatedInput, powershellAsBash, preToolUseOutput } from "./approve-guard.mjs";
 import {
-  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, basename, dequoted, feedsShell, launchedCommands, lex, mayBeNode, mayExpandTo,
-  readGrant, releaseTagCommand, runtimeTextWords, scriptSubcommand, shellTextIndexes, withoutLiteralSubstitutions, wmiProcessCreate,
+  ASSIGN_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, basename, dequoted, feedsShell, isAutomatedInput, launchedCommands, lex, mayBeNode,
+  mayExpandTo, powershellAsBash, preToolUseOutput, readGrant, releaseTagCommand, runtimeTextWords, scriptSubcommand, shellTextIndexes,
+  withoutLiteralSubstitutions, wmiProcessCreate,
 } from "./shell-lex.mjs";
 
 // start.mjs reads the grant with the guard's own reader.
@@ -123,7 +123,7 @@ export function onUserPromptSubmit(input, now = Date.now()) {
 // sees only the ones that expand (#89). A quoted script is walked with them restored: the shell that runs it (bash -c,
 // eval) expands them; a restored backtick comes back as QUOTED_TICK, so a literal message such as 'Fix `start.mjs`'
 // is not read as a run of start.mjs (#197).
-// Every command is lexed in shell-lex.mjs's bodies shape; its words shape is approve-guard.mjs's.
+// Every command is lexed in shell-lex.mjs's bodies shape; its words shape is the other shape it offers.
 const lexBodies = (cmd, collapse = false) => lex(cmd, { bodies: true, collapse });
 const unliteral = (s) => s.replaceAll(LIT_DOLLAR, "$").replaceAll(LIT_TICK, QUOTED_TICK);
 // dequoted and withoutLiteralSubstitutions, the raw-text readers, live in shell-lex.mjs beside the WMI reader (#308).

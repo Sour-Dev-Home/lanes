@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { PATH_PATTERNS } from "../preflight.mjs";
 
@@ -116,12 +116,12 @@ test("issue-contract concurrency group is keyed by issue number to serialize edi
   assert.match(yml, /group: issue-contract-\$\{\{ github\.event\.issue\.number \}\}/);
 });
 
-test("settings: the owner's approval is guarded by hooks, never allowed by a rule; reviewers are allowed; no force push", () => {
+test("settings: start-guard is wired, approve-guard is gone, the owner's approval is never allowed by a rule; reviewers are allowed; no force push", () => {
   const s = JSON.parse(readFileSync(".claude/settings.json", "utf8"));
-  // A PreToolUse allow cannot skip an ask rule (#30), so approve-guard.mjs replaces the ask rule as the barrier.
   const hook = (event, matcher) => s.hooks[event].find((h) => h.matcher === matcher)?.hooks.map((x) => x.command).join("\n") ?? "";
-  assert.match(hook("UserPromptSubmit", undefined), /scripts\/lanes\/approve-guard\.mjs" user-prompt-submit$/);
-  assert.match(hook("PreToolUse", "Bash"), /scripts\/lanes\/approve-guard\.mjs" pre-tool-use$/);
+  assert.match(hook("UserPromptSubmit", undefined), /scripts\/lanes\/start-guard\.mjs" user-prompt-submit$/);
+  assert.match(hook("PreToolUse", "Bash"), /scripts\/lanes\/start-guard\.mjs" pre-tool-use$/);
+  assert.doesNotMatch(JSON.stringify(s.hooks), /approve-guard/);
   assert.ok(!(s.permissions.ask ?? []).some((r) => r.includes("post-review.mjs owner")));
   assert.ok(!s.permissions.allow.some((r) => r.includes("post-review.mjs owner") || r.includes("post-review.mjs:")));
   assert.ok(s.permissions.allow.includes("Bash(node scripts/lanes/post-review.mjs --file:*)"));
@@ -254,29 +254,16 @@ test("the reviewer agents are installed into other repos", () => {
 });
 
 test("every command file has a description", () => {
-  for (const name of ["lane", "status", "approve", "adr", "health", "night", "plan-issues"]) {
+  for (const name of ["lane", "status", "adr", "health", "night", "plan-issues"]) {
     assert.match(readFileSync(`.claude/commands/${name}.md`, "utf8"), /^---\ndescription: .+/, name);
   }
 });
 
-// #275: /approve <N> [<N>...] approves up to 10 PRs, each with its own view, diff, SHA, owner post and merge.
-test("approve.md loops over every PR number, each with its own view, diff, owner post on its own SHA, and merge", () => {
-  const md = readFileSync(".claude/commands/approve.md", "utf8").replace(/\r\n/g, "\n");
-  assert.match(md, /^argument-hint: <pr-number> \[<pr-number>\.\.\.\]$/m);
-  const flat = md.replace(/\s+/g, " ");
-  assert.match(flat, /[Ff]or each PR number <N> in `\$ARGUMENTS`, in order/);
-  assert.match(flat, /at most 10 distinct/);
-  assert.match(flat, /`gh pr view <N> --json title,body,headRefOid`/);
-  assert.match(flat, /"Needs the owner"/);
-  assert.match(flat, /"Contract changes"/);
-  assert.match(flat, /`gh pr diff <N> --name-only`/);
-  assert.match(flat, /`node scripts\/lanes\/post-review\.mjs owner success "approved by owner" --pr <N> --sha <that PR's headRefOid>`/);
-  assert.match(flat, /never another PR's/);
-  assert.match(flat, /`gh pr merge <N> --auto`/);
-  assert.match(flat, /[Oo]ne PR that fails does not stop the others/);
-  assert.match(flat, /report lists each PR's outcome/);
-  // No step uses the whole argument list where one PR number belongs.
-  assert.doesNotMatch(flat, /(pr view|pr diff|pr merge|--pr) \$ARGUMENTS/);
+// #616: the owner's /approve and /approvals commands and their guard are retired (ADR 0025); team approves in GitHub.
+test("approve.md, approvals.md and approve-guard.mjs are gone", () => {
+  for (const f of [".claude/commands/approve.md", ".claude/commands/approvals.md", "scripts/lanes/approve-guard.mjs", "scripts/lanes/approve-guard.test.mjs"]) {
+    assert.equal(existsSync(f), false, f);
+  }
 });
 
 const VENDORED_SKILLS = ["test-driven-development", "incremental-implementation", "api-and-interface-design", "planning-and-task-breakdown", "debugging-and-error-recovery", "frontend-ui-engineering", "security-and-hardening", "code-review-and-quality"];

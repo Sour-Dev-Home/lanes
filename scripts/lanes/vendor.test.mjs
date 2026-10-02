@@ -132,7 +132,7 @@ test("criterion 4: INDEX.md stays within about 2k tokens", () => {
 
 test("criterion 4: INDEX.md maps the guards, workflows, secrets, logging and Node.js topics", () => {
   const i = index();
-  for (const needle of ["scripts/lanes/approve-guard.mjs", "scripts/lanes/start-guard.mjs", ".github/workflows/", "pull_request_target"]) {
+  for (const needle of ["scripts/lanes/start-guard.mjs", ".github/workflows/", "pull_request_target"]) {
     assert.ok(i.includes(needle), `INDEX.md does not mention ${needle}`);
   }
   for (const topic of [/secret/i, /token/i, /logging/i, /Node\.js/]) assert.match(i, topic);
