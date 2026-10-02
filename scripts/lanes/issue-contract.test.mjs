@@ -49,7 +49,7 @@ test("a complete task carrying needs-owner never gets ready, even from the owner
   const p = issuePlan(body, ["needs-owner", "ready", "tier:quick"], true);
   assert.deepEqual(p.add, ["tier:full"]);
   assert.deepEqual(p.remove, ["tier:quick", "ready"]);
-  assert.match(p.comment, /needs-owner/);
+  assert.match(p.comment, /but a lane stopped and needs the owner \(see its last comment\); remove needs-owner when it is resolved\.$/);
   assert.ok(p.comment.startsWith(MARKER));
 });
 

@@ -106,6 +106,7 @@ function gateFailure(p, run) {
 export function renderComment(p, tests, repoUrl) {
   const lines = [`New problem: ${p.text}`];
   if (p.pr) lines.push(`PR: ${p.pr}`);
+  if (p.url) lines.push(`Issue: ${p.url}`);
   if (p.run?.url) lines.push(`Run: ${p.run.url}`);
   if (tests === null) lines.push("The failing test names could not be read from the log.");
   else if (tests?.length) lines.push(`Failing tests (up to ${TEST_LIMIT}):`, ...tests.map((t) => `- ${t}`));
@@ -158,6 +159,16 @@ export function evaluate(inputs, now) {
     if (open.has(n) && !queued.includes(n)) {
       add(`gate-failure:PR ${n}`, "gate-failure", `PR ${n}: a merge-group check failed${f.name ? ` (${safeName(f.name)})` : ""}`, gateFailure(byNumber.get(n) ?? { number: n }, runOf(f)));
     }
+  }
+  // #679: an open issue a lane stopped on. The text never copies the title, which is the issue author's free text.
+  for (const i of inputs.needsOwner ?? []) {
+    if (!Number.isInteger(i?.number) || i.number < 1) continue;
+    add(`needs-owner:#${i.number}`, "needs-owner", `#${i.number} needs you: a lane stopped or found nothing to build; see its last comment`, {
+      anchor: "needs-owner",
+      url: httpsUrl(i.url),
+      cause: "a lane stopped on this issue, or found nothing to build, and left a comment saying why",
+      fix: "read the issue's last comment, then close or rewrite the issue and remove needs-owner",
+    });
   }
   const heartbeat = readHeartbeat(inputs.comments, inputs.identity);
   if (inputs.readyCount > 0 && inputs.inFlightCount === 0 && (!heartbeat || now - heartbeat.at >= noProgressMinutes * 60_000)) {
@@ -338,7 +349,7 @@ export function gatherInputs(gh = ghJson, config = loadConfig()) {
     const status = node.commits?.nodes?.[0]?.commit?.status;
     return { number: node.number, gateState: status?.contexts?.find((c) => c.context === "lanes/gate")?.state ?? null, gateSince: since.get(node.number), gateDescription: descriptions.get(node.number), ...details.get(node.number) };
   });
-  const issues = gh(["issue", "list", "--state", "open", "--limit", "1000", "--json", "number,labels"]);
+  const issues = gh(["issue", "list", "--state", "open", "--limit", "1000", "--json", "number,labels,url"]);
   const has = (i, name) => i.labels.some((l) => l.name === name);
   const runs = gh(["run", "list", "--limit", "100", "--json", "name,headSha,conclusion,updatedAt"]);
   return {
@@ -350,6 +361,7 @@ export function gatherInputs(gh = ghJson, config = loadConfig()) {
     prs,
     mergeGroupRuns: gh(["run", "list", "--event", "merge_group", "--status", "failure", "--limit", "50", "--json", "databaseId,headBranch,workflowName,url,createdAt"]),
     readyCount: issues.filter((i) => has(i, "ready") && !has(i, "lane:running")).length,
+    needsOwner: issues.filter((i) => has(i, "needs-owner")).map((i) => ({ number: i.number, url: i.url })),
     inFlightCount: prs.length + issues.filter((i) => has(i, "lane:running")).length,
     checkRuns: runs.map((r) => ({ name: r.name, sha: r.headSha, conclusion: r.conclusion, at: r.updatedAt })),
   };

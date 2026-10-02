@@ -504,3 +504,52 @@ test("caps: 120 characters and 10 names are kept whole, one past is cut", () => 
   assert.equal(failingTests(lines(11)).length, 10);
   assert.deepEqual(failingTests(`not ok 1 - ${"b".repeat(120)}`), ["b".repeat(120)]);
 });
+
+// #679: an open issue a lane stopped on (labelled needs-owner) is a problem the owner gets one notification for.
+const stopped = (extra = {}) => base({ needsOwner: [{ number: 630, url: "https://github.com/o/r/issues/630", title: "@owner see #1 secret" }], ...extra });
+
+test("needs-owner: an open labelled issue is one problem, keyed by number, with a text that copies no title", () => {
+  const [p] = evaluate(stopped(), NOW);
+  assert.deepEqual([p.key, p.kind], ["needs-owner:#630", "needs-owner"]);
+  assert.equal(p.text, "#630 needs you: a lane stopped or found nothing to build; see its last comment");
+  assert.equal(p.url, "https://github.com/o/r/issues/630");
+  assert.equal(p.anchor, "needs-owner");
+  assert.doesNotMatch(JSON.stringify(p), /secret/);
+});
+
+test("edge: a malformed needs-owner entry is skipped and an unsafe url is dropped", () => {
+  assert.deepEqual(keys(base({ needsOwner: [null, { number: "x" }, { number: 0 }, { number: 3, url: "javascript:alert(1)" }] })), ["needs-owner:#3"]);
+  assert.equal(evaluate(base({ needsOwner: [{ number: 3, url: "javascript:alert(1)" }] }), NOW)[0].url, undefined);
+});
+
+test("needs-owner: commented once when it appears, silent on the next run, recovered when the label goes or the issue closes", async () => {
+  const f = fake();
+  await run({ client: f.client, inputs: { ...stopped(), repoUrl: REPO }, now: NOW });
+  const comments = () => f.calls.filter((c) => c[0] === "comment");
+  assert.equal(comments().length, 1);
+  assert.match(comments()[0][2], /^New problem: #630 needs you: a lane stopped or found nothing to build; see its last comment/);
+  assert.match(comments()[0][2], /Issue: https:\/\/github\.com\/o\/r\/issues\/630/);
+  assert.match(comments()[0][2], /Runbook: .*docs\/OPERATIONS\.md#needs-owner/);
+  await run({ client: f.client, inputs: stopped(), now: NOW + 5 * MIN });
+  assert.equal(comments().length, 1);
+  await run({ client: f.client, inputs: base(), now: NOW + 10 * MIN });
+  assert.equal(comments().length, 2);
+  assert.match(comments()[1][2], /Recovered/);
+});
+
+test("needs-owner: gatherInputs lists open issues only and keeps those labelled needs-owner", async () => {
+  const { gatherInputs } = await import("./health.mjs");
+  const seen = [];
+  const gh = (args) => {
+    if (args[0] === "issue") {
+      seen.push(args);
+      return [{ number: 4, url: "https://github.com/o/r/issues/4", title: "t", labels: [{ name: "needs-owner" }] }, { number: 5, url: "u", labels: [{ name: "ready" }] }];
+    }
+    if (args[0] === "repo") return { url: "https://github.com/o/r" };
+    if (args[0] === "pr" || args[0] === "run") return [];
+    return { data: { repository: { pullRequests: { nodes: [] } } } };
+  };
+  const r = gatherInputs(gh, { identity });
+  assert.deepEqual(r.needsOwner, [{ number: 4, url: "https://github.com/o/r/issues/4" }]);
+  assert.ok(seen[0].includes("open") && seen[0].includes("number,labels,url"));
+});

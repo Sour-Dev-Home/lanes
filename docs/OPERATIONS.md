@@ -20,6 +20,7 @@ The incident numbers cited below are issues and pull requests in this repository
 - [chain-deadlock](#chain-deadlock)
 - [scope-miss](#scope-miss)
 - [paused](#paused)
+- [needs-owner](#needs-owner)
 
 <a id="merge-queue-removed"></a>
 ## merge-queue-removed
@@ -236,3 +237,16 @@ single issue, remove its `ready` label in GitHub.
 **To resume.** `git pull --ff-only`, then `node scripts/lanes/queue.mjs` in your own terminal. Lanes that died during
 the pause resume as in [stalled-lane](#stalled-lane). A pause longer than the health thresholds raises
 [no-progress](#no-progress) once the queue is back, and clears when work moves.
+
+<a id="needs-owner"></a>
+## needs-owner
+
+**What you see.** A comment on the `lanes-health` issue: `#<N> needs you: a lane stopped or found nothing to build; see
+its last comment`, linking the issue. The issue carries the `needs-owner` label and has lost `ready` and `lane:running`.
+
+**What it means.** A lane stopped on that issue and left it for you: its contract was wrong or missing, a check refused
+it, or every criterion was already met on `main`. The lane's own comment on the issue, the last one, says which.
+
+**To fix.** Read that last comment, then either close the issue (nothing to build) or rewrite it (fix the contract, or
+the Scope paths). Remove the `needs-owner` label when it is resolved: the issue goes back in the queue once it carries
+`ready` again, and the alert clears on the next health run. Closing the issue clears it too.
