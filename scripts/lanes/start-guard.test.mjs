@@ -2865,6 +2865,7 @@ test("#669 edge: the same text unquoted or in double quotes, and a single-quoted
     `echo '$X' | awk '{system($0)}'`, `echo 'node $X' | head | sh`,
     // Found by the test-hunter: a file written by a sink's own option, then run.
     `echo 'node $X' | sort -o f; bash f`, `echo 'node $X' | sort --output=f; bash f`, `echo 'node $X' | sort -of; bash f`, `echo 'node $X' | uniq - f; bash f`,
+    `echo 'node $X' | sort --out=f; bash f`, `echo 'node $X' | sort --o f; bash f`, `echo '$(node queue.mjs)' | sort --compress-program=sh -S1`, `echo 'node $X' | sort`,
   ];
   for (const c of denied) assert.equal(decidePreToolUse(bash(c), null, NOW)?.decision, "deny", c);
 });

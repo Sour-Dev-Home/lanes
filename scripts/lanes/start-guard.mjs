@@ -330,8 +330,9 @@ function literalTextWords(words) {
 }
 
 // What a TEXT_COMMANDS program's output may be piped into and still be text: these print, count or filter their input and
-// never run it, unlike a shell, xargs, tee (a file a later `bash f` runs), awk (`system($0)`) or sed (`e`).
-const TEXT_SINKS = new Set([...TEXT_COMMANDS, "sort", "grep", "egrep", "fgrep", "rg"]);
+// never run it, unlike a shell, xargs, tee (a file a later `bash f` runs), awk (`system($0)`), sed (`e`) or sort (`-o`,
+// any abbreviation of `--output`, `--compress-program`) and uniq (`uniq - f`).
+const TEXT_SINKS = new Set([...TEXT_COMMANDS, "grep", "egrep", "fgrep", "rg"]);
 
 /**
  * True when simple command `k` writes no file and its output goes nowhere a shell, runtime or later script could read
@@ -342,8 +343,6 @@ function outputStaysText({ segments, writes, pipes }, k) {
   for (let i = k; i < segments.length; i += 1) {
     if (writes[i] !== false) return false;
     if (i > k && !TEXT_SINKS.has(basename(segments[i][0] ?? "").replace(/\.exe$/i, ""))) return false;
-    // `sort -o f` / `--output=f` writes a file without a redirect, for a later `bash f` to run.
-    if (i > k && basename(segments[i][0] ?? "") === "sort" && segments[i].some((w) => /^--output|^-[A-Za-z]*o/.test(w))) return false;
     if (pipes?.[i] !== true) return true;
   }
   return false;
