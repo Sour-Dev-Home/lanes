@@ -29,6 +29,7 @@ Scripts that import `node:child_process` (each call site runs `gh`, `git`, `clau
 - `scripts/lanes/diff-coverage.mjs`
 - `scripts/lanes/gate.mjs`
 - `scripts/lanes/handover.mjs` (runs fixed `git` and `gh` commands; the PR number is checked as digits and the branch and file paths as plain names; posts workflow-file text from the final local commit only; prints no secret)
+- `scripts/lanes/health.mjs` (runs `gh api`, `gh issue list` and `gh run list` through an argument array, never a shell; writes only to the one `lanes-health` issue it finds or creates; check names are reduced to a plain alphabet before they are posted)
 - `scripts/lanes/identity-check.mjs` (runs fixed `gh` and `git` commands with no outside text; prints no secret)
 - `scripts/lanes/install.mjs` (asks `gh repo view` whether the target is public)
 - `scripts/lanes/issue-contract.mjs`

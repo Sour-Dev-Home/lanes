@@ -1,6 +1,7 @@
 {
   "requiredChecks": ["verify", "security", "lanes/gate"],
   "metrics": { "mainWorkflow": "verify.yml", "fragmentsDir": null },
+  "health": { "approvedStuckMinutes": 30, "noProgressMinutes": 30 },
   "budget": { "perNightTokens": 300000000, "perLaneTokens": 15000000 },
   "identity": { "profile": "team", "app": { "id": 5140388, "installationId": 166641484, "botLogin": "sour-dev-lanes[bot]" } },
   "start": {
@@ -32,7 +33,7 @@
         "paths": [
           "scripts/lanes/pick.", "scripts/lanes/status.", "scripts/lanes/paths.", "scripts/lanes/start.", "scripts/lanes/start-guard.",
           "scripts/lanes/queue.", "scripts/lanes/cleanup.", "scripts/lanes/reap.", "scripts/lanes/lifecycle.",
-          "scripts/lanes/snapshot.", "scripts/lanes/lane-cost.", "scripts/lanes/consolidate.",
+          "scripts/lanes/snapshot.", "scripts/lanes/health.", "scripts/lanes/lane-cost.", "scripts/lanes/consolidate.",
           "scripts/lanes/app-token.", "scripts/lanes/identity-check.", "scripts/lanes/handover."
         ],
         "imports": ["lib", "gate"],
