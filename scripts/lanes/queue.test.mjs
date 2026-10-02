@@ -385,7 +385,8 @@ function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFai
       }
       if (args[0] === "issue") return JSON.stringify(world.issues);
       if (args[0] === "pr") return JSON.stringify(world.prs);
-      if (args[0] === "api") return JSON.stringify({ data: { repository: { pullRequests: { nodes: [] } } } });
+      if (args[0] === "api") return JSON.stringify({ data: { repository: { pullRequests: { nodes: world.gateNodes ?? [] } } } });
+      if (args[0] === "run" && world.runs) return JSON.stringify(world.runs);
       throw new Error(`unexpected gh ${args.join(" ")}`);
     },
     claude: (args, opts) => {
@@ -1681,4 +1682,46 @@ test("edge: under team a review wait with a missing or non-https url gets no lin
     assert.equal(lines.length, 2);
     assert.ok(!lines[1].includes("/files"), String(url));
   }
+});
+
+// #621: a PR the merge queue removed is reported once, with the failed merge-group check when it can be read.
+const queueNode = (number, ...events) => ({ number, timelineItems: { nodes: events.map(([t, at]) => ({ __typename: t, createdAt: at })) } });
+const REMOVED = "RemovedFromMergeQueueEvent";
+const ADDED = "AddedToMergeQueueEvent";
+const titled = (n) => ({ ...pr(n, n, ["a"]), title: `pr ${n}` });
+const failedLines = (run) => run.out.map((l) => l.replace(STAMP, "")).filter((l) => l.includes("[queue failed]"));
+
+test("#621: the queue prints one [queue failed] line, with the failed check and run link, when a PR is removed", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = {
+    issues: [],
+    prs: [titled(5)],
+    sessions: [],
+    gateNodes: [queueNode(5, [ADDED, "2026-10-02T02:30:00Z"], [REMOVED, "2026-10-02T02:36:12Z"])],
+    runs: [{ databaseId: 1, headBranch: "gh-readonly-queue/main/pr-5-abc", workflowName: "verify", url: "https://github.com/o/r/actions/runs/1", createdAt: "2026-10-02T02:35:00Z" }],
+  };
+  const run = fakeRun(world, { onSleep: (t) => t === 3 && (world.prs = []) });
+  await main([], run.deps);
+  assert.deepEqual(failedLines(run), ["#5 [queue failed] pr 5 — removed from the merge queue at 2026-10-02 02:36 UTC: verify failed in the merge group (https://github.com/o/r/actions/runs/1)"]);
+});
+
+test("#621: a removal is still reported, without a check, when the run list cannot be read", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [], prs: [titled(5)], sessions: [], gateNodes: [queueNode(5, [REMOVED, "2026-10-02T02:36:12Z"])] };
+  const run = fakeRun(world, { onSleep: (t) => t === 3 && (world.prs = []) });
+  await main([], run.deps);
+  assert.deepEqual(failedLines(run), ["#5 [queue failed] pr 5 — removed from the merge queue at 2026-10-02 02:36 UTC"]);
+});
+
+test("#621: removed then re-added, or never removed, prints nothing", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = {
+    issues: [],
+    prs: [pr(5, 5, ["a"]), pr(6, 6, ["b"])],
+    sessions: [],
+    gateNodes: [queueNode(5, [REMOVED, "2026-10-02T02:36:00Z"], [ADDED, "2026-10-02T02:40:00Z"]), queueNode(6)],
+  };
+  const run = fakeRun(world, { onSleep: (t) => t === 3 && (world.prs = []) });
+  await main([], run.deps);
+  assert.deepEqual(failedLines(run), []);
 });

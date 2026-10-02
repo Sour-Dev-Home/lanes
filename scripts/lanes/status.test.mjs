@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { TEAM_REQUIRED_MESSAGE } from "./lib.mjs";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
-import { prStage, formatAge, gateDescriptions, gateSince, idleLaneSession, laneBranches, laneSessions, laneWorktree, worktreeUnsaved, liveLanes, loadLaneBranches, loadSessions, mergeQueueEntries, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, trustedRollups, waitingApprovals } from "./status.mjs";
+import { prStage, formatAge, gateDescriptions, gateSince, idleLaneSession, laneBranches, laneSessions, laneWorktree, worktreeUnsaved, liveLanes, loadLaneBranches, loadSessions, mergeGroupFailures, mergeQueueEntries, queueRemovals, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, trustedRollups, waitingApprovals } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -1220,4 +1220,65 @@ test("status.mjs prints the team-required line instead of data for a missing con
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// #621: the merge queue removes a PR whose merge group fails; /status says so.
+const qNode = (number, ...events) => ({ number, timelineItems: { nodes: events.map(([t, at]) => ({ __typename: t, createdAt: at })) } });
+const qReply = (...nodes) => ({ data: { repository: { pullRequests: { nodes } } } });
+const REMOVED_EV = "RemovedFromMergeQueueEvent";
+const ADDED_EV = "AddedToMergeQueueEvent";
+const greenPr = (n) => pr(n, [gate("SUCCESS", "all reviews passed")]);
+
+test("queueRemovals keeps a PR whose latest queue event is a removal, whatever order the events arrive in", () => {
+  const removals = queueRemovals(qReply(qNode(5, [REMOVED_EV, "2026-10-02T02:36:00Z"], [ADDED_EV, "2026-10-02T02:30:00Z"]), qNode(6, [REMOVED_EV, "2026-10-02T02:36:00Z"], [ADDED_EV, "2026-10-02T02:40:00Z"]), qNode(7)));
+  assert.deepEqual([...removals], [[5, { at: Date.parse("2026-10-02T02:36:00Z") }]]);
+});
+
+test("edge: queueRemovals ignores a PR in the queue now, events with a bad time, and a malformed reply", () => {
+  assert.equal(queueRemovals(qReply(qNode(5, [REMOVED_EV, "2026-10-02T02:36:00Z"])), [5]).size, 0);
+  assert.equal(queueRemovals(qReply(qNode(5, [REMOVED_EV, "not a time"], [REMOVED_EV, undefined]))).size, 0);
+  assert.equal(queueRemovals(undefined).size, 0);
+  assert.equal(queueRemovals({ data: null }).size, 0);
+});
+
+test("a removed PR is [queue failed] under WAITING ON YOU with the time and the failed check's name and link", () => {
+  const removals = queueRemovals(qReply(qNode(5, [REMOVED_EV, "2026-10-02T02:36:12Z"])));
+  const queueFailures = mergeGroupFailures([{ headBranch: "gh-readonly-queue/main/pr-5-abc", workflowName: "verify", url: "https://github.com/o/r/actions/runs/9", createdAt: "2026-10-02T02:35:00Z" }]);
+  const s = summarize({ prs: [greenPr(5)], issues: [], merged: [], removals, queueFailures });
+  assert.equal(placement(s, 5), "owner");
+  assert.equal(itemOf(s, 5).stage, "queue failed");
+  assert.match(render(s, "24h"), /#5 \[queue failed\] pr 5 — removed from the merge queue at 2026-10-02 02:36 UTC: verify failed in the merge group \(https:\/\/github\.com\/o\/r\/actions\/runs\/9\)/);
+});
+
+test("a removed PR without a readable merge-group run still shows the time", () => {
+  const s = summarize({ prs: [greenPr(5)], issues: [], merged: [], removals: queueRemovals(qReply(qNode(5, [REMOVED_EV, "2026-10-02T02:36:12Z"]))) });
+  assert.equal(itemOf(s, 5).note, "removed from the merge queue at 2026-10-02 02:36 UTC");
+});
+
+test("a PR removed then re-added shows as queued again", () => {
+  const reply = qReply(qNode(5, [REMOVED_EV, "2026-10-02T02:36:00Z"], [ADDED_EV, "2026-10-02T02:40:00Z"]));
+  const s = summarize({ prs: [greenPr(5)], issues: [], merged: [], mergeQueue: [{ number: 5, position: 0 }], removals: queueRemovals(reply, [5]) });
+  assert.equal(stageOf(s, 5).stage, "queued");
+});
+
+test("a merged PR (not in the open list) with a removal in its history is only MERGED", () => {
+  const s = summarize({ prs: [], issues: [], merged: [{ number: 5, title: "pr 5" }], removals: queueRemovals(qReply(qNode(5, [REMOVED_EV, "2026-10-02T02:36:00Z"]))) });
+  assert.equal(s.waitingOnOwner.length, 0);
+  assert.equal(s.merged[0].number, 5);
+});
+
+test("mergeGroupFailures keeps the newest failed run per PR, only an https link, and tolerates bad input", () => {
+  const f = mergeGroupFailures([
+    { headBranch: "gh-readonly-queue/main/pr-5-a", workflowName: "old", url: "https://x/1", createdAt: "2026-10-02T01:00:00Z" },
+    { headBranch: "gh-readonly-queue/main/pr-5-b", workflowName: "verify", url: "javascript:alert(1)", createdAt: "2026-10-02T02:00:00Z" },
+    { headBranch: "main", workflowName: "x", createdAt: "2026-10-02T03:00:00Z" },
+    null,
+  ]);
+  assert.deepEqual([...f], [[5, { name: "verify" }]]);
+  assert.equal(mergeGroupFailures(undefined).size, 0);
+});
+
+test("edge: mergeGroupFailures drops a plain http link (only https is kept)", () => {
+  const f = mergeGroupFailures([{ headBranch: "gh-readonly-queue/main/pr-8-a", workflowName: "verify", url: "http://example.test/1", createdAt: "2026-10-02T02:00:00Z" }]);
+  assert.deepEqual([...f], [[8, { name: "verify" }]]);
 });

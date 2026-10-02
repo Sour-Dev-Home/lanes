@@ -176,3 +176,14 @@ test("lanes.config.json maps this script into the modules module", () => {
   assert.equal(moduleOf("scripts/lanes/affected-tests.mjs", cfg.modules), "modules");
   assert.equal(moduleOf("scripts/lanes/affected-tests.test.mjs", cfg.modules), "modules");
 });
+
+// #621: the PR job runs the affected files through npm, as the merge group does, so both see one environment.
+test("verify.yml runs the affected tests through npm, and the full suite through npm test when none or ALL", () => {
+  const workflow = readFileSync(".github/workflows/verify.yml", "utf8");
+  const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+  assert.ok(workflow.includes("npm run test:files -- $files"), "the affected files go through npm");
+  assert.ok(!/^\s*node --test\b/m.test(workflow), "no bare node --test step is left");
+  assert.match(workflow, /if \[ -z "\$files" \] \|\| \[ "\$files" = "ALL" \]; then\s+npm test\s+else/);
+  assert.equal(pkg.scripts["test:files"], "node --test", "test:files takes the file arguments as given");
+  assert.match(pkg.scripts.test, /^node --test /, "npm test still runs the whole suite");
+});

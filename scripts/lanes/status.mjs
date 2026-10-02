@@ -122,6 +122,45 @@ export function mergeQueueEntries(reply) {
   return (reply?.data?.repository?.mergeQueue?.entries?.nodes ?? []).map((e) => ({ number: e.pullRequest.number, position: e.position }));
 }
 
+// #621: the merge queue removes a PR whose merge group fails and nothing else says so. The PR's timeline holds each
+// queue event; the `timelineItems` fragment below is shared by every query that reads them.
+export const QUEUE_EVENTS = "timelineItems(last:10,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){ nodes { __typename ... on AddedToMergeQueueEvent { createdAt } ... on RemovedFromMergeQueueEvent { createdAt } } }";
+
+// PR number → `{ at }` (ms) for each open PR whose latest queue event is a removal, from a reply holding QUEUE_EVENTS.
+// A PR re-added after a removal, or in the queue now, is left out (`inQueue`: the numbers in the queue).
+export function queueRemovals(reply, inQueue = []) {
+  const out = new Map();
+  for (const node of reply?.data?.repository?.pullRequests?.nodes ?? []) {
+    const events = (node.timelineItems?.nodes ?? []).filter((e) => e?.createdAt && !Number.isNaN(Date.parse(e.createdAt)));
+    events.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+    const last = events.at(-1);
+    if (last?.__typename === "RemovedFromMergeQueueEvent" && !inQueue.includes(node.number)) out.set(node.number, { at: Date.parse(last.createdAt) });
+  }
+  return out;
+}
+
+// PR number → `{ name, url }` of the newest failed merge-group run, from `gh run list --event merge_group --json
+// databaseId,headBranch,workflowName,url,createdAt` (the merge group's branch is gh-readonly-queue/<base>/pr-<N>-<sha>).
+// Only an https URL is kept.
+export function mergeGroupFailures(runs) {
+  const out = new Map();
+  const newest = new Map();
+  for (const run of Array.isArray(runs) ? runs : []) {
+    const n = Number(/^gh-readonly-queue\/.+\/pr-(\d+)-/.exec(run?.headBranch ?? "")?.[1]);
+    const at = Date.parse(run?.createdAt ?? "") || 0;
+    if (!n || at < (newest.get(n) ?? -1)) continue;
+    newest.set(n, at);
+    out.set(n, { name: String(run.workflowName ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, ""), ...(typeof run.url === "string" && run.url.startsWith("https://") && { url: run.url }) });
+  }
+  return out;
+}
+
+// The text after `[queue failed]`: when the merge queue removed the PR and, if known, which merge-group check failed.
+export function queueFailedNote(removal, failure) {
+  const at = new Date(removal.at).toISOString().slice(0, 16).replace("T", " ");
+  return `removed from the merge queue at ${at} UTC${failure?.name ? `: ${failure.name} failed in the merge group` : ""}${failure?.url ? ` (${failure.url})` : ""}`;
+}
+
 // PR number → the `lanes/gate` description on its head commit, from the reply to STATUS_QUERY. PRs without a gate
 // status are left out.
 export function gateDescriptions(reply) {
@@ -341,7 +380,7 @@ const withSession = (item, session) => {
 // `mergeQueue` is the output of mergeQueueEntries (null or missing: no merge queue); `gateDescriptions` that of
 // gateDescriptions (missing: the rollup's own descriptions only). `sessions` and `sessionsUnavailable` come from
 // loadSessions (missing: no sessions). `laneBranches` is the output of laneBranches (missing: no branches known).
-export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map(), sessions: loaded = new Map(), stalled = new Map(), idle: idleLanesFound = new Map(), sessionsUnavailable, laneBranches = new Map(), branchesUnavailable, team }) {
+export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map(), sessions: loaded = new Map(), stalled = new Map(), idle: idleLanesFound = new Map(), sessionsUnavailable, laneBranches = new Map(), branchesUnavailable, team, removals = new Map(), queueFailures = new Map() }) {
   // `team` is teamContext's output (missing: no owner approval is read). `stalled` is the output of stalledLanes (issue N → minutes silent).
   const sessions = new Map([...loaded].map(([n, s]) => [n, stalled.has(n) ? { ...s, stalledMin: stalled.get(n) } : s]));
   const out = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
@@ -362,7 +401,10 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
     // approval already given only clears a /approve ask (the gate's own "waiting on owner" stage, or a "needs the
     // owner" note that asks for /approve) — an unrelated need (e.g. "pick a name for the package") still surfaces.
     const asksForApprove = /\/approve\b/i.test(needs);
-    if (session?.waiting || hung || stage === "conflict") out.waitingOnOwner.push(withSession(item, session));
+    // #621: the merge queue removed it and it is open still, so it is not ready whatever the gate says.
+    const removal = removals.get(pr.number);
+    if (removal && queuePosition.get(pr.number) === undefined) out.waitingOnOwner.push(withSession({ ...item, stage: "queue failed", note: queueFailedNote(removal, queueFailures.get(pr.number)) }, session));
+    else if (session?.waiting || hung || stage === "conflict") out.waitingOnOwner.push(withSession(item, session));
     else if (stage === "gate") out.inFlight.push(withSession(item, session));
     else if (stage === "owner") (ownerApproved(pr, team) ? out.inFlight : out.waitingOnOwner).push(withSession(item, session));
     else if (needs && !/^nothing\b/i.test(needs)) {
@@ -510,7 +552,7 @@ const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", std
 export const STATUS_QUERY =
   "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ " +
   "mergeQueue { entries(first:100){ nodes { state position pullRequest { number } } } } " +
-  `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description createdAt } contexts { context state creator { login __typename } } } } } } } } } }`;
+  `pullRequests(states:OPEN,first:100){ nodes { number ${QUEUE_EVENTS} commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description createdAt } contexts { context state creator { login __typename } } } } } } } } } }`;
 
 // #390: the token budget for `--json`. A bad or unreadable lanes.config.json gives the defaults and says so in `note`;
 // unreadable agents or costs count as 0 (loadBudget notes the latter). Never throws.
@@ -580,6 +622,7 @@ async function main(argv = process.argv.slice(2)) {
     merged: gh(["pr", "list", "--state", "merged", "--search", `merged:>=${since}`, "--limit", "100", "--json", "number,title"]),
     mergeQueue: mergeQueueEntries(reply),
     gateDescriptions: gateDescriptions(reply),
+    removals: queueRemovals(reply, mergeQueueEntries(reply).map((e) => e.number)),
     // Lanes run in worktrees of the main checkout, so the root is the common git dir's parent, not --show-toplevel.
     ...loadSessions(repoRoot, () => (rawAgents = runClaudeAgents())),
     ...loadLaneBranches(),
@@ -589,6 +632,12 @@ async function main(argv = process.argv.slice(2)) {
     data.stalled = stalledLanes(agents, repoRoot);
     data.idle = idleLanes(agents, repoRoot);
   } catch {}
+  // The failed check is a nicety: a run list that cannot be read leaves the removal line without it.
+  if (data.removals.size) {
+    try {
+      data.queueFailures = mergeGroupFailures(gh(["run", "list", "--event", "merge_group", "--status", "failure", "--limit", "50", "--json", "databaseId,headBranch,workflowName,url,createdAt"]));
+    } catch {}
+  }
   const budget = readBudget(repoRoot, rawAgents);
   // A blocker missing from a truncated list would read as closed, so refuse rather than list a blocked issue as ready.
   if (data.issues.length >= ISSUE_LIMIT) throw new Error(`${ISSUE_LIMIT}+ open issues: too many to tell open blockers from closed ones`);
