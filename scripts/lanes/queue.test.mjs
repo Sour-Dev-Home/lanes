@@ -1,6 +1,7 @@
 // scripts/lanes/queue.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadBudget } from "./lane-cost.mjs";
 import { planTick } from "./queue.mjs";
@@ -339,6 +340,26 @@ test("edge: a failing gate with no description still gives a reason", () => {
 
 const TICK_MS = 3 * 60 * 1000;
 const STAMP = /^\d\d:\d\d:\d\d /;
+const QUEUE_TEAM = { profile: "team", app: { id: 11, installationId: 22, botLogin: "sour-dev-lanes[bot]" } };
+
+// The team profile's owner-side steps (start.mjs's `teamSteps`), faked; `removed` collects the directories removed.
+function fakeTeamSteps({ key = "/keys/app.pem", mintFail = false, botIdFail = false, removed = [] } = {}) {
+  return {
+    keyFile: () => key,
+    readable: () => {},
+    repo: () => "lanes",
+    makeDir: (n) => ({ dir: `/tmp/lane-${n}`, emptyConfig: `/tmp/lane-${n}/empty` }),
+    removeDir: (dir) => removed.push(dir),
+    writeSettings: () => {},
+    mintInto: () => {
+      if (mintFail) throw new Error("HTTP 401");
+    },
+    botUserId: () => {
+      if (botIdFail) throw new Error("HTTP 401");
+      return "336249257";
+    },
+  };
+}
 
 // A fake GitHub and claude. `world.issues`, `world.prs` and `world.sessions` are read each tick; `onSleep(tickNo)`
 // changes them between ticks. A launch adds a background session in the issue's worktree.
@@ -377,7 +398,9 @@ function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFai
       return `backgrounded · sess-${n}\n`;
     },
     root: () => "/repo",
-    config: () => ({ start: { maxLanes: 3 } }),
+    // ADR 0025: team is the only profile, so every fake run is a team run with the team steps faked.
+    config: () => ({ start: { maxLanes: 3 }, identity: QUEUE_TEAM }),
+    team: fakeTeamSteps(),
     cleanup: () => {
       calls.push(["cleanup"]);
       return [];
@@ -562,7 +585,7 @@ test("CLI: prints each owner wait once per state change, not every tick", async 
 });
 
 // #383: the digest is one block per changed tick, with ages from the gate's own time and one /approve line.
-test("CLI: prints one grouped digest, oldest first, with ages and a single /approve line, only when something changed", async () => {
+test("CLI: prints one grouped digest, oldest first, with ages and no /approve line under team, only when something changed", async () => {
   const { main } = await import("./queue.mjs");
   const now = Date.UTC(2026, 8, 28, 9, 0, 0);
   const owner = (number, n, minutesAgo, title) => ({ ...pr(number, n, [`src/${n}.mjs`], [gate("PENDING", "waiting on owner: review/owner")]), title, gateSince: now - minutesAgo * 60_000 });
@@ -582,7 +605,6 @@ test("CLI: prints one grouped digest, oldest first, with ages and a single /appr
     "  #60 Older — waiting 3h 10m — waiting on owner: review/owner",
     "  #61 Newer — waiting 30m — waiting on owner: review/owner",
     "  #62 Fix y — waiting 0m — failing: test",
-    "/approve 60 61",
   ]);
 });
 
@@ -655,14 +677,13 @@ test("edge: a cleanup failure is printed and the tick goes on", async () => {
 test("edge: a bad lanes.config.json exits 2 before any tick", async () => {
   const { main } = await import("./queue.mjs");
   const run = fakeRun({ issues: [], prs: [], sessions: [] });
-  run.deps.config = () => ({ start: { maxLanes: 0 } });
+  run.deps.config = () => ({ start: { maxLanes: 0 }, identity: QUEUE_TEAM });
   assert.equal(await main([], run.deps), 2);
   assert.match(run.out[0], /maxLanes/);
   assert.equal(run.calls.length, 0);
 });
 
 // #556: the queue launches team lanes through start.mjs's launchLane, with the team steps faked.
-const QUEUE_TEAM = { profile: "team", app: { id: 11, installationId: 22, botLogin: "sour-dev-lanes[bot]" } };
 function teamQueueRun(world, { key = "/keys/app.pem", mintFail = false, botIdFail = false, noTeam = false, onSleep, launchEnvNote = null } = {}) {
   const run = fakeRun(world, { onSleep });
   const removed = [];
@@ -674,23 +695,7 @@ function teamQueueRun(world, { key = "/keys/app.pem", mintFail = false, botIdFai
     if (args[0] !== "agents") envs.push(opts.env);
     return claude(args, opts);
   };
-  if (!noTeam) {
-    run.deps.team = {
-      keyFile: () => key,
-      readable: () => {},
-      repo: () => "lanes",
-      makeDir: (n) => ({ dir: `/tmp/lane-${n}`, emptyConfig: `/tmp/lane-${n}/empty` }),
-      removeDir: (dir) => removed.push(dir),
-      writeSettings: () => {},
-      mintInto: () => {
-        if (mintFail) throw new Error("HTTP 401");
-      },
-      botUserId: () => {
-        if (botIdFail) throw new Error("HTTP 401");
-        return "336249257";
-      },
-    };
-  }
+  run.deps.team = noTeam ? undefined : fakeTeamSteps({ key, mintFail, botIdFail, removed });
   return { ...run, removed, envs };
 }
 
@@ -727,17 +732,12 @@ test("#595: a team launch through the queue notes a Scope that names .github/wor
   assert.equal(run.out.filter((l) => l.endsWith(WF_NOTE_1)).length, 1, run.out.join("\n"));
 });
 
-test("#595: edge: team without a workflow path in Scope, and solo with one, print no note", async () => {
+test("#595: edge: team without a workflow path in Scope prints no note", async () => {
   const { main } = await import("./queue.mjs");
   const teamWorld = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
   const team = teamQueueRun(teamWorld, { onSleep: (t) => t === 1 && (teamWorld.issues = []) });
   assert.equal(await main([], team.deps), 0);
   assert.equal(team.out.some((l) => l.includes("Scope names .github/workflows/")), false);
-  const soloWorld = { issues: [issue(1, [".github/workflows/lanes-gate.yml"])], prs: [], sessions: [] };
-  const solo = fakeRun(soloWorld, { onSleep: (t) => t === 1 && (soloWorld.issues = []) });
-  assert.equal(await main([], solo.deps), 0);
-  assert.deepEqual(solo.launched.map((l) => l.n), [1]);
-  assert.equal(solo.out.some((l) => l.includes("Scope names .github/workflows/")), false);
 });
 
 for (const [name, opts, step] of [
@@ -786,40 +786,32 @@ test("#556: edge: the queue's PATH note still prints once per team launch", asyn
   assert.equal(run.out.filter((l) => l.endsWith("#1: PATH note")).length, 1);
 });
 
-test("#556: under solo the queue's launch arguments and environment are unchanged", async () => {
+// #613 (ADR 0025): a config whose identity is not team stops the queue first, with the one message, before any read.
+test("#613: a missing identity, solo, an unknown profile and a missing config stop the queue first with the one message", async () => {
   const { main } = await import("./queue.mjs");
-  const { launchArgs } = await import("./start.mjs");
-  for (const identity of [{ profile: "solo" }, undefined]) {
-    const world = { issues: [issue(1, ["src/a.mjs"], { labels: ["ready", "tier:full"] })], prs: [], sessions: [] };
-    const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
-    const env = { PATH: "/bin", GH_TOKEN: "owner-token" };
-    const seen = [];
-    const claude = run.deps.claude;
-    run.deps.claude = (args, opts) => {
-      if (args[0] !== "agents") seen.push(opts);
-      return claude(args, opts);
-    };
-    run.deps.launchEnv = () => ({ env, note: null });
-    run.deps.config = () => ({ start: { maxLanes: 3, models: { full: "sonnet" } }, ...(identity ? { identity } : {}) });
-    assert.equal(await main([], run.deps), 0);
-    assert.deepEqual(run.launched.map((l) => l.args), [launchArgs(1, { tier: "full", models: { full: "sonnet" } })]);
-    assert.equal(seen.length, 1);
-    assert.equal(seen[0].env, env, "the same environment object as before");
-    assert.equal(seen[0].cwd, "/repo");
-    assert.ok(run.out.every((l) => !/ignored label/.test(l)), "no model:* label, so none is logged (#577)");
-    assert.equal(run.reapers.filter((r) => r.args.includes("--refresh-token")).length, 0);
+  const { TEAM_REQUIRED_MESSAGE } = await import("./lib.mjs");
+  for (const [config, found] of [
+    [{ start: { maxLanes: 3 } }, "no identity profile"],
+    [{ identity: { profile: "solo" } }, 'profile "solo"'],
+    [{ identity: { profile: "solo", app: { id: 1, installationId: 2, botLogin: "sour-dev-lanes[bot]" } } }, 'profile "solo"'],
+    [{ identity: { profile: "other" } }, 'profile "other"'],
+    [{ identity: {} }, "no identity profile"],
+    [undefined, "no identity profile"],
+  ]) {
+    const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+    run.deps.config = () => config;
+    assert.equal(await main([], run.deps), 2, JSON.stringify(config));
+    assert.equal(run.out.length, 1);
+    assert.equal(run.out[0], `${TEAM_REQUIRED_MESSAGE} (lanes.config.json: ${found})`);
+    assert.deepEqual(run.launched, []);
+    assert.deepEqual(run.calls, [], "nothing read or launched");
   }
 });
 
-test("#512: solo and a missing identity launch as before", async () => {
-  const { main } = await import("./queue.mjs");
-  for (const identity of [{ profile: "solo" }, undefined]) {
-    const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
-    const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
-    run.deps.config = () => ({ start: { maxLanes: 3 }, ...(identity ? { identity } : {}) });
-    assert.equal(await main([], run.deps), 0);
-    assert.deepEqual(run.launched.map((l) => l.n), [1]);
-  }
+test("#613: this repository's lanes.config.json passes the queue's identity check", async () => {
+  const { startConfig } = await import("./start.mjs");
+  const raw = JSON.parse(readFileSync("lanes.config.json", "utf8"));
+  assert.equal(startConfig(raw).identity.profile, "team");
 });
 
 test("#512: edge: a malformed identity still exits 2 on the config error, not a launch", async () => {
@@ -855,7 +847,7 @@ test("edge: the config's maxLanes caps the launches", async () => {
   const { main } = await import("./queue.mjs");
   const world = { issues: [1, 2, 3].map((n) => issue(n, [`src/${n}.mjs`])), prs: [], sessions: [] };
   const run = fakeRun(world, { onSleep: (t) => t === 2 && (world.issues = []) });
-  run.deps.config = () => ({ start: { maxLanes: 2 } });
+  run.deps.config = () => ({ start: { maxLanes: 2 }, identity: QUEUE_TEAM });
   assert.equal(await main([], run.deps), 0);
   assert.deepEqual(run.launched.filter((l) => l.tick === 0).length, 2);
 });
@@ -935,7 +927,9 @@ async function launchOptions(withLaunchEnv) {
 
 test("#344: a launch passes the env from deps.launchEnv to claude --bg and prints its note", async () => {
   const { seen, out } = await launchOptions(() => ({ env: { PATH: "adjusted" }, note: "PATH not adjusted: git not found" }));
-  assert.deepEqual(seen.map((o) => o.env), [{ PATH: "adjusted" }]);
+  // Under team (ADR 0025) the lane's environment is built on the launcher's: its PATH, the lane's own gh directory.
+  assert.deepEqual(seen.map((o) => o.env.PATH), ["adjusted"]);
+  assert.equal(seen[0].env.GH_CONFIG_DIR, "/tmp/lane-1");
   assert.equal(seen[0].cwd, "/repo");
   assert.equal(out.filter((l) => l.endsWith(" #1: PATH not adjusted: git not found")).length, 1, out.join("\n"));
 });
@@ -945,10 +939,13 @@ test("#344: edge: an adjusted env with no note prints no PATH line", async () =>
   assert.ok(!out.some((l) => /PATH not adjusted/.test(l)), out.join("\n"));
 });
 
-test("#344: edge: with no launchEnv (other platforms) claude gets no env option and inherits", async () => {
+test("#344: edge: with no launchEnv (other platforms) the team lane's environment is built on the process's own", async () => {
   const { seen } = await launchOptions(null);
   assert.equal(seen.length, 1);
-  assert.ok(!("env" in seen[0]), "no env key");
+  assert.equal(seen[0].env.GH_CONFIG_DIR, "/tmp/lane-1");
+  // Windows keeps the variable as `Path` in a copied env object, so the key is matched case-insensitively.
+  const pathOf = (env) => env[Object.keys(env).find((k) => k.toLowerCase() === "path")];
+  assert.equal(pathOf(seen[0].env), pathOf(process.env));
 });
 
 test("#344: edge: an adjusted env with no note prints exactly what no launchEnv prints", async () => {
@@ -973,7 +970,7 @@ test("#344: edge: launchEnv is not asked when nothing launches, and a two-lane t
   run.deps.launchEnv = () => ({ env: { PATH: "p" }, note: "PATH not adjusted: git not found" });
   await main([], run.deps);
   assert.equal(seen.length, 2);
-  assert.ok(seen.every((o) => o.env?.PATH === "p"));
+  assert.ok(seen.every((o) => o.env.PATH === "p"));
   for (const n of [1, 2]) assert.equal(run.out.filter((l) => l.endsWith(` #${n}: PATH not adjusted: git not found`)).length, 1, run.out.join("\n"));
 });
 
@@ -981,25 +978,30 @@ test("#344: edge: launchEnv is not asked when nothing launches, and a two-lane t
 
 const reapScript = join("/repo", "scripts", "lanes", "reap.mjs");
 
+// A team launch also starts the token refresher, which logs the same way; the reaper tests look at the reapers alone.
+// Each spawn follows its own reaperLog call, so `run.logs[i]` is the log of `run.reapers[i]`.
+const reapersOf = (run) => run.reapers.map((reaper, i) => ({ reaper, log: run.logs[i] })).filter(({ reaper }) => reaper.args[0] === reapScript);
+
 test("CLI: one detached, unref'd reaper per launched lane, logging to its own log", async () => {
   const { main } = await import("./queue.mjs");
   const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/b.mjs"])], prs: [], sessions: [] };
   const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
   assert.equal(await main([], run.deps), 0);
+  const reaps = reapersOf(run);
   assert.deepEqual(
-    run.reapers.map((r) => [r.cmd, r.args]),
+    reaps.map(({ reaper }) => [reaper.cmd, reaper.args]),
     [
       [process.execPath, [reapScript, "--issue", "1", "--session", "sess-1"]],
       [process.execPath, [reapScript, "--issue", "2", "--session", "sess-2"]],
     ],
   );
-  for (const [i, r] of run.reapers.entries()) {
-    assert.equal(r.options.detached, true);
-    assert.equal(r.options.cwd, "/repo");
-    assert.deepEqual(r.options.stdio, ["ignore", run.logs[i].fd, run.logs[i].fd]);
-    assert.equal(r.child.unrefed, true);
+  for (const { reaper, log } of reaps) {
+    assert.equal(reaper.options.detached, true);
+    assert.equal(reaper.options.cwd, "/repo");
+    assert.deepEqual(reaper.options.stdio, ["ignore", log.fd, log.fd]);
+    assert.equal(reaper.child.unrefed, true);
   }
-  assert.deepEqual(run.logs.map((l) => [l.root, l.n, l.closed]), [["/repo", 1, true], ["/repo", 2, true]]);
+  assert.deepEqual(reaps.map(({ log }) => [log.root, log.n, log.closed]), [["/repo", 1, true], ["/repo", 2, true]]);
 });
 
 test("CLI: a failed launch starts no reaper", async () => {
@@ -1007,8 +1009,9 @@ test("CLI: a failed launch starts no reaper", async () => {
   const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/b.mjs"])], prs: [], sessions: [] };
   const run = fakeRun(world, { launchFails: (n) => n === 1, onSleep: (t) => t === 1 && (world.issues = []) });
   assert.equal(await main([], run.deps), 0);
-  assert.deepEqual(run.reapers.map((r) => r.args[2]), ["2"]);
-  assert.deepEqual(run.logs.map((l) => l.n), [2]);
+  assert.deepEqual(reapersOf(run).map(({ reaper }) => reaper.args[2]), ["2"]);
+  assert.deepEqual(run.logs.map((l) => l.n), [2, 2], "the reaper's log and the refresher's, both for #2");
+  assert.deepEqual(run.reapers.filter((r) => r.args.includes("--refresh-token")).length, 1);
 });
 
 test("edge: a reaper that cannot start prints one line, and the queue still launches the rest and finishes", async () => {
@@ -1060,7 +1063,7 @@ test("CLI: a label failure is printed, keeps the launch and the reaper, and does
   assert.equal(await main([], run.deps), 0);
   assert.ok(run.out.some((l) => / #1 → sess-1$/.test(l)), run.out.join("\n"));
   assert.ok(run.out.some((l) => / #1: label not set: HTTP 403: Forbidden$/.test(l)), run.out.join("\n"));
-  assert.equal(run.reapers.length, 1);
+  assert.equal(reapersOf(run).length, 1);
   assert.deepEqual(run.launched.map((l) => l.n), [1]);
 });
 
@@ -1307,7 +1310,7 @@ test("edge: a budget that cannot be read is said once and launches continue", as
 test("edge: a bad budget in lanes.config.json exits 2 before any tick", async () => {
   const { main } = await import("./queue.mjs");
   const run = fakeRun({ issues: [], prs: [], sessions: [] });
-  run.deps.config = () => ({ budget: { perLaneTokens: -1 } });
+  run.deps.config = () => ({ budget: { perLaneTokens: -1 }, identity: QUEUE_TEAM });
   assert.equal(await main([], run.deps), 2);
   assert.match(run.out[0], /perLaneTokens/);
   assert.equal(run.calls.length, 0);

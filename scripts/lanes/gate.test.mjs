@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { carry, evaluatePr, main, makeGhApi, noteOwnerApproval } from "./gate.mjs";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compileConfig, parseAdr, pendingFileHash } from "./lib.mjs";
+import { TEAM_REQUIRED_MESSAGE, compileConfig, parseAdr, parseIdentity, pendingFileHash } from "./lib.mjs";
 
 const config = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] } });
 const SHA = "a".repeat(40);
@@ -308,11 +308,13 @@ test("edge: evaluatePr without adrs decides as before", () => {
 });
 
 // main reads lanes.config.json and docs/adr from the directory it runs in, like the workflow's default-branch checkout.
-function inCheckout(adrFiles, fn) {
+const TEAM_IDENTITY = { profile: "team", app: { id: 11, installationId: 22, botLogin: "sour-dev-lanes[bot]" } };
+function inCheckout(adrFiles, fn, options = {}) {
+  const identity = "identity" in options ? options.identity : TEAM_IDENTITY; // `{ identity: undefined }` writes none
   const root = mkdtempSync(join(tmpdir(), "lanes-gate-"));
   const prev = process.cwd();
   try {
-    writeFileSync(join(root, "lanes.config.json"), JSON.stringify({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] } }));
+    writeFileSync(join(root, "lanes.config.json"), JSON.stringify({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] }, ...(identity === undefined ? {} : { identity }) }));
     mkdirSync(join(root, "docs", "adr"), { recursive: true });
     for (const [name, text] of Object.entries(adrFiles)) writeFileSync(join(root, "docs", "adr", name), text);
     process.chdir(root);
@@ -336,6 +338,47 @@ test("main requires the advisor for an ADR the PR itself adds, though it is not 
   const { api, posted } = fakeApi(routes);
   inCheckout({}, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
   assert.equal(descriptionOf(posted[0]), WAIT_ADVISOR);
+});
+
+// #613 (ADR 0025): a config whose identity is not team fails the gate closed, with the one message as the reason.
+const PR_EVENT = { REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" };
+
+test("main fails closed on a missing identity, solo or an unknown profile: posts the one message as a failure and throws", () => {
+  for (const [identity, found] of [[undefined, "no identity profile"], [{ profile: "solo" }, 'profile "solo"'], [{ profile: "other" }, 'profile "other"'], [{}, "no identity profile"]]) {
+    const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+    assert.throws(() => inCheckout({}, () => main(PR_EVENT, api), { identity }), (e) => e.message.startsWith(TEAM_REQUIRED_MESSAGE), JSON.stringify(identity));
+    assert.equal(posted.length, 1, "one status, on the PR head");
+    assert.equal(posted[0].sha, SHA);
+    assert.ok(posted[0].fields.includes("state=failure"), posted[0].fields.join(" "));
+    assert.ok(posted[0].fields.includes("context=lanes/gate"));
+    assert.ok(descriptionOf(posted[0]).startsWith(TEAM_REQUIRED_MESSAGE), descriptionOf(posted[0]));
+    assert.ok(descriptionOf(posted[0]).length <= 140);
+    assert.ok(descriptionOf(posted[0]).includes(found) || descriptionOf(posted[0]).length === 140, descriptionOf(posted[0]));
+  }
+});
+
+test("edge: main reads nothing from GitHub but the PR head before refusing a config that is not team", () => {
+  const { api: inner } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const calls = [];
+  const api = (args) => (calls.push(args[0]), inner(args));
+  assert.throws(() => inCheckout({}, () => main(PR_EVENT, api), { identity: { profile: "solo" } }));
+  assert.ok(calls.every((c) => c === "repos/o/r/pulls/5" || c.includes("/statuses/")), JSON.stringify(calls));
+});
+
+test("edge: main refuses a config that is not team on a merge_group event too, posting on the group commit", () => {
+  const group = "b".repeat(40);
+  const { api, posted } = fakeApi({});
+  const env = { REPO: "o/r", EVENT_NAME: "merge_group", GROUP_SHA: group, HEAD_REF: `gh-readonly-queue/main/pr-5-${"c".repeat(40)}` };
+  assert.throws(() => inCheckout({}, () => main(env, api), { identity: { profile: "solo" } }), (e) => e.message.startsWith(TEAM_REQUIRED_MESSAGE));
+  assert.equal(posted[0].sha, group);
+  assert.ok(posted[0].fields.includes("state=failure"));
+});
+
+test("a valid team config passes the gate's identity check, and this repository's own config does", () => {
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  inCheckout({}, () => main(PR_EVENT, api));
+  assert.ok(!descriptionOf(posted[0]).startsWith(TEAM_REQUIRED_MESSAGE));
+  assert.doesNotThrow(() => parseIdentity(JSON.parse(readFileSync("lanes.config.json", "utf8")).identity));
 });
 
 // #241 (from #250): the gate passes the linked issue's Interface contract to the reviewer rule.

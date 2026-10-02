@@ -5,7 +5,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { parseIdentity } from "./lib.mjs";
+import { parseLegacyIdentity } from "./lib.mjs";
 
 // gh's token-source line for an account whose token sits in a lane's own GH_CONFIG_DIR (start.mjs makes
 // `lanes-gh-<issue>-<random>` under the temp folder); only the issue number is ever printed.
@@ -96,7 +96,7 @@ function checkEnv(env) {
 export function identityCheck({ readConfig, run, env }) {
   let identity;
   try {
-    identity = parseIdentity(JSON.parse(readConfig()).identity);
+    identity = parseLegacyIdentity(JSON.parse(readConfig()).identity);
   } catch {
     return { code: 1, line: JSON.stringify({ profile: null, error: "lanes.config.json unreadable or its identity invalid" }) };
   }
@@ -186,7 +186,7 @@ export function setupChecksMain({ run = realRun, exists = existsSync, config = (
   let app;
   let repo;
   try {
-    app = parseIdentity(config().identity)?.app;
+    app = parseLegacyIdentity(config().identity)?.app;
     const r = safeRun(run, "gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
     repo = r.status === 0 ? r.stdout.trim() : "";
   } catch {

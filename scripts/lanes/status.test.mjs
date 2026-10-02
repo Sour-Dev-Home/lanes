@@ -1,5 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { TEAM_REQUIRED_MESSAGE } from "./lib.mjs";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
 import { approveLine, prStage, formatAge, gateDescriptions, gateSince, idleLaneSession, laneBranches, laneSessions, laneWorktree, worktreeUnsaved, liveLanes, loadLaneBranches, loadSessions, mergeQueueEntries, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, trustedRollups, waitingApprovals } from "./status.mjs";
 
@@ -1210,4 +1215,25 @@ test("edge: teamContext is undefined under solo or no config, and reads code own
   const identity = { profile: "team", app: { id: 1, installationId: 2, botLogin: "lanes[bot]" } };
   assert.deepEqual(teamContext({ identity }, "* @boss @dev\n# c\n"), { owners: ["boss", "dev"], identity });
   assert.deepEqual(teamContext({ identity }, undefined), { owners: [], identity });
+});
+
+// #613 (ADR 0025): a config that is not team shows the one line in place of data; the command does not crash.
+test("status.mjs prints the team-required line instead of data for a missing config, a missing identity, solo or an unknown profile", () => {
+  const dir = mkdtempSync(join(tmpdir(), "status-refuse-"));
+  const script = resolve("scripts/lanes/status.mjs");
+  try {
+    for (const config of [null, "{}", JSON.stringify({ identity: {} }), JSON.stringify({ identity: { profile: "solo" } }), JSON.stringify({ identity: { profile: "other" } })]) {
+      rmSync(join(dir, "lanes.config.json"), { force: true });
+      if (config !== null) writeFileSync(join(dir, "lanes.config.json"), config);
+      for (const flags of [[], ["--json"], ["--waiting"]]) {
+        const stdout = execFileSync(process.execPath, [script, ...flags], { encoding: "utf8", cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
+        assert.ok(stdout.startsWith(TEAM_REQUIRED_MESSAGE), stdout);
+        assert.equal(stdout.trim().split("\n").length, 1, "one line, no data");
+      }
+    }
+    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity: { profile: "solo" } }));
+    assert.match(execFileSync(process.execPath, [script], { encoding: "utf8", cwd: dir }), /profile "solo"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

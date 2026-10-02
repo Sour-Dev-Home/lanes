@@ -5,7 +5,7 @@ import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GATE_CONTEXT, laneIssueOf, loadConfig, nativeCodeOwnerApproval, parseCodeOwnerUsers, parseIssueForm, parsePrBody, reviewContext, reviewerNames, trustedStatuses } from "./lib.mjs";
+import { GATE_CONTEXT, identityRefusal, laneIssueOf, loadConfig, nativeCodeOwnerApproval, parseCodeOwnerUsers, parseIssueForm, parsePrBody, reviewContext, reviewerNames, trustedStatuses } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { BUDGET_DEFAULTS, budgetConfig, loadBudget, projectFolder } from "./lane-cost.mjs";
 import { claimedPaths } from "./pick.mjs";
@@ -549,6 +549,9 @@ export function readBudget(repoRoot, rawAgents, { readConfig = () => readFileSyn
 }
 
 async function main(argv = process.argv.slice(2)) {
+  // ADR 0025: a config that is not team shows the refusal line in place of data.
+  const refusal = identityRefusal(() => readFileSync("lanes.config.json", "utf8"));
+  if (refusal) return console.log(refusal);
   const startsIdx = argv.indexOf("--starts");
   if (startsIdx >= 0) {
     const days = Number(/^[1-9]\d*$/.test(argv[startsIdx + 1] ?? "") ? argv[startsIdx + 1] : NaN);

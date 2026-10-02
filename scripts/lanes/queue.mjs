@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseBlockedBy } from "./blockers.mjs";
 import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWorktree, waitForStop } from "./cleanup.mjs";
-import { GATE_CONTEXT, laneIssueOf, parseIssueForm } from "./lib.mjs";
+import { GATE_CONTEXT, TEAM_REQUIRED_MESSAGE, laneIssueOf, parseIssueForm } from "./lib.mjs";
 import { issuePaths } from "./paths.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
@@ -317,7 +317,8 @@ export async function main(argv, deps = DEFAULT_DEPS) {
   try {
     settings = startConfig(config());
   } catch (err) {
-    print(`cannot read lanes.config.json: ${reason(err)}`);
+    // ADR 0025: the team-profile refusal is one message, printed as is.
+    print(String(err?.message).startsWith(TEAM_REQUIRED_MESSAGE) ? err.message : `cannot read lanes.config.json: ${reason(err)}`);
     return 2;
   }
   let caps;

@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adrGoverns, pendingFileHash, parsePending, pendingReuseBlockedBy, botIssueReleased, readBotIssueRelease, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { TEAM_REQUIRED_MESSAGE, identityRefusal, parseLegacyIdentity, adrGoverns, pendingFileHash, parsePending, pendingReuseBlockedBy, botIssueReleased, readBotIssueRelease, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // The permission endpoint's `permission` field is the legacy base role: maintain maps to write, triage to read.
 const permissionApi = (reply) => {
@@ -1163,17 +1163,36 @@ const TEAM_ID = { profile: "team", app: { id: 11, installationId: 22, botLogin: 
 const botCreator = { type: "Bot", login: BOT };
 const botStatus = (name, creator = botCreator) => ({ context: reviewContext(name), state: "success", description: "ok", created_at: "2026-09-29T10:00:00Z", ...(creator === null ? {} : { creator }) });
 
-test("parseIdentity accepts solo and team shapes and requires botLogin only under team", () => {
-  assert.equal(parseIdentity(undefined), undefined);
-  assert.deepEqual(parseIdentity({ profile: "solo" }), { profile: "solo" });
+test("parseIdentity accepts only the team shape (ADR 0025)", () => {
   assert.deepEqual(parseIdentity(TEAM_ID), TEAM_ID);
-  assert.deepEqual(parseIdentity({ profile: "solo", app: { id: 1, installationId: 2, botLogin: BOT } }), { profile: "solo", app: { id: 1, installationId: 2, botLogin: BOT } });
-  assert.deepEqual(parseIdentity({ profile: "solo", app: { id: 1, installationId: 2 } }), { profile: "solo", app: { id: 1, installationId: 2 } });
+});
+
+test("parseIdentity refuses a missing identity, a missing profile and any profile but team with the one message", () => {
+  assert.equal(TEAM_REQUIRED_MESSAGE, "lanes needs the team identity profile (a GitHub App). Run: node scripts/lanes/app-setup.mjs");
+  const refused = (identity, path) => assert.throws(() => parseIdentity(identity, path), (e) => e.message.startsWith(TEAM_REQUIRED_MESSAGE) ? true : false);
+  refused(undefined);
+  refused({});
+  refused({ profile: "solo" });
+  refused({ profile: "solo", app: { id: 1, installationId: 2, botLogin: BOT } });
+  refused({ profile: "other" });
+  refused({ profile: "" });
+  refused({ profile: null });
+  refused({ profile: "TEAM" });
+  // the error names the config path and the profile found, if any
+  assert.throws(() => parseIdentity({ profile: "solo" }, "x/lanes.config.json"), /x\/lanes\.config\.json.*profile "solo"/);
+  assert.throws(() => parseIdentity({ profile: "other" }), /lanes\.config\.json.*profile "other"/);
+  assert.throws(() => parseIdentity(undefined, "x/lanes.config.json"), (e) => e.message.includes("x/lanes.config.json") && !/profile "/.test(e.message));
+  assert.throws(() => parseIdentity({}), (e) => e.message.includes("lanes.config.json") && !/profile "/.test(e.message));
+});
+
+test("this repository's lanes.config.json passes parseIdentity", () => {
+  const identity = JSON.parse(readFileSync("lanes.config.json", "utf8")).identity;
+  assert.equal(parseIdentity(identity).profile, "team");
 });
 
 test("parseIdentity rejects bad shapes and bad bot logins", () => {
   const app = (extra) => ({ profile: "team", app: { id: 1, installationId: 2, ...extra } });
-  const bad = [null, "team", [], {}, { profile: "other" }, { profile: "team" }, { profile: "solo", x: 1 }, { profile: "team", app: null }, { profile: "team", app: { id: 1 } }, { profile: "team", app: { id: "1", installationId: 2, botLogin: BOT } }, { profile: "team", app: { id: 1, installationId: 2, botLogin: BOT, key: "x" } }];
+  const bad = [null, "team", [], { profile: "team" }, { profile: "team", x: 1 },{ profile: "team", app: null }, { profile: "team", app: { id: 1 } }, { profile: "team", app: { id: "1", installationId: 2, botLogin: BOT } }, { profile: "team", app: { id: 1, installationId: 2, botLogin: BOT, key: "x" } }];
   for (const identity of bad) assert.throws(() => parseIdentity(identity), /lanes\.config\.json: identity /, JSON.stringify(identity));
   // edge: team without botLogin, and malformed logins (no suffix, wildcard, list, empty, dash edges, upper-case suffix, too long)
   assert.throws(() => parseIdentity(app({})), /botLogin/);
@@ -1194,6 +1213,30 @@ test("compileConfig exposes a validated identity, leaves it out when absent and 
   assert.equal("identity" in compileConfig(raw), false);
   assert.deepEqual(compileConfig({ ...raw, identity: TEAM_ID }).identity, TEAM_ID);
   assert.throws(() => compileConfig({ ...raw, identity: { profile: "team" } }), /identity/);
+  // the callers that need a team identity refuse the rest with parseIdentity, so a solo config still compiles here
+  assert.deepEqual(compileConfig({ ...raw, identity: { profile: "solo" } }).identity, { profile: "solo" });
+});
+
+test("parseLegacyIdentity keeps the pre-ADR-0025 reading: solo and a missing key are accepted", () => {
+  assert.equal(parseLegacyIdentity(undefined), undefined);
+  assert.deepEqual(parseLegacyIdentity({ profile: "solo" }), { profile: "solo" });
+  assert.deepEqual(parseLegacyIdentity(TEAM_ID), TEAM_ID);
+  assert.deepEqual(parseLegacyIdentity({ profile: "solo", app: { id: 1, installationId: 2 } }), { profile: "solo", app: { id: 1, installationId: 2 } });
+  assert.throws(() => parseLegacyIdentity({ profile: "other" }), (e) => e.teamRequired === true && /profile "other"/.test(e.message));
+  assert.throws(() => parseLegacyIdentity({ profile: "team" }), /botLogin|\.app/);
+});
+
+test("identityRefusal is the refusal line for a config that is not team, and null for team or an unparseable file", () => {
+  const cfg = (identity) => () => JSON.stringify({ identity });
+  assert.equal(identityRefusal(cfg(TEAM_ID)), null);
+  assert.match(identityRefusal(cfg({ profile: "solo" })), new RegExp(`^${TEAM_REQUIRED_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*profile "solo"`));
+  assert.match(identityRefusal(cfg({ profile: "other" })), /profile "other"/);
+  assert.match(identityRefusal(() => "{}"), /^lanes needs the team identity profile/);
+  assert.match(identityRefusal(() => { throw Object.assign(new Error("gone"), { code: "ENOENT" }); }), /^lanes needs the team identity profile/);
+  assert.equal(identityRefusal(() => "not json"), null);
+  assert.equal(identityRefusal(() => { throw new Error("EACCES"); }), null);
+  // a malformed team identity is not this refusal (loadConfig reports it)
+  assert.equal(identityRefusal(cfg({ profile: "team" })), null);
 });
 
 test("isLaneBot is true only for team, a set botLogin, the exact login and (for a status) type Bot", () => {
