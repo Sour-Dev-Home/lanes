@@ -43,6 +43,7 @@ Scripts that import `node:child_process` (each call site runs `gh`, `git`, `clau
 - `scripts/lanes/release.mjs` (runs `git merge-base` on a validated tag)
 - `scripts/lanes/review-metrics.mjs`
 - `scripts/lanes/reviewers.mjs`
+- `scripts/lanes/scope-tests.mjs`
 - `scripts/lanes/setup-repo.mjs`
 - `scripts/lanes/snapshot.mjs`
 - `scripts/lanes/start.mjs`
