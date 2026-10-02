@@ -2837,3 +2837,35 @@ test("#642 criterion 2: an unquoted heredoc with a live expansion, a heredoc fed
   denied(heredoc("cat > plan.md", NAMING[0], "\nnode scripts/lanes/queue.mjs"));
   denied(heredoc("cat > plan.md", NAMING[1], "\nnode scripts/lanes/start.mjs 12"));
 });
+
+test("#669: a $ or backtick inside single quotes is literal text, not a program named at run time", () => {
+  const allowed = [
+    // The command from the report: awk's `$0` in a program, piped on.
+    `awk '/^diff --git/{f=($0 ~ /INDEX\\.md/)} f && /^[+-]/' file | head`,
+    `awk '/^diff --git/{f=($0 ~ /INDEX\\.md/)} f && /^[+-]/' file`,
+    `awk '{f=($0 ~ /a/)}' file | head`,
+    `awk '{print $1, $(NF)}' file | head`,
+    // $NAME, $0-$9, $(…) and backticks, in the programs that only print or match their words.
+    `echo '$(date)'`, `echo '$(date)' | head`, "echo '`date`'", `echo '$FOO' '$0' '$9'`, `printf '%s\\n' '$(x) ($0)'`,
+    `cat '$x' | head`, `grep '$x' f | head`, `head -n 1 '($1 ~ a)'`,
+  ];
+  for (const c of allowed) for (const g of [null, grant()]) assert.equal(decidePreToolUse(bash(c), g, NOW), null, c);
+});
+
+test("#669 edge: the same text unquoted or in double quotes, and a single-quoted program a shell would run, is still denied", () => {
+  const denied = [
+    `awk "{f=($0 ~ /a/)}" file | head`, `echo "$(date)" | head; $X`, `echo '$(date)'; node $X 1`, "echo `date` | $X", `node $(echo queue.mjs) 1`, `$RUN 12`,
+    `bash -c 'node $X'`, `sh -c '$X 1'`, `bash -c 'node queue.mjs'`, `sh -c 'node scripts/lanes/start.mjs 1'`, `node -e 'x("queue.mjs")'`,
+    `X=scripts/lanes/queue.mjs; eval 'node $X'`, `eval 'node scripts/lanes/queue.mjs'`, `eval 'node $(echo queue.mjs)'`,
+    // Piped into a shell, or run by awk itself, the quoted text runs.
+    `echo 'node scripts/lanes/queue.mjs' | sh`, `echo '$(node queue.mjs)' | sh`, `echo '$(date)' | sh`, `awk '{print "node queue.mjs"}' | sh`,
+    `awk 'BEGIN{system("node queue.mjs")}'`,
+    // Output a shell can still read: a redirect, a process substitution, a pipe into tee, xargs or awk's system().
+    `X=scripts/lanes/queue.mjs; echo 'node $X' > f; bash f`, `bash <(echo 'node $X')`, `echo 'node $X' | tee f`, `echo '$X' | xargs sh -c`,
+    `echo '$X' | awk '{system($0)}'`, `echo 'node $X' | head | sh`,
+    // Found by the test-hunter: a file written by a sink's own option, then run.
+    `echo 'node $X' | sort -o f; bash f`, `echo 'node $X' | sort --output=f; bash f`, `echo 'node $X' | sort -of; bash f`, `echo 'node $X' | uniq - f; bash f`,
+    `echo 'node $X' | sort --out=f; bash f`, `echo 'node $X' | sort --o f; bash f`, `echo '$(node queue.mjs)' | sort --compress-program=sh -S1`, `echo 'node $X' | sort`,
+  ];
+  for (const c of denied) assert.equal(decidePreToolUse(bash(c), null, NOW)?.decision, "deny", c);
+});

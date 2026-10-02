@@ -316,6 +316,38 @@ function awkText(words) {
   return at;
 }
 
+// Programs that only print or filter the words they are given and never run them (#669), so a `$` or backtick the shell
+// kept literal inside single quotes stays text for them: `echo '$(date)'`, `head -n 1 '$x'`. A program that runs its
+// words (a shell, eval, node -e, xargs, find -exec, sed's `e`) is not here and is read as before.
+const TEXT_COMMANDS = new Set(["echo", "printf", "cat", "head", "tail", "wc", "cut", "tr"]); // not uniq: `uniq - f` writes a file a later `sh f` runs
+
+/** The indexes of a simple command's words whose literal `$` and backticks are text: every argument of a TEXT_COMMANDS program, or an awk program that cannot run a command (awkText). */
+function literalTextWords(words) {
+  const at = awkText(words);
+  const cmd = words.findIndex((w) => !ASSIGN_RE.test(w));
+  if (cmd !== -1 && TEXT_COMMANDS.has(basename(words[cmd]).replace(/\.exe$/i, ""))) words.forEach((_, i) => i > cmd && at.add(i));
+  return at;
+}
+
+// What a TEXT_COMMANDS program's output may be piped into and still be text: these print, count or filter their input and
+// never run it, unlike a shell, xargs, tee (a file a later `bash f` runs), awk (`system($0)`), sed (`e`) or sort (`-o`,
+// any abbreviation of `--output`, `--compress-program`) and uniq (`uniq - f`).
+const TEXT_SINKS = new Set([...TEXT_COMMANDS, "grep", "egrep", "fgrep", "rg"]);
+
+/**
+ * True when simple command `k` writes no file and its output goes nowhere a shell, runtime or later script could read
+ * it: not redirected, and piped on only through TEXT_SINKS (itself without a redirect, to the end). Its quoted `$` is
+ * then no more than text printed to the terminal; any other consumer reads it as before (the #588 allowlist lesson).
+ */
+function outputStaysText({ segments, writes, pipes }, k) {
+  for (let i = k; i < segments.length; i += 1) {
+    if (writes[i] !== false) return false;
+    if (i > k && !TEXT_SINKS.has(basename(segments[i][0] ?? "").replace(/\.exe$/i, ""))) return false;
+    if (pipes?.[i] !== true) return true;
+  }
+  return false;
+}
+
 /**
  * The words after awk that may name a command the program runs or whose output a shell runs (#588): `print | "node
  * queue.mjs"` runs a command from inside the program, and `awk '{print "node queue.mjs"}' | sh` hands its output to a
@@ -414,13 +446,14 @@ function walk(cmd, depth, visit, onOpaque, onEval, collapse = false) {
   }
   const nested = (text) => (depth >= MAX_DEPTH ? onOpaque(text) : walk(text, depth + 1, visit, onOpaque, onEval, collapse));
   const dataOnly = depth === 0 && isDataOnly(lexed);
-  const scan = (words, stdin, piped = false, written = false) => {
+  const scan = (words, stdin, piped = false, written = false, textOut = false) => {
     if (!dataOnly) visit(words, stdin);
     const scripts = dataOnly ? new Map() : evalScripts(words);
     const programs = programWords(words);
     // Only a word that names the queue script or start.mjs is read, so an unresolved `$` in an awk program is no new denial (#588).
     if (!dataOnly) for (const w of awkNamedWords(words, piped || cmd.includes("<("))) if (/(queue|start)\.mjs/i.test(jsNames(unliteral(w)))) onEval(unliteral(w));
     const prose = proseWords(words);
+    const literal = textOut ? literalTextWords(words) : new Set();
     // A search's pattern is no script (#404), unless a shell reads the output or a here-string in the call could be
     // mistaken for the pattern (`grep <<< "…" x`, whose here-string grep reads as its input and prints).
     const patterns = piped || cmd.includes("<<<") ? new Set() : searchPatterns(words);
@@ -434,7 +467,10 @@ function walk(cmd, depth, visit, onOpaque, onEval, collapse = false) {
       else if (isNestedScript(w) && !((dataOnly || patterns.has(i) || quiet.has(i)) && !UNRESOLVED_RE.test(w))) {
         // A jq program or Go template keeps its quoted `$` literal: `$s` there is its own variable (#61). PowerShell's
         // text is read with its own rules (#404).
-        if (prose.has(i) && !piped && !runsAsShell(words, i)) {
+        if (literal.has(i) && !piped && !runsAsShell(words, i)) {
+          // Text a program prints or matches: its quoted `$` stays literal, but a name it spells is still read (#669).
+          nested(w);
+        } else if (prose.has(i) && !piped && !runsAsShell(words, i)) {
           const text = unliteral(w);
           try {
             lexBodies(text);
@@ -454,7 +490,7 @@ function walk(cmd, depth, visit, onOpaque, onEval, collapse = false) {
     if (!dataOnly) for (const line of launchedCommands(words)) nested(line);
   };
   for (const [k, words] of resolveSegments(lexed.segments).entries()) {
-    scan(words, lexed.stdin[k], feedsShell(lexed.segments, lexed.pipes, k), lexed.writes[k] !== false || lexed.pipes[k] === true);
+    scan(words, lexed.stdin[k], feedsShell(lexed.segments, lexed.pipes, k), lexed.writes[k] !== false || lexed.pipes[k] === true, !cmd.includes("<(") && !cmd.includes(">(") && outputStaysText(lexed, k));
     // The command find -exec or xargs runs is a simple command of its own (#113).
     if (!dataOnly) for (const sub of runnerCommands(words)) scan(sub);
   }
