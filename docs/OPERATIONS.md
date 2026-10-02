@@ -65,7 +65,9 @@ green and not queued. The health issue may carry `approved-stuck:PR <N>`.
    the PR and use **Re-run all jobs**.
 4. If auto-merge is off, click **Enable auto-merge** on the PR.
 
-Incidents: #573, #590, #597.
+There is no `/approve` any more: since #624 removed the solo branches, only a native code-owner review counts.
+
+Incidents: #558 (the native code-owner review, merged as #573), #590, #597, #624.
 
 <a id="gate-failure"></a>
 ## gate-failure
