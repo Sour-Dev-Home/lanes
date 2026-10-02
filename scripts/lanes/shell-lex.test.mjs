@@ -5,9 +5,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  CAT_HEREDOC_RE, HEREDOC_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, ansiCString, dequoted, heredocOperator, launchedCommands, lex, literalSubstitution, mark,
-  mayBeNode, mayExpandTo, plainLiteralSubstitution, readGrant, readHeredoc, releaseTagCommand, runsRuntimeText, shellTextIndexes, skipRedirectTarget, unmark, wmiProcessCreate,
+  AUTOMATED_INPUT_PREFIXES, CAT_HEREDOC_RE, HEREDOC_RE, LIT_DOLLAR, LIT_TICK, QUOTED_TICK, ansiCString, dequoted, heredocOperator, isAutomatedInput, launchedCommands, lex,
+  literalSubstitution, mark, mayBeNode, mayExpandTo, plainLiteralSubstitution, powershellAsBash, preToolUseOutput, readGrant, readHeredoc, releaseTagCommand, runsRuntimeText,
+  shellTextIndexes, skipRedirectTarget, unmark, wmiProcessCreate,
 } from "./shell-lex.mjs";
+import { WRAPPERS } from "./shell-lex.fixtures.mjs";
 
 const source = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
 // A lexed segment's words with the literal stand-ins turned back into their characters.
@@ -26,15 +28,12 @@ test("#194 criterion 1: shell-lex exports the heredoc reader, the literal substi
   assert.deepEqual([...segments[1].literal], [3]);
 });
 
-test("#194 criterion 2: both guards import shell-lex.mjs and keep no copy of its heredoc helpers", () => {
-  for (const name of ["approve-guard.mjs", "start-guard.mjs"]) {
-    const text = source(name);
-    assert.match(text, /^import \{[^}]*\} from "\.\/shell-lex\.mjs";$/m, `${name} imports shell-lex.mjs`);
-    for (const def of [/function readHeredoc\b/, /function literalSubstitution\b/, /const HEREDOC_RE\b/, /const CAT_HEREDOC_RE\b/]) {
-      assert.doesNotMatch(text, def, `${name} defines ${def.source}`);
-    }
+test("#194 criterion 2: start-guard imports shell-lex.mjs and keeps no copy of its heredoc helpers", () => {
+  const text = source("start-guard.mjs");
+  assert.match(text, /^import \{[^}]*\} from "\.\/shell-lex\.mjs";$/m, "start-guard.mjs imports shell-lex.mjs");
+  for (const def of [/function readHeredoc\b/, /function literalSubstitution\b/, /const HEREDOC_RE\b/, /const CAT_HEREDOC_RE\b/]) {
+    assert.doesNotMatch(text, def, `start-guard.mjs defines ${def.source}`);
   }
-  assert.match(source("approve-guard.mjs"), /import \{[^}]*\blex\b[^}]*\} from "\.\/shell-lex\.mjs"/);
 });
 
 test("#194 criterion 4: heredocs, quoted, unquoted, <<-, <<\\EOF and unterminated", () => {
@@ -172,34 +171,30 @@ test("#351 criterion 1: start-guard.mjs has no lexer of its own and calls shell-
   assert.doesNotMatch(text, /function lex\b/);
   assert.match(text, /import \{[^}]*\blex\b[^}]*\} from "\.\/shell-lex\.mjs"/);
   assert.match(text, /\blex\([^)]*\{ bodies: true(, collapse)? \}\)/);
-  // Every call asks for start-guard's shape: the words shape would read its commands with approve-guard's rules.
+  // Every call asks for start-guard's shape, never the words shape.
   for (const call of text.matchAll(/\blex\([^)]*\)/g)) assert.match(call[0], /\{ bodies: true(, collapse)? \}/, call[0]);
 });
 
-test("#351 criterion 2: readHeredoc, literalSubstitution and readGrant exist once, in shell-lex.mjs, and both guards import from it", () => {
+test("#351 criterion 2: readHeredoc, literalSubstitution and readGrant exist once, in shell-lex.mjs, and start-guard imports from it", () => {
   const lexText = source("shell-lex.mjs");
   for (const name of ["readHeredoc", "literalSubstitution", "readGrant"]) {
     assert.match(lexText, new RegExp(`^export function ${name}\\(`, "m"), `shell-lex.mjs defines ${name}`);
   }
-  for (const name of ["approve-guard.mjs", "start-guard.mjs"]) {
-    const text = source(name);
-    for (const def of [/function readHeredoc\b/, /function literalSubstitution\b/, /function readGrant\b/, /const EXPANDS_RE\b/, /PLAIN_CAT_HEREDOC_RE =/]) {
-      assert.doesNotMatch(text, def, `${name} defines ${def.source}`);
-    }
-    assert.match(text, /import \{[^}]*\breadGrant\b[^}]*\} from "\.\/shell-lex\.mjs"/, `${name} imports readGrant`);
-    // start.mjs and post-review.mjs still import readGrant from the guard they belong to.
-    assert.match(text, /export \{ readGrant \} from "\.\/shell-lex\.mjs";/, `${name} re-exports readGrant`);
+  const text = source("start-guard.mjs");
+  for (const def of [/function readHeredoc\b/, /function literalSubstitution\b/, /function readGrant\b/, /const EXPANDS_RE\b/, /PLAIN_CAT_HEREDOC_RE =/]) {
+    assert.doesNotMatch(text, def, `start-guard.mjs defines ${def.source}`);
   }
+  assert.match(text, /import \{[^}]*\breadGrant\b[^}]*\} from "\.\/shell-lex\.mjs"/, "start-guard.mjs imports readGrant");
+  // start.mjs still imports readGrant from the guard it belongs to.
+  assert.match(text, /export \{ readGrant \} from "\.\/shell-lex\.mjs";/, "start-guard.mjs re-exports readGrant");
 });
 
 test("#351 criterion 3: the WRAPPERS fixture and the #262 criterion 1 test body live once, in shell-lex.fixtures.mjs", () => {
   assert.match(source("shell-lex.fixtures.mjs"), /^export const WRAPPERS = /m);
-  for (const name of ["approve-guard.test.mjs", "start-guard.test.mjs"]) {
-    const text = source(name);
-    assert.doesNotMatch(text, /const WRAPPERS\b/, `${name} keeps its own WRAPPERS`);
-    assert.doesNotMatch(text, /test\("#262 criterion 1:/, `${name} keeps its own #262 criterion 1 body`);
-    assert.match(text, /import \{[^}]*\bWRAPPERS\b[^}]*\} from "\.\/shell-lex\.fixtures\.mjs"/, `${name} imports the fixture`);
-  }
+  const text = source("start-guard.test.mjs");
+  assert.doesNotMatch(text, /const WRAPPERS\b/, "start-guard.test.mjs keeps its own WRAPPERS");
+  assert.doesNotMatch(text, /test\("#262 criterion 1:/, "start-guard.test.mjs keeps its own #262 criterion 1 body");
+  assert.match(text, /import \{[^}]*\bWRAPPERS\b[^}]*\} from "\.\/shell-lex\.fixtures\.mjs"/, "start-guard.test.mjs imports the fixture");
 });
 
 test("#351 criterion 5: readHeredoc reads unterminated, tab-stripped, and quoted versus unquoted bodies", () => {
@@ -270,7 +265,7 @@ test("#351 edge: the bodies shape on empty, malformed and unterminated input", (
 });
 
 test("#351 edge: the two shapes read pipes as each guard did", () => {
-  // approve-guard's shape marks the group before `| sh`; start-guard's marks a pipe only from a non-empty command.
+  // The words shape marks the group before `| sh`; start-guard's marks a pipe only from a non-empty command.
   assert.equal(lex("(echo x) | sh")[0].pipedOut, true);
   assert.deepEqual(lex("(echo x) | sh", { bodies: true }).pipes, [false, false]);
   assert.deepEqual(lex("a | b || c |& d", { bodies: true }).pipes, [true, false, true, false]);
@@ -899,4 +894,137 @@ test("#477 criterion 10: a gh issue create title with an apostrophe inside doubl
   assert.equal(lex(cmd, { bodies: true }).segments[0][4], "start.mjs: launch with only the App's credentials");
   assert.throws(() => lex(`echo "App's`));
   assert.throws(() => lex("echo 'App", { bodies: true }));
+});
+
+// --- #616: the hook helpers moved here from approve-guard.mjs, with the tests they had there ---------------------------
+
+const NOTICE_492 = "[SYSTEM NOTIFICATION - NOT USER INPUT]";
+const REMINDER_NOTICE_492 = "<system-reminder>\n<task-notification>\nreviewer finished\n</task-notification>\n</system-reminder>";
+const HAND_BACK = "Another Claude session sent a message:\nreviewer done";
+const AGENT_MESSAGE = '<agent-message from="security-reviewer">verdict posted</agent-message>';
+const reminder = (body = "context") => `<system-reminder>\n${body}\n</system-reminder>`;
+
+test("#262 criterion 5: the wrapper list is one exported, frozen constant", () => {
+  assert.deepEqual([...AUTOMATED_INPUT_PREFIXES], [...WRAPPERS, NOTICE_492]);
+  assert.equal(Object.isFrozen(AUTOMATED_INPUT_PREFIXES), true);
+  for (const w of [...WRAPPERS, NOTICE_492]) assert.equal(isAutomatedInput(`\n ${w}`), true);
+});
+
+test("#492: a system-notification prefix or a system-reminder holding a task notice is automated input", () => {
+  assert.equal(isAutomatedInput(`${NOTICE_492}\n<task-notification>\nx`), true);
+  assert.equal(isAutomatedInput(`  \n${REMINDER_NOTICE_492}`), true);
+  // a system-reminder without a task notice, or a notice not at the start, is typed input
+  assert.equal(isAutomatedInput("<system-reminder>\nsomething else\n</system-reminder>"), false);
+  assert.equal(isAutomatedInput(`hello ${NOTICE_492}`), false);
+  assert.equal(isAutomatedInput("[system notification - not user input]"), false);
+});
+
+test("#262 edge: a wrapper in another case, a non-string prompt or an empty prompt is not an automated input", () => {
+  assert.equal(isAutomatedInput("<TASK-NOTIFICATION>"), false);
+  assert.equal(isAutomatedInput("another claude session sent a message:"), false);
+  for (const p of [undefined, null, 5, {}, "", "   "]) assert.equal(isAutomatedInput(p), false, JSON.stringify(p));
+});
+
+test("#546 criterion 1: a hand-back in any wrapping is automated", () => {
+  for (const p of [
+    `${reminder()}\n\n${HAND_BACK}`,
+    `${reminder("a")}\n${reminder("b")}\n${HAND_BACK}`,
+    `${reminder()}\n[SYSTEM NOTIFICATION - NOT USER INPUT]\nx`,
+    AGENT_MESSAGE,
+    `${reminder()}\n${AGENT_MESSAGE}`,
+    `The user sent a new message while you were working:\n${AGENT_MESSAGE}`,
+    `${reminder()}\nThe user sent a new message while you were working:\n${AGENT_MESSAGE}\n${reminder()}`,
+    '<agent-message from="a" id="2">line one\n/start 5\n</agent-message>',
+  ]) {
+    assert.equal(isAutomatedInput(p), true, JSON.stringify(p));
+  }
+});
+
+test("#546 criterion 1: typed text outside the wrappers is not automated", () => {
+  for (const p of [
+    "go on",
+    `${reminder()}\ngo on`,
+    `${reminder()}\n/start 7`,
+    `${AGENT_MESSAGE}\n/start 7`,
+    `${AGENT_MESSAGE}\n  /start 7`,
+    `${reminder("Another Claude session sent a message:")}\n/start 7`,
+    `<system-reminder>unclosed\n${HAND_BACK}`,
+    "<agent-message from=x>never closed",
+  ]) {
+    assert.equal(isAutomatedInput(p), false, JSON.stringify(p));
+  }
+});
+
+test("edge: a typed /start beside a hand-back, on its own line or glued to it, is never treated as automated", () => {
+  const hb = "<agent-message from=\"x\">done</agent-message>";
+  for (const p of [`${hb}\n/start 7`, `${hb}/start 7`, `${hb} /start 7`, `/start 7\n${hb}`, `<system-reminder>r</system-reminder>\n${hb}\r/start 7`]) {
+    assert.equal(isAutomatedInput(p), false, JSON.stringify(p));
+  }
+});
+
+test("#548 criterion 1: 50,000 unclosed <agent-message> openers are scanned in under 500 ms", () => {
+  const p = "<agent-message from=x>".repeat(50000);
+  const t = performance.now();
+  assert.equal(isAutomatedInput(p), false);
+  assert.ok(performance.now() - t < 500, `took ${performance.now() - t} ms`);
+});
+
+test("#548 criterion 1: 50,000 unclosed <system-reminder> openers beside a hand-back are scanned in under 500 ms", () => {
+  const p = `<agent-message from=x>ok</agent-message>${"<system-reminder>".repeat(50000)}`;
+  const t = performance.now();
+  assert.equal(isAutomatedInput(p), true);
+  assert.ok(performance.now() - t < 500, `took ${performance.now() - t} ms`);
+});
+
+test("edge: 50,000 openers with no '>' and an <agent-messages> look-alike stay linear and are no hand-back", () => {
+  const t = performance.now();
+  assert.equal(isAutomatedInput("<agent-message".repeat(50000)), false);
+  assert.equal(isAutomatedInput("<agent-messages>x</agent-message>"), false);
+  assert.ok(performance.now() - t < 500);
+});
+
+test("edge: a closed hand-back after an unclosed opener still counts, and a typed /start outside a reminder still wins", () => {
+  assert.equal(isAutomatedInput("<agent-message from=a>one</agent-message>"), true);
+  assert.equal(isAutomatedInput("<agent-message from=x>\n<agent-message from=y>z</agent-message>"), true);
+  assert.equal(isAutomatedInput("<agent-message from=y>z</agent-message><system-reminder>\n/start 5\n</system-reminder>"), true);
+  assert.equal(isAutomatedInput("<agent-message from=y>z</agent-message>\n<system-reminder>unclosed\n/start 5"), false);
+});
+
+test("#61 edge: powershellAsBash reads PowerShell quoting into Bash words", () => {
+  // The same command written with PowerShell's quotes reads as the same Bash words.
+  const same = "'node' 'scripts/lanes/start.mjs' '1'";
+  for (const c of [
+    "node scripts/lanes/start.mjs 1",
+    "node scripts/lanes/'start.mjs' 1",
+    'node scripts/lanes/"start.mjs" 1',
+    "node scripts/lanes/sta`rt.mjs 1",
+    "node scripts/lanes/sta''rt.mjs 1",
+    'node scripts/lanes/sta""rt.mjs 1',
+    "node <# c #> scripts/lanes/start.mjs 1",
+  ]) {
+    assert.equal(powershellAsBash(c), same, c);
+  }
+  // A backslash is literal in PowerShell, and two quotes inside a string are one quote character.
+  assert.equal(powershellAsBash("x 'o\\wner'"), "'x' 'o\\wner'");
+  assert.equal(powershellAsBash("x 'ow''ner'"), "'x' 'ow'\\''ner'");
+  // Whatever PowerShell expands reads as unresolved, and a subexpression's statements are statements of their own.
+  assert.match(powershellAsBash('Write-Output "$(node scripts/lanes/start.mjs 1)"'), /'node' 'scripts\/lanes\/start\.mjs' '1'/);
+  // A private-use character in the source reads as U+FFFD, so it can never stand in for a marker of the reader's own.
+  assert.equal(powershellAsBash("x ''"), "'x' '�'");
+  assert.throws(() => powershellAsBash("(".repeat(40) + ")".repeat(40)), (e) => /too deep/.test(e.message) && e.readerLimit === true);
+});
+
+test("#616 edge: an -e, -ec, -enc or -EncodedCommand base64 value is read decoded; another flag or a non-base64 value is not", () => {
+  const b64 = Buffer.from("node scripts/lanes/start.mjs 7", "utf16le").toString("base64");
+  const decoded = /'node' 'scripts\/lanes\/start\.mjs' '7'/;
+  for (const flag of ["-e", "-ec", "-enc", "-EncodedCommand", "/e"]) assert.match(powershellAsBash(`powershell ${flag} ${b64}`), decoded, flag);
+  for (const flag of ["-x", "-encx", "-File"]) assert.doesNotMatch(powershellAsBash(`powershell ${flag} ${b64}`), decoded, flag);
+  assert.doesNotMatch(powershellAsBash(`powershell -e ${b64}!`), decoded);
+  // Padding and the + and / characters of base64 are accepted, so a value holding them is decoded, not skipped.
+  const odd = Buffer.from("node scripts/lanes/start.mjs 7 ??>>", "utf16le").toString("base64");
+  assert.match(powershellAsBash(`powershell -e ${odd}`), decoded);
+});
+
+test("#616: preToolUseOutput is the PreToolUse hook JSON for a decision and its reason", () => {
+  assert.deepEqual(JSON.parse(preToolUseOutput("deny", "why")), { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "why" } });
 });

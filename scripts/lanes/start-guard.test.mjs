@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BG_DENY_REASON, DENY_REASON, PARSE_DENY_REASON, QUEUE_DENY_REASON, RUNTIME_TEXT_DENY_REASON, TAG_DENY_REASON, UNRESOLVED_DENY_REASON, WMI_DENY_REASON, GRANT_TTL_MS, decidePreToolUse, findBgLaunches, findQueueInvocations, findStartInvocations, grantPath, grantRefusal, onUserPromptSubmit, parseAutoPrompt, parseStartPrompt, readGrant, runHook } from "./start-guard.mjs";
-import { AUTOMATED_INPUT_PREFIXES } from "./approve-guard.mjs";
+import { AUTOMATED_INPUT_PREFIXES } from "./shell-lex.mjs";
 import { WRAPPERS, automatedInputLeavesTheGrant } from "./shell-lex.fixtures.mjs";
 
 const NOW = Date.parse("2026-09-27T12:00:00Z");
@@ -1390,10 +1390,10 @@ test("#492: a system notification keeps the /start grant, grants nothing, and a 
   }
 });
 
-test("#262 criterion 5: start-guard uses approve-guard's one wrapper list", () => {
+test("#262 criterion 5: start-guard uses shell-lex's one wrapper list", () => {
   assert.deepEqual([...AUTOMATED_INPUT_PREFIXES], [...WRAPPERS, NOTICE_492]);
   const src = readFileSync(new URL("./start-guard.mjs", import.meta.url), "utf8");
-  assert.match(src, /import \{[^}]*\bisAutomatedInput\b[^}]*\} from "\.\/approve-guard\.mjs"/);
+  assert.match(src, /import \{[^}]*\bisAutomatedInput\b[^}]*\} from "\.\/shell-lex\.mjs"/);
   assert.doesNotMatch(src, /Another Claude session sent a message:/, "the list is not copied into start-guard");
 });
 
@@ -1410,12 +1410,11 @@ const decideFor = (input, g = null) => decidePreToolUse(input, g, NOW);
 const BG = "--" + "bg";
 const encodedPs = (text) => Buffer.from(text, "utf16le").toString("base64");
 
-test("#61 criterion 1: both guards' PreToolUse hooks match the PowerShell tool as well as Bash", () => {
+test("#61 criterion 1: the start-guard PreToolUse hook matches the PowerShell tool as well as Bash", () => {
   const s = JSON.parse(readFileSync(".claude/settings.json", "utf8"));
   const commands = (tool) => s.hooks.PreToolUse.filter((h) => new RegExp(`^(?:${h.matcher})$`).test(tool)).flatMap((h) => h.hooks.map((x) => x.command));
   for (const tool of ["Bash", "PowerShell"]) {
     assert.ok(commands(tool).some((c) => /scripts\/lanes\/start-guard\.mjs" pre-tool-use$/.test(c)), `start-guard for ${tool}`);
-    assert.ok(commands(tool).some((c) => /scripts\/lanes\/approve-guard\.mjs" pre-tool-use$/.test(c)), `approve-guard for ${tool}`);
   }
 });
 
@@ -2056,7 +2055,7 @@ test("#318 edge: -p before --eval, a flag between, a script starting with -, -p 
   }
 });
 
-// Through shell-lex.mjs a backslash-led delimiter (`<<\EOF`) is literal, as in bash and approve-guard.mjs (#140);
+// Through shell-lex.mjs a backslash-led delimiter (`<<\EOF`) is literal, as in bash (#140);
 // start-guard.mjs read it as unquoted before #194, so a plain `$HOME` in such a commit message was denied.
 test("#194 edge: <<\\EOF reads like <<'EOF', and a live body is still walked", () => {
   for (const delim of ["\\EOF", "'EOF'"]) {
@@ -2068,7 +2067,7 @@ test("#194 edge: <<\\EOF reads like <<'EOF', and a live body is still walked", (
 
 // --- #308: remaining launchers, wildcard and glob names, deno eval and joined iex strings ----------------------------
 
-// The launchers of #308 criterion 1 with a program named only at run time; approve-guard.test.mjs checks the same list.
+// The launchers of #308 criterion 1 with a program named only at run time.
 const LAUNCHERS_308 = [
   "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$c}",
   "Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $c",
