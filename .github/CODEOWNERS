@@ -39,6 +39,8 @@
 /scripts/lanes/pick.test.mjs @SourE-dev
 /scripts/lanes/blockers.mjs @SourE-dev
 /scripts/lanes/blockers.test.mjs @SourE-dev
+/scripts/lanes/health.mjs @SourE-dev
+/scripts/lanes/health.test.mjs @SourE-dev
 /scripts/lanes/shell-lex.mjs @SourE-dev
 /scripts/lanes/shell-lex.test.mjs @SourE-dev
 /scripts/lanes/shell-lex.fixtures.mjs @SourE-dev
