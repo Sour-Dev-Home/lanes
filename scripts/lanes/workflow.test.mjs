@@ -709,19 +709,24 @@ test("ADR 0008 carries the 2026-10-01 amendment: sized by lines, may span module
   assert.match(adr, /never implemented and is withdrawn/);
 });
 
-test("plan-issues.md step 5 greps the existing tests for strings the draft changes and adds each pinning test to Scope", () => {
-  const step = draftStep();
-  assert.match(step, /grep the existing tests for strings the draft changes \(a permission, env name, pinned text\)/);
-  assert.match(step, /add each test that pins one to Scope/);
+// #634: one helper finds the tests a draft affects or pins, instead of the planner's own grep.
+test("plan-issues.md step 5 runs scope-tests.mjs per issue, adds each listed test to Scope \"In\" and shows them in the draft", () => {
+  const step = draftStep().replace(/\s+/g, " ");
+  assert.match(step, /run `node scripts\/lanes\/scope-tests\.mjs --paths <path>\.\.\. --strings <text>\.\.\.`/);
+  assert.match(step, /the issue's Scope "In" paths/);
+  assert.match(step, /every string, command, path or permission the criteria change \(workflow lines included, such as a `verify\.yml` step\)/);
+  assert.match(step, /add each listed test to Scope "In"/);
+  assert.match(step, /show the added tests in the draft/);
+  assert.doesNotMatch(step, /Always grep the existing tests/);
 });
 
-// edge: the test grep is unconditional, so it must not sit inside the module-map-only skip clause.
-test("plan-issues.md step 5 test grep is unconditional, not gated on a module map", () => {
+// edge: the helper run is unconditional, so it must not sit inside the module-map-only skip clause.
+test("plan-issues.md step 5 scope-tests run is unconditional, not gated on a module map", () => {
   const step = draftStep();
-  assert.match(step, /Always grep the existing tests/);
+  assert.match(step, /Always run `node scripts\/lanes\/scope-tests\.mjs/);
   assert.ok(
-    step.indexOf("Always grep the existing tests") > step.indexOf("With no `modules` key, skip this."),
-    "the test grep must come after the module-map skip clause so `skip this` cannot swallow it",
+    step.indexOf("Always run `node scripts/lanes/scope-tests.mjs") > step.indexOf("With no `modules` key, skip this."),
+    "the helper run must come after the module-map skip clause so `skip this` cannot swallow it",
   );
 });
 

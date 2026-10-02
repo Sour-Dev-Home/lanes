@@ -12,7 +12,7 @@
   "modules": {
     "entries": [
       { "id": "preflight", "paths": ["scripts/preflight.", "scripts/security-workflow."], "imports": [], "risk": "normal" },
-      { "id": "modules", "paths": ["scripts/lanes/modules.", "scripts/lanes/affected-tests.", "contracts/module-map."], "imports": [], "contracts": ["contracts/module-map."], "risk": "normal" },
+      { "id": "modules", "paths": ["scripts/lanes/modules.", "scripts/lanes/affected-tests.", "scripts/lanes/scope-tests.", "contracts/module-map."], "imports": [], "contracts": ["contracts/module-map."], "risk": "normal" },
       { "id": "structure", "paths": ["scripts/lanes/structure-report."], "imports": ["modules"], "risk": "sensitive" },
       { "id": "lessons", "paths": ["scripts/lanes/lessons."], "imports": ["modules"], "risk": "sensitive" },
       { "id": "lib", "paths": ["scripts/lanes/lib.", "scripts/lanes/validate."], "imports": ["modules"], "risk": "sensitive" },
