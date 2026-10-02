@@ -78,7 +78,7 @@ These are decided, not overlooked:
 ## What lanes does not protect against
 
 - A malicious or compromised **owner**, or anyone holding the owner's GitHub credentials or machine.
-- A determined lane using the owner's credentials directly (see the shared identity above).
+- A lane that obtains the owner's credentials some other way, or the App's private key (kept outside the repository).
 - **Vulnerabilities in the code lanes write.** Reviews and CodeQL reduce them; they do not certify them.
 - Flaws in your own project's tests, dependencies or CI beyond what the gate and reviewers see.
 - **Public exposure you choose.** The dashboard's GitHub Pages site is public even for a private repository; it is
