@@ -36,7 +36,7 @@ jobs:
           if [ -z "$files" ] || [ "$files" = "ALL" ]; then
             npm test
           else
-            node --test $files
+            npm run test:files -- $files
           fi
       # the merge queue and main always run the full suite
       - if: github.event_name != 'pull_request'
