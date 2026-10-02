@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GATE_CONTEXT, loadConfig, nativeCodeOwnerApproval, parseCodeOwnerUsers, parseIdentity, parseIssueForm, parseVerdictComment, REVIEWERS, reviewerNames } from "./lib.mjs";
+import { GATE_CONTEXT, identityRefusal, loadConfig, nativeCodeOwnerApproval, parseCodeOwnerUsers, parseIdentity, parseIssueForm, parseVerdictComment, REVIEWERS, reviewerNames } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { STATUS_QUERY, gateDescriptions, mergeQueueEntries, prStage } from "./status.mjs";
 
@@ -293,6 +293,9 @@ const ghText = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["i
 function main(argv = process.argv.slice(2)) {
   const out = parseOutArg(argv);
   const from = parseFromArg(argv);
+  // ADR 0025: a config that is not team shows the refusal line in place of data, and writes no snapshot file.
+  const refusal = identityRefusal(() => readFileSync("lanes.config.json", "utf8"));
+  if (refusal) return console.log(refusal);
   const identity = configuredIdentity();
   const profile = identity?.profile;
   if (from) {

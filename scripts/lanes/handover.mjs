@@ -10,7 +10,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { parseIdentity, pendingFileHash } from "./lib.mjs";
+import { parseLegacyIdentity, pendingFileHash } from "./lib.mjs";
 
 const DIR = ".github/workflows/";
 const SAFE_PATH = /^[A-Za-z0-9._\/-]+$/;
@@ -68,7 +68,7 @@ export function handover(argv, deps) {
   try {
     let identity;
     try {
-      identity = parseIdentity(JSON.parse(deps.readConfig()).identity);
+      identity = parseLegacyIdentity(JSON.parse(deps.readConfig()).identity);
     } catch {
       return { code: 2, lines: ["lanes.config.json unreadable or its identity invalid"] };
     }

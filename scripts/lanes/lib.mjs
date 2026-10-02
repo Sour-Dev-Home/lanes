@@ -61,8 +61,9 @@ export function compileConfig(raw) {
   }
   // ADR 0018: the optional module map, kept as written; modules.mjs validates it.
   const config = raw.modules === undefined ? { requiredChecks, paths } : { requiredChecks, paths, modules: raw.modules };
-  // ADR 0020 part 1: the validated identity, so the gate can read the configured lane bot; absent when the key is.
-  const identity = parseIdentity(raw.identity);
+  // ADR 0020 part 1: the validated identity, so the gate can read the configured lane bot. A config with no identity
+  // key, or a solo one, still compiles; start, queue and the gate refuse it with parseIdentity (ADR 0025).
+  const identity = parseLegacyIdentity(raw.identity);
   return identity === undefined ? config : { ...config, identity };
 }
 
@@ -759,23 +760,31 @@ export function nativeCodeOwnerApproval(reviews, prAuthor, headSha, owners, iden
   return none;
 }
 
+/** ADR 0025 part 2: the one refusal for a config whose identity is not team. */
+export const TEAM_REQUIRED_MESSAGE = "lanes needs the team identity profile (a GitHub App). Run: node scripts/lanes/app-setup.mjs";
+
 /**
- * The `identity` key (ADR 0019 part 1, ADR 0020 part 1), validated and copied; undefined when the key is missing.
- * `{ profile: "solo" }` or `{ profile: "team", app: { id, installationId, botLogin } }`; `botLogin` is required under
- * team and accepted (and never used) under solo. Throws on any other shape.
+ * The `identity` key (ADR 0019 part 1, ADR 0020 part 1, ADR 0025 part 1), validated and copied:
+ * `{ profile: "team", app: { id, installationId, botLogin } }`. Throws TEAM_REQUIRED_MESSAGE, naming `configPath` and
+ * the profile found if any, for a missing identity, a missing profile or any profile but "team"; throws on any other
+ * bad shape.
  */
-export function parseIdentity(identity) {
-  if (identity === undefined) return undefined;
-  const bad = (what) => new Error(`lanes.config.json: identity ${what}`);
-  if (identity === null || typeof identity !== "object" || Array.isArray(identity)) throw bad("must be an object");
+export function parseIdentity(identity, configPath = "lanes.config.json") {
+  const bad = (what) => new Error(`${configPath}: identity ${what}`);
+  const isObject = identity !== null && typeof identity === "object" && !Array.isArray(identity);
+  if (identity === undefined || (isObject && identity.profile !== "team")) {
+    const found = isObject && identity.profile !== undefined ? `profile ${JSON.stringify(identity.profile)}` : "no identity profile";
+    throw Object.assign(new Error(`${TEAM_REQUIRED_MESSAGE} (${configPath}: ${found})`), { teamRequired: true });
+  }
+  if (!isObject) throw bad("must be an object");
   const extra = Object.keys(identity).find((k) => k !== "profile" && k !== "app");
   if (extra !== undefined) throw bad(`has an unknown key ${JSON.stringify(extra)}`);
-  if (identity.profile !== "solo" && identity.profile !== "team") throw bad(`.profile must be "solo" or "team", got ${JSON.stringify(identity.profile)}`);
-  const { app } = identity;
-  if (app === undefined) {
-    if (identity.profile === "team") throw bad(".app { id, installationId, botLogin } is required for the team profile");
-    return { profile: "solo" };
-  }
+  if (identity.app === undefined) throw bad(".app { id, installationId, botLogin } is required for the team profile");
+  return { profile: "team", app: validApp(identity.app, bad, true) };
+}
+
+// The `app` of an identity, validated and copied; botLogin is required when `needLogin`.
+function validApp(app, bad, needLogin) {
   if (app === null || typeof app !== "object" || Array.isArray(app)) throw bad(".app must be an object { id, installationId, botLogin }");
   if (Object.keys(app).some((k) => k !== "id" && k !== "installationId" && k !== "botLogin")) throw bad(".app may only have id, installationId and botLogin");
   for (const key of ["id", "installationId"]) {
@@ -783,12 +792,51 @@ export function parseIdentity(identity) {
   }
   const copy = { id: app.id, installationId: app.installationId };
   if (app.botLogin === undefined) {
-    if (identity.profile === "team") throw bad(".app.botLogin is required for the team profile (the lane App's login, like name[bot])");
+    if (needLogin) throw bad(".app.botLogin is required for the team profile (the lane App's login, like name[bot])");
   } else {
     if (typeof app.botLogin !== "string" || !BOT_LOGIN.test(app.botLogin)) throw bad(`.app.botLogin must be one App login like name[bot], got ${JSON.stringify(app.botLogin)}`);
     copy.botLogin = app.botLogin;
   }
-  return { profile: identity.profile, app: copy };
+  return copy;
+}
+
+/**
+ * The pre-ADR-0025 reading of `identity`, which still accepts solo and a missing key (undefined), for the files whose
+ * solo branches a later change removes (approve-guard, handover, identity-check). New code uses `parseIdentity`.
+ */
+export function parseLegacyIdentity(identity) {
+  if (identity === undefined) return undefined;
+  const bad = (what) => new Error(`lanes.config.json: identity ${what}`);
+  if (identity === null || typeof identity !== "object" || Array.isArray(identity)) throw bad("must be an object");
+  const extra = Object.keys(identity).find((k) => k !== "profile" && k !== "app");
+  if (extra !== undefined) throw bad(`has an unknown key ${JSON.stringify(extra)}`);
+  // an unknown or missing profile is the one team-required refusal, like everywhere else
+  if (identity.profile !== "solo" && identity.profile !== "team") return parseIdentity(identity);
+  if (identity.app === undefined) {
+    if (identity.profile === "team") throw bad(".app { id, installationId, botLogin } is required for the team profile");
+    return { profile: "solo" };
+  }
+  return { profile: identity.profile, app: validApp(identity.app, bad, identity.profile === "team") };
+}
+
+/**
+ * ADR 0025 part 2, for the readers that show a line instead of refusing (`/status`, the snapshot): the refusal line for
+ * the lanes.config.json `read()` returns, or null when its identity is team. A missing file counts as no identity;
+ * a file that is not JSON is left to the reader's own config loading.
+ */
+export function identityRefusal(read, configPath = "lanes.config.json") {
+  let raw;
+  try {
+    raw = JSON.parse(read());
+  } catch (err) {
+    if (err?.code !== "ENOENT") return null;
+  }
+  try {
+    parseIdentity(raw?.identity, configPath);
+    return null;
+  } catch (err) {
+    return err.teamRequired ? err.message : null;
+  }
 }
 
 const NEEDS_NOTHING = /^nothing\.?$/i;

@@ -4,8 +4,9 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUDGET_DEFAULTS, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, isLaneGhDir, launchEnv, main as runStart, makeRemint, markRunning, parseSessionId, planStart, refreshArgs, refreshLoop, startConfig, teamLaneEnv, teamLaneSettings, TEAM_SCRUBBED_NAMES, botCommitIdentity } from "./start.mjs";
+import { BUDGET_DEFAULTS, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, isLaneGhDir, launchEnv, main as runStart, makeRemint, markRunning, parseSessionId, planStart, refreshArgs, refreshLoop, startConfig as strictStartConfig, teamLaneEnv, teamLaneSettings, TEAM_SCRUBBED_NAMES, botCommitIdentity } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
+import { TEAM_REQUIRED_MESSAGE } from "./lib.mjs";
 import { launchLane, resolveKeyFile, scopeNamesWorkflows, teamSteps } from "./start.mjs";
 
 // #612: the App key defaults to ~/.lanes/<slug>.pem; an explicit LANES_APP_KEY_FILE wins.
@@ -289,7 +290,12 @@ test("parseSessionId returns null when no id is printed", () => {
 const form = ({ scope = "In: `a.mjs`.", blockedBy = "none", contract = "none" } = {}) =>
   ["### Goal", "g", "### Acceptance criteria", "- [ ] a", "### Interface contract", contract, "### Scope", scope, "### Blocked by", blockedBy, "### Tier", "quick"].join("\n\n");
 
-function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config, cleanup = () => [], spawnChild, labelFail = null, labelMissing = false, recordFail = false } = {}) {
+const TEAM = { profile: "team", app: { id: 11, installationId: 22, botLogin: "sour-dev-lanes[bot]" } };
+// ADR 0025: startConfig refuses a config with no team identity, so the tests of its other keys read one that has it;
+// the refusal tests call strictStartConfig.
+const startConfig = (raw) => strictStartConfig({ identity: TEAM, ...raw });
+
+function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut = {}, launchFail = [], agentsFail = false, config, cleanup = () => [], spawnChild, labelFail = null, labelMissing = false, recordFail = false, keepRefresher = false } = {}) {
   const launches = [];
   const labeled = [];
   let labelCreated = false;
@@ -297,7 +303,16 @@ function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut
   // Every reaper spawn and log open/close, in order; spawnChild(cmd, args, options) overrides the fake child.
   const reapers = [];
   const logs = [];
+  // ADR 0025: every launch is a team launch, which also starts the token refresher. It is kept apart (`refreshers`), with
+  // its log, so the reaper tests keep reading the reapers alone; `spawnChild` overrides the reaper's child only.
+  const refreshers = [];
   const spawn = (cmd, args, options) => {
+    if (args.includes("--refresh-token") && !keepRefresher) {
+      logs.pop();
+      const child = { pid: 4243, on() {}, unref() {} };
+      refreshers.push({ cmd, args, options, child });
+      return child;
+    }
     const child = spawnChild ? spawnChild(cmd, args, options) : { pid: 4242, on() {}, unref() { this.unrefed = true; } };
     reapers.push({ cmd, args, options, child });
     return child;
@@ -339,7 +354,8 @@ function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut
       if (agentsFail) throw new Error("claude: agents failed");
       return JSON.stringify(sessions);
     }
-    launches.push({ args, cwd: opts?.cwd });
+    // The team-only flags are left out of the recorded args (the team tests read them from their own wrapper).
+    launches.push({ args: args.filter((a, i) => a !== "--strict-mcp-config" && a !== "--settings" && args[i - 1] !== "--settings"), cwd: opts?.cwd });
     const n = Number(args.at(-1).split(" ")[1]);
     if (launchFail.includes(n)) throw new Error("claude: spawn failed");
     return launchOut[n] ?? `backgrounded · id${n}`;
@@ -354,7 +370,20 @@ function fakes({ issues = {}, prs = [], mergedPrs = [], sessions = [], launchOut
     if (recordFail) throw new Error("EACCES: cannot write .lanes/starts.jsonl");
     for (const line of lines) recorded.push([root, line]);
   };
-  return { deps: { gh, claude, root: () => "/repo", config: () => config, cleanup: cleanupFake, spawn, reaperLog, recordStarts }, launches, calls, reapers, logs, labeled, recorded };
+  // ADR 0025: team is the only profile, so a config without an `identity` key gets the team identity, and every launch
+  // runs through the faked team steps. A test of the refusal passes `identity` itself (even as undefined).
+  const withIdentity = config === undefined ? { identity: TEAM } : "identity" in config ? config : { ...config, identity: TEAM };
+  const team = {
+    keyFile: () => "/keys/app.pem",
+    readable: () => {},
+    repo: () => "lanes",
+    makeDir: (n) => ({ dir: `/tmp/lane-${n}`, emptyConfig: `/tmp/lane-${n}/empty` }),
+    removeDir: () => {},
+    writeSettings: () => {},
+    mintInto: () => {},
+    botUserId: () => "336249257",
+  };
+  return { deps: { gh, claude, root: () => "/repo", config: () => withIdentity, cleanup: cleanupFake, spawn, reaperLog, recordStarts, team }, launches, calls, reapers, refreshers, logs, labeled, recorded };
 }
 
 // #164: one detached reaper per launched lane (ADR 0010).
@@ -447,7 +476,8 @@ test("edge: a reaper log that cannot be opened is reported, spawns nothing, and 
   deps.reaperLog = () => { throw new Error("EACCES: permission denied, open '.lanes/reap/1.log'"); };
   const { code, lines } = main(["1"], deps);
   assert.equal(code, 0);
-  assert.deepEqual(lines, ["#1 → id1", "#1: reaper not started: EACCES: permission denied, open '.lanes/reap/1.log'"]);
+  // the team launch's token refresher logs to the same file, so it is not started either
+  assert.deepEqual(lines, ["#1 → id1", "#1: reaper not started: EACCES: permission denied, open '.lanes/reap/1.log'", "#1: token refresher not started: EACCES: permission denied, open '.lanes/reap/1.log'"]);
   assert.equal(reapers.length, 0);
 });
 
@@ -828,11 +858,12 @@ test("lanes.config.json has the start block with maxLanes 8 and the two soft pat
 test("startConfig falls back to the defaults when the start block or a key is missing", () => {
   const defaults = { maxLanes: 8, softPaths: ["^docs/USING\\.md$", "^README\\.md$", "^lanes\\.config\\.json$"], models: {} };
   assert.deepEqual(START_DEFAULTS, defaults);
-  assert.deepEqual(startConfig(undefined), defaults);
-  assert.deepEqual(startConfig({}), defaults);
-  assert.deepEqual(startConfig({ start: {} }), defaults);
-  assert.deepEqual(startConfig({ start: { maxLanes: 3 } }), { ...defaults, maxLanes: 3 });
-  assert.deepEqual(startConfig({ start: { softPaths: [] } }), { ...defaults, softPaths: [] });
+  const team = { ...defaults, identity: TEAM };
+  assert.deepEqual(startConfig(undefined), team);
+  assert.deepEqual(startConfig({}), team);
+  assert.deepEqual(startConfig({ start: {} }), team);
+  assert.deepEqual(startConfig({ start: { maxLanes: 3 } }), { ...team, maxLanes: 3 });
+  assert.deepEqual(startConfig({ start: { softPaths: [] } }), { ...team, softPaths: [] });
 });
 
 // #153 criterion 1: start.models maps tiers to model names; no models by default.
@@ -1883,7 +1914,8 @@ test("launch: the adjusted env goes to the background launch and the note is pri
   f.deps.claude = (args, opts) => (seen.push(opts?.env), launchClaude(args, opts));
   f.deps.launchEnv = () => ({ env: { PATH: "adjusted" }, note: "PATH not adjusted: because" });
   const { lines } = main(["1"], f.deps);
-  assert.deepEqual(seen.filter(Boolean), [{ PATH: "adjusted" }]);
+  // under team the lane's environment is the launcher's PATH plus the lane's own gh directory
+  assert.deepEqual(seen.filter(Boolean).map((e) => [e.PATH, e.GH_CONFIG_DIR]), [["adjusted", "/tmp/lane-1"]]);
   assert.ok(lines.includes("#1: PATH not adjusted: because"), lines.join("|"));
 });
 
@@ -2107,12 +2139,39 @@ test("appendStarts appends JSON lines to .lanes/starts.jsonl, writes nothing for
 });
 
 // #499: the team profile (ADR 0019 parts 1, 3 and 4).
-const TEAM = { profile: "team", app: { id: 11, installationId: 22, botLogin: "sour-dev-lanes[bot]" } };
 
-test("startConfig accepts an identity: missing or solo is solo, team needs numeric app ids", () => {
-  assert.equal("identity" in startConfig({}), false);
-  assert.deepEqual(startConfig({ identity: { profile: "solo" } }).identity, { profile: "solo" });
+test("startConfig accepts a team identity with numeric app ids", () => {
   assert.deepEqual(startConfig({ identity: TEAM }).identity, TEAM);
+});
+
+// #613 (ADR 0025): a config whose identity is not team is refused first, with the one message.
+test("startConfig refuses a missing config, a missing identity or profile, solo and an unknown profile with the one message", () => {
+  for (const raw of [undefined, null, {}, { start: { maxLanes: 3 } }, { identity: {} }, { identity: { profile: "solo" } }, { identity: { profile: "solo", app: TEAM.app } }, { identity: { profile: "other" } }, { identity: { profile: "Team", app: TEAM.app } }]) {
+    assert.throws(() => strictStartConfig(raw), (e) => e.message.startsWith(TEAM_REQUIRED_MESSAGE) && e.message.includes("lanes.config.json"), JSON.stringify(raw));
+  }
+  // the identity is checked before the rest of the config: a bad start block does not hide the refusal
+  assert.throws(() => strictStartConfig({ start: { maxLanes: 0 } }), (e) => e.message.startsWith(TEAM_REQUIRED_MESSAGE));
+  assert.throws(() => strictStartConfig({ identity: { profile: "solo" } }), /profile "solo"/);
+});
+
+test("main refuses a config that is not team with the one message, launching and reading nothing", () => {
+  for (const config of [undefined, { identity: undefined }, { identity: { profile: "solo" } }, { identity: { profile: "other" } }]) {
+    for (const args of [["1"], ["--auto"], ["--auto", "--go"]]) {
+      const f = fakes({ issues: { 1: {} }, config: config ?? { identity: undefined } });
+      if (config === undefined) f.deps.config = () => undefined;
+      const { code, lines } = main(args, f.deps);
+      assert.equal(code, 2, JSON.stringify([config, args]));
+      assert.equal(lines.length, 1);
+      assert.ok(lines[0].startsWith(`nothing launched: ${TEAM_REQUIRED_MESSAGE}`), lines[0]);
+      assert.deepEqual(f.launches, []);
+      assert.deepEqual(f.calls, [], "no gh call, no cleanup");
+    }
+  }
+});
+
+test("this repository's lanes.config.json passes startConfig's identity check", () => {
+  const raw = JSON.parse(readFileSync("lanes.config.json", "utf8"));
+  assert.equal(strictStartConfig(raw).identity.profile, "team");
 });
 
 test("startConfig requires a valid botLogin under team (#528)", () => {
@@ -2126,7 +2185,7 @@ test("startConfig requires a valid botLogin under team (#528)", () => {
 });
 
 test("startConfig refuses any other identity shape with a clear error", () => {
-  for (const identity of [null, "team", [], {}, { profile: "other" }, { profile: "team" }, { profile: "team", app: { id: 1 } }, { profile: "team", app: { id: "1", installationId: 2 } }, { profile: "team", app: { id: 0, installationId: 2 } }, { profile: "team", app: { id: 1, installationId: 2, key: "x" } }, { profile: "team", app: null }, { profile: "solo", x: 1 }]) {
+  for (const identity of [null, "team", [], { profile: "team" }, { profile: "team", app: { id: 1 } }, { profile: "team", app: { id: "1", installationId: 2 } }, { profile: "team", app: { id: 0, installationId: 2 } }, { profile: "team", app: { id: 1, installationId: 2, key: "x" } }, { profile: "team", app: null }, { profile: "team", x: 1 }]) {
     assert.throws(() => startConfig({ identity }), /lanes\.config\.json: identity /, JSON.stringify(identity));
   }
 });
@@ -2141,7 +2200,7 @@ test("teamLaneEnv removes the credentials and points gh and git at the lane's ow
 
 // A team launch with every side effect faked: what was minted, where, what claude got, what the refresher was given.
 function teamRun({ env = {}, key = "/keys/app.pem", unreadable = false, mintFail = null, dirFail = false, noRepo = false, settingsFail = false, botId = "336249257", botIdFail = false, identity = TEAM, launchFail = [], spawnChild } = {}) {
-  const f = fakes({ issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } }, launchFail, config: { identity }, spawnChild });
+  const f = fakes({ issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } }, launchFail, config: { identity }, spawnChild, keepRefresher: true });
   const made = [];
   const removed = [];
   const minted = [];
@@ -2284,12 +2343,6 @@ test("edge (#540): the settings env blanks or sets every exact name the launcher
   assert.equal("GIT_CONFIG_PARAMETERS" in out, false);
 });
 
-test("edge (#540): a solo launch passes no --settings", () => {
-  const f = fakes({ issues: { 1: {} } });
-  main(["1"], f.deps);
-  assert.equal(f.launches.some((l) => l.args.includes("--settings")), false);
-});
-
 test("team (#544): a team launch passes --strict-mcp-config, never --mcp-config, and the settings deny MCP tools", () => {
   const t = teamRun({ env: { GH_TOKEN: "owner" } });
   assert.equal(main(["1"], t.deps).code, 0);
@@ -2306,12 +2359,6 @@ test("team (#544): the settings deny MCP tools, and launchArgs adds --strict-mcp
   assert.deepEqual(launchArgs(18, { strictMcp: true }), [...NAMED(18), "--strict-mcp-config", "/lane 18"]);
   assert.deepEqual(launchArgs(18, { strictMcp: true, tier: "full", models: { full: "sonnet" } }), [...NAMED(18), "--strict-mcp-config", "--model", "sonnet", "/lane 18"]);
   assert.deepEqual(launchArgs(18), [...NAMED(18), "/lane 18"]);
-});
-
-test("edge (#544): a solo launch passes neither --strict-mcp-config nor an MCP deny", () => {
-  const f = fakes({ issues: { 1: {} } });
-  main(["1"], f.deps);
-  assert.equal(f.launches.some((l) => l.args.includes("--strict-mcp-config") || l.args.includes("--mcp-config")), false);
 });
 
 test("edge (#540): undeliverable settings remove the lane's directory and launch nothing", () => {
@@ -2395,14 +2442,15 @@ test("edge: team with no team support in deps fails closed", () => {
   assert.equal(t.launches.length, 0);
 });
 
-test("solo identity launches exactly as before: no team calls, the environment passed through unchanged", () => {
+test("a solo identity launches nothing, mints nothing and keeps the owner's environment out of it (ADR 0025)", () => {
   const t = teamRun({ identity: { profile: "solo" }, env: { GH_TOKEN: "owner" } });
   const { code, lines } = main(["1"], t.deps);
-  assert.equal(code, 0);
-  assert.deepEqual(lines, ["#1 → id1"]);
-  assert.deepEqual(t.claudeEnvs[0], { PATH: "/bin", GH_TOKEN: "owner" });
+  assert.equal(code, 2);
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].startsWith(`nothing launched: ${TEAM_REQUIRED_MESSAGE}`), lines[0]);
+  assert.equal(t.claudeEnvs.length, 0);
   assert.equal(t.minted.length + t.made.length, 0);
-  assert.equal(t.reapers.some((r) => r.args.includes("--refresh-token")), false);
+  assert.equal(t.reapers.length, 0);
 });
 
 // The refresher loop: re-mints each interval and exits once the lane's session is gone or idle.

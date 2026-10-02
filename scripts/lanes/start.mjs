@@ -84,15 +84,13 @@ const ISSUE_LIMIT = 1000;
  * The `start` block of a parsed lanes.config.json, each missing key (or the whole block) filled from START_DEFAULTS.
  * Throws when maxLanes is not a whole number from 1 to 10, softPaths is not an array of valid regex strings, or
  * models is not an object mapping tiers (skip, quick, full) to model names.
- * It also carries `identity` (ADR 0019 part 1) when the file sets one: `{ profile: "solo" }` or
- * `{ profile: "team", app: { id, installationId, botLogin } }` (lib's parseIdentity; botLogin is required under team); a
- * missing key leaves it out, which is solo. Throws on any other shape.
- * @returns {{ maxLanes: number, softPaths: string[], models: { skip?: string, quick?: string, full?: string }, identity?: { profile: "solo" | "team", app?: { id: number, installationId: number, botLogin?: string } } }}
+ * It also carries `identity`, checked first (ADR 0025): `{ profile: "team", app: { id, installationId, botLogin } }`
+ * (lib's parseIdentity). Throws TEAM_REQUIRED_MESSAGE for a missing config, identity or profile, or a profile but team.
+ * @returns {{ maxLanes: number, softPaths: string[], models: { skip?: string, quick?: string, full?: string }, identity: { profile: "team", app: { id: number, installationId: number, botLogin: string } } }}
  */
 export function startConfig(raw) {
   const identity = parseIdentity(raw?.identity);
-  const config = startBlock(raw?.start);
-  return identity ? { ...config, identity } : config;
+  return { ...startBlock(raw?.start), identity };
 }
 
 function startBlock(start) {

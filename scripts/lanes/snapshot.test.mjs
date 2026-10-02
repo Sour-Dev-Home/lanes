@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { DEFAULT_SOFT_PATHS, RUNNING_LABEL, buildSnapshot, parseFromArg, parseInput, parseOutArg, readOwnerApprovals, verdictCriteria, writeSnapshot } from "./snapshot.mjs";
 import { buildVerdictComment } from "./post-review.mjs";
-import { REVIEWERS } from "./lib.mjs";
+import { REVIEWERS, TEAM_REQUIRED_MESSAGE } from "./lib.mjs";
 import { STATUS_QUERY } from "./status.mjs";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -276,15 +276,39 @@ test("the command builds a snapshot offline with --from and writes it with --out
   const dir = mkdtempSync(join(tmpdir(), "snapshot-cli-"));
   try {
     writeFileSync(join(dir, "in.json"), JSON.stringify({ prs: [], issues: [issue(1)], generatedAt: NOW }));
-    // Run in the temp directory, so the repository's own lanes.config.json (and its profile) is not read.
+    // Run in the temp directory, so the repository's own lanes.config.json is not read; ADR 0025: it must be a team one.
     const script = resolve("scripts/lanes/snapshot.mjs");
+    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity: TEAM_ID }));
     execFileSync(process.execPath, [script, "--from", join(dir, "in.json"), "--out", join(dir, "out.json")], { stdio: "pipe", cwd: dir });
-    assert.deepEqual(JSON.parse(readFileSync(join(dir, "out.json"), "utf8")), build({ issues: [issue(1)] }));
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "out.json"), "utf8")), build({ issues: [issue(1)], profile: "team" }));
     const stdout = execFileSync(process.execPath, [script, "--from", join(dir, "in.json")], { encoding: "utf8", cwd: dir });
     assert.equal(JSON.parse(stdout).generatedAt, NOW);
     // The profile comes from the config's identity in the working directory.
+    assert.equal(JSON.parse(stdout).profile, "team");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #613 (ADR 0025): a config that is not team shows the one line in place of data; the command does not crash and writes no file.
+const TEAM_ID = { profile: "team", app: { id: 11, installationId: 22, botLogin: "sour-dev-lanes[bot]" } };
+test("the command prints the team-required line instead of a snapshot for a missing config, a missing identity, solo or an unknown profile", () => {
+  const dir = mkdtempSync(join(tmpdir(), "snapshot-refuse-"));
+  const script = resolve("scripts/lanes/snapshot.mjs");
+  try {
+    writeFileSync(join(dir, "in.json"), JSON.stringify({ prs: [], issues: [issue(1)], generatedAt: NOW }));
+    for (const config of [null, "{}", JSON.stringify({ identity: {} }), JSON.stringify({ identity: { profile: "solo" } }), JSON.stringify({ identity: { profile: "solo", app: TEAM_ID.app } }), JSON.stringify({ identity: { profile: "other" } })]) {
+      rmSync(join(dir, "lanes.config.json"), { force: true });
+      if (config !== null) writeFileSync(join(dir, "lanes.config.json"), config);
+      for (const extra of [[], ["--out", join(dir, "out.json")]]) {
+        const stdout = execFileSync(process.execPath, [script, "--from", join(dir, "in.json"), ...extra], { encoding: "utf8", cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
+        assert.ok(stdout.startsWith(TEAM_REQUIRED_MESSAGE), stdout);
+        assert.equal(stdout.trim().split("\n").length, 1, "one line");
+        assert.equal(existsSync(join(dir, "out.json")), false, "no snapshot file");
+      }
+    }
     writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity: { profile: "solo" } }));
-    assert.equal(JSON.parse(execFileSync(process.execPath, [script, "--from", join(dir, "in.json")], { encoding: "utf8", cwd: dir })).profile, "solo");
+    assert.match(execFileSync(process.execPath, [script, "--from", join(dir, "in.json")], { encoding: "utf8", cwd: dir }), /profile "solo"/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -369,12 +393,13 @@ test("edge: the command reads start.softPaths from lanes.config.json in the work
   const run = () => JSON.parse(execFileSync(process.execPath, [script, "--from", "in.json"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   try {
     writeFileSync(join(dir, "in.json"), JSON.stringify({ prs: [], issues: [scoped(1, "`a.mjs`"), scoped(2, "`a.mjs`")], generatedAt: NOW }));
+    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity: TEAM_ID }));
     assert.deepEqual(run().overlaps, [{ a: 1, b: 2 }]);
-    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ start: { softPaths: ["^a\\.mjs$"] } }));
+    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity: TEAM_ID, start: { softPaths: ["^a\\.mjs$"] } }));
     assert.deepEqual(run().overlaps, []);
-    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ start: { softPaths: [1] } }));
+    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity: TEAM_ID, start: { softPaths: [1] } }));
     assert.throws(run, /softPaths must be an array of regex strings/);
-    writeFileSync(join(dir, "lanes.config.json"), "{}");
+    writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity: TEAM_ID }));
     assert.deepEqual(run().overlaps, [{ a: 1, b: 2 }]);
   } finally {
     rmSync(dir, { recursive: true, force: true });

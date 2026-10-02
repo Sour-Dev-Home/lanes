@@ -138,10 +138,21 @@ function startDeps(w) {
     gh: (args) => w.run("gh", args, {}, "start"),
     claude: (args, options) => w.run("claude", args, options, "start"),
     root: () => w.root,
-    config: () => undefined,
+    // ADR 0025: team is the only profile; the team steps are faked and the refresher's spawn is not a reaper's.
+    config: () => ({ identity: { profile: "team", app: { id: 11, installationId: 22, botLogin: "sour-dev-lanes[bot]" } } }),
+    team: {
+      keyFile: () => "/keys/app.pem",
+      readable: () => {},
+      repo: () => "lanes",
+      makeDir: (n) => ({ dir: `/tmp/lane-${n}`, emptyConfig: `/tmp/lane-${n}/empty` }),
+      removeDir: () => {},
+      writeSettings: () => {},
+      mintInto: () => {},
+      botUserId: () => "336249257",
+    },
     cleanup: ({ dryRun }) => cleanupMerged({ dryRun, deps: w.cleanupDeps("start-cleanup") }),
     spawn: (cmd, args, options) => {
-      w.spawned.push({ cmd, args, options });
+      if (!args.includes("--refresh-token")) w.spawned.push({ cmd, args, options });
       return { pid: 4242, on() {}, unref() {} };
     },
     reaperLog: () => ({ fd: -1, close() {} }),

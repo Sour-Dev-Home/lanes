@@ -18,6 +18,7 @@ import {
   moduleMapProblem,
   nativeCodeOwnerApproval,
   parseCodeOwnerUsers,
+  parseIdentity,
   parsePending,
   parsePrBody,
   parseVerdictComment,
@@ -487,11 +488,13 @@ export function main(env = process.env, api = ghApi) {
     // Only a failed GitHub call: other failures (a malformed input) keep their own outcome. A failed notice call also lands here,
     // which overwrites an already-posted status with error: the safe direction.
     if (e?.ghCall) postError(env, api, e);
+    // ADR 0025: a config that is not team fails closed, with the one refusal message as the reason.
+    else if (e?.teamRequired) postError(env, api, e, { state: "failure", description: e.message });
     throw e;
   }
 }
 
-function postError(env, api, e) {
+function postError(env, api, e, decision = { state: "error", description: `gate error: ${e.ghCall} failed (${e.httpStatus ? `HTTP ${e.httpStatus}` : "no response"})` }) {
   try {
     let sha;
     if (env.EVENT_NAME === "merge_group") sha = env.GROUP_SHA;
@@ -502,14 +505,16 @@ function postError(env, api, e) {
       } catch {}
     }
     if (!SHA.test(sha ?? "")) return;
-    post(api, env.REPO, sha, { state: "error", description: `gate error: ${e.ghCall} failed (${e.httpStatus ? `HTTP ${e.httpStatus}` : "no response"})` });
+    post(api, env.REPO, sha, decision);
   } catch {}
 }
 
 function decide(env, api) {
+  // ADR 0025: the identity is checked before anything else; a config that is not team fails closed.
+  const config = loadConfig();
+  parseIdentity(config.identity);
   const repo = env.REPO ?? "";
   if (!REPO.test(repo)) throw new Error("REPO is missing or malformed");
-  const config = loadConfig();
   // #45: the ADRs in this checkout (the default branch), so a PR's own ADR edits never change its required reviewers.
   const adrs = loadAdrs();
   switch (env.EVENT_NAME) {

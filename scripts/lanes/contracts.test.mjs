@@ -331,11 +331,9 @@ test("a snapshot built by snapshot.mjs conforms to the schema, and it exercises 
   assert.equal(three.pr.checks[0].url, "https://github.com/owner/lanes/actions/runs/1");
 });
 
-test("a solo snapshot has the profile but no ownerApproved, and still conforms", () => {
-  const s = builtSnapshot({ profile: "solo" });
-  assert.equal(schemaAccepts(snapshotSchema, s), true);
-  assert.equal(s.profile, "solo");
-  assert.equal("ownerApproved" in s.issues.find((i) => i.number === 3).pr, false);
+// ADR 0025: a config that is not team writes no snapshot; the command prints the refusal line instead.
+test("a solo config builds no snapshot: snapshot.mjs prints the team-required line and writes no file", () => {
+  assert.throws(() => builtSnapshot({ profile: "solo" }), /ENOENT/);
 });
 
 test("every stage snapshot.mjs can emit is in the schema's stage enum", () => {
