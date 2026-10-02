@@ -349,10 +349,45 @@ test("edge: lane.md step 7 keeps the solo `/approve` branch unchanged beside the
   assert.match(step7, /`waiting on owner \(\/approve\)`: stop right away, report "waiting on your \/approve" with the gate's reason, and\s+notify `lanes #<N>: needs \/approve: <the lanes\/gate reason>`/);
 });
 
-test("CLAUDE.md rule 9 names /approve lines under solo and code-owner review URLs under team", () => {
+test("CLAUDE.md rule 9 names each PR waiting for a code-owner review with its review link, and no /approve", () => {
   const rule9 = readFileSync("CLAUDE.md", "utf8").match(/^9\. [\s\S]*$/m)[0].replace(/\s+/g, " ");
-  assert.match(rule9, /under solo, name each PR waiting on `\/approve` with the ready `\/approve <N>` line/);
-  assert.match(rule9, /under team, name each PR waiting for a code-owner review with its URL/);
+  assert.match(rule9, /name each PR waiting for a code-owner review with its review link/);
+  assert.doesNotMatch(rule9, /solo|\/approve/);
+});
+
+// #617 (ADR 0025 part 11): the written record matches the code
+test("ADRs 0004 and 0015 are superseded by 0025; 0002, 0007 and 0019 each carry one dated 0025 note", () => {
+  for (const f of ["0004-approve-guard-accepted-risk", "0015-owner-input"]) {
+    assert.match(readFileSync(`docs/adr/${f}.md`, "utf8"), /^Status: superseded by 0025$/m);
+  }
+  for (const f of ["0002-owner-only-paths", "0007-start-guard-accepted-risk", "0019-team-identity-profile"]) {
+    const text = readFileSync(`docs/adr/${f}.md`, "utf8");
+    assert.match(text, /^Status: accepted$/m);
+    assert.equal(text.match(/^\*Amended 2026-10-02 by ADR 0025 part 11:/gm)?.length, 1, f);
+  }
+});
+
+test("USING.md and SECURITY.md carry no solo profile, /approve or /approvals text", () => {
+  for (const f of ["docs/USING.md", "docs/SECURITY.md"]) {
+    const text = readFileSync(f, "utf8").replace(/\(adr\/[^)]*\)/g, "");
+    assert.doesNotMatch(text, /\bsolo\b|\/approve|\/approvals|approve-guard/i, f);
+  }
+});
+
+test("the retire-solo history note records the owner's words, the removals with line counts, what stayed and the setup", () => {
+  const text = readFileSync("docs/history/2026-10-01-retire-solo-profile.md", "utf8");
+  assert.match(text, /I do not want to maintain it/);
+  assert.match(text, /3,546 deleted/);
+  assert.match(text, /## What stayed/);
+  assert.match(text, /app-setup\.mjs/);
+  assert.doesNotMatch(text, /[A-Za-z]:\\|\/Users\//);
+});
+
+test("CLAUDE.md rules 6 and 7 follow ADR 0025: the owner's GitHub review, the App as the one setup", () => {
+  const text = readFileSync("CLAUDE.md", "utf8").replace(/\s+/g, " ");
+  assert.match(text, /`\/plan-issues`, `\/start` and the GitHub review are the owner's/);
+  assert.match(text, /Lanes act as the App bot \(ADR 0019\)/);
+  assert.doesNotMatch(text, /solo|`\/approve`|approve guard|approve-guard/i);
 });
 
 test("lane.md step 7 reports a failed CI check by name, never a success", () => {

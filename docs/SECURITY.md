@@ -15,23 +15,21 @@ private channel in a public issue that contains no details.
 | Threat | How | ADRs |
 | --- | --- | --- |
 | A lane or model **launching lanes** (itself or others) | `start-guard.mjs` allows `start.mjs` only in the turn the owner typed a matching `/start`; `start.mjs` itself refuses without that single-use, short-lived grant; `queue.mjs` exits when it runs inside Claude | [0005](adr/0005-owner-run-lane-queue.md), [0007](adr/0007-start-guard-accepted-risk.md) |
-| A lane or model **approving itself**, and **forged owner approvals** | `approve-guard.mjs` denies commands that would post `review/owner`; `post-review.mjs owner` refuses without an unused `/approve` grant for that exact PR; every recorded owner approval produces a PR comment, so the owner is notified | [0004](adr/0004-approve-guard-accepted-risk.md) |
+| A lane or model **approving itself**, and **forged owner approvals** | Lanes act as the App bot and hold only an installation token, never the owner's; the approval is a GitHub code-owner review the bot cannot post, enforced by the ruleset | [0025](adr/0025-retire-solo-profile.md), [0019](adr/0019-team-identity-profile.md), [0021](adr/0021-team-native-code-owner-review.md) |
 | **Weakened gates**, and a PR changing its own rules | `lanes/gate` is a required status; it reads its path lists and configuration from the default branch, and verdicts and approvals count only for the PR's current head SHA (a new push invalidates them); the merge queue re-decides the gate from live inputs ([USING.md](USING.md)) | [0002](adr/0002-owner-only-paths.md) |
-| **Unreviewed changes to the files that decide what is checked and who approves** | Owner paths (`paths.owner`): any PR touching them waits for the owner's `/approve`, at every tier. Only a fail-closed structural check may waive that, and only for additive `paths.owner` entries and new whole test blocks | [0002](adr/0002-owner-only-paths.md), [0003](adr/0003-owner-only-amendment.md), [0015](adr/0015-owner-input.md) |
+| **Unreviewed changes to the files that decide what is checked and who approves** | Owner paths (`paths.owner`): any PR touching them waits for the owner's code-owner review in GitHub, at every tier | [0002](adr/0002-owner-only-paths.md), [0003](adr/0003-owner-only-amendment.md) |
 | **Untrusted issue text steering a lane** | Invariant I4: an issue a lane filed carries `lane-filed` and never becomes `ready` until the owner removes the label; auto-release was considered and rejected | [0015](adr/0015-owner-input.md), [0008](adr/0008-module-map.md) |
 | **Secrets or personal data in published files** | The `PII_PATTERNS` repository secret feeds a scan (the `security` check and the pre-push `preflight`) for personal data and absolute local paths; the dashboard publisher runs the same check on what it publishes ([ADR 0012](adr/0012-endgame-workflow.md), [0013](adr/0013-lane-metrics.md)); setup is in [USING.md](USING.md) | [0012](adr/0012-endgame-workflow.md), [0013](adr/0013-lane-metrics.md) |
 
 **Who counts as a trusted author.** Three cases ([0020](adr/0020-gate-trusts-the-lane-app-bot.md),
 [0022](adr/0022-release-lane-filed-bot-issues.md)): a human with write permission on
-the repository, or, only under the `team` identity profile, the configured App bot (`identity.app.botLogin`, matched
-exactly). The bot counts for reviewer output alone: a `review/<reviewer>` status or a verdict comment for a configured
-reviewer, never `review/owner`, which only a human with write permission can post. Any other bot, such as
-`github-actions[bot]`, counts for nothing, and under `solo` no bot does. The third case, also team only, is a
+the repository, or the configured App bot (`identity.app.botLogin`, matched exactly). The bot counts for reviewer
+output alone: a `review/<reviewer>` status or a verdict comment for a configured reviewer, never an approval. Any
+other bot, such as `github-actions[bot]`, counts for nothing. The third case is a
 lane-bot issue released by a write-access actor (not the bot) removing `lane-filed`: the issue check and the gate trust
 it as an author until someone without write access edits its body.
 
-**Approving under the `team` profile** ([0021](adr/0021-team-native-code-owner-review.md)). There is no `/approve` and no
-`review/owner`: the owner approves the PR in GitHub. The gate counts a review only if it is `APPROVED` on the PR's
+**Approving** ([0021](adr/0021-team-native-code-owner-review.md)). The owner approves the PR in GitHub. The gate counts a review only if it is `APPROVED` on the PR's
 current head commit, by a user listed in the default branch's `.github/CODEOWNERS`, and not by the PR author or the lane
 bot; a read failure or a CODEOWNERS file with no user entries means pending. Owner work under team goes through lanes,
 so the bot is the author and the owner is the approver.

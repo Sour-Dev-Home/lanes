@@ -31,37 +31,36 @@
    An issue labelled `model:opus` launches on Opus whatever its tier's model, in `--auto` and in the queue too (a resumed lane as well). Use it for the issues
    where a subtle bug is a security hole: security-critical parsing, guards, and contracts the reviewers found hard.
    Any other `model:*` label is ignored and logged as `#N: ignored label model:<x>`.
-   Team lanes (identity profile `team`) run without MCP servers: `start.mjs` launches them with `--strict-mcp-config`
+   Lanes run without MCP servers: `start.mjs` launches them with `--strict-mcp-config`
    and the lane's settings deny `mcp__github` and `mcp__*` (a best-effort backstop behind `--strict-mcp-config`:
    `mcp__<server>` is the documented permission form, the bare wildcard is not). A user-level MCP server (a GitHub one, say) holds your own token, so a lane
-   that loaded it could open PRs or review as you and defeat the bot identity. Solo lanes are unchanged.
-   The start guard (`scripts/lanes/start-guard.mjs`, two hooks in `.claude/settings.json` next to the approve guard)
+   that loaded it could open PRs or review as you and defeat the bot identity.
+   The start guard (`scripts/lanes/start-guard.mjs`, two hooks in `.claude/settings.json`)
    enforces that: it lets `start.mjs` run only for the same issue numbers or the same `--auto` form, within 15 minutes
    of you typing `/start <N ...>`, `/start --auto` or `/start --auto --go` in that session (a `/start --auto` never
    allows `--go`), and it denies a direct `claude --bg` in every session and permission mode. `start.mjs` checks the
    same grant itself and deletes it after its launches, so it runs once per `/start` however it was reached (ADR 0007).
    **Recommended: keep the queue running**, and use `/start` (above) as the manual alternative when you want to pick
-   the issues yourself. Run `/approvals` about twice a day and approve in one or two batches: the queue prints
-   each waiting PR with how long it has waited, and `/approvals` lists them oldest first with a ready `/approve` line.
+   the issues yourself. Review in GitHub about twice a day, in one or two batches: the queue prints
+   each waiting PR with how long it has waited, oldest first.
    `node scripts/lanes/queue.mjs` in your own terminal (never from Claude: it exits 2
    when `CLAUDECODE` is set, and the start guard denies it in every session). It takes no arguments. Every 3 minutes
    it cleans up merged lanes, re-reads every open `ready` issue, the open PRs and the sessions, and launches what
    `/start --auto --go` would, under the same `start.maxLanes`, `start.softPaths` and `start.models`; an issue made
    `ready` mid-run joins on the next tick, and one skipped for an overlap or the cap is tried again. Each line is
-   time-stamped. The PRs waiting on you (`/approve`, a failing check or review, a failing gate) print as one block,
+   time-stamped. The PRs waiting on you (a code-owner review, a failing check or review, a failing gate) print as one block,
    oldest first, in each tick where one started waiting, stopped or changed its reason and in no other: each line has the
-   PR's number, title, how long it has waited and what you must decide, and the block ends with one `/approve N M K`
-   line (at most 10 numbers, the PRs waiting on `/approve`). The queue keeps working the rest. A failed launch is printed and that issue is not tried
+   PR's number, title, how long it has waited and what you must decide. The queue keeps working the rest. A failed launch is printed and that issue is not tried
    again until you restart the queue. A GitHub read that fails is retried after 1, 2, 4, 8 and then at most 15
    minutes (one line names the delay; a success resets it), and never ends the queue. After three idle ticks in a row
    (nothing in flight, nothing to launch) the tick lengthens from 3 to 15 minutes and the queue keeps polling, printing
    nothing new; picked work returns it to 3 minutes (ADR 0026). Ctrl-C stops it at any time (exit 0). Each lane it
    launches gets the same detached reaper `/start` starts (ADR 0010, logged to `.lanes/reap/<N>.log`), so a lane that
    merges after the queue exits is still cleaned up; a reaper that fails to start prints one line and the queue goes on.
-   **The queue works under the team profile** when you run it in a shell with `LANES_APP_KEY_FILE` set: it launches
+   **The queue acts as the App bot**: it reads the App's key from `~/.lanes/<slug>.pem` (or `LANES_APP_KEY_FILE`) and launches
    each lane through the same launcher as `/start` (`launchLane` in `start.mjs`), so a queued team lane gets its own
    minted token, the settings file, `--strict-mcp-config`, the bot commit identity and the token refresher, and never
-   your credentials. When that preparation fails (no `LANES_APP_KEY_FILE`, a mint failure, no bot user id) the queue
+   your credentials. When that preparation fails (no key file, a mint failure, no bot user id) the queue
    prints `#N: launch failed: team profile: <reason>`, launches nothing for that issue and does not try it again.
    **The queue restarts itself after a lanes merge (ADR 0026).** The command you type is a thin supervisor that runs
    the queue as one child process (`LANES_QUEUE_CHILD=1`); never more than those two processes exist. The child records
@@ -81,18 +80,14 @@
    A `Notification` hook (`scripts/lanes/notify-hook.mjs`) pops a notification when a lane stops at a permission
    prompt or needs input (with the `claude attach <id>` to reach it), or finishes with its PR waiting on you or failing.
    It is a desktop notification on the machine running the lane only, never a phone or external push.
-4. **Approve with `/approve <pr>`** when a PR waits on you: read its "Needs the owner" and the diff; typing the command
-   is the approval, and the merge queue does the rest. The approve guard (`scripts/lanes/approve-guard.mjs`, two hooks
-   in `.claude/settings.json`) lets `post-review.mjs owner` run without a prompt only for that PR, once, in the turn
-   where you typed `/approve <pr>`. It denies that command everywhere else, including lanes and auto mode.
-   **Under the team profile there is no `/approve`** ([ADR 0021](adr/0021-team-native-code-owner-review.md)): approve
-   the PR in GitHub with a review from a user listed in `.github/CODEOWNERS`. The gate reads that review and counts it
-   only if it is on the PR's current head commit and is not by the PR author or the lane bot, so any push after the review
-   needs a fresh one. It waits for a review in the same cases `/approve` waits (owner-only path, non-empty "Needs the
-   owner", a full-tier blocker, a quick-tier contract change). Owner work under team goes through lanes, so the bot is
-   the author and you approve natively; a PR you push yourself cannot be approved by you.
+4. **Approve in GitHub** when a PR waits on you: read its "Needs the owner" and the diff, then review it as a user
+   listed in `.github/CODEOWNERS` ([ADR 0021](adr/0021-team-native-code-owner-review.md)). The gate reads that review
+   and counts it only if it is on the PR's current head commit and is not by the PR author or the lane bot, so any push
+   after the review needs a fresh one. It waits for a review when the diff touches an owner-only path, the "Needs the
+   owner" is non-empty, a full-tier blocker is open or a quick-tier contract changes. Owner work goes through lanes, so
+   the bot is the author and you approve natively; a PR you push yourself cannot be approved by you.
 5. **At night** a scheduled cloud session runs `/night`: up to 3 skip or quick tasks, merged only if CI finds them
-   unattended-eligible. In the morning read the digest comment on the "Lanes digest" issue, and `/approve` the rest.
+   unattended-eligible. In the morning read the digest comment on the "Lanes digest" issue, and review the rest in GitHub.
 6. **Weekly `/health`** files issues for stale work, a red main and flaky checks. When the queue or a lane misbehaves,
    [docs/OPERATIONS.md](OPERATIONS.md) has one "if X happens, do Y" page per situation.
 7. **Clean up merged lanes** with `node scripts/lanes/cleanup.mjs` (`--dry-run` to see the plan first). It removes
@@ -113,8 +108,8 @@ default branch, so a PR can't change its own rules.
 | Class | Paths (see `lanes.config.json`) | What it requires |
 | --- | --- | --- |
 | skip (`paths.skip`) | docs, `*.md`, tests | Allowed at `tier:skip`, with no reviewers, only if *every* file is a skip path and none is sensitive. |
-| sensitive (`paths.sensitive`) | `.github/`, `.claude/`, `.githooks/`, `scripts/lanes/`, `lanes.config.json`, package and lock files, `vendor/`, `CLAUDE.md`, auth, secrets, deploy, `.env` | The security-reviewer, at quick and full; not allowed at `tier:skip`. It does not by itself need `/approve`. |
-| owner-only (`paths.owner`) | the gate and trust code and their tests, `install`/`setup-repo`/`new-project`, `.claude/settings.json`, `.github/`, `.githooks/`, `lanes.config.json`, `.claude/agents/`, `.claude/commands/{lane,night,approve}.md`, `docs/adr/`, package and lock files, `vendor/`, `CLAUDE.md`, `.gitattributes`, `scripts/preflight.mjs`, `.env`, auth, secrets, deploy | `/approve`, at every tier, however clean the reviews. Adds no reviewer. |
+| sensitive (`paths.sensitive`) | `.github/`, `.claude/`, `.githooks/`, `scripts/lanes/`, `lanes.config.json`, package and lock files, `vendor/`, `CLAUDE.md`, auth, secrets, deploy, `.env` | The security-reviewer, at quick and full; not allowed at `tier:skip`. It does not by itself need the owner's review. |
+| owner-only (`paths.owner`) | the gate and trust code and their tests, `install`/`setup-repo`/`new-project`, `.claude/settings.json`, `.github/`, `.githooks/`, `lanes.config.json`, `.claude/agents/`, `.claude/commands/{lane,night}.md`, `docs/adr/`, package and lock files, `vendor/`, `CLAUDE.md`, `.gitattributes`, `scripts/preflight.mjs`, `.env`, auth, secrets, deploy | A code-owner review in GitHub, at every tier, however clean the reviews. Adds no reviewer. |
 
 A PR merges on green checks alone only when it touches no owner-only path, its "Needs the owner" says `nothing`,
 and its tier's rule holds:
@@ -136,8 +131,8 @@ reviewer's brief (`.claude/agents/<reviewer>.md`), the test-hunter's two checkli
 governing the PR's files, and by a changed-file list of 300 or more files. A rebase or force-push drops the earlier commits, so it always needs a
 fresh review.
 
-Everything else waits for `/approve`, and the `lanes/gate` status says why (for example
-`waiting on owner (/approve) (owner-only path)`). CI decides this from the diff and the PR's
+Everything else waits for your code-owner review, and the `lanes/gate` status says why (for example
+`waiting for a code-owner review in GitHub (owner-only path)`). CI decides this from the diff and the PR's
 comments; a lane cannot grant it to itself.
 
 ## Contracts, in one place
@@ -213,7 +208,7 @@ comment for a problem that is still active, once. With several open `lanes-healt
 ## When a team lane changes a workflow file
 
 Under the team profile a lane cannot push `.github/workflows/` (the App has no `workflows` permission; see
-[ADR 0023](adr/0023-workflow-changes-owner-web-editor.md) and `docs/SECURITY.md`). Solo is unchanged. The steps are all
+[ADR 0023](adr/0023-workflow-changes-owner-web-editor.md) and `docs/SECURITY.md`). The steps are all
 in the browser:
 
 1. **The note.** `/start` and the queue print `#N: Scope names .github/workflows/: the lane opens its PR without the
@@ -284,8 +279,7 @@ Free, environments have no required reviewers: skip both steps and keep the copy
   failure, and a lane can enable auto-merge itself. No check inside the repo can prevent this while the gate and the
   lanes share an identity. The fix is to post `lanes/gate` from a dedicated GitHub App and pin the ruleset's
   `integration_id` to that App; until then, treat every lane as trusted, keep untrusted text away from lanes, and read
-  any PR that adds or changes a workflow. Never allow `post-review.mjs owner` in any settings file, and never run
-  `/approve` from a lane or a schedule.
+  any PR that adds or changes a workflow. Never review as the owner from a lane or a schedule.
 - **Silenced errors.** Never `2>/dev/null` a git, gh, npm or test command; use `set -o pipefail` with `tail`.
 - **Local servers.** Lanes run tests, not dev servers. A lane that needs a running server (UI review) asks the owner.
 - **Updating vendored skills.** Never pull agent-skills from upstream main. Pick a commit, re-read the diff for anything that fetches, installs, handles secrets or overrides rules, and change it in a tier-full PR the owner approves.
@@ -396,12 +390,9 @@ publishes next to `snapshot.json`. Enable Pages once per repository: Settings, P
 the next run of the `dashboard` workflow the page is at `https://<owner>.github.io/<repo>/`.
 
 **The site is public**, even for a private repository: anyone with the URL can read every task title, stage and
-blocker reason in the snapshot. The page only reads, and its "waiting on you" list gives you an `/approve N M K` line
-to copy; approving still happens in the owner session.
-
-**Under the team profile** ([ADR 0024](adr/0024-dashboard-review-links-under-team.md)) the page has no `/approve` line.
-Each waiting PR instead shows a "Review in GitHub" link to its files, the gate's reason, and whether your review covers
+blocker reason in the snapshot. The page only reads, and its "waiting on you" list shows each waiting PR ([ADR 0024](adr/0024-dashboard-review-links-under-team.md)):
+each one shows a "Review in GitHub" link to its files, the gate's reason, and whether your review covers
 the current head, with the note "Approve in GitHub; the gate re-runs on your review." Task cards link to their issue and
 PR, and a failing check links to its run. The snapshot carries the profile, the repository name, one yes/no per PR for
 your review (never a login) and only check links inside this repository; the page checks every link again before it
-makes one, and shows anything else as plain text. Under solo nothing changes.
+makes one, and shows anything else as plain text.
