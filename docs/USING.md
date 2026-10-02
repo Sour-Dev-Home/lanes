@@ -252,6 +252,29 @@ in the browser:
 | A test command that runs in under a minute locally | the project's `package.json` | Lanes run narrow tests constantly |
 | `verify` also triggers on `push: branches: [main]` | the project's `verify.yml` | Otherwise nothing runs on main and `delivery-metrics`, `/night` and `/health` have no data to read |
 
+## Setting up the lanes GitHub App (once per owner)
+
+Lanes act as a GitHub App, not as you (ADR 0019, 0025). From the repository's root, run:
+
+`node scripts/lanes/app-setup.mjs [--org <org>]`
+
+1. It prints a `http://127.0.0.1:<port>/` address; open it and press **Continue to GitHub**. `--org` creates the App
+   in that organisation instead of your account.
+2. **Button one**: GitHub's "Create GitHub App". The script receives the key, saves it to `~/.lanes/<slug>.pem` (owner
+   only, outside every repository) and sends you on to the install page.
+3. **Button two**: install the App on this repository. The script then writes `identity` into `lanes.config.json`,
+   keeping every other key. It prints no key or token, and refuses a callback whose `state` it did not generate.
+4. It then runs the read-only checks (`node scripts/lanes/identity-check.mjs --setup-checks` repeats them any time) and
+   prints, for each missing item, the GitHub settings link and the line to add. Do those in GitHub's UI:
+   - **CODEOWNERS**: commit `.github/CODEOWNERS` in a PR with the printed line (`* @<you>`).
+   - **The ruleset**: from the printed settings link, add a branch ruleset on `main` that requires a pull request with
+     **Require review from Code Owners**. Optionally add a tag ruleset restricting tag creation to you.
+   - **The install**: if the App is not on this repository, use the printed install link.
+
+`/start` and the queue find the key at `~/.lanes/<slug>.pem` (the slug is `botLogin` without `[bot]`), so no environment
+variable is needed. Setting `LANES_APP_KEY_FILE` still overrides it. A missing key file stops the launch with a message
+naming the path.
+
 ## Adopting it in another repository
 
 A new project, in one command (owner), run from this lanes clone:

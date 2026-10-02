@@ -6,7 +6,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BUDGET_DEFAULTS, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, inFlightIssues, launchArgs, isLaneGhDir, launchEnv, main as runStart, makeRemint, markRunning, parseSessionId, planStart, refreshArgs, refreshLoop, startConfig, teamLaneEnv, teamLaneSettings, TEAM_SCRUBBED_NAMES, botCommitIdentity } from "./start.mjs";
 import { GRANT_TTL_MS, runHook } from "./start-guard.mjs";
-import { launchLane, scopeNamesWorkflows, teamSteps } from "./start.mjs";
+import { launchLane, resolveKeyFile, scopeNamesWorkflows, teamSteps } from "./start.mjs";
+
+// #612: the App key defaults to ~/.lanes/<slug>.pem; an explicit LANES_APP_KEY_FILE wins.
+const BOT = { app: { botLogin: "my-lanes[bot]" } };
+test("resolveKeyFile defaults to ~/.lanes/<slug>.pem with the slug from botLogin", () => {
+  assert.equal(resolveKeyFile({ env: {}, identity: BOT, home: "/h" }), join("/h", ".lanes", "my-lanes.pem"));
+});
+test("resolveKeyFile: an explicit LANES_APP_KEY_FILE wins", () => {
+  assert.equal(resolveKeyFile({ env: { LANES_APP_KEY_FILE: "/k.pem" }, identity: BOT, home: "/h" }), "/k.pem");
+});
+test("edge: resolveKeyFile with an empty override, no identity or no botLogin", () => {
+  assert.equal(resolveKeyFile({ env: { LANES_APP_KEY_FILE: "" }, identity: BOT, home: "/h" }), join("/h", ".lanes", "my-lanes.pem"));
+  assert.equal(resolveKeyFile({ env: {}, identity: undefined, home: "/h" }), undefined);
+  assert.equal(resolveKeyFile({ env: {}, identity: { app: { id: 1 } }, home: "/h" }), undefined);
+  assert.equal(resolveKeyFile({ env: {}, identity: { app: { botLogin: "[bot]" } }, home: "/h" }), undefined);
+});
 
 const CAP = START_DEFAULTS.maxLanes;
 
@@ -2331,7 +2346,7 @@ test("team: a refresher that cannot start is reported and keeps the launch", () 
 
 for (const [name, opts, step] of [
   ["no key file configured", { key: null }, "LANES_APP_KEY_FILE is not set"],
-  ["an unreadable key file", { unreadable: true }, "key file unreadable"],
+  ["an unreadable key file", { unreadable: true }, "key file unreadable: /keys/app.pem"],
   ["an unknown repository", { noRepo: true }, "repository name unknown"],
   ["a config directory that cannot be made", { dirFail: true }, "could not create the lane's config directory"],
   ["settings that cannot be delivered", { settingsFail: true }, "could not deliver the team settings to the lane"],
@@ -2471,7 +2486,7 @@ test("the refresher rewrites the lane's hosts.yml through the injected app-token
 test("edge: a re-mint with no key file set or an unreadable one fails by step and never mints or writes", async () => {
   for (const [keyFile, readFile, step] of [
     [() => undefined, () => "PEM", /LANES_APP_KEY_FILE is not set/],
-    [() => "/k", () => { throw new Error("EACCES: /k"); }, /^Error: key file unreadable$/],
+    [() => "/k", () => { throw new Error("EACCES: /k"); }, /^Error: key file unreadable: \/k$/],
   ]) {
     const calls = [];
     const remint = makeRemint({ args: { app: 1, installation: 2, repo: "r", dir: "/d" }, keyFile, readFile, mint: async () => calls.push("mint"), writeHosts: () => calls.push("write") });

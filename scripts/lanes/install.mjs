@@ -78,6 +78,7 @@ export const MANIFEST = [
   "scripts/lanes/notify-hook.mjs",
   "scripts/lanes/blockers.mjs",
   "scripts/lanes/identity-check.mjs",
+  "scripts/lanes/app-setup.mjs",
   "scripts/lanes/handover.mjs",
   "scripts/lanes/owner-diff.mjs",
   "scripts/lanes/pick.mjs",
