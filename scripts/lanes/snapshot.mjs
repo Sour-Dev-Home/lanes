@@ -97,7 +97,7 @@ function prBlockers(stage, note) {
     case "failing":
       return note.replace(/^failing: /, "").split(", ").map((name) => ({ kind: "check", ref: clean(name), reason }));
     case "owner":
-      return [{ kind: "owner", ref: "review/owner", reason }];
+      return [{ kind: "owner", ref: "code-owner review", reason }];
     case "conflict":
       return [{ kind: "owner", ref: "merge conflict", reason }];
     case "gate":
@@ -114,7 +114,7 @@ function prBlockers(stage, note) {
  * `issues` every open issue with body and labels; `mergeQueue` and `gateDescriptions` are the outputs of status.mjs's
  * mergeQueueEntries and gateDescriptions.
  */
-export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), softPaths = DEFAULT_SOFT_PATHS, reviewers = REVIEWERS, generatedAt, profile, repo: repoName, ownerApprovals = new Map() }) {
+export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: gates = new Map(), softPaths = DEFAULT_SOFT_PATHS, reviewers = REVIEWERS, generatedAt, repo: repoName, ownerApprovals = new Map() }) {
   const repo = validRepo(repoName);
   const queuePosition = new Map(mergeQueue.map((e) => [e.number, e.position]));
   const prOf = new Map();
@@ -129,8 +129,7 @@ export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: 
     .sort((a, b) => a.number - b.number);
   const listedNumbers = new Set(listed.map((i) => i.number));
 
-  const out = { version: 0, generatedAt, issues: [], edges: [] };
-  if (profile === "solo" || profile === "team") out.profile = profile;
+  const out = { version: 0, generatedAt, profile: "team", issues: [], edges: [] };
   if (repo !== undefined) out.repo = repo;
   for (const issue of listed) {
     const labels = issue.labels.map((l) => l.name);
@@ -144,8 +143,8 @@ export function buildSnapshot({ prs, issues, mergeQueue = [], gateDescriptions: 
       item.stage = stage === "conflict" ? "owner" : stage;
       item.blockedBy = prBlockers(stage, note);
       item.pr = { number: pr.number, headSha: String(pr.headRefOid ?? "").toLowerCase(), checks: checksOf(pr, repo) };
-      // ADR 0024: a boolean under team only; an unread or missing answer counts as not approved.
-      if (profile === "team") item.pr.ownerApproved = ownerApprovals.get(pr.number) === true;
+      // ADR 0024: a boolean; an unread or missing answer counts as not approved.
+      item.pr.ownerApproved = ownerApprovals.get(pr.number) === true;
       const criteria = verdictCriteria(currentVerdicts(pr.comments, item.pr.headSha, reviewers), item.pr.headSha);
       if (criteria.length) item.criteria = criteria;
     } else {
@@ -297,9 +296,8 @@ function main(argv = process.argv.slice(2)) {
   const refusal = identityRefusal(() => readFileSync("lanes.config.json", "utf8"));
   if (refusal) return console.log(refusal);
   const identity = configuredIdentity();
-  const profile = identity?.profile;
   if (from) {
-    const snapshot = buildSnapshot({ ...parseInput(readFileSync(from, "utf8")), softPaths: configuredSoftPaths(), profile });
+    const snapshot = buildSnapshot({ ...parseInput(readFileSync(from, "utf8")), softPaths: configuredSoftPaths() });
     if (out) writeSnapshot(snapshot, out);
     else console.log(JSON.stringify(snapshot, null, 2));
     return;
@@ -317,9 +315,9 @@ function main(argv = process.argv.slice(2)) {
   } catch {
     repo = undefined; // links are optional: the snapshot is still useful without them
   }
-  // Team only, and only for same-repo PRs (the ones the snapshot lists).
-  const ownerApprovals = profile === "team" && repo !== undefined ? readOwnerApprovals({ prs: prs.filter((p) => p.isCrossRepository === false), repo, run: ghText, identity }) : undefined;
-  const snapshot = buildSnapshot({ prs, issues, mergeQueue: mergeQueueEntries(reply), gateDescriptions: gateDescriptions(reply), softPaths: configuredSoftPaths(), reviewers: reviewerNames(loadConfig()), generatedAt: new Date().toISOString(), profile, repo, ownerApprovals });
+  // Only for same-repo PRs (the ones the snapshot lists).
+  const ownerApprovals = repo !== undefined ? readOwnerApprovals({ prs: prs.filter((p) => p.isCrossRepository === false), repo, run: ghText, identity }) : undefined;
+  const snapshot = buildSnapshot({ prs, issues, mergeQueue: mergeQueueEntries(reply), gateDescriptions: gateDescriptions(reply), softPaths: configuredSoftPaths(), reviewers: reviewerNames(loadConfig()), generatedAt: new Date().toISOString(), repo, ownerApprovals });
   if (out) writeSnapshot(snapshot, out);
   else console.log(JSON.stringify(snapshot, null, 2));
 }

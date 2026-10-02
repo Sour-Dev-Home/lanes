@@ -16,7 +16,7 @@ import { issuePaths } from "./paths.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
 import { appendStarts, budgetConfig, inFlightIssues, startDecisions, deadLaneSession, launchLane, localLaunchEnv, reaperLog, START_DEFAULTS, startConfig, teamSteps } from "./start.mjs";
-import { approveLine, formatAge, gateDescriptions, gateSince, liveLanes, prStage, stalledLanes } from "./status.mjs";
+import { formatAge, gateDescriptions, gateSince, liveLanes, prStage, stalledLanes } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
 // waiting on owner.
@@ -106,14 +106,14 @@ export function planTick({ issues = [], prs = [], sessions = [], maxLanes = STAR
 
 /**
  * #383: the owner's digest of the lane PRs waiting on them. Pure. One block: a header, a line per PR (oldest first) with
- * its number, title, age since it began waiting and what the owner must decide, then one `/approve N M K` line
- * (at most 10 numbers) for the PRs that wait on /approve. Empty when nothing waits. A PR's age runs from its gate
+ * its number, title, age since it began waiting and what the owner must decide, with the PR's files URL when it waits
+ * for the owner's review. Empty when nothing waits. A PR's age runs from its gate
  * status's time (`gateSince`), else from `seen` (PR number → ms it was first seen waiting), else from `now`.
  * @param {{ number: number, title?: string, gateSince?: number }[]} prs the snapshot's open PRs
  * @param {{ number: number, reason: string }[]} waiting planTick's `waiting`
  * @returns {string[]} lines, without a time stamp
  */
-export function waitingDigest(prs, waiting, now, seen = new Map(), team = false) {
+export function waitingDigest(prs, waiting, now, seen = new Map()) {
   const byNumber = new Map(prs.map((pr) => [pr.number, pr]));
   const rows = waiting.map((w) => {
     const pr = byNumber.get(w.number) ?? {};
@@ -125,13 +125,11 @@ export function waitingDigest(prs, waiting, now, seen = new Map(), team = false)
   const plain = (text) => String(text ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
   const title = (pr) => plain(pr.title);
   const ownerWait = (r) => prStage(r.pr, undefined, r.pr.gateDescription).stage === "owner";
-  // Under team ADR 0021 retired /approve: a PR waiting on the owner's review gets its GitHub files URL instead.
-  const reviewUrl = (r) => (team && ownerWait(r) && typeof r.pr.url === "string" && r.pr.url.startsWith("https://") ? ` — ${plain(r.pr.url)}/files` : "");
-  const approvable = team ? [] : rows.filter(ownerWait).map((r) => r.number);
+  // ADR 0021: a PR waiting on the owner's review gets its GitHub files URL.
+  const reviewUrl = (r) => (ownerWait(r) && typeof r.pr.url === "string" && r.pr.url.startsWith("https://") ? ` — ${plain(r.pr.url)}/files` : "");
   return [
     `waiting on you (${rows.length}):`,
     ...rows.map((r) => `  #${r.number} ${title(r.pr)} — waiting ${formatAge(r.since, now)} — ${plain(r.reason)}${reviewUrl(r)}`),
-    ...(approvable.length ? [approveLine(approvable)] : []),
   ];
 }
 
@@ -416,7 +414,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     const current = new Map(plan.waiting.map((w) => [w.number, w.reason]));
     for (const line of plan.lines) if (!WAIT_LINE.test(line)) say(line);
     const changed = current.size !== waits.size || [...current].some(([n, r]) => waits.get(n) !== r);
-    if (changed) for (const line of waitingDigest(snapshot.prs, plan.waiting, now(), firstWaiting, identity?.profile === "team")) say(line);
+    if (changed) for (const line of waitingDigest(snapshot.prs, plan.waiting, now(), firstWaiting)) say(line);
     for (const n of [...firstWaiting.keys()]) if (!current.has(n)) firstWaiting.delete(n);
     for (const n of current.keys()) if (!firstWaiting.has(n)) firstWaiting.set(n, now());
     waits.clear();

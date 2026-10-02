@@ -696,27 +696,24 @@ export function launchLane(n, deps, { tier, models, labels, identity, root, cwd 
   const notes = ignored.map((l) => `#${n}: ignored label ${l.replace(/[\x00-\x1f\x7f-\x9f]/g, "?")}`);
   if (envNote) notes.push(`#${n}: ${envNote}`);
   // ADR 0023 part 5: informational only; the lane's own diff check acts, and the issue still launches.
-  if (identity?.profile === "team" && scopeNamesWorkflows(scope)) notes.push(WORKFLOW_NOTE(n));
-  let lane = null;
-  if (identity?.profile === "team") {
-    lane = prepareTeam(n, identity, deps, env ?? process.env);
-    if (lane.failed) return { id: null, failed: true, lines: [...notes, `#${n}: launch failed: team profile: ${lane.failed}`] };
-  }
-  const launchEnvFor = lane ? lane.env : env;
+  if (scopeNamesWorkflows(scope)) notes.push(WORKFLOW_NOTE(n));
+  const lane = prepareTeam(n, identity, deps, env ?? process.env);
+  if (lane.failed) return { id: null, failed: true, lines: [...notes, `#${n}: launch failed: team profile: ${lane.failed}`] };
+  const launchEnvFor = lane.env;
   // One attempt only: a launch that printed no id may still have started, and a retry could start it twice.
   let id = null;
   let why = "no session id in output";
   try {
-    id = parseSessionId(deps.claude(launchArgs(n, { tier, models, opus, settings: lane?.settings, strictMcp: Boolean(lane?.settings) }), launchEnvFor ? { cwd, env: launchEnvFor } : { cwd }));
+    id = parseSessionId(deps.claude(launchArgs(n, { tier, models, opus, settings: lane.settings, strictMcp: Boolean(lane.settings) }), launchEnvFor ? { cwd, env: launchEnvFor } : { cwd }));
   } catch (err) {
     why = reason(err);
   }
   if (!id) {
-    if (lane) removeQuietly(deps.team, lane.dir);
+    removeQuietly(deps.team, lane.dir);
     return { id: null, failed: true, lines: [...notes, `#${n}: launch failed: ${why}, not retried`] };
   }
   const reaperFailed = startReaper(n, id, deps, root);
-  const refresherFailed = lane ? startRefresher(n, id, lane, identity, deps, root) : null;
+  const refresherFailed = startRefresher(n, id, lane, identity, deps, root);
   const marked = markRunning(n, deps);
   return { id, failed: false, lines: [...notes, `#${n} → ${id}`, ...(reaperFailed ? [reaperFailed] : []), ...(refresherFailed ? [refresherFailed] : []), ...(marked.includes(": label not set: ") ? [marked] : [])] };
 }

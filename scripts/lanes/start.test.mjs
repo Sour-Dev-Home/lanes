@@ -2656,13 +2656,13 @@ const laneTeam = (over = {}) => ({
   ...over,
 });
 
-test("launchLane (#556): solo launches once from root with the given env, starts the reaper and marks the issue", () => {
-  const t = laneDeps();
-  const env = { PATH: "/bin" };
-  const r = launchLane(4, t.deps, { tier: "full", models: { full: "sonnet" }, labels: [], root: "/repo", env });
+test("launchLane (#556): team launches once from root, starts the reaper and the refresher and marks the issue", () => {
+  const t = laneDeps({ team: laneTeam() });
+  const r = launchLane(4, t.deps, { tier: "full", models: { full: "sonnet" }, labels: [], identity: TEAM, root: "/repo", env: { PATH: "/bin" } });
   assert.deepEqual(r, { id: "s-1", failed: false, lines: ["#4 → s-1"] });
-  assert.deepEqual(t.launches, [{ args: launchArgs(4, { tier: "full", models: { full: "sonnet" } }), opts: { cwd: "/repo", env } }]);
-  assert.deepEqual(t.spawned.map((a) => a[0]), [join("/repo", "scripts", "lanes", "reap.mjs")]);
+  assert.equal(t.launches.length, 1);
+  assert.equal(t.launches[0].opts.cwd, "/repo");
+  assert.deepEqual(t.spawned.map((a) => a[0]).filter((p) => p.endsWith("reap.mjs")), [join("/repo", "scripts", "lanes", "reap.mjs")]);
   assert.deepEqual(t.labels, [["issue", "edit", "4", "--add-label", "lane:running"]]);
 });
 
@@ -2693,10 +2693,10 @@ test("launchLane (#556): edge: cwd launches the session elsewhere while the reap
   for (const args of t.spawned) assert.ok(args[0].startsWith(join("/repo", "scripts", "lanes")), args[0]);
 });
 
-test("launchLane (#556): edge: no env launches with only cwd; ignored labels and the env note lead the lines", () => {
-  const t = laneDeps();
-  const r = launchLane(4, t.deps, { labels: ["model:haiku"], root: "/repo", envNote: "PATH note" });
-  assert.deepEqual(t.launches[0].opts, { cwd: "/repo" });
+test("launchLane (#556): edge: with no env the lane still launches from the process environment; ignored labels and the env note lead the lines", () => {
+  const t = laneDeps({ team: laneTeam() });
+  const r = launchLane(4, t.deps, { labels: ["model:haiku"], identity: TEAM, root: "/repo", envNote: "PATH note" });
+  assert.equal(t.launches[0].opts.cwd, "/repo");
   assert.deepEqual(r.lines, ["#4: ignored label model:haiku", "#4: PATH note", "#4 → s-1"]);
 });
 
@@ -2725,11 +2725,9 @@ test("launchLane (#595): team with a workflow scope path prints the note first a
   assert.equal(t.launches.length, 1);
 });
 
-test("launchLane (#595): team without a workflow path, and solo with one, print no note", () => {
+test("launchLane (#595): team without a workflow path prints no note", () => {
   const a = laneDeps({ team: laneTeam() });
   assert.deepEqual(launchLane(4, a.deps, { labels: [], identity: TEAM, root: "/repo", env: {}, scope: ["scripts/lanes/x.mjs"] }).lines, ["#4 → s-1"]);
-  const b = laneDeps();
-  assert.deepEqual(launchLane(4, b.deps, { labels: [], root: "/repo", scope: [".github/workflows/ci.yml"] }).lines, ["#4 → s-1"]);
 });
 
 test("launchLane (#595): edge: no scope, a bare workflows directory and a look-alike path", () => {

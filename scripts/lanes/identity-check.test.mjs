@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { identityCheck } from "./identity-check.mjs";
+import { TEAM_REQUIRED_MESSAGE } from "./lib.mjs";
 
 const TOKEN = "ghs_FAKEfakeFAKEfakeFAKEfakeFAKEfake0123";
 const OTHER = "gho_OWNERownerOWNERownerOWNERowner9876";
@@ -54,17 +55,21 @@ function assertNoSecret(line) {
   }
 }
 
-test("solo prints only the profile and exits 0, running no command", () => {
-  const r = check({ config: JSON.stringify({ identity: { profile: "solo" } }) });
-  assert.equal(r.code, 0);
-  assert.equal(r.line, '{"profile":"solo"}');
-  assert.equal(r.calls.length, 0);
+test("a solo profile or a config without an identity key is refused with the team-required message, running no command", () => {
+  for (const config of [JSON.stringify({ identity: { profile: "solo" } }), "{}"]) {
+    const r = check({ config });
+    assert.equal(r.code, 1);
+    assert.equal(r.parsed.profile, null);
+    assert.equal(r.parsed.error, TEAM_REQUIRED_MESSAGE);
+    assert.equal(r.calls.length, 0);
+  }
 });
 
-test("a config without an identity key is solo", () => {
-  const r = check({ config: "{}" });
-  assert.equal(r.code, 0);
-  assert.equal(r.line, '{"profile":"solo"}');
+test("edge: an unreadable config is refused with the generic error, running no command", () => {
+  const r = check({ config: "not json" });
+  assert.equal(r.code, 1);
+  assert.match(r.parsed.error, /unreadable or its identity invalid/);
+  assert.equal(r.calls.length, 0);
 });
 
 test("a passing team run prints one JSON line with every check passing", () => {
