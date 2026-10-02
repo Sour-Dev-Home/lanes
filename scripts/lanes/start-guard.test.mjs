@@ -2826,6 +2826,13 @@ test("#642 criterion 2: an unquoted heredoc with a live expansion, a heredoc fed
   denied("X=queue.mjs; cat > plan.md <<EOF\nnode scripts/lanes/$X\nEOF");
   for (const head of ["bash", "sh", "node -e 'x'", "node", "python -", "cat | bash", "cat | sh", "tee >(bash)", "tee $(echo f)"]) denied(heredoc(head, NAMING[0]));
   denied(heredoc("cat", NAMING[0], " | tee plan.md | bash"));
+  denied(`echo ${NAMING[0]} | sh`);
+  denied("echo queue.mjs | sh");
+  denied(`echo x <<'EOF' | bash\n${NAMING[0]}\nEOF`);
+  denied(`printf x <<'EOF' | bash\n${NAMING[0]}\nEOF`);
+  denied(heredoc("cat f | tee plan.md", NAMING[0]));
+  denied(heredoc("tee plan.md 2>&1", NAMING[0]));
+  denied(`tee plan.md <<'EOF' | sh\n${NAMING[0]}\nEOF`);
   denied(heredoc("cat > plan.md", NAMING[0], "\nbash plan.md"));
   denied(heredoc("cat > plan.md", NAMING[0], "\nnode scripts/lanes/queue.mjs"));
   denied(heredoc("cat > plan.md", NAMING[1], "\nnode scripts/lanes/start.mjs 12"));
