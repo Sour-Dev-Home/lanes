@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { carry, evaluatePr, main, makeGhApi } from "./gate.mjs";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TEAM_REQUIRED_MESSAGE, compileConfig, parseAdr, parseIdentity, pendingFileHash } from "./lib.mjs";
+import { TEAM_REQUIRED_MESSAGE, classifyFiles, compileConfig, loadAdrs, loadConfig, parseAdr, parseCodeOwnerUsers, parseIdentity, pendingFileHash, requiredReviewers } from "./lib.mjs";
 
 const config = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] } });
 const SHA = "a".repeat(40);
@@ -1461,6 +1461,114 @@ test("team: a status event re-evaluates through the native review and posts only
   const { posted } = runMain({ REPO: "o/r", EVENT_NAME: "status", STATUS_SHA: SHA, STATUS_CONTEXT: "review/test-hunter", STATUS_STATE: "success" }, routes);
   assert.equal(posted.length, 1);
   assert.equal(descriptionOf(posted[0]), "approved by code owner @code-owner");
+});
+
+// ---- #636: liveness, end to end against the repository's real lanes.config.json, CODEOWNERS and ADRs ----
+// An owner-path PR with every required reviewer passed and a native code-owner approval on its head must reach success
+// through every entry point; without the approval it waits (pending, never failure). This is what #573 broke.
+
+const REPO_ROOT = process.cwd();
+const realConfig = loadConfig(join(REPO_ROOT, "lanes.config.json"));
+const realAdrs = loadAdrs(join(REPO_ROOT, "docs", "adr"));
+const REAL_OWNER = parseCodeOwnerUsers(readFileSync(join(REPO_ROOT, ".github", "CODEOWNERS"), "utf8"))[0];
+const GROUP = "b".repeat(40);
+const QUEUE_REF = `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`;
+
+// A checkout like the workflow's: the default branch's real config, CODEOWNERS and ADRs, in a temporary directory.
+function realCheckout(fn) {
+  const root = mkdtempSync(join(tmpdir(), "lanes-gate-live-"));
+  const prev = process.cwd();
+  try {
+    cpSync(join(REPO_ROOT, "lanes.config.json"), join(root, "lanes.config.json"));
+    cpSync(join(REPO_ROOT, ".github", "CODEOWNERS"), join(root, ".github", "CODEOWNERS"));
+    cpSync(join(REPO_ROOT, "docs", "adr"), join(root, "docs", "adr"), { recursive: true });
+    process.chdir(root);
+    return fn();
+  } finally {
+    process.chdir(prev);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const liveCases = [
+  { reason: "an owner-only path", tier: "full", files: ["scripts/lanes/gate.mjs"], verdicts: true, wait: "owner-only path" },
+  { reason: "a Needs the owner text", tier: "quick", files: ["scripts/lanes/status.mjs"], needsOwner: "sign off", wait: "needs the owner" },
+  { reason: "a contract change", tier: "quick", files: ["contracts/x.json"], contract: "additive", wait: "contract change" },
+  { reason: "a full-tier PR", tier: "full", files: ["scripts/lanes/status.mjs"], wait: "no verdict for head from test-hunter" },
+];
+
+// Every reviewer the diff requires has passed on the head (a trusted human status), the PR is otherwise clean, and
+// `approvedBy` (or no one) has approved the head natively.
+function liveRoutes(c, approvedBy, over = {}) {
+  const required = requiredReviewers(c.tier, classifyFiles(c.files, realConfig, realAdrs), c.files, realConfig.modules);
+  const prBody = readyBody.replace("## Contract changes\nnone", `## Contract changes\n${c.contract ?? "none"}`).replace("## Needs the owner\nnothing", `## Needs the owner\n${c.needsOwner ?? "nothing"}`);
+  return {
+    "repos/o/r/pulls/5": { state: "open", body: prBody, user: { login: "author" }, head: { sha: SHA, ref: "issue-7-add-thing" } },
+    "repos/o/r/pulls/5/files": c.files.join("\n") + "\n",
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: `tier:${c.tier}` }, { name: "ready" }] },
+    [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: required.map((n) => ({ ...reviewStatus, context: `review/${n}` })),
+    "repos/o/r/issues/5/comments": commentsOut(c.verdicts ? required.map((n) => verdictComment("leo", n)) : []),
+    "repos/o/r/pulls/5/reviews": commentsOut(approvedBy === null ? [] : [review(approvedBy)]),
+    "repos/o/r/pulls?state=open&per_page=100": "5\n",
+    ...over,
+  };
+}
+
+const lastState = (posted) => posted.at(-1).fields.find((f) => f.startsWith("state=")).slice("state=".length);
+function runReal(env, routes, wrap = (api) => api) {
+  const { api, posted } = fakeApi(routes);
+  const log = console.log;
+  console.log = () => {};
+  try {
+    realCheckout(() => main(env, wrap(api)));
+  } finally {
+    console.log = log;
+  }
+  return posted;
+}
+
+// Each entry point maps routes to the state it posted; `waiting` is the state an unapproved PR gets there. The merge
+// queue answers a wait with failure by design (it needs a definite answer, and "pending" must never merge).
+const entryPoints = {
+  evaluatePr: { waiting: "pending", decide: (routes, wrap) => { const { api, posted } = fakeApi(routes); const d = realCheckout(() => evaluatePr(wrap(api), "o/r", 5, realConfig, realAdrs)); assert.equal(lastState(posted), d.state); return d.state; } },
+  "pull_request_target": { waiting: "pending", decide: (routes, wrap) => lastState(runReal({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, routes, wrap)) },
+  merge_group: { waiting: "failure", decide: (routes, wrap) => { const posted = runReal({ REPO: "o/r", EVENT_NAME: "merge_group", GROUP_SHA: GROUP, HEAD_REF: QUEUE_REF }, routes, wrap); assert.equal(posted.at(-1).sha, GROUP); return lastState(posted); } },
+  "workflow_run (RUN_PR_NUMBER)": { waiting: "pending", decide: (routes, wrap) => lastState(runReal({ REPO: "o/r", EVENT_NAME: "workflow_run", RUN_PR_NUMBER: "5", RUN_HEAD_SHA: SHA }, routes, wrap)) },
+  "workflow_run (head SHA only)": { waiting: "pending", decide: (routes, wrap) => lastState(runReal({ REPO: "o/r", EVENT_NAME: "workflow_run", RUN_PR_NUMBER: "", RUN_HEAD_SHA: SHA }, routes, wrap)) },
+};
+
+function assertLiveEnd(entry, c, wrap = (api) => api) {
+  assert.equal(entry.decide(liveRoutes(c, REAL_OWNER), wrap), "success", `${c.reason}: an approved PR must pass`);
+  assert.equal(entry.decide(liveRoutes(c, null), wrap), entry.waiting, `${c.reason}: an unapproved PR must wait`);
+}
+
+test("liveness: the repository's CODEOWNERS names a user owner the tests approve as", () => {
+  assert.match(REAL_OWNER, /^[A-Za-z0-9-]+$/);
+  assert.equal(realConfig.identity.profile, "team");
+});
+
+for (const [name, entry] of Object.entries(entryPoints)) {
+  for (const c of liveCases) {
+    test(`liveness: ${name} passes ${c.reason} with a code-owner approval on the head, and waits without`, () => {
+      assertLiveEnd(entry, c);
+    });
+  }
+}
+
+test("liveness: an approval of an older head, by the PR author, or by a non-owner leaves each owner reason waiting", () => {
+  for (const c of liveCases) {
+    const stale = liveRoutes(c, null, { "repos/o/r/pulls/5/reviews": commentsOut([review(REAL_OWNER, "APPROVED", OLD_SHA)]) });
+    const stranger = liveRoutes(c, "stranger");
+    for (const routes of [stale, stranger]) assert.equal(entryPoints.evaluatePr.decide(routes, (api) => api), "pending", c.reason);
+  }
+});
+
+test("liveness: the check fails when evaluatePr stops passing the native approval to gateDecision (the #573 shape)", () => {
+  // The approval is on GitHub but never reaches the decision: the reviews read comes back empty.
+  const dropsApproval = (api) => (args) => (args[0] === "repos/o/r/pulls/5/reviews" ? "" : api(args));
+  for (const [name, entry] of Object.entries(entryPoints)) {
+    for (const c of liveCases) assert.throws(() => assertLiveEnd(entry, c, dropsApproval), assert.AssertionError, `${name}: ${c.reason}`);
+  }
 });
 
 // #580 (ADR 0022 part 2): under team, a lane-filed bot issue that a write-access actor released is a trusted author.
