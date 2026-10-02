@@ -15,10 +15,13 @@ const onBlock = section(yml, "\non:\n", "\npermissions:\n");
 const jobsBlock = section(yml, "\njobs:\n");
 const buildJob = section(jobsBlock, "\n  build:\n", "\n  deploy:\n");
 const deployJob = section(jobsBlock, "\n  deploy:\n", "\n  health:\n");
-// ADR 0027 part 9: the health job reaches dashboard.yml through the ADR 0023 hand-over, so the owner's commit may come
-// after this file merges. The health tests below run once the job exists; the shape tests count it only when present.
+// ADR 0027 part 9: the health job is required in dashboard.yml. #683: it once went missing when #662 merged without its
+// ADR 0023 hand-over and these tests skipped, so a missing job now fails them.
 const healthJob = jobsBlock.includes("\n  health:\n") ? section(jobsBlock, "\n  health:\n") : undefined;
-const withHealth = (n) => (healthJob === undefined ? 0 : n);
+
+test("dashboard.yml has the health job", () => {
+  assert.notEqual(healthJob, undefined, "the health job is missing from dashboard.yml (ADR 0027 part 5)");
+});
 
 test("it triggers on issues, status, a push to the default branch and a 5-minute cron", () => {
   for (const trigger of ["issues", "status", "push", "schedule"]) assert.match(onBlock, new RegExp(`\\n {2}${trigger}:`), trigger);
@@ -34,7 +37,7 @@ test("it has no pull_request, pull_request_target or merge_group trigger, anywhe
 
 test("every checkout is of the default branch's own code", () => {
   const checkouts = [...yml.matchAll(/uses: actions\/checkout@[^\n]*\n((?: {8,}[^\n]*\n)*)/g)];
-  assert.equal(checkouts.length, 1 + withHealth(1));
+  assert.equal(checkouts.length, 2);
   for (const [, withBlock] of checkouts) assert.match(withBlock, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
   assert.doesNotMatch(yml, /github\.(head_ref|event\.pull_request)/);
   assert.match(buildJob, /default_branch \}\}\n {10}persist-credentials: false\n/);
@@ -72,13 +75,11 @@ test("the build runs snapshot.mjs, then the PII check on snapshot.json, then upl
 
 test("every action is pinned to a commit SHA", () => {
   const uses = [...raw.matchAll(/uses: (\S+)@(\S+)( # v\d+)?/g)];
-  assert.equal(uses.length, 5 + withHealth(2));
+  assert.equal(uses.length, 7);
   for (const [line, , ref, comment] of uses) assert.ok(/^[0-9a-f]{40}$/.test(ref) && comment, line);
 });
 
-const noHealth = healthJob === undefined ? "the health job is not in dashboard.yml yet (ADR 0023 hand-over)" : false;
-
-test("the health job's only write permission is issues: write, with the reads health.mjs needs", { skip: noHealth }, () => {
+test("the health job's only write permission is issues: write, with the reads health.mjs needs", () => {
   const perms = healthJob.match(/permissions:\n((?: {6}\S[^\n]*\n)+)/)[1];
   assert.deepEqual(
     perms.trim().split("\n").map((l) => l.trim()).sort(),
@@ -89,7 +90,7 @@ test("the health job's only write permission is issues: write, with the reads he
   assert.doesNotMatch(healthJob, /pages: write|id-token: write/);
 });
 
-test("the health job runs health.mjs on schedule only, from the default branch, with the default token and no secret", { skip: noHealth }, () => {
+test("the health job runs health.mjs on schedule only, from the default branch, with the default token and no secret", () => {
   assert.match(healthJob, /\n {4}if: github\.event_name == 'schedule'\n/);
   assert.match(healthJob, /run: node scripts\/lanes\/health\.mjs\n/);
   assert.match(healthJob, /default_branch \}\}\n {10}persist-credentials: false\n/);
