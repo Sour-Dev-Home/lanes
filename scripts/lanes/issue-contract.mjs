@@ -75,7 +75,7 @@ export function issuePlan(body, labels, canWrite, config) {
     const why = laneFiled
       ? "a maintainer must remove the lane-filed label to approve it"
       : needsOwner
-        ? "a lane found nothing to build, so a maintainer must close it or rewrite it and remove the needs-owner label"
+        ? "a lane stopped and needs the owner (see its last comment); remove needs-owner when it is resolved"
         : "a maintainer must open this task themselves; adding ready by hand will not help, since a lane also checks the issue's author";
     return {
       isTask: true,
