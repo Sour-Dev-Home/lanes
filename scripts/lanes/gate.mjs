@@ -195,6 +195,29 @@ function pendingBlobHash(api, repo, path, ref) {
 }
 
 /**
+ * #684: the head's `pendingFileHash` for every path a verdict bound to the head (or to a reused commit) lists as
+ * `pending`, whether or not any verdict is reused, for `gateDecision`'s hand-over check. A path maps to the hash, null
+ * (not committed), or the Error of a failed read, which the check treats as pending.
+ */
+export function pendingHeadHashes(api, repo, verdicts, head, reused) {
+  const reuseShas = new Set((Array.isArray(reused) ? reused : []).map((r) => r?.sha));
+  const headSha = typeof head === "string" ? head.toLowerCase() : null;
+  const hashes = new Map();
+  for (const v of Array.isArray(verdicts) ? verdicts : []) {
+    if (!v?.verdict || !(v.sha === headSha || reuseShas.has(v.sha))) continue;
+    for (const { path } of parsePending(v.verdict) ?? []) {
+      if (hashes.has(path)) continue;
+      try {
+        hashes.set(path, pendingBlobHash(api, repo, path, head));
+      } catch (e) {
+        hashes.set(path, e instanceof Error ? e : new Error(String(e)));
+      }
+    }
+  }
+  return hashes;
+}
+
+/**
  * The lookups `reusableReviews` uses, or null when they cannot run: the head, each
  * commit's own diff fingerprint (three-dot compare against the base branch), the files changed since a commit, a
  * commit's trusted statuses, and the PR's newest `REUSE_WALK` commits before the head, newest first.
@@ -309,7 +332,9 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   const reused = candidates.length > 0 ? reusableReviews(api, repo, number, pr, candidates, { files, adrs, config, blocked: pendingBlocked }) : [];
   // ADR 0021, 0025: the owner stage is a native code-owner review, read live here so a merge_group run re-reads it
   // against the queued head.
+  const verdicts = trustedVerdicts(api, repo, number, reviewerNames(config), config.identity);
   const inputs = {
+    pendingHeadHashes: pendingHeadHashes(api, repo, verdicts, pr.head.sha, reused),
     nativeApproval: readNativeApproval(api, repo, { number, user: pr.user, head: pr.head }, config),
     prBody: pr.body,
     issueLabels,
@@ -320,7 +345,7 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     headSha: pr.head.sha,
     files,
     statuses,
-    verdicts: trustedVerdicts(api, repo, number, reviewerNames(config), config.identity),
+    verdicts,
     config,
     adrs,
     interfaceContract,

@@ -811,3 +811,44 @@ test("liveness: the check fails when the native approval is not passed to gateDe
 test("edge: liveness holds for every owner reason at once (owner path, contract, needs-owner text, full tier)", () => {
   assertLive((inputs) => run(inputs), { reason: "all", tier: "full", files: ["scripts/lanes/gate.mjs", "contracts/x.json"], contract: "additive", needsOwner: "sign off", wait: "owner-only path" });
 });
+
+// #684: the hand-over check, pure.
+const PH = "d".repeat(64);
+const PWF = ".github/workflows/a.yml";
+const withPending = (pending, reviewer = "test-hunter") => {
+  const v = verdict(reviewer);
+  v.verdict.pending = pending;
+  return v;
+};
+const handover = (hashes, pending = [{ path: PWF, sha256: PH }], over = {}) =>
+  full({ verdicts: [withPending(pending)], pendingHeadHashes: hashes, ...over });
+
+test("handover: a pending file absent at the head holds the gate at stage handover, even with owner approval", () => {
+  const absent = new Map([[PWF, null]]);
+  const want = { state: "pending", description: `waiting for the workflow hand-over: ${PWF}`, stage: "handover" };
+  assert.deepEqual(handover(absent), want);
+  assert.deepEqual(handover(absent, undefined, { nativeApproval: { approved: true, by: "leo" } }), want);
+});
+
+test("handover: every pending path at its listed hash passes; one other hash does not", () => {
+  assert.equal(handover(new Map([[PWF, PH]])).state, "success");
+  assert.equal(handover(new Map([[PWF, "e".repeat(64)]])).state, "pending");
+});
+
+test("handover: several problems name the first and count the rest", () => {
+  const pending = [PWF, ".github/workflows/b.yml", ".github/workflows/c.yml"].map((path) => ({ path, sha256: PH }));
+  const d = handover(new Map([[pending[0].path, null], [pending[1].path, "e".repeat(64)], [pending[2].path, PH]]), pending);
+  assert.equal(d.description, `waiting for the workflow hand-over: ${PWF} and 1 more`);
+});
+
+test("edge: handover fails closed on a failed read, a missing map and a malformed list", () => {
+  assert.equal(handover(new Map([[PWF, new Error("x")]])).description, `waiting for the workflow hand-over: could not read ${PWF}`);
+  assert.equal(handover(undefined).state, "pending");
+  assert.match(handover(new Map(), [{ path: "src/x.ts", sha256: PH }]).description, /invalid pending list from test-hunter/);
+});
+
+test("edge: handover ignores verdicts for another commit, and a verdict with no or empty pending", () => {
+  const stale = { ...withPending([{ path: PWF, sha256: PH }]), sha: OLD };
+  assert.equal(full({ verdicts: [verdict("test-hunter"), stale] }).state, "success");
+  assert.equal(handover(undefined, []).state, "success");
+});
