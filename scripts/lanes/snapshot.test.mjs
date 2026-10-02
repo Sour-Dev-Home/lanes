@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { DEFAULT_SOFT_PATHS, RUNNING_LABEL, buildSnapshot, parseFromArg, parseInput, parseOutArg, readOwnerApprovals, verdictCriteria, writeSnapshot } from "./snapshot.mjs";
+import { DEFAULT_SOFT_PATHS, RUNNING_LABEL, TREND_WEEKS, buildSnapshot, buildTrends, isoWeekLabel, normalizeTrendPr, parseFromArg, parseInput, parseOutArg, readOwnerApprovals, verdictCriteria, writeSnapshot } from "./snapshot.mjs";
 import { buildVerdictComment } from "./post-review.mjs";
 import { REVIEWERS, TEAM_REQUIRED_MESSAGE } from "./lib.mjs";
 import { STATUS_QUERY } from "./status.mjs";
@@ -343,7 +343,10 @@ test("snapshot.mjs uses status.mjs's GraphQL query rather than its own copy", ()
   assert.equal(typeof STATUS_QUERY, "string");
   assert.match(source, /import \{[^}]*\bSTATUS_QUERY\b[^}]*\} from "\.\/status\.mjs"/);
   assert.match(source, /`query=\$\{STATUS_QUERY\}`/);
-  assert.doesNotMatch(source, /query\(\$owner/);
+  // The only other query is the trends' merged-PR read (TRENDS_QUERY); the status query is never copied.
+  assert.equal((source.match(/query\(\$owner/g) ?? []).length, 1);
+  assert.match(source, /const TRENDS_QUERY = `query\(\$owner/);
+  assert.doesNotMatch(source, /mergeQueue\(|branchProtectionRule/);
 });
 
 test("edge: the running label and default soft paths match start.mjs, which snapshot.mjs cannot import", async () => {
@@ -530,4 +533,90 @@ test("edge: a check url is kept at exactly 500 characters and dropped at 501", (
   const base = "https://github.com/" + REPO + "/runs/";
   assert.equal(withRollup([{ name: "v", conclusion: "SUCCESS", detailsUrl: base + "x".repeat(500 - base.length) }])[0].url?.length, 500);
   assert.equal("url" in withRollup([{ name: "v", conclusion: "SUCCESS", detailsUrl: base + "x".repeat(501 - base.length) }])[0], false);
+});
+
+// ADR 0027 part 7: weekly trends, counts only.
+const richPr = (over = {}) => ({ mergedAt: "2026-09-29T10:00:00Z", queueRemoved: [], statuses: [], checkRunAttempts: [], failedRounds: 0, ...over });
+const verdictBody = (rounds) => buildVerdictComment({ reviewer: "test-hunter", verdict: "success", summary: "s", criteria: [], findings: [], metrics: { tier: "full", minutes: 1, tokens: 10, ...(rounds === undefined ? {} : { rounds }) } }, SHA);
+const TREND_NOW = new Date("2026-10-02T12:00:00Z"); // a Friday in ISO week 2026-W40
+
+test("isoWeekLabel gives the ISO year and week, including a year boundary", () => {
+  assert.equal(isoWeekLabel("2026-10-02T12:00:00Z"), "2026-W40");
+  assert.equal(isoWeekLabel("2026-09-28T00:00:00Z"), "2026-W40");
+  assert.equal(isoWeekLabel("2027-01-01T00:00:00Z"), "2026-W53");
+  assert.equal(isoWeekLabel("2024-12-30T00:00:00Z"), "2025-W01");
+});
+
+test("buildTrends counts the four measures per ISO week, oldest first, with every week of the window present", () => {
+  const trends = buildTrends({
+    now: TREND_NOW,
+    weeks: 3,
+    prs: [
+      richPr({
+        queueRemoved: ["2026-09-30T08:00:00Z", "2026-09-22T08:00:00Z"],
+        statuses: [{ context: "lanes/gate", state: "failure", at: "2026-10-01T08:00:00Z" }, { context: "review/x", state: "success", at: "2026-10-01T08:00:00Z" }, { context: "ci", state: "error", at: "2026-09-23T08:00:00Z" }],
+        checkRunAttempts: [1, 3],
+        failedRounds: 2,
+      }),
+    ],
+  });
+  assert.deepEqual(trends, [
+    { week: "2026-W38", queueRemovals: 0, gateFailures: 0, flakes: 0, reviewRounds: 0 },
+    { week: "2026-W39", queueRemovals: 1, gateFailures: 1, flakes: 0, reviewRounds: 0 },
+    { week: "2026-W40", queueRemovals: 1, gateFailures: 1, flakes: 2, reviewRounds: 2 },
+  ]);
+});
+
+test("edge: buildTrends with no PRs is a zero row per week, and drops anything outside the window, in the future or unreadable", () => {
+  const empty = buildTrends({ now: TREND_NOW, prs: [], weeks: 2 });
+  assert.equal(empty.length, 2);
+  assert.ok(empty.every((r) => r.queueRemovals + r.gateFailures + r.flakes + r.reviewRounds === 0));
+  const trends = buildTrends({ now: TREND_NOW, weeks: 2, prs: [richPr({ mergedAt: "2026-01-01T00:00:00Z", checkRunAttempts: [4], queueRemoved: ["2026-01-01T00:00:00Z", "2026-12-01T00:00:00Z", "garbage"] }), undefined] });
+  assert.ok(trends.every((r) => r.flakes === 0 && r.queueRemovals === 0));
+});
+
+test("edge: buildTrends defaults to 8 weeks", () => {
+  assert.equal(buildTrends({ now: TREND_NOW, prs: [richPr()] }).length, TREND_WEEKS);
+});
+
+const node = (over = {}) => ({
+  mergedAt: "2026-09-29T10:00:00Z",
+  timelineItems: { nodes: [{ createdAt: "2026-09-29T09:00:00Z" }, { createdAt: "not a time" }] },
+  comments: { nodes: [{ body: verdictBody(3) }, { body: verdictBody(1) }, { body: verdictBody(undefined) }, { body: "plain comment" }] },
+  lastCommit: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: [{ __typename: "StatusContext", state: "FAILURE", createdAt: "2026-09-29T08:00:00Z" }, { __typename: "CheckRun", checkSuite: { workflowRun: { runAttempt: 2 } } }, { __typename: "CheckRun", checkSuite: null }] } } } }] },
+  ...over,
+});
+
+test("normalizeTrendPr keeps times, states, attempts and failed rounds only: rounds - 1 per verdict, none when absent", () => {
+  assert.deepEqual(normalizeTrendPr(node()), { mergedAt: "2026-09-29T10:00:00Z", queueRemoved: ["2026-09-29T09:00:00Z"], statuses: [{ state: "failure", at: "2026-09-29T08:00:00Z" }], checkRunAttempts: [2], failedRounds: 2 });
+});
+
+test("edge: normalizeTrendPr of a node with no merge time, no commit, no comments or an invalid rounds value", () => {
+  assert.equal(normalizeTrendPr({}), undefined);
+  assert.equal(normalizeTrendPr(null), undefined);
+  assert.deepEqual(normalizeTrendPr({ mergedAt: "2026-09-29T10:00:00Z" }), { mergedAt: "2026-09-29T10:00:00Z", queueRemoved: [], statuses: [], checkRunAttempts: [], failedRounds: 0 });
+  const bad = { body: buildVerdictComment({ reviewer: "test-hunter", verdict: "success", summary: "s", criteria: [], findings: [], metrics: { tier: "full", minutes: 1, tokens: 1, rounds: 0 } }, SHA) };
+  assert.equal(normalizeTrendPr(node({ comments: { nodes: [bad] } })).failedRounds, 0);
+});
+
+test("normalizeTrendPr output carries no title, login, check name or comment text", () => {
+  const text = JSON.stringify(normalizeTrendPr(node({ title: "secret title", author: { login: "someone" }, number: 4242 })));
+  for (const leak of ["secret title", "someone", "4242", "plain comment", "test-hunter"]) assert.ok(!text.includes(leak), leak);
+});
+
+test("buildTrends rows hold only a week label and four integers: no PR number, title, login or check name", () => {
+  const [row] = buildTrends({
+    now: TREND_NOW,
+    weeks: 1,
+    prs: [richPr({ number: 4242, title: "secret title", statuses: [{ context: "ci/private-check", state: "failure", at: "2026-10-01T08:00:00Z" }] })],
+  });
+  assert.deepEqual(Object.keys(row).sort(), ["flakes", "gateFailures", "queueRemovals", "reviewRounds", "week"]);
+  const text = JSON.stringify(row);
+  for (const leak of ["4242", "secret title", "private-check"]) assert.ok(!text.includes(leak));
+});
+
+test("buildSnapshot writes trends only when given them", () => {
+  assert.equal("trends" in build(), false);
+  const trends = [{ week: "2026-W40", queueRemovals: 1, gateFailures: 0, flakes: 0, reviewRounds: 0 }];
+  assert.deepEqual(build({ trends }).trends, trends);
 });

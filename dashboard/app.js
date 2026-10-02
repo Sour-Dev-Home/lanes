@@ -488,6 +488,58 @@ function loadMetrics(doc, fetcher) {
     });
 }
 
+// The weekly trends (snapshot.json's optional `trends`): counts per ISO week, nothing else. A row that is not the
+// contract's shape is skipped; with no readable row the panel is hidden.
+var TREND_COLUMNS = ["queueRemovals", "gateFailures", "flakes", "reviewRounds"];
+
+function validTrends(trends) {
+  if (!Array.isArray(trends)) return [];
+  return trends.filter(function (r) {
+    return isObject(r) && typeof r.week === "string" && /^\d{4}-W\d{2}$/.test(r.week) && TREND_COLUMNS.every(function (k) {
+      return Number.isInteger(r[k]) && r[k] >= 0;
+    });
+  });
+}
+
+// index.html has no trends section, so the first call adds one before the metrics panel.
+function renderTrends(doc, trends) {
+  var section = doc.getElementById("trends");
+  if (!section) {
+    var metrics = doc.getElementById("metrics");
+    if (!metrics || !metrics.parentNode) return false;
+    section = el(doc, "section", "metrics");
+    section.setAttribute("id", "trends");
+    section.setAttribute("aria-labelledby", "trends-h");
+    metrics.parentNode.insertBefore(section, metrics);
+  }
+  clear(section);
+  var rows = validTrends(trends);
+  if (!rows.length) {
+    section.hidden = true;
+    return false;
+  }
+  var h = el(doc, "h2", "", "Weekly trends");
+  h.setAttribute("id", "trends-h");
+  section.appendChild(h);
+  section.appendChild(el(doc, "p", "muted", "Counts per ISO week, oldest first; failed review rounds are reruns of a reviewer."));
+  section.appendChild(
+    table(
+      doc,
+      "Weekly trends",
+      ["Week", "Queue removals", "Gate failures", "Flakes", "Failed review rounds"],
+      rows.map(function (r) {
+        return [r.week].concat(
+          TREND_COLUMNS.map(function (k) {
+            return num(r[k], 0);
+          })
+        );
+      })
+    )
+  );
+  section.hidden = false;
+  return true;
+}
+
 function render(doc, snapshot, now) {
   var issues = snapshot.issues || [];
   doc.getElementById("generated").textContent = formatGenerated(snapshot.generatedAt);
@@ -508,6 +560,7 @@ function render(doc, snapshot, now) {
   var noteText = graphNote(snapshot.edges, snapshot.overlaps);
   note.textContent = noteText;
   note.hidden = !noteText;
+  renderTrends(doc, snapshot.trends);
 }
 
 var lastGenerated = null;
@@ -540,5 +593,5 @@ if (typeof document !== "undefined") {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { POLL_MS: POLL_MS, STALE_MS: STALE_MS, STAGES: STAGES, formatGenerated: formatGenerated, staleNote: staleNote, ageText: ageText, waitingNote: waitingNote, renderAge: renderAge, graphNote: graphNote, stageOf: stageOf, renderLegend: renderLegend, renderTask: renderTask, linkBase: linkBase, linkOrText: linkOrText, renderWaiting: renderWaiting, criticalPath: criticalPath, renderGraph: renderGraph, validMetrics: validMetrics, renderMetrics: renderMetrics, loadMetrics: loadMetrics };
+  module.exports = { POLL_MS: POLL_MS, STALE_MS: STALE_MS, STAGES: STAGES, formatGenerated: formatGenerated, staleNote: staleNote, ageText: ageText, waitingNote: waitingNote, renderAge: renderAge, graphNote: graphNote, stageOf: stageOf, renderLegend: renderLegend, renderTask: renderTask, linkBase: linkBase, linkOrText: linkOrText, renderWaiting: renderWaiting, criticalPath: criticalPath, renderGraph: renderGraph, validTrends: validTrends, renderTrends: renderTrends, validMetrics: validMetrics, renderMetrics: renderMetrics, loadMetrics: loadMetrics };
 }

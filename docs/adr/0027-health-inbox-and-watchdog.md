@@ -62,6 +62,8 @@ Forces:
    workflow's new health job gets `issues: write` and nothing else, runs default-branch code on schedule only, never on
    `pull_request` events, and the snapshot-publishing job stays at `contents: read`. The residual risk, a compromised
    default branch using `issues: write` repository-wide, is the same exposure default-branch workflow code already has.
+   *Amendment (2026-10-02, #631, approved by the owner in the operability item 1 plan):* no other write; the read
+   permissions it needs.
 6. **Health issue closed or edited by hand.** If the issue is closed, the watchdog reopens it only when there is an
    active problem; it never creates a second one while a closed one carries the label. If the `lanes:health` block is
    missing, unparseable or not written by `github-actions[bot]`, the stored set is empty: the next run rewrites the body
