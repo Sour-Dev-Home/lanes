@@ -264,6 +264,7 @@ const OWNER_SAMPLES = {
   "^scripts/lanes/workflow\\.test\\.mjs$": ["scripts/lanes/workflow.test.mjs", "scripts/lanes/workflow.mjs"],
   "^scripts/lanes/contracts\\.test\\.mjs$": ["scripts/lanes/contracts.test.mjs", "scripts/lanes/contracts.test.mjs.bak"],
   "^scripts/lanes/start-guard(\\.test)?\\.mjs$": ["scripts/lanes/start-guard.test.mjs", "scripts/lanes/start-guards.mjs"],
+  "^scripts/lanes/(queue|start|status|app-token|reap|cleanup|lane-cost|modules|paths|pick|blockers)(\\.test)?\\.mjs$": ["scripts/lanes/queue.test.mjs", "scripts/lanes/queue-extra.mjs"],
   "^scripts/lanes/shell-lex(\\.test|\\.fixtures)?\\.mjs$": ["scripts/lanes/shell-lex.fixtures.mjs", "scripts/lanes/shell-lexer.mjs"],
   "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$": ["scripts/lanes/setup-repo.mjs", "scripts/lanes/new-project-x.mjs"],
   "^scripts/gate-workflow\\.test\\.mjs$": ["scripts/gate-workflow.test.mjs", "scripts/gate-workflow.test.mjs.bak"],
@@ -304,7 +305,7 @@ test("every regex in lanes.config.json paths.owner matches its sample and not it
 
 test("the real config: start-guard.mjs and contracts.test.mjs are owner-only, reviewers.mjs is not (ADR 0003)", () => {
   const real = loadConfig();
-  for (const file of ["scripts/lanes/contracts.test.mjs", "scripts/lanes/start-guard.mjs", "scripts/lanes/start-guard.test.mjs"]) {
+  for (const file of ["scripts/lanes/contracts.test.mjs", "scripts/lanes/start-guard.mjs", "scripts/lanes/start-guard.test.mjs", "scripts/lanes/start.mjs"]) {
     assert.equal(classifyFiles([file], real).owner, true, file);
   }
   for (const file of [
@@ -312,7 +313,6 @@ test("the real config: start-guard.mjs and contracts.test.mjs are owner-only, re
     "scripts/lanes/reviewers.test.mjs",
     "scripts/lanes/contracts.mjs",
     "scripts/lanes/start-guard.mjs.orig",
-    "scripts/lanes/start.mjs",
     // edge: the new regexes are anchored to scripts/lanes/ exactly, not any nested directory under it.
     "scripts/lanes/sub/contracts.test.mjs",
     "scripts/lanes/sub/start-guard.mjs",
@@ -351,7 +351,7 @@ test("ADR 0003 is accepted, parses, and governs lanes.config.json", () => {
 
 test("the real config: tooling scripts and non-lane commands are sensitive but not owner-only", () => {
   const real = loadConfig();
-  for (const file of ["scripts/lanes/status.mjs", "scripts/lanes/blockers.mjs", ".claude/commands/status.md", ".claude/hooks/notify.mjs"]) {
+  for (const file of ["scripts/lanes/notify-hook.mjs", "scripts/lanes/reviewers.mjs", ".claude/commands/status.md", ".claude/hooks/notify.mjs"]) {
     const cls = classifyFiles([file], real);
     assert.equal(cls.sensitive, true, file);
     assert.equal(cls.owner, false, file);

@@ -1,10 +1,13 @@
 // scripts/lanes/queue.mjs
 // The owner-run lane queue (ADR 0005 as amended by ADR 0006). `planTick` decides one tick from a snapshot: which
 // ready issues launch now, which lane PRs wait on the owner, and whether the queue is idle. Pure: `main` reads
-// GitHub and the sessions, cleans up merged lanes and launches, every 3 minutes until it is idle.
-// Usage: node scripts/lanes/queue.mjs, in the owner's own terminal. Exit 0: idle for three ticks in a row.
-// 1: three GitHub reads failed in a row. 2: an argument, a bad lanes.config.json, or run inside Claude (CLAUDECODE).
-// 3: a merge changed the lanes scripts since the queue started (#535): pull and restart.
+// GitHub and the sessions, cleans up merged lanes and launches, every 3 minutes (every 15 once idle) until Ctrl+C.
+// Usage: node scripts/lanes/queue.mjs, in the owner's own terminal (ADR 0026: it sustains itself).
+// Exit 0: Ctrl+C (SIGINT or SIGTERM). 2: an argument, a bad lanes.config.json, or run inside Claude (CLAUDECODE).
+// 3: the lanes scripts changed since the queue started (#535) but a restart precondition does not hold (not on main,
+// a dirty checkout, HEAD is not origin/main after the pull). 4: `git pull --ff-only` could not fast-forward.
+// 10: only between the child and the supervisor, meaning "scripts changed, pulled, start the next child".
+// Exit 1 is retired: a failed GitHub read backs off and retries.
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -183,8 +186,15 @@ export function planRecovery({ issues = [], prs = [], sessions = [], stalled = n
 }
 
 export const TICK_MS = 3 * 60 * 1000;
+// ADR 0026 part 4: after IDLE_TICKS idle ticks the tick lengthens to IDLE_TICK_MS; picked work returns it to TICK_MS.
+export const IDLE_TICK_MS = 15 * 60 * 1000;
 const IDLE_TICKS = 3;
-const READ_FAILURES = 3;
+// ADR 0026 part 5: a failed read backs off 1, 2, 4, 8 ... minutes, capped at 15.
+export const BACKOFF_CAP_MS = 15 * 60 * 1000;
+export const backoffMs = (failures) => Math.min(60_000 * 2 ** (Math.max(failures, 1) - 1), BACKOFF_CAP_MS);
+// ADR 0026 part 3: the exit code a child uses to ask its supervisor for the next child.
+export const RESTART_CODE = 10;
+const STOP = "QUEUE_STOP";
 const PR_LIMIT = 1000;
 const ISSUE_LIMIT = 1000;
 const USAGE = "usage: node scripts/lanes/queue.mjs (no arguments; run it in your own terminal, Ctrl-C stops it)";
@@ -207,6 +217,24 @@ function scriptsChanged(git, startedAt) {
   const now = git(["rev-parse", "origin/main"]).trim();
   if (now === startedAt) return null;
   return git(["diff", "--name-only", startedAt, now, "--", ...LOADED_PATHS]).trim() ? { old: startedAt, now } : null;
+}
+
+// ADR 0026 part 2: once the lanes scripts are stale, pull and restart only when the branch is main, the checkout is
+// clean, the pull fast-forwards and HEAD then equals origin/main. Returns { code, line } for a stop (3, or 4 for a pull
+// that cannot fast-forward) or { restart: { old, now } }.
+function pullForRestart(git, stale) {
+  const stop = (code, why) => ({ code, line: `lanes scripts changed (${stale.old.slice(0, 7)}..${stale.now.slice(0, 7)}) but cannot restart: ${why}; fix it, then start the queue again` });
+  const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+  if (branch !== "main") return stop(3, `the checkout is on ${branch || "no branch"}, not main`);
+  if (git(["status", "--porcelain"]).trim()) return stop(3, "the checkout has uncommitted changes");
+  try {
+    git(["pull", "--ff-only"]);
+  } catch (err) {
+    return stop(4, `git pull --ff-only failed (${reason(err)})`);
+  }
+  const head = git(["rev-parse", "HEAD"]).trim();
+  if (head !== git(["rev-parse", "origin/main"]).trim()) return stop(3, "HEAD is not origin/main after the pull");
+  return { restart: { old: stale.old, now: head } };
 }
 
 // One tick's snapshot for planTick. Throws when any part cannot be read, or a list may be truncated.
@@ -311,8 +339,10 @@ function recoverLanes(snapshot, { deps, dir, say, attempted, told }) {
 /**
  * The queue CLI. Every TICK_MS: cleanupMerged, then reads issues, PRs and sessions, runs planTick, launches its picks
  * (one attempt each; a failed issue is not tried again this run) and prints its lines, each time-stamped. An owner
- * wait prints once per change. Resolves to the exit code: 0 after three idle ticks in a row, 1 after three failed
- * reads in a row, 2 for an argument, a bad config, or a run inside Claude. `deps` holds fakes in tests: `env`,
+ * wait prints once per change. Resolves to the exit code (ADR 0026): 0 when a `sleep` rejects with `code: "QUEUE_STOP"`
+ * (Ctrl+C), 2 for an argument, a bad config, or a run inside Claude, 3 or 4 for scripts that are stale with no restart,
+ * 10 for a restart (child only). With `deps.runChild(argv, env)` and no LANES_QUEUE_CHILD in `env` it is the supervisor:
+ * it spawns children until one exits with other than 10. `deps` holds fakes in tests: `env`,
  * `gh(args)` and `claude(args, { cwd })` return stdout, `root()` the main checkout, `config()` the parsed
  * lanes.config.json (undefined when missing), `cleanup()` cleanupMerged's lines, `spawn` and `reaperLog(root, n)` for
  * each launched lane's reaper (as in start.mjs), `team` the team profile's steps (start.mjs's launchLane, #556), `now()`
@@ -329,6 +359,20 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     print("queue.mjs refuses to run inside Claude (CLAUDECODE is set): run it in your own terminal");
     return 2;
   }
+  // ADR 0026 part 3: the first process only supervises; each child runs the loop below and exits RESTART_CODE to be replaced.
+  if (deps.runChild && !env.LANES_QUEUE_CHILD) {
+    for (let restarts = 0; ; restarts += 1) {
+      let code;
+      try {
+        code = await deps.runChild(argv, { ...env, LANES_QUEUE_CHILD: "1", LANES_QUEUE_RESTARTS: String(restarts) });
+      } catch (err) {
+        print(`cannot start the queue: ${reason(err)}`);
+        return 2;
+      }
+      if (code !== RESTART_CODE) return code;
+    }
+  }
+  const restartNumber = Number(env.LANES_QUEUE_RESTARTS) + 1 || 1;
   let settings;
   try {
     settings = startConfig(config());
@@ -384,12 +428,9 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       readFailures = 0;
     } catch (err) {
       readFailures += 1;
-      if (readFailures >= READ_FAILURES) {
-        say(`cannot read GitHub or the sessions: ${reason(err)}; three reads failed in a row, stopping`);
-        return 1;
-      }
-      say(`cannot read GitHub or the sessions: ${reason(err)}, retrying next tick`);
-      await sleep(TICK_MS);
+      const delay = backoffMs(readFailures);
+      say(`cannot read GitHub or the sessions: ${reason(err)}, retrying in ${delay / 60_000} min`);
+      if (await stopped(sleep, delay)) return 0;
       continue;
     }
     // #535: nothing launches, recovers or resumes with lanes scripts older than origin/main's; a fetch that fails launches nothing.
@@ -399,12 +440,22 @@ export async function main(argv, deps = DEFAULT_DEPS) {
         stale = scriptsChanged(deps.git, startedAt);
       } catch (err) {
         say(`cannot fetch origin/main: ${reason(err)}, launching nothing this tick`);
-        await sleep(TICK_MS);
+        if (await stopped(sleep, TICK_MS)) return 0;
         continue;
       }
       if (stale) {
-        say(`lanes scripts changed since the queue started (${stale.old.slice(0, 7)}..${stale.now.slice(0, 7)}): git pull --ff-only, then restart the queue`);
-        return 3;
+        let outcome;
+        try {
+          outcome = pullForRestart(deps.git, stale);
+        } catch (err) {
+          outcome = { code: 3, line: `lanes scripts changed (${stale.old.slice(0, 7)}..${stale.now.slice(0, 7)}) but cannot restart: ${reason(err)}; fix it, then start the queue again` };
+        }
+        if (outcome.restart) {
+          say(`queue: lanes scripts changed (${outcome.restart.old.slice(0, 7)} -> ${outcome.restart.now.slice(0, 7)}), pulled, restarting (#${restartNumber})`);
+          return RESTART_CODE;
+        }
+        say(outcome.line);
+        return outcome.code;
       }
     }
     const resumes = deps.recovery ? recoverLanes(snapshot, { deps, dir, say, attempted, told }) : [];
@@ -477,11 +528,19 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       if (launched.failed) failedLaunches.add(n);
     }
     idleTicks = plan.idle ? idleTicks + 1 : 0;
-    if (idleTicks >= IDLE_TICKS) {
-      say(`idle for ${IDLE_TICKS} ticks in a row: stopping`);
-      return 0;
-    }
-    await sleep(TICK_MS);
+    // ADR 0026 part 4: idle lengthens the tick, it never stops the queue, and prints nothing.
+    if (await stopped(sleep, idleTicks >= IDLE_TICKS ? IDLE_TICK_MS : TICK_MS)) return 0;
+  }
+}
+
+// Sleeps `ms`; true when the sleep was ended by a stop request (a rejection with code QUEUE_STOP), which exits 0.
+async function stopped(sleep, ms) {
+  try {
+    await sleep(ms);
+    return false;
+  } catch (err) {
+    if (err?.code === STOP) return true;
+    throw err;
   }
 }
 
@@ -556,6 +615,17 @@ const DEFAULT_DEPS = {
   now: Date.now,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   print: (line) => console.log(line),
+  // ADR 0026 part 3: one child at a time, sharing this console; a signal-ended child counts as Ctrl+C.
+  runChild: (argv, env) =>
+    new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...argv], { stdio: "inherit", env });
+      child.on("error", reject);
+      child.on("exit", (code) => resolve(code ?? 0));
+    }),
 };
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) process.exitCode = await main(process.argv.slice(2));
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  // Ctrl+C reaches the supervisor and its child through the shared console; each ends the run with exit 0.
+  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => process.exit(0));
+  process.exitCode = await main(process.argv.slice(2));
+}

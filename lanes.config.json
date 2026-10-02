@@ -87,6 +87,7 @@
       "^scripts/gate-workflow\\.test\\.mjs$",
       "^scripts/lanes/contracts\\.test\\.mjs$",
       "^scripts/lanes/start-guard(\\.test)?\\.mjs$",
+      "^scripts/lanes/(queue|start|status|app-token|reap|cleanup|lane-cost|modules|paths|pick|blockers)(\\.test)?\\.mjs$",
       "^scripts/lanes/shell-lex(\\.test|\\.fixtures)?\\.mjs$",
       "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$",
       "^\\.claude/settings\\.json$",

@@ -339,6 +339,7 @@ test("edge: a failing gate with no description still gives a reason", () => {
 // --- The CLI (#97): main drives ticks through fake gh, claude, clock and sleep deps. ---
 
 const TICK_MS = 3 * 60 * 1000;
+const IDLE_TICK_MS = 15 * 60 * 1000;
 const STAMP = /^\d\d:\d\d:\d\d /;
 const QUEUE_TEAM = { profile: "team", app: { id: 11, installationId: 22, botLogin: "sour-dev-lanes[bot]" } };
 
@@ -363,7 +364,8 @@ function fakeTeamSteps({ key = "/keys/app.pem", mintFail = false, botIdFail = fa
 
 // A fake GitHub and claude. `world.issues`, `world.prs` and `world.sessions` are read each tick; `onSleep(tickNo)`
 // changes them between ticks. A launch adds a background session in the issue's worktree.
-function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFails = () => false, ghFails = () => false, spawnChild = null, labelFails = () => false, recordFails = false } = {}) {
+function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFails = () => false, ghFails = () => false, spawnChild = null, labelFails = () => false, recordFails = false, idleContinues = false } = {}) {
+  const sleeps = [];
   const recorded = [];
   const labeled = [];
   const reapers = [];
@@ -417,8 +419,11 @@ function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFai
       return { fd: log.fd, close: () => (log.closed = true) };
     },
     now: () => clock,
+    // ADR 0026: the queue never exits when idle, so a test run ends at the first long idle sleep (as Ctrl+C would), or
+    // when `onSleep` throws a QUEUE_STOP error; that sleep is not counted as a tick.
     sleep: async (ms) => {
-      assert.equal(ms, TICK_MS);
+      sleeps.push(ms);
+      if (ms === IDLE_TICK_MS && !idleContinues) throw Object.assign(new Error("stop"), { code: "QUEUE_STOP" });
       clock += ms;
       ticks += 1;
       if (ticks > maxTicks) throw new Error("the queue never stopped");
@@ -431,7 +436,7 @@ function fakeRun(world, { onSleep = () => {}, env = {}, maxTicks = 20, launchFai
       for (const line of lines) recorded.push([root, line]);
     },
   };
-  return { deps, out, calls, launched, reapers, logs, labeled, recorded, ticks: () => ticks };
+  return { deps, out, calls, launched, reapers, logs, labeled, recorded, sleeps, ticks: () => ticks };
 }
 
 test("CLI: any argument prints a usage line and exits 2 before reading anything", async () => {
@@ -518,13 +523,32 @@ test("#577: a resumed lane (#444) launches with its issue's labels too", async (
   assert.equal(modelArg(run.launched[0].args), "opus");
 });
 
-test("CLI: exits 0 after three idle ticks in a row, no sooner", async () => {
+test("CLI: the tick lengthens to 15 minutes after three idle ticks in a row, no sooner, and prints nothing new", async () => {
   const { main } = await import("./queue.mjs");
   const run = fakeRun({ issues: [], prs: [], sessions: [] });
   assert.equal(await main([], run.deps), 0);
-  assert.equal(run.ticks(), 2, "three ticks: two sleeps");
+  assert.deepEqual(run.sleeps, [TICK_MS, TICK_MS, IDLE_TICK_MS]);
   assert.equal(run.calls.filter((c) => c[0] === "cleanup").length, 3);
-  assert.match(run.out.at(-1), /idle/);
+  assert.ok(!run.out.some((l) => /idle for|stopping/.test(l)));
+});
+
+test("CLI: an idle queue keeps polling at 15 minutes and returns to 3 minutes when work is picked", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [], prs: [], sessions: [] };
+  const run = fakeRun(world, {
+    idleContinues: true,
+    maxTicks: 8,
+    onSleep: (t) => {
+      if (t === 5) world.issues = [issue(5, ["src/e.mjs"])];
+      if (t === 6) world.issues = [];
+      if (t === 7) throw Object.assign(new Error("stop"), { code: "QUEUE_STOP" });
+    },
+  });
+  assert.equal(await main([], run.deps), 0);
+  // Ticks 0-2 idle (the third sleeps long), long again, then #5 launches on tick 5, then 3 minutes until idle again.
+  assert.deepEqual(run.sleeps.slice(0, 6), [TICK_MS, TICK_MS, IDLE_TICK_MS, IDLE_TICK_MS, IDLE_TICK_MS, TICK_MS]);
+  assert.deepEqual(run.launched.map((l) => l.n), [5]);
+  assert.ok(run.sleeps.slice(5).every((ms) => ms === TICK_MS || ms === IDLE_TICK_MS));
 });
 
 test("CLI: a busy tick resets the idle count", async () => {
@@ -642,16 +666,37 @@ test("CLI: a GitHub read failure is printed and retried next tick", async () => 
   assert.deepEqual(run.launched.map((l) => [l.n, l.tick]), [[1, 1]]);
   const failures = run.out.filter((l) => /cannot read GitHub/.test(l));
   assert.equal(failures.length, 2);
-  assert.match(failures[0], /HTTP 502: Bad Gateway, retrying next tick$/);
+  assert.match(failures[0], /HTTP 502: Bad Gateway, retrying in 1 min$/);
   assert.ok(failures.every((l) => !l.includes("more")), "only the first line of the error");
 });
 
-test("CLI: three GitHub read failures in a row exit 1", async () => {
+test("CLI: read failures back off 1, 2, 4, 8 minutes, cap at 15 and never exit, one line each naming the delay", async () => {
   const { main } = await import("./queue.mjs");
-  const run = fakeRun({ issues: [], prs: [], sessions: [] }, { ghFails: () => true });
-  assert.equal(await main([], run.deps), 1);
-  assert.equal(run.ticks(), 2);
-  assert.match(run.out.at(-1), /three .*in a row/);
+  const stopAt = 8;
+  const run = fakeRun({ issues: [], prs: [], sessions: [] }, { ghFails: () => true, idleContinues: true, onSleep: (t) => {
+    if (t === stopAt) throw Object.assign(new Error("stop"), { code: "QUEUE_STOP" });
+  } });
+  assert.equal(await main([], run.deps), 0);
+  const min = 60_000;
+  assert.deepEqual(run.sleeps, [1, 2, 4, 8, 15, 15, 15, 15].map((m) => m * min));
+  const lines = run.out.filter((l) => /cannot read GitHub/.test(l));
+  assert.equal(lines.length, 8);
+  assert.match(lines[0], /retrying in 1 min$/);
+  assert.match(lines[3], /retrying in 8 min$/);
+  assert.match(lines[7], /retrying in 15 min$/);
+});
+
+test("CLI: a successful read resets the backoff to 1 minute", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] }, { ghFails: (t) => t < 3 || t === 4, maxTicks: 6 });
+  assert.equal(await main([], run.deps), 0);
+  // Fails at ticks 0-2 (1, 2, 4 min), succeeds at 3 (3 min), fails at 4 (1 min again).
+  assert.deepEqual(run.sleeps.slice(0, 5).map((ms) => ms / 60_000), [1, 2, 4, 3, 1]);
+});
+
+test("backoffMs doubles from 1 minute, caps at 15 and treats 0 as the first failure", async () => {
+  const { backoffMs } = await import("./queue.mjs");
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 50].map((n) => backoffMs(n) / 60_000), [1, 1, 2, 4, 8, 15, 15, 15]);
 });
 
 test("edge: failures that are not in a row do not add up to an exit", async () => {
@@ -853,7 +898,7 @@ test("edge: the config's maxLanes caps the launches", async () => {
   assert.deepEqual(run.launched.filter((l) => l.tick === 0).length, 2);
 });
 
-test("CLI: conflicting issues launch one after the other, a newly ready issue joins, then three idle ticks end the run", async () => {
+test("CLI: conflicting issues launch one after the other, a newly ready issue joins, then three idle ticks lengthen the tick", async () => {
   const { main } = await import("./queue.mjs");
   const world = { issues: [issue(1, ["src/a.mjs"]), issue(2, ["src/a.mjs"]), issue(3, ["src/c.mjs"], { labels: ["tier:quick"] })], prs: [], sessions: [] };
   const close = (n) => (world.issues = world.issues.filter((i) => i.number !== n));
@@ -893,7 +938,7 @@ test("edge: claude agents --json printing something other than a list is a read 
     return `backgrounded · sess-${n}\n`;
   };
   assert.equal(await main([], run.deps), 0);
-  assert.ok(run.out.some((l) => /cannot read GitHub or the sessions:.*printed no list.*retrying next tick/.test(l)), run.out.join("\n"));
+  assert.ok(run.out.some((l) => /cannot read GitHub or the sessions:.*printed no list.*retrying in 1 min/.test(l)), run.out.join("\n"));
   assert.deepEqual(run.launched.map((l) => l.n), [1], "the issue launches once the sessions can be read again");
 });
 
@@ -905,7 +950,7 @@ test("edge: 1000+ open issues is a read failure naming the count, retried next t
   const world = { issues: many, prs: [], sessions: [] };
   const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
   assert.equal(await main([], run.deps), 0);
-  assert.ok(run.out.some((l) => /1000\+ open issues: too many to plan from, retrying next tick/.test(l)), run.out.join("\n"));
+  assert.ok(run.out.some((l) => /1000\+ open issues: too many to plan from, retrying in 1 min/.test(l)), run.out.join("\n"));
 });
 
 // --- #344: queue-launched lanes get the Git POSIX tools first on PATH, as /start lanes do (#337). ---
@@ -1518,12 +1563,19 @@ test("edge: several assignees are all named, and an assigned issue without ready
 });
 
 // #535: a queue keeps the lanes scripts it loaded, so it stops when a merge changes them.
-function fakeGit({ head = "aaaaaaa1111", remote = "aaaaaaa1111", changed = [], fetchFails = false } = {}) {
-  const state = { head, remote, changed, fetchFails, calls: [] };
+function fakeGit({ head = "aaaaaaa1111", remote = "aaaaaaa1111", changed = [], fetchFails = false, branch = "main", dirty = "", pullFails = false, pullLands = true } = {}) {
+  const state = { head, remote, changed, fetchFails, branch, dirty, pullFails, pullLands, calls: [] };
   state.git = (args) => {
     state.calls.push(args);
     if (args[0] === "fetch") {
       if (state.fetchFails) throw Object.assign(new Error("git failed"), { stderr: "fatal: unable to access remote\nmore" });
+      return "";
+    }
+    if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") return `${state.branch}\n`;
+    if (args[0] === "status") return state.dirty;
+    if (args[0] === "pull") {
+      if (state.pullFails) throw Object.assign(new Error("git failed"), { stderr: "fatal: Not possible to fast-forward, aborting.\nmore" });
+      if (state.pullLands) state.head = state.remote;
       return "";
     }
     if (args[0] === "rev-parse") return `${args[1] === "HEAD" ? state.head : state.remote}\n`;
@@ -1535,7 +1587,8 @@ function fakeGit({ head = "aaaaaaa1111", remote = "aaaaaaa1111", changed = [], f
   };
   return state;
 }
-const STALE_LINE = /lanes scripts changed since the queue started \(aaaaaaa\.\.bbbbbbb\): git pull --ff-only, then restart the queue$/;
+const RESTART_LINE = /queue: lanes scripts changed \(aaaaaaa -> bbbbbbb\), pulled, restarting \(#1\)$/;
+const CANNOT_RESTART = /lanes scripts changed \(aaaaaaa\.\.bbbbbbb\) but cannot restart: /;
 
 test("scripts unchanged since the queue started: it fetches origin/main and launches as before", async () => {
   const { main } = await import("./queue.mjs");
@@ -1547,22 +1600,145 @@ test("scripts unchanged since the queue started: it fetches origin/main and laun
   assert.ok(git.calls.some((c) => c[0] === "fetch" && c.includes("origin")));
 });
 
-test("a change under scripts/lanes/ stops the queue with both commits and the fix, launching nothing", async () => {
+test("a change under scripts/lanes/ pulls and exits 10 with the one restart line, launching nothing", async () => {
   const { main } = await import("./queue.mjs");
   const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
   const git = fakeGit({ remote: "bbbbbbb2222", changed: ["scripts/lanes/queue.mjs"] });
-  assert.equal(await main([], { ...run.deps, git: git.git }), 3);
+  assert.equal(await main([], { ...run.deps, git: git.git }), 10);
   assert.deepEqual(run.launched, []);
-  assert.equal(run.out.filter((l) => STALE_LINE.test(l)).length, 1);
+  assert.equal(run.out.filter((l) => RESTART_LINE.test(l)).length, 1);
+  assert.ok(git.calls.some((c) => c[0] === "pull" && c.includes("--ff-only")));
 });
 
-test("a change to lanes.config.json stops the queue the same way", async () => {
+test("a change to lanes.config.json restarts the same way", async () => {
   const { main } = await import("./queue.mjs");
   const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
   const git = fakeGit({ remote: "bbbbbbb2222", changed: ["lanes.config.json"] });
-  assert.equal(await main([], { ...run.deps, git: git.git }), 3);
+  assert.equal(await main([], { ...run.deps, git: git.git }), 10);
   assert.deepEqual(run.launched, []);
-  assert.ok(run.out.some((l) => STALE_LINE.test(l)));
+  assert.ok(run.out.some((l) => RESTART_LINE.test(l)));
+});
+
+test("the restart line counts restarts in this run from LANES_QUEUE_RESTARTS", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] }, { env: { LANES_QUEUE_CHILD: "1", LANES_QUEUE_RESTARTS: "2" } });
+  const git = fakeGit({ remote: "bbbbbbb2222", changed: ["scripts/lanes/pick.mjs"] });
+  assert.equal(await main([], { ...run.deps, git: git.git }), 10);
+  assert.match(run.out.at(-1), /pulled, restarting \(#3\)$/);
+});
+
+// Each restart precondition (ADR 0026 part 2): it names the failed one, exits 3 (4 for a pull that cannot fast-forward),
+// launches nothing, and never pulls past a failed check.
+for (const [name, opts, code, message, pulled] of [
+  ["not on main", { branch: "feature" }, 3, /on feature, not main/, false],
+  ["a detached HEAD", { branch: "" }, 3, /on no branch, not main/, false],
+  ["a dirty checkout", { dirty: " M scripts/lanes/pick.mjs\n" }, 3, /uncommitted changes/, false],
+  ["a pull that cannot fast-forward", { pullFails: true }, 4, /git pull --ff-only failed \(fatal: Not possible to fast-forward, aborting\.\)/, true],
+  ["HEAD not origin/main after the pull", { pullLands: false }, 3, /HEAD is not origin\/main after the pull/, true],
+]) {
+  test(`restart precondition: ${name} exits ${code} naming it, launching nothing`, async () => {
+    const { main } = await import("./queue.mjs");
+    const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+    const git = fakeGit({ remote: "bbbbbbb2222", changed: ["scripts/lanes/queue.mjs"], ...opts });
+    assert.equal(await main([], { ...run.deps, git: git.git }), code);
+    assert.deepEqual(run.launched, []);
+    assert.match(run.out.at(-1), CANNOT_RESTART);
+    assert.match(run.out.at(-1), message);
+    assert.ok(!run.out.some((l) => RESTART_LINE.test(l)));
+    assert.equal(git.calls.some((c) => c[0] === "pull"), pulled);
+  });
+}
+
+test("edge: a git read that throws while checking a restart precondition exits 3 naming it, not a crash", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+  const git = fakeGit({ remote: "bbbbbbb2222", changed: ["scripts/lanes/queue.mjs"] });
+  const inner = git.git;
+  const flaky = (args) => {
+    if (args[0] === "status") throw new Error("status exploded");
+    return inner(args);
+  };
+  assert.equal(await main([], { ...run.deps, git: flaky }), 3);
+  assert.match(run.out.at(-1), CANNOT_RESTART);
+  assert.match(run.out.at(-1), /status exploded/);
+  assert.deepEqual(run.launched, []);
+});
+
+test("edge: a sleep that rejects with something other than a stop request is not swallowed", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] });
+  run.deps.sleep = async () => { throw new Error("timer broke"); };
+  await assert.rejects(main([], run.deps), /timer broke/);
+});
+
+test("the supervisor spawns one new child with the same arguments after a child exits 10, and exits with the next code", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] });
+  const spawned = [];
+  const codes = [10, 10, 0];
+  const runChild = async (argv, env) => {
+    spawned.push({ argv, env });
+    return codes[spawned.length - 1];
+  };
+  assert.equal(await main([], { ...run.deps, runChild }), 0);
+  assert.equal(spawned.length, 3);
+  assert.ok(spawned.every((s) => s.argv.length === 0 && s.env.LANES_QUEUE_CHILD === "1"));
+  assert.deepEqual(spawned.map((s) => s.env.LANES_QUEUE_RESTARTS), ["0", "1", "2"]);
+  assert.deepEqual(run.calls, [], "the supervisor itself reads nothing");
+});
+
+test("no chain of waiting parents: after several restarts only the supervisor and one child are ever alive", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] });
+  let alive = 0;
+  let peak = 0;
+  let n = 0;
+  const runChild = async () => {
+    alive += 1;
+    peak = Math.max(peak, alive);
+    await Promise.resolve();
+    alive -= 1;
+    return (n += 1) < 6 ? 10 : 4;
+  };
+  assert.equal(await main([], { ...run.deps, runChild }), 4);
+  assert.equal(n, 6);
+  assert.equal(peak, 1, "one child at a time beside the supervisor: two processes");
+});
+
+test("the supervisor returns a child's other exit code (2, 3, 4) unchanged and reports a child that cannot start as 2", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const code of [0, 2, 3, 4]) {
+    const run = fakeRun({ issues: [], prs: [], sessions: [] });
+    assert.equal(await main([], { ...run.deps, runChild: async () => code }), code);
+  }
+  const run = fakeRun({ issues: [], prs: [], sessions: [] });
+  const failing = async () => {
+    throw Object.assign(new Error("spawn node ENOENT"), { stderr: "" });
+  };
+  assert.equal(await main([], { ...run.deps, runChild: failing }), 2);
+  assert.match(run.out.at(-1), /cannot start the queue: spawn node ENOENT/);
+});
+
+test("exit 2 inside Claude in both processes, before anything else: no child is spawned and nothing is read", async () => {
+  const { main } = await import("./queue.mjs");
+  let spawned = 0;
+  const runChild = async () => (spawned += 1, 0);
+  for (const env of [{ CLAUDECODE: "1" }, { CLAUDECODE: "1", LANES_QUEUE_CHILD: "1" }]) {
+    const run = fakeRun({ issues: [], prs: [], sessions: [] }, { env });
+    assert.equal(await main([], { ...run.deps, runChild, git: fakeGit().git }), 2);
+    assert.match(run.out[0], /CLAUDECODE/);
+    assert.deepEqual(run.calls, []);
+  }
+  assert.equal(spawned, 0);
+});
+
+test("a child (LANES_QUEUE_CHILD set) never supervises, even when runChild is available", async () => {
+  const { main } = await import("./queue.mjs");
+  let spawned = 0;
+  const run = fakeRun({ issues: [], prs: [], sessions: [] }, { env: { LANES_QUEUE_CHILD: "1" } });
+  assert.equal(await main([], { ...run.deps, runChild: async () => (spawned += 1, 0) }), 0);
+  assert.equal(spawned, 0);
+  assert.ok(run.calls.length > 0);
 });
 
 test("a merge that lands mid-run stops it on the next tick, before that tick launches", async () => {
@@ -1577,9 +1753,9 @@ test("a merge that lands mid-run stops it on the next tick, before that tick lau
       world.issues.push(issue(2, ["src/b.mjs"]));
     },
   });
-  assert.equal(await main([], { ...run.deps, git: git.git }), 3);
+  assert.equal(await main([], { ...run.deps, git: git.git }), 10);
   assert.deepEqual(run.launched.map((l) => l.n), [1]);
-  assert.ok(run.out.some((l) => STALE_LINE.test(l)));
+  assert.ok(run.out.some((l) => RESTART_LINE.test(l)));
 });
 
 test("a change elsewhere (docs, src, a lookalike path) does not stop the queue", async () => {

@@ -343,8 +343,8 @@ const onReal = (tier, files, reviewers, over = {}) =>
   run({ config: real, issueLabels: [`tier:${tier}`, "ready"], headSha: HEAD, files, ...clean(reviewers), ...over });
 const READY = (tier) => ({ state: "success", description: `unattended-eligible (tier:${tier}), reviews in`, stage: "ready" });
 
-test("real config: a reviewed full PR on scripts/lanes/status.mjs merges unattended", () => {
-  assert.deepEqual(onReal("full", ["scripts/lanes/status.mjs"], ["test-hunter", "security-reviewer"]), READY("full"));
+test("real config: a reviewed full PR on scripts/lanes/reviewers.mjs merges unattended", () => {
+  assert.deepEqual(onReal("full", ["scripts/lanes/reviewers.mjs"], ["test-hunter", "security-reviewer"]), READY("full"));
 });
 
 test("real config: the same full PR on scripts/lanes/gate.mjs waits (owner-only path)", () => {
@@ -365,13 +365,13 @@ test("real config: a skip PR adding docs/adr/0003-x.md waits, never fails", () =
 
 test("real config: one owner-only file among tooling files makes the whole PR wait", () => {
   // #241: lanes.config.json (the module map) also needs the architecture-advisor.
-  waits(onReal("full", ["scripts/lanes/status.mjs", "docs/USING.md", "lanes.config.json"], ["test-hunter", "security-reviewer", "architecture-advisor"]), "owner-only path");
+  waits(onReal("full", ["scripts/lanes/reviewers.mjs", "docs/USING.md", "lanes.config.json"], ["test-hunter", "security-reviewer", "architecture-advisor"]), "owner-only path");
 });
 
 test("real config: a sensitive full PR whose security verdict has an unfixed important finding waits", () => {
-  const findings = [{ severity: "important", file: "scripts/lanes/status.mjs", line: 1, summary: "x", fixed: false }];
+  const findings = [{ severity: "important", file: "scripts/lanes/reviewers.mjs", line: 1, summary: "x", fixed: false }];
   const verdicts = [verdict("test-hunter"), verdict("security-reviewer", { findings })];
-  waits(onReal("full", ["scripts/lanes/status.mjs"], ["test-hunter", "security-reviewer"], { verdicts }), "unfixed important finding from security-reviewer");
+  waits(onReal("full", ["scripts/lanes/reviewers.mjs"], ["test-hunter", "security-reviewer"], { verdicts }), "unfixed important finding from security-reviewer");
 });
 
 test("real config: an owner-only path waits for a native code-owner review (ADR 0021)", () => {
@@ -416,7 +416,7 @@ test("team: review/owner success with nativeApproval null or missing is pending 
 
 test("edge: no owner reason ever says /approve, and a review/owner success never passes without the native approval", () => {
   const prBody = body().replace("## Needs the owner\nnothing", "## Needs the owner\npick a name");
-  for (const over of [{ files: ["scripts/lanes/gate.mjs"] }, { prBody, files: ["scripts/lanes/status.mjs"] }]) {
+  for (const over of [{ files: ["scripts/lanes/gate.mjs"] }, { prBody, files: ["scripts/lanes/reviewers.mjs"] }]) {
     const d = onReal("full", over.files, ["test-hunter", "security-reviewer"], { ...over, statuses: [...clean(["test-hunter", "security-reviewer"]).statuses, st("review/owner")] });
     assert.equal(d.state, "pending");
     assert.equal(d.stage, "owner");
@@ -434,7 +434,7 @@ test("owner-only is reported before the other owner reasons", () => {
 });
 
 test("the other owner reasons are unchanged on a sensitive, non-owner-only path", () => {
-  const files = ["scripts/lanes/status.mjs"];
+  const files = ["scripts/lanes/reviewers.mjs"];
   const reviewers = ["test-hunter", "security-reviewer"];
   const needs = body().replace("## Needs the owner\nnothing", "## Needs the owner\npick a name");
   waits(onReal("full", files, reviewers, { prBody: needs }), "needs the owner");
@@ -726,9 +726,9 @@ test("edge: gateDecision stays pure with blockers (same input, same output, inpu
 
 const liveCases = [
   { reason: "owner-only path", tier: "full", files: ["scripts/lanes/gate.mjs"], verdicts: true, wait: "owner-only path" },
-  { reason: "needs the owner text", tier: "quick", files: ["scripts/lanes/status.mjs"], needsOwner: "sign off", wait: "needs the owner" },
+  { reason: "needs the owner text", tier: "quick", files: ["scripts/lanes/reviewers.mjs"], needsOwner: "sign off", wait: "needs the owner" },
   { reason: "contract change", tier: "quick", files: ["contracts/x.json"], contract: "additive", wait: "contract change" },
-  { reason: "full-tier PR", tier: "full", files: ["scripts/lanes/status.mjs"], wait: "no verdict for head from test-hunter" },
+  { reason: "full-tier PR", tier: "full", files: ["scripts/lanes/reviewers.mjs"], wait: "no verdict for head from test-hunter" },
 ];
 // Every reviewer the diff requires has passed on the head; the PR is otherwise clean.
 function liveInputs(c, nativeApproval) {
