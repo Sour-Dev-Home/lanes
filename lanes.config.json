@@ -79,7 +79,7 @@
     ],
     "ui": ["^frontend/src/", "^src/ui/", "\\.css$", "^dashboard/"],
     "owner": [
-      "^scripts/lanes/(gate|lib|approve-guard|post-review|issue-contract)(\\.test)?\\.mjs$",
+      "^scripts/lanes/(gate|lib|post-review|issue-contract)(\\.test)?\\.mjs$",
       "^scripts/lanes/gate-decision\\.test\\.mjs$",
       "^scripts/lanes/workflow\\.test\\.mjs$",
       "^scripts/gate-workflow\\.test\\.mjs$",

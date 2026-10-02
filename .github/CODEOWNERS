@@ -7,8 +7,6 @@
 /scripts/lanes/gate.test.mjs @SourE-dev
 /scripts/lanes/lib.mjs @SourE-dev
 /scripts/lanes/lib.test.mjs @SourE-dev
-/scripts/lanes/approve-guard.mjs @SourE-dev
-/scripts/lanes/approve-guard.test.mjs @SourE-dev
 /scripts/lanes/post-review.mjs @SourE-dev
 /scripts/lanes/post-review.test.mjs @SourE-dev
 /scripts/lanes/issue-contract.mjs @SourE-dev

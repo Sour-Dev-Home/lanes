@@ -5,8 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { configuredReviewersFrom, grantDirFrom } from "./approve-guard.mjs";
-import { buildStatus, buildVerdictComment, checkSha, main, metricsWarning, parseArgs, validateVerdict } from "./post-review.mjs";
+import { buildStatus, buildVerdictComment, checkSha, configuredReviewersFrom, mainCheckoutFrom, main, metricsWarning, parseArgs, TEAM_REASON, validateVerdict } from "./post-review.mjs";
 
 test("skipped is a success whose description starts with skipped", () => {
   assert.deepEqual(buildStatus("ui-reviewer", "skipped", "no visible change"), { context: "review/ui-reviewer", state: "success", description: "skipped: no visible change" });
@@ -437,7 +436,12 @@ test("edge: a security failure verdict is never refused over a failure status", 
   assert.deepEqual(gh.writes.map((w) => w.kind), ["comment", "status"]);
 });
 
-test("grantDirFrom finds the main checkout's .lanes/approve from the main checkout and from a worktree", () => {
+test("the team refusal for post-review.mjs owner is unchanged", () => {
+  assert.equal(TEAM_REASON, "under the team profile, approve the PR in GitHub (ADR 0021)");
+  assert.throws(() => buildStatus("owner", "skipped", "x"), new RegExp(`there is no owner status: ${TEAM_REASON.replace(/[()]/g, "\\$&")}`));
+});
+
+test("mainCheckoutFrom finds the main checkout from the main checkout and from a worktree", () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "grant-repo-")));
   const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "core.hooksPath=", ...args], { cwd, stdio: "pipe" });
   const mainCheckout = join(root, "main");
@@ -447,16 +451,15 @@ test("grantDirFrom finds the main checkout's .lanes/approve from the main checko
   const wt = join(root, "wt");
   git(mainCheckout, "worktree", "add", "-q", "-b", "wt", wt);
   mkdirSync(join(wt, "scripts", "lanes"), { recursive: true });
-  const want = join(mainCheckout, ".lanes", "approve");
-  assert.equal(grantDirFrom(join(mainCheckout, "scripts", "lanes")), want);
-  assert.equal(grantDirFrom(join(wt, "scripts", "lanes")), want);
+  assert.equal(join(mainCheckoutFrom(join(mainCheckout, "scripts", "lanes"))), mainCheckout);
+  assert.equal(join(mainCheckoutFrom(join(wt, "scripts", "lanes"))), mainCheckout);
 });
 
-test("edge: grantDirFrom outside any repository falls back to the checkout holding the script", () => {
+test("edge: mainCheckoutFrom outside any repository falls back to the checkout holding the script", () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "grant-nogit-")));
   const dir = join(root, "scripts", "lanes");
   mkdirSync(dir, { recursive: true });
-  assert.equal(grantDirFrom(dir), join(root, ".lanes", "approve"));
+  assert.equal(mainCheckoutFrom(dir), root);
 });
 
 test("lane.md says a lane posts only a verdict the reviewer returned, never edits its verdict field, and re-runs after fixes", () => {
@@ -472,7 +475,7 @@ test("edge: a truncated status list without the security status fails closed, an
   assert.deepEqual(gh.writes, []);
 });
 
-test("edge: an inherited GIT_DIR cannot redirect grantDirFrom", () => {
+test("edge: an inherited GIT_DIR cannot redirect mainCheckoutFrom", () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "grant-env-")));
   const dir = join(root, "scripts", "lanes");
   mkdirSync(dir, { recursive: true });
@@ -482,7 +485,7 @@ test("edge: an inherited GIT_DIR cannot redirect grantDirFrom", () => {
   const saved = process.env.GIT_DIR;
   process.env.GIT_DIR = other;
   try {
-    assert.equal(grantDirFrom(dir), join(root, ".lanes", "approve"));
+    assert.equal(mainCheckoutFrom(dir), root);
   } finally {
     if (saved === undefined) delete process.env.GIT_DIR;
     else process.env.GIT_DIR = saved;
