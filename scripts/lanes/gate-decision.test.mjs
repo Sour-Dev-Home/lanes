@@ -847,6 +847,21 @@ test("edge: handover fails closed on a failed read, a missing map and a malforme
   assert.match(handover(new Map(), [{ path: "src/x.ts", sha256: PH }]).description, /invalid pending list from test-hunter/);
 });
 
+test("edge: handover treats a non-string, non-null hash as a failed read, and keeps the outside-Scope note", () => {
+  for (const bad of [{}, 1, true, undefined, [PH]]) {
+    assert.equal(handover(new Map([[PWF, bad]])).description, `waiting for the workflow hand-over: could not read ${PWF}`, String(bad));
+  }
+  const d = handover(new Map([[PWF, null]]), undefined, { outsideScope: ["a", "b"] });
+  assert.equal(d.description, `waiting for the workflow hand-over: ${PWF}; 2 files outside Scope, see PR body`);
+  assert.equal(d.stage, "handover");
+});
+
+test("edge: handover uses only the newest verdict of a reviewer, so a re-review without pending clears it", () => {
+  const newer = verdict("test-hunter");
+  assert.equal(full({ verdicts: [withPending([{ path: PWF, sha256: PH }]), newer], pendingHeadHashes: new Map([[PWF, null]]) }).state, "success");
+  assert.equal(full({ verdicts: [newer, withPending([{ path: PWF, sha256: PH }])], pendingHeadHashes: new Map([[PWF, null]]) }).state, "pending");
+});
+
 test("edge: handover ignores verdicts for another commit, and a verdict with no or empty pending", () => {
   const stale = { ...withPending([{ path: PWF, sha256: PH }]), sha: OLD };
   assert.equal(full({ verdicts: [verdict("test-hunter"), stale] }).state, "success");
