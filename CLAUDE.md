@@ -23,13 +23,12 @@ restructure decision in `docs/adr/` or `docs/history/`, written so it can later 
    names none.
 5. **Consolidate before starting.** Before releasing lane-filed follow-ups or starting a batch, compare Scope paths and
    propose merging issues that share files, keeping security fixes reviewable in size.
-6. **Owner-only stays owner-only.** `/plan-issues`, `/start` and `/approve` are typed by the owner; never run, imitate
-   or work around them from a lane, a schedule or another session. A denial or refusal is reported, never routed
+6. **Owner-only stays owner-only.** `/plan-issues`, `/start` and the GitHub review are the owner's; never run, imitate or
+   work around them from a lane, a schedule or another session. A denial or refusal is reported, never routed
    around.
-7. **No extra setup for adopters by default.** The solo profile needs no account, app or credential; acting as the
-   owner's account is an accepted risk there (ADRs 0004 and 0007). The team profile (ADR 0019, 0021) is opt-in and needs
-   a GitHub App and a code-owner ruleset.
+7. **One profile, one required setup.** Lanes act as the App bot (ADR 0019); the owner's own token never reaches a
+   lane. The GitHub App is the one required setup, done with one command (`node scripts/lanes/app-setup.mjs`) and
+   GitHub's buttons (ADR 0025), plus a code-owner ruleset (ADR 0021).
 8. **No personal data and no absolute local paths** in any commit, issue or PR.
 9. **Surface what waits on the owner.** The owner session names every PR waiting on the owner whenever it reports:
-   under solo, name each PR waiting on `/approve` with the ready `/approve <N>` line; under team, name each PR waiting
-   for a code-owner review with its URL.
+   name each PR waiting for a code-owner review with its review link.

@@ -1,6 +1,6 @@
 # 0004: The approve guard is defence in depth; the script checks the grant; owner approvals are made visible
 
-Status: accepted
+Status: superseded by 0025
 
 ## Context
 

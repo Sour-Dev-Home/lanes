@@ -2,6 +2,8 @@
 
 Status: accepted
 
+*Amended 2026-10-02 by ADR 0025 part 11: lanes act as the App bot (ADR 0019) and not as the owner's account; this ADR's start-guard risk stands.*
+
 ## Context
 
 `start-guard.mjs` (#51) keeps lanes and schedules from launching lanes: it lets `start.mjs` run only in the turn the

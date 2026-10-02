@@ -2,6 +2,8 @@
 
 Status: accepted
 
+*Amended 2026-10-02 by ADR 0025 part 11: team is the only profile, and `node scripts/lanes/app-setup.mjs` replaces the manual setup below.*
+
 ## Context
 
 ADRs 0004 and 0007 accept that lanes run as the owner's single GitHub identity, so a determined lane can post

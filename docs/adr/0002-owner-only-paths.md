@@ -2,6 +2,8 @@
 
 Status: accepted
 
+*Amended 2026-10-02 by ADR 0025 part 11: the owner approval this ADR names is the GitHub code-owner review; `/approve` no longer exists.*
+
 ## Context
 
 Since #27, a PR merges unattended only if it touches no *sensitive* path. In this repo nearly every PR touches

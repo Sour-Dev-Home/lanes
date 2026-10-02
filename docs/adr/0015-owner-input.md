@@ -1,6 +1,6 @@
 # 0015: A fail-closed structural checker retires /approve for additive-only config and test-pin diffs; I4 and the start guard hold
 
-Status: accepted
+Status: superseded by 0025
 
 ## Context
 
