@@ -18,7 +18,7 @@ import { GATE_CONTEXT, TEAM_REQUIRED_MESSAGE, laneIssueOf, parseIssueForm } from
 import { issuePaths } from "./paths.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
-import { appendStarts, budgetConfig, inFlightIssues, startDecisions, deadLaneSession, launchLane, localLaunchEnv, launchRefusal, reaperLog, START_DEFAULTS, startConfig, teamSteps } from "./start.mjs";
+import { appendStarts, budgetConfig, inFlightIssues, isEntryScript, startDecisions, deadLaneSession, launchLane, localLaunchEnv, launchRefusal, reaperLog, START_DEFAULTS, startConfig, teamSteps } from "./start.mjs";
 import { QUEUE_EVENTS, formatAge, gateDescriptions, gateSince, liveLanes, mergeGroupFailures, prStage, queueFailedNote, queueRemovals, stalledLanes } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
@@ -627,7 +627,7 @@ const DEFAULT_DEPS = {
     }),
 };
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (isEntryScript(process.argv[1], import.meta.url)) {
   // Ctrl+C reaches the supervisor and its child through the shared console; each ends the run with exit 0.
   for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => process.exit(0));
   process.exitCode = await main(process.argv.slice(2));

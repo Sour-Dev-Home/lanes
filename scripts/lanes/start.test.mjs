@@ -5,11 +5,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { BUDGET_DEFAULTS, LAUNCH_REFUSAL, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, deadLaneSession, inFlightIssues, launchArgs, isLaneGhDir, launchEnv, launchRefusal, makeRemint, markRunning, parseSessionId, refreshArgs, refreshLoop, startConfig as strictStartConfig, teamLaneEnv, teamLaneSettings, TEAM_SCRUBBED_NAMES, botCommitIdentity } from "./start.mjs";
+import { BUDGET_DEFAULTS, LAUNCH_REFUSAL, REFRESH_MS, START_DEFAULTS, appendStarts, classifySkip, startDecisions, budgetConfig, deadLaneSession, inFlightIssues, isEntryScript, launchArgs, isLaneGhDir, launchEnv, launchRefusal, makeRemint, markRunning, parseSessionId, refreshArgs, refreshLoop, startConfig as strictStartConfig, teamLaneEnv, teamLaneSettings, TEAM_SCRUBBED_NAMES, botCommitIdentity } from "./start.mjs";
 import * as startModule from "./start.mjs";
 import { TEAM_REQUIRED_MESSAGE, parseIssueForm } from "./lib.mjs";
 import { issuePaths } from "./paths.mjs";
@@ -46,6 +46,7 @@ test("launchRefusal: a script under a .claude/worktrees directory refuses, by it
   for (const file of ["/repo/.claude/worktrees/issue-5-x/scripts/lanes/start.mjs", "C:\\repo\\.claude\\worktrees\\issue-5-x\\scripts\\lanes\\queue.mjs", "file:///repo/.claude/worktrees/issue-5-x/scripts/lanes/start.mjs", pathToFileURL("/a/.claude/worktrees/x/y.mjs").href]) {
     assert.equal(launchRefusal({}, file), LAUNCH_REFUSAL, file);
   }
+  assert.equal(launchRefusal({}, "/repo/.Claude/Worktrees/issue-5-x/scripts/lanes/start.mjs"), LAUNCH_REFUSAL, "a re-cased path");
   // `process.cwd()` is never consulted: a plain checkout's script refuses nothing, wherever the shell stands.
   assert.equal(launchRefusal({}, "/repo/scripts/lanes/start.mjs"), null);
   assert.equal(launchRefusal({}, pathToFileURL("/repo/scripts/lanes/start.mjs").href), null);
@@ -95,6 +96,40 @@ test("start.mjs at the command line exits 2 with the refusal from a copy under .
     assert.equal(ran.status, 2);
     assert.match(ran.stderr, /^usage: start\.mjs --refresh-token /, "the refresher ran and printed its own usage");
     assert.ok(!ran.stderr.includes(LAUNCH_REFUSAL));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// macOS's tmpdir (/var/folders) is a symlink to /private/var, and Node resolves import.meta.url through it while
+// process.argv[1] keeps the path as typed: both entries compare real paths, so the CLI still runs.
+test("isEntryScript compares real paths, and is false for no argv[1] or an unresolvable path", () => {
+  assert.equal(isEntryScript(START_FILE, import.meta.resolve("./start.mjs")), true);
+  assert.equal(isEntryScript(join(SCRIPTS_DIR, "queue.mjs"), import.meta.resolve("./start.mjs")), false);
+  assert.equal(isEntryScript(undefined, import.meta.resolve("./start.mjs")), false);
+  assert.equal(isEntryScript("", import.meta.resolve("./start.mjs")), false);
+  assert.equal(isEntryScript(join(SCRIPTS_DIR, "no-such-file.mjs"), import.meta.resolve("./start.mjs")), false);
+});
+
+test("start.mjs and queue.mjs reach their command line when started through a symlinked directory", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "start-link-"));
+  try {
+    const real = join(dir, "real", "scripts", "lanes");
+    mkdirSync(real, { recursive: true });
+    cpSync(SCRIPTS_DIR, real, { recursive: true, filter: (src) => !src.endsWith(".test.mjs") });
+    const link = join(dir, "link");
+    try {
+      symlinkSync(join(dir, "real"), link, "junction");
+    } catch (err) {
+      if (err.code === "EPERM" || err.code === "EACCES") return t.skip("cannot create a symlink here");
+      throw err;
+    }
+    const env = { ...cleanEnv(), CLAUDECODE: "1" };
+    for (const name of ["start.mjs", "queue.mjs"]) {
+      const r = spawnSync(process.execPath, [join(link, "scripts", "lanes", name)], { env, encoding: "utf8", timeout: 30_000 });
+      assert.equal(r.status, 2, `${name}: ${r.stdout}${r.stderr}`);
+      assert.equal(`${r.stdout}${r.stderr}`.trim(), LAUNCH_REFUSAL, name);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

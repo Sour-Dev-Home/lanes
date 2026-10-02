@@ -3,7 +3,7 @@
 // (`--refresh-token`, spawned by the queue). `/start` is retired (ADR 0030): the queue is the only launcher, and this
 // file refuses a command-line run from a Claude session or a lane worktree (launchRefusal).
 import { execFileSync, spawn } from "node:child_process";
-import { accessSync, appendFileSync, closeSync, constants as fsConstants, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, closeSync, constants as fsConstants, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -693,10 +693,25 @@ export function launchRefusal(env, file) {
   if (file === undefined) return null;
   // The URL's own path, not fileURLToPath: that throws for a URL whose path is not a local one on this platform.
   const path = String(file).startsWith("file:") ? decodeURIComponent(new URL(file).pathname) : String(file);
-  return /(^|\/)\.claude\/worktrees\//.test(path.replaceAll("\\", "/")) ? LAUNCH_REFUSAL : null;
+  // Case-insensitive: Windows and default macOS filesystems ignore case in a path.
+  return /(^|\/)\.claude\/worktrees\//i.test(path.replaceAll("\\", "/")) ? LAUNCH_REFUSAL : null;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+/**
+ * Whether the module at `url` is the script node was started with (`argv1`). Real paths on both sides: Node resolves
+ * `import.meta.url` through symlinks (macOS's tmpdir /var is /private/var), but `process.argv[1]` keeps the path as typed.
+ * False with no `argv1` or a path that cannot be resolved.
+ */
+export function isEntryScript(argv1, url) {
+  if (!argv1) return false;
+  try {
+    return realpathSync(argv1) === realpathSync(fileURLToPath(url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryScript(process.argv[1], import.meta.url)) {
   const refused = launchRefusal(process.env, import.meta.url);
   if (refused) {
     console.error(refused);
