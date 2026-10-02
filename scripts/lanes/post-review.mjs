@@ -7,11 +7,46 @@
 // The owner's approval is a native code-owner review in GitHub (ADR 0021, 0025); there is no owner status to post.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { configuredReviewers, TEAM_REASON } from "./approve-guard.mjs";
-import { parseIssueForm, parsePending, parsePrBody, REVIEWERS, reviewContext } from "./lib.mjs";
+import { loadConfig, parseIssueForm, parsePending, parsePrBody, REVIEWERS, reviewContext, reviewerNames } from "./lib.mjs";
 
+export const TEAM_REASON = "under the team profile, approve the PR in GitHub (ADR 0021)";
 const OWNER_REASON = TEAM_REASON;
+
+/** The main checkout's root, found from `from` (a directory of any checkout or worktree) through `git rev-parse --git-common-dir`; the checkout holding `from` without git (#447). */
+export function mainCheckoutFrom(from) {
+  try {
+    // An inherited GIT_DIR, GIT_COMMON_DIR or GIT_WORK_TREE would redirect the answer, so git reads only `from`.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.toUpperCase().startsWith("GIT_")));
+    const common = execFileSync("git", ["-C", from, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env }).trim();
+    if (common !== "" && basename(common) === ".git") return dirname(common);
+  } catch {
+    // git missing or not a repository: the checkout holding this script is the best answer.
+  }
+  return resolve(from, "../..");
+}
+
+/**
+ * The reviewer names a session may post (#463, ADR 0018): reviewerNames of the main checkout's lanes.config.json, never a
+ * worktree's copy. A config that is missing, unreadable or invalid leaves the built-in four, and `owner` is never one.
+ */
+export function configuredReviewersFrom(from) {
+  try {
+    const names = reviewerNames(loadConfig(join(mainCheckoutFrom(from), "lanes.config.json"))).filter((n) => n !== "owner");
+    // loadConfig does not check the modules block: a name that is not the agent-name shape (`Owner`, `owner `,
+    // `review/owner`) could alias the owner's status, so one bad name leaves the built-in four.
+    if (!names.every((n) => /^[a-z][a-z0-9-]*$/.test(n))) return [...REVIEWERS];
+    return names;
+  } catch {
+    return [...REVIEWERS];
+  }
+}
+
+/** configuredReviewersFrom for the checkout holding this script. */
+export function configuredReviewers() {
+  return configuredReviewersFrom(fileURLToPath(new URL(".", import.meta.url)));
+}
 
 const RESULTS = ["pass", "fail", "not-applicable"];
 const SEVERITIES = ["critical", "important", "minor"];

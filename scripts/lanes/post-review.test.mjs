@@ -5,8 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { configuredReviewersFrom, grantDirFrom } from "./approve-guard.mjs";
-import { buildStatus, buildVerdictComment, checkSha, main, metricsWarning, parseArgs, validateVerdict } from "./post-review.mjs";
+import { buildStatus, buildVerdictComment, checkSha, configuredReviewers, configuredReviewersFrom, mainCheckoutFrom, main, metricsWarning, parseArgs, TEAM_REASON, validateVerdict } from "./post-review.mjs";
 
 test("skipped is a success whose description starts with skipped", () => {
   assert.deepEqual(buildStatus("ui-reviewer", "skipped", "no visible change"), { context: "review/ui-reviewer", state: "success", description: "skipped: no visible change" });
@@ -437,7 +436,12 @@ test("edge: a security failure verdict is never refused over a failure status", 
   assert.deepEqual(gh.writes.map((w) => w.kind), ["comment", "status"]);
 });
 
-test("grantDirFrom finds the main checkout's .lanes/approve from the main checkout and from a worktree", () => {
+test("the team refusal for post-review.mjs owner is unchanged", () => {
+  assert.equal(TEAM_REASON, "under the team profile, approve the PR in GitHub (ADR 0021)");
+  assert.throws(() => buildStatus("owner", "skipped", "x"), (e) => e.message === `there is no owner status: ${TEAM_REASON}`);
+});
+
+test("mainCheckoutFrom finds the main checkout from the main checkout and from a worktree", () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "grant-repo-")));
   const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "core.hooksPath=", ...args], { cwd, stdio: "pipe" });
   const mainCheckout = join(root, "main");
@@ -447,16 +451,15 @@ test("grantDirFrom finds the main checkout's .lanes/approve from the main checko
   const wt = join(root, "wt");
   git(mainCheckout, "worktree", "add", "-q", "-b", "wt", wt);
   mkdirSync(join(wt, "scripts", "lanes"), { recursive: true });
-  const want = join(mainCheckout, ".lanes", "approve");
-  assert.equal(grantDirFrom(join(mainCheckout, "scripts", "lanes")), want);
-  assert.equal(grantDirFrom(join(wt, "scripts", "lanes")), want);
+  assert.equal(join(mainCheckoutFrom(join(mainCheckout, "scripts", "lanes"))), mainCheckout);
+  assert.equal(join(mainCheckoutFrom(join(wt, "scripts", "lanes"))), mainCheckout);
 });
 
-test("edge: grantDirFrom outside any repository falls back to the checkout holding the script", () => {
+test("edge: mainCheckoutFrom outside any repository falls back to the checkout holding the script", () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "grant-nogit-")));
   const dir = join(root, "scripts", "lanes");
   mkdirSync(dir, { recursive: true });
-  assert.equal(grantDirFrom(dir), join(root, ".lanes", "approve"));
+  assert.equal(mainCheckoutFrom(dir), root);
 });
 
 test("lane.md says a lane posts only a verdict the reviewer returned, never edits its verdict field, and re-runs after fixes", () => {
@@ -472,7 +475,7 @@ test("edge: a truncated status list without the security status fails closed, an
   assert.deepEqual(gh.writes, []);
 });
 
-test("edge: an inherited GIT_DIR cannot redirect grantDirFrom", () => {
+test("edge: an inherited GIT_DIR cannot redirect mainCheckoutFrom", () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "grant-env-")));
   const dir = join(root, "scripts", "lanes");
   mkdirSync(dir, { recursive: true });
@@ -482,7 +485,7 @@ test("edge: an inherited GIT_DIR cannot redirect grantDirFrom", () => {
   const saved = process.env.GIT_DIR;
   process.env.GIT_DIR = other;
   try {
-    assert.equal(grantDirFrom(dir), join(root, ".lanes", "approve"));
+    assert.equal(mainCheckoutFrom(dir), root);
   } finally {
     if (saved === undefined) delete process.env.GIT_DIR;
     else process.env.GIT_DIR = saved;
@@ -588,4 +591,42 @@ test("edge: --file with owner as the verdict's reviewer is refused as an unknown
   const gh = fakeGh();
   assert.throws(() => main(["--file", verdictFile(verdict({ reviewer: "owner" }))], { run: gh.run, ...quiet }), /reviewer must be one of/);
   assert.deepEqual(gh.writes, []);
+});
+
+const cfgRepo = (text) => {
+  const dir = mkdtempSync(join(tmpdir(), "post-review-cfg2-"));
+  execFileSync("git", ["init", "-q", dir]);
+  mkdirSync(join(dir, "scripts", "lanes"), { recursive: true });
+  if (text !== undefined) writeFileSync(join(dir, "lanes.config.json"), text);
+  return dir;
+};
+const cfgWith = (names) => JSON.stringify({
+  requiredChecks: ["verify"],
+  paths: { skip: [], contract: [], sensitive: [], ui: [] },
+  modules: { entries: [{ id: "m", paths: ["x/"], imports: [], risk: "normal", reviewers: names }] },
+});
+const BUILT_IN_FOUR = CONFIGURED.slice(0, 4);
+
+test("a missing, unreadable or invalid config leaves only the built-in four (#463)", () => {
+  for (const text of [undefined, "{not json", "[]", "{}", JSON.stringify({ requiredChecks: [] })]) {
+    assert.deepEqual(configuredReviewersFrom(join(cfgRepo(text), "scripts", "lanes")), BUILT_IN_FOUR, String(text));
+  }
+});
+
+test("a config that lists owner never makes it a configured reviewer (#463)", () => {
+  const names = configuredReviewersFrom(join(cfgRepo(cfgWith(["owner", "compliance-reviewer"])), "scripts", "lanes"));
+  assert.ok(!names.includes("owner"));
+  assert.deepEqual(names, CONFIGURED);
+});
+
+test("a config name that is not a plain agent name leaves only the built-in four (#463)", () => {
+  for (const bad of ["Owner", "OWNER", "owner ", "review/owner", "", "9lives", "a_b"]) {
+    assert.deepEqual(configuredReviewersFrom(join(cfgRepo(cfgWith(["compliance-reviewer", bad])), "scripts", "lanes")), BUILT_IN_FOUR, JSON.stringify(bad));
+  }
+});
+
+test("edge: configuredReviewers reads the checkout holding the script and never offers owner", () => {
+  const names = configuredReviewers();
+  assert.ok(names.includes("test-hunter"));
+  assert.ok(!names.includes("owner"));
 });

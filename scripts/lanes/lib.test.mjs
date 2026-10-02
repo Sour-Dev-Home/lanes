@@ -259,7 +259,7 @@ test("classifyFiles reports owner when any file matches paths.owner", () => {
 
 // ADR 0002: every regex in the real paths.owner, with a path it must match and a near-miss that is not owner-only.
 const OWNER_SAMPLES = {
-  "^scripts/lanes/(gate|lib|approve-guard|post-review|issue-contract)(\\.test)?\\.mjs$": ["scripts/lanes/approve-guard.test.mjs", "scripts/lanes/gatekeeper.mjs"],
+  "^scripts/lanes/(gate|lib|post-review|issue-contract)(\\.test)?\\.mjs$": ["scripts/lanes/post-review.test.mjs", "scripts/lanes/gatekeeper.mjs"],
   "^scripts/lanes/gate-decision\\.test\\.mjs$": ["scripts/lanes/gate-decision.test.mjs", "scripts/lanes/gate-decision.mjs"],
   "^scripts/lanes/workflow\\.test\\.mjs$": ["scripts/lanes/workflow.test.mjs", "scripts/lanes/workflow.mjs"],
   "^scripts/lanes/contracts\\.test\\.mjs$": ["scripts/lanes/contracts.test.mjs", "scripts/lanes/contracts.test.mjs.bak"],
