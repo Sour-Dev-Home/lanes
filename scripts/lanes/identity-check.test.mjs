@@ -277,3 +277,91 @@ test("edge: CRLF output and a POSIX lane directory still pass, with no leak", ()
   assert.equal(r.code, 0, r.line);
   assertNoSecret(r.line);
 });
+
+// #612: the read-only setup checks (ADR 0025 part 8).
+import { formatRepoChecks, repoChecks, setupChecksMain } from "./identity-check.mjs";
+
+const REPO = "me/proj";
+const RULE = { enforcement: "active", rules: [{ type: "pull_request", parameters: { require_code_owner_review: true } }] };
+function ghFake({ rulesets = [{ id: 7 }], detail = RULE, installs = { installations: [{ id: 2 }] }, repos = { repositories: [{ full_name: REPO }] }, fail = [] } = {}) {
+  const calls = [];
+  const run = (cmd, args) => {
+    calls.push([cmd, ...args].join(" "));
+    const path = args[1];
+    if (cmd !== "gh" || args[0] !== "api" || fail.includes(path)) return { status: 1, stdout: "" };
+    const body = path === `repos/${REPO}/rulesets` ? rulesets : path === `repos/${REPO}/rulesets/7` ? detail : path === "user/installations" ? installs : path.startsWith("user/installations/2/repositories") ? repos : undefined;
+    return body === undefined ? { status: 1, stdout: "" } : { status: 0, stdout: JSON.stringify(body) };
+  };
+  return { run, calls };
+}
+const checks = (g, exists = () => true) => repoChecks({ run: g.run, exists, repo: REPO, slug: "x", installationId: 2 });
+const byName = (rs, n) => rs.find((c) => c.name === n);
+
+test("repoChecks: everything present passes all three and makes only GET api calls", () => {
+  const g = ghFake();
+  const rs = checks(g);
+  assert.deepEqual(rs.map((c) => [c.name, c.pass]), [["codeowners", true], ["ruleset", true], ["installed", true]]);
+  assert.ok(g.calls.every((c) => c.startsWith("gh api ") && !c.includes("-X") && !c.includes("--method")));
+});
+
+test("repoChecks: a missing CODEOWNERS prints the file link and the line to add", () => {
+  const c = byName(checks(ghFake(), () => false), "codeowners");
+  assert.equal(c.pass, false);
+  assert.equal(c.fix.line, "* @me");
+  assert.match(c.fix.link, /^https:\/\/github\.com\/me\/proj\/new\/main\?filename=\.github\/CODEOWNERS$/);
+});
+
+for (const [name, opts] of [
+  ["no rulesets", { rulesets: [] }],
+  ["a ruleset without the code-owner rule", { detail: { enforcement: "active", rules: [{ type: "pull_request", parameters: { require_code_owner_review: false } }] } }],
+  ["an inactive ruleset", { detail: { ...RULE, enforcement: "disabled" } }],
+]) {
+  test(`repoChecks: ${name} fails the ruleset check with the settings link`, () => {
+    const c = byName(checks(ghFake(opts)), "ruleset");
+    assert.equal(c.pass, false);
+    assert.equal(c.fix.link, `https://github.com/${REPO}/settings/rules/new?target=branch`);
+  });
+}
+
+test("edge: repoChecks never passes a check it could not read", () => {
+  const rs = checks(ghFake({ fail: ["repos/me/proj/rulesets", "user/installations"] }));
+  assert.match(byName(rs, "ruleset").reason, /could not be checked/);
+  assert.match(byName(rs, "installed").reason, /could not be checked/);
+  assert.equal(byName(rs, "ruleset").pass, false);
+  assert.equal(byName(rs, "installed").pass, false);
+});
+
+test("repoChecks: the App not installed (account or repository) fails with the install link", () => {
+  for (const opts of [{ installs: { installations: [{ id: 9 }] } }, { repos: { repositories: [{ full_name: "me/other" }] } }]) {
+    const c = byName(checks(ghFake(opts)), "installed");
+    assert.equal(c.pass, false);
+    assert.equal(c.fix.link, "https://github.com/apps/x/installations/new");
+  }
+});
+
+test("edge: repoChecks reads past a non-matching ruleset and fails when the App's repositories cannot be read", () => {
+  const g = ghFake({ rulesets: [{ id: 3 }, { id: 7 }] });
+  assert.equal(byName(checks(g), "ruleset").pass, true);
+  const r = byName(checks(ghFake({ repos: {} })), "installed");
+  assert.equal(r.pass, false);
+  assert.match(r.reason, /repositories could not be checked/);
+});
+
+test("formatRepoChecks lists each missing item with its link and the CODEOWNERS line", () => {
+  const out = formatRepoChecks(checks(ghFake({ rulesets: [] }), () => false));
+  assert.match(out, /missing: codeowners/);
+  assert.match(out, /add the line: \* @me/);
+  assert.match(out, /missing: ruleset[^\n]*\n {2}open https:\/\/github\.com\/me\/proj\/settings\/rules/);
+  assert.match(out, /ok: installed/);
+});
+
+test("setupChecksMain exits 0 when all pass, 1 when one is missing, and 1 without a team identity", () => {
+  const cfg = () => JSON.parse(TEAM);
+  const wrap = (g) => (cmd, args, o) => (cmd === "gh" && args[0] === "repo" ? { status: 0, stdout: `${REPO}\n` } : g.run(cmd, args, o));
+  const out = [];
+  const print = (l) => out.push(l);
+  assert.equal(setupChecksMain({ run: wrap(ghFake()), exists: () => true, config: cfg, print }), 0);
+  assert.equal(setupChecksMain({ run: wrap(ghFake()), exists: () => false, config: cfg, print }), 1);
+  assert.equal(setupChecksMain({ run: wrap(ghFake()), exists: () => true, config: () => ({}), print }), 1);
+  assert.equal(setupChecksMain({ run: wrap(ghFake()), exists: () => true, config: () => { throw new Error("x"); }, print }), 1);
+});

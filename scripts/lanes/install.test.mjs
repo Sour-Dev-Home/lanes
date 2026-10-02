@@ -20,6 +20,13 @@ function hookScripts(settings) {
   return [...scripts];
 }
 
+test("#612: MANIFEST ships app-setup.mjs with the identity-check it imports, and the config registers it under install", () => {
+  assert.ok(MANIFEST.includes("scripts/lanes/app-setup.mjs"));
+  assert.ok(MANIFEST.includes("scripts/lanes/identity-check.mjs"));
+  const install = JSON.parse(readFileSync("lanes.config.json", "utf8")).modules.entries.find((m) => m.id === "install");
+  assert.ok(install.paths.includes("scripts/lanes/app-setup."));
+});
+
 test("MANIFEST ships the OWASP licence, provenance note, index and every vendored sheet", () => {
   const dir = "vendor/owasp-cheatsheets";
   for (const f of ["LICENSE", "VENDORED.md", "INDEX.md"]) assert.ok(MANIFEST.includes(`${dir}/${f}`), f);

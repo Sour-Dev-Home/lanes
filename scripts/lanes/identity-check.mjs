@@ -3,7 +3,7 @@
 // own App credentials, printing one redacted JSON line and never a token, password, URL or local path.
 // Usage: node scripts/lanes/identity-check.mjs (no arguments). Exit 0: solo, or every team check passed. 1: otherwise.
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseIdentity } from "./lib.mjs";
 
@@ -107,13 +107,103 @@ export function identityCheck({ readConfig, run, env }) {
   return { code: ok ? 0 : 1, line: JSON.stringify({ profile: "team", pass: ok, checks }) };
 }
 
+const CODEOWNERS_PATHS = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
+
+const ghJson = (run, path) => {
+  const r = safeRun(run, "gh", ["api", path]);
+  if (r.status !== 0) return undefined;
+  try {
+    return JSON.parse(r.stdout);
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * #612 (ADR 0025 part 8): the owner-side, read-only checks after App setup. Each result is `{ name, pass, reason, fix }`;
+ * `fix` (only when not passing) holds the GitHub settings `link` and, for CODEOWNERS, the `line` to add. Makes no write
+ * and no admin call; a check that cannot be read fails with "could not be checked" rather than passing.
+ * @param {{ run: Function, exists: (path: string) => boolean, repo: string, slug: string, installationId: number }} o
+ *   `repo` is `owner/name`; `run` and `exists` are injected so tests touch no network or disk.
+ */
+export function repoChecks({ run, exists, repo, slug, installationId }) {
+  const owner = repo.split("/")[0];
+  const base = `https://github.com/${repo}`;
+  const results = [];
+
+  const hasOwners = CODEOWNERS_PATHS.some((p) => exists(p));
+  results.push({
+    name: "codeowners",
+    pass: hasOwners,
+    reason: hasOwners ? "CODEOWNERS present" : "no CODEOWNERS file",
+    ...(hasOwners ? {} : { fix: { link: `${base}/new/main?filename=.github/CODEOWNERS`, line: `* @${owner}` } }),
+  });
+
+  const list = ghJson(run, `repos/${repo}/rulesets`);
+  let ruleset;
+  if (!Array.isArray(list)) ruleset = { pass: false, reason: "rulesets could not be checked" };
+  else {
+    let found = false;
+    for (const rs of list) {
+      const detail = ghJson(run, `repos/${repo}/rulesets/${rs?.id}`);
+      const rules = Array.isArray(detail?.rules) ? detail.rules : [];
+      if (detail?.enforcement === "active" && rules.some((r) => r?.type === "pull_request" && r.parameters?.require_code_owner_review === true)) {
+        found = true;
+        break;
+      }
+    }
+    ruleset = { pass: found, reason: found ? "code-owner ruleset present" : "no active ruleset requires a code-owner review" };
+  }
+  results.push({ name: "ruleset", ...ruleset, ...(ruleset.pass ? {} : { fix: { link: `${base}/settings/rules/new?target=branch` } }) });
+
+  const installs = ghJson(run, "user/installations");
+  let installed;
+  if (!Array.isArray(installs?.installations)) installed = { pass: false, reason: "installations could not be checked" };
+  else if (!installs.installations.some((i) => i?.id === installationId)) installed = { pass: false, reason: "the App is not installed for this account" };
+  else {
+    const repos = ghJson(run, `user/installations/${installationId}/repositories?per_page=100`);
+    if (!Array.isArray(repos?.repositories)) installed = { pass: false, reason: "the App's repositories could not be checked" };
+    else if (repos.repositories.some((r) => r?.full_name === repo)) installed = { pass: true, reason: "the App is installed on the repository" };
+    else installed = { pass: false, reason: "the App is not installed on this repository" };
+  }
+  results.push({ name: "installed", ...installed, ...(installed.pass ? {} : { fix: { link: `https://github.com/apps/${slug}/installations/new` } }) });
+  return results;
+}
+
+/** One printable block for the failing checks: each missing item with its link and, for CODEOWNERS, the line to add. */
+export function formatRepoChecks(results) {
+  return results.map((c) => (c.pass ? `ok: ${c.name}: ${c.reason}` : `missing: ${c.name}: ${c.reason}\n  open ${c.fix.link}${c.fix.line ? `\n  add the line: ${c.fix.line}` : ""}`)).join("\n");
+}
+
 const realRun = (cmd, args, { input, env } = {}) => {
   const r = spawnSync(cmd, args, { input, env, encoding: "utf8", timeout: 20000, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
   if (r.error) throw r.error;
   return { stdout: r.stdout, stderr: r.stderr, status: r.status };
 };
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+/** Runs repoChecks for the repository in the current directory, as the owner (`--setup-checks`). Returns the exit code. */
+export function setupChecksMain({ run = realRun, exists = existsSync, config = () => JSON.parse(readFileSync("lanes.config.json", "utf8")), print = console.log } = {}) {
+  let app;
+  let repo;
+  try {
+    app = parseIdentity(config().identity)?.app;
+    const r = safeRun(run, "gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+    repo = r.status === 0 ? r.stdout.trim() : "";
+  } catch {
+    app = undefined;
+  }
+  if (!app?.botLogin || !repo) {
+    print("setup checks need a team identity in lanes.config.json and a repository gh can read");
+    return 1;
+  }
+  const results = repoChecks({ run, exists, repo, slug: app.botLogin.replace(/\[bot\]$/, ""), installationId: app.installationId });
+  print(formatRepoChecks(results));
+  return results.every((c) => c.pass) ? 0 : 1;
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv.length === 3 && process.argv[2] === "--setup-checks") {
+  process.exitCode = setupChecksMain();
+} else if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { code, line } = identityCheck({ readConfig: () => readFileSync("lanes.config.json", "utf8"), run: realRun, env: process.env });
   console.log(line);
   process.exitCode = code;

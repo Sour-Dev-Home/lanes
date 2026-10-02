@@ -9,7 +9,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, appendFileSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mintInstallationToken, writeGhHosts } from "./app-token.mjs";
@@ -296,7 +296,7 @@ function prepareTeam(n, identity, deps, baseEnv) {
     try {
       team.readable(keyFile);
     } catch {
-      return { failed: "key file unreadable" };
+      return { failed: `key file unreadable: ${keyFile}` };
     }
     try {
       repo = team.repo();
@@ -350,6 +350,19 @@ function removeQuietly(team, dir) {
   }
 }
 
+/**
+ * #612 (ADR 0025 part 7): the App key's path. An explicit LANES_APP_KEY_FILE wins; otherwise `~/.lanes/<slug>.pem`, the
+ * slug being `identity.app.botLogin` without `[bot]`. Undefined when neither is known.
+ * @param {{ env: Record<string, string|undefined>, identity?: { app?: { botLogin?: string } }, home: string }} o
+ */
+export function resolveKeyFile({ env, identity, home }) {
+  if (env.LANES_APP_KEY_FILE) return env.LANES_APP_KEY_FILE;
+  const login = identity?.app?.botLogin;
+  if (typeof login !== "string") return undefined;
+  const slug = login.replace(/\[bot\]$/, "");
+  return /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(slug) ? join(home, ".lanes", `${slug}.pem`) : undefined;
+}
+
 /** How often the refresher re-mints: installation tokens last an hour (ADR 0019 part 4). */
 export const REFRESH_MS = 45 * 60 * 1000;
 
@@ -390,7 +403,7 @@ export function makeRemint({ args, keyFile, readFile, mint, writeHosts }) {
     try {
       keyPem = readFile(file);
     } catch {
-      throw new Error("key file unreadable");
+      throw new Error(`key file unreadable: ${file}`);
     }
     const { token } = await mint({ appId: args.app, installationId: args.installation, keyPem, repo: args.repo });
     writeHosts(args.dir, token);
@@ -939,8 +952,9 @@ function readConfig() {
 // in a child so the launch stays synchronous; the child reads the key from the owner's own environment. Exported as
 // `teamSteps` for the queue (#556).
 const selfPath = fileURLToPath(import.meta.url);
+const defaultKeyFile = () => resolveKeyFile({ env: process.env, identity: readConfig()?.identity, home: homedir() });
 const team = {
-  keyFile: () => process.env.LANES_APP_KEY_FILE,
+  keyFile: defaultKeyFile,
   readable: (file) => accessSync(file, fsConstants.R_OK),
   repo: () => gh(["repo", "view", "--json", "name", "--jq", ".name"]).trim(),
   // A fresh directory under the OS temp folder: outside the repository and every worktree, owner-only where modes exist.
@@ -986,7 +1000,7 @@ async function runRefresher(argv) {
     console.error("refusing: --dir is not a lane config directory");
     return 2;
   }
-  const remint = makeRemint({ args, keyFile: () => process.env.LANES_APP_KEY_FILE, readFile: (file) => readFileSync(file, "utf8"), mint: mintInstallationToken, writeHosts: writeGhHosts });
+  const remint = makeRemint({ args, keyFile: defaultKeyFile, readFile: (file) => readFileSync(file, "utf8"), mint: mintInstallationToken, writeHosts: writeGhHosts });
   if (args.once) {
     try {
       await remint();
