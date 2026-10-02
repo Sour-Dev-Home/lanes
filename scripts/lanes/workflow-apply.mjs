@@ -10,6 +10,9 @@
 //   apply env: LANES_REPO, LANES_PR, LANES_COMMENT_ID, LANES_HEAD_SHA (the head the filter saw), LANES_WORKFLOWS_TOKEN.
 //     Exit 0 committed, 1 refused (the reason is printed, nothing was written), 2 unusable input.
 // The token is read once, never printed, and scrubbed from every line the script prints.
+// Two checks are stricter or narrower than ADR 0029 part 5 words them: any edit of the comment refuses (the lane bot
+// never edits a hand-over), and "the head has not moved since the comment" compares the head with the one the filter
+// job read when the comment arrived; the verdicts' SHA match and the non-forced ref update close the gap after that.
 import { appendFileSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { REVIEWERS, isLaneBot, parseIdentity, parsePending, parseVerdictComment, pendingFileHash } from "./lib.mjs";
