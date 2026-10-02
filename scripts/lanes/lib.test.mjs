@@ -1160,6 +1160,15 @@ test("compileConfig exposes a validated identity, leaves it out when absent and 
   assert.throws(() => parseIdentity(compileConfig({ ...raw, identity: { profile: "solo" } }).identity), (e) => e.teamRequired === true && /profile "solo"/.test(e.message));
 });
 
+test("edge: compileConfig keeps no profile for a non-object or non-string-profile identity, and still throws a team shape error", () => {
+  const raw = { requiredChecks: ["verify"], paths: { skip: [], contract: [], sensitive: [], ui: [] } };
+  assert.equal("identity" in compileConfig({ ...raw, identity: { profile: 7 } }), false);
+  for (const identity of ["solo", null, 5, []]) {
+    assert.throws(() => compileConfig({ ...raw, identity }), /identity must be an object/, JSON.stringify(identity));
+  }
+  assert.throws(() => compileConfig({ ...raw, identity: { profile: "team", app: { id: "x" } } }), /identity/);
+});
+
 test("identityRefusal is the refusal line for a config that is not team, and null for team or an unparseable file", () => {
   const cfg = (identity) => () => JSON.stringify({ identity });
   assert.equal(identityRefusal(cfg(TEAM_ID)), null);
