@@ -360,7 +360,7 @@ export function resolveKeyFile({ env, identity, home }) {
   const login = identity?.app?.botLogin;
   if (typeof login !== "string") return undefined;
   const slug = login.replace(/\[bot\]$/, "");
-  return slug ? join(home, ".lanes", `${slug}.pem`) : undefined;
+  return /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(slug) ? join(home, ".lanes", `${slug}.pem`) : undefined;
 }
 
 /** How often the refresher re-mints: installation tokens last an hour (ADR 0019 part 4). */

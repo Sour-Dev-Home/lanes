@@ -339,6 +339,14 @@ test("repoChecks: the App not installed (account or repository) fails with the i
   }
 });
 
+test("edge: repoChecks reads past a non-matching ruleset and fails when the App's repositories cannot be read", () => {
+  const g = ghFake({ rulesets: [{ id: 3 }, { id: 7 }] });
+  assert.equal(byName(checks(g), "ruleset").pass, true);
+  const r = byName(checks(ghFake({ repos: {} })), "installed");
+  assert.equal(r.pass, false);
+  assert.match(r.reason, /repositories could not be checked/);
+});
+
 test("formatRepoChecks lists each missing item with its link and the CODEOWNERS line", () => {
   const out = formatRepoChecks(checks(ghFake({ rulesets: [] }), () => false));
   assert.match(out, /missing: codeowners/);

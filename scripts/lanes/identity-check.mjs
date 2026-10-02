@@ -201,7 +201,7 @@ export function setupChecksMain({ run = realRun, exists = existsSync, config = (
   return results.every((c) => c.pass) ? 0 : 1;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv.includes("--setup-checks")) {
+if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv.length === 3 && process.argv[2] === "--setup-checks") {
   process.exitCode = setupChecksMain();
 } else if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { code, line } = identityCheck({ readConfig: () => readFileSync("lanes.config.json", "utf8"), run: realRun, env: process.env });

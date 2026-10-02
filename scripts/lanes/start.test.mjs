@@ -21,6 +21,7 @@ test("edge: resolveKeyFile with an empty override, no identity or no botLogin", 
   assert.equal(resolveKeyFile({ env: {}, identity: undefined, home: "/h" }), undefined);
   assert.equal(resolveKeyFile({ env: {}, identity: { app: { id: 1 } }, home: "/h" }), undefined);
   assert.equal(resolveKeyFile({ env: {}, identity: { app: { botLogin: "[bot]" } }, home: "/h" }), undefined);
+  for (const bad of ["../x[bot]", "a/b[bot]", "a\\b[bot]", "-x[bot]", "a b[bot]"]) assert.equal(resolveKeyFile({ env: {}, identity: { app: { botLogin: bad } }, home: "/h" }), undefined, bad);
 });
 
 const CAP = START_DEFAULTS.maxLanes;

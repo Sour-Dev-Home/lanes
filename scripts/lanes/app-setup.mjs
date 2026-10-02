@@ -4,7 +4,7 @@
 // It serves a form on 127.0.0.1 only; the owner presses GitHub's own buttons (create, then install). The key goes to
 // ~/.lanes/<slug>.pem before any config is written, and neither the key nor a token is ever printed.
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -117,9 +117,18 @@ export function saveKey(slug, pem, home = homedir()) {
   if (!SLUG.test(slug)) throw new Error("bad slug");
   const dir = join(home, ".lanes");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const fd = openSync(join(dir, `${slug}.pem`), "wx", 0o600);
+  const file = join(dir, `${slug}.pem`);
+  const fd = openSync(file, "wx", 0o600);
   try {
     writeSync(fd, pem);
+  } catch (err) {
+    // A partial key would block a retry through "wx"; the code is single-use, so drop it.
+    try {
+      rmSync(file, { force: true });
+    } catch {
+      // Nothing more to do.
+    }
+    throw err;
   } finally {
     closeSync(fd);
   }
@@ -171,7 +180,11 @@ async function main(argv) {
     convert: realConvert,
     saveKey: (slug, pem) => saveKey(slug, pem),
     readConfig,
-    writeConfig: (obj) => writeFileSync("lanes.config.json", `${JSON.stringify(obj, null, 2)}\n`),
+    // Temp file then rename, so a crash cannot leave a truncated config.
+    writeConfig: (obj) => {
+      writeFileSync("lanes.config.json.tmp", `${JSON.stringify(obj, null, 2)}\n`);
+      renameSync("lanes.config.json.tmp", "lanes.config.json");
+    },
     log: (l) => console.log(l),
   });
   const server = createServer(async (req, res) => {
