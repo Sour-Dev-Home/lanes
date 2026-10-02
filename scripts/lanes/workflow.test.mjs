@@ -1106,7 +1106,19 @@ test("lanes-workflow-apply grants nothing at the top and the filter job only con
 
 test("lanes-workflow-apply serialises per PR and cancels an older waiting run", () => {
   const yml = applyYml();
-  assert.match(yml, /concurrency:\n  group: lanes-workflow-apply-\$\{\{ github\.event\.issue\.number \}\}\n  cancel-in-progress: true/);
+  assert.match(yml, /concurrency:\n(  #.*\n)*  group: lanes-workflow-apply-\$\{\{ github\.event\.issue\.number \}\}-/);
+  assert.match(yml, /\n  cancel-in-progress: true/);
+});
+
+test("edge: lanes-workflow-apply gives a non-bot commenter its own group so it cannot cancel a pending approval", () => {
+  const group = /\n  group: (.*)/.exec(applyYml())[1];
+  assert.match(group, /endsWith\(github\.event\.comment\.user\.login, '\[bot\]'\) && 'bot' \|\| github\.run_id/);
+});
+
+test("lanes-workflow-apply pins every action to a full commit SHA, as the other workflows do", () => {
+  const uses = [...applyYml().matchAll(/uses: (\S+)/g)].map((m) => m[1]);
+  assert.ok(uses.length >= 4);
+  for (const u of uses) assert.match(u, /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/, u);
 });
 
 test("lanes-workflow-apply checks out the default branch, never the PR head, and keeps no credentials", () => {

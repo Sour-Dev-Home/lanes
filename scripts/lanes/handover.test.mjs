@@ -274,6 +274,7 @@ test("handoverMode (#649): edge: only a required_reviewers rule with a reviewer 
   const mode = (answer) => handoverMode({ gh: () => answer }, "owner/lanes");
   assert.equal(mode(WITH_REVIEWER), "one-click");
   assert.equal(mode(JSON.stringify({ protection_rules: [{ type: "required_reviewers", reviewers: [] }] })), "copy-paste");
+  assert.equal(mode(JSON.stringify({ protection_rules: [{ type: "wait_timer", reviewers: [{ type: "User" }] }] })), "copy-paste");
   assert.equal(mode(JSON.stringify({ protection_rules: [{ type: "wait_timer" }, { type: "branch_policy" }] })), "copy-paste");
   assert.equal(mode(JSON.stringify({ protection_rules: "x" })), "copy-paste");
   assert.equal(handoverMode({ gh: () => { throw new Error("boom"); } }, "owner/lanes"), "copy-paste");
