@@ -69,7 +69,7 @@ export function buildStatus(reviewer, verdict, summary, names = REVIEWERS) {
 }
 
 const METRIC_TIERS = ["skip", "quick", "full"];
-const METRIC_KEYS = ["tier", "minutes", "tokens"];
+const METRIC_KEYS = ["tier", "minutes", "tokens", "rounds"];
 
 /**
  * The optional `metrics` object, by the rules of contracts/review-metrics.schema.json (checked in code, not read from
@@ -82,6 +82,7 @@ function metricsErrors(m) {
   if (!METRIC_TIERS.includes(m.tier)) errors.push(`metrics.tier must be ${METRIC_TIERS.join(", ")}`);
   if (typeof m.minutes !== "number" || !Number.isFinite(m.minutes) || m.minutes < 0) errors.push("metrics.minutes must be a number >= 0");
   if (!Number.isInteger(m.tokens) || m.tokens < 0) errors.push("metrics.tokens must be an integer >= 0");
+  if (m.rounds !== undefined && (!Number.isInteger(m.rounds) || m.rounds < 1)) errors.push("metrics.rounds must be an integer >= 1");
   return errors;
 }
 

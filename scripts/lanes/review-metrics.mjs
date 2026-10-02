@@ -9,7 +9,7 @@
 // JSON shape (schemaVersion 1):
 //   { schemaVersion, generatedAt, window: { days, from, to }, runs, runsWithoutMetrics, unreadable,
 //     tiers: [{ tier, runs, runsWithMetrics, runsWithoutMetrics, realFindings, minorFindings, runsWithNoRealFinding,
-//               noRealFindingShare, totalTokens, tokensPerRealFinding,
+//               failedRounds, noRealFindingShare, totalTokens, tokensPerRealFinding,
 //               reviewers: [{ reviewer, runs, runsWithMetrics, runsWithoutMetrics, minutes: { median, total },
 //                             tokens: { median, total }, realFindings, minorFindings, runsWithNoRealFinding }] }] }
 //
@@ -17,6 +17,7 @@
 // - Every posted verdict is one run (a second review round posts a second verdict).
 // - A run's tier is its `metrics.tier` (contracts/review-metrics.schema.json); without metrics, the tier label of the
 //   issue the PR closes; else "unknown".
+// - Failed rounds are `metrics.rounds - 1` summed, a verdict without `rounds` counting as 1 round (0 failed).
 // - Real findings are critical plus important; minor findings are counted apart.
 // - Runs without `metrics` count toward runs and findings, not toward minutes or tokens. tokensPerRealFinding divides
 //   the tier's tokens by the real findings of the runs that reported metrics, so both sides cover the same runs.
@@ -39,7 +40,8 @@ const round = (value, digits = 1) => Math.round(value * 10 ** digits) / 10 ** di
 function validMetrics(m) {
   return (
     m !== null && typeof m === "object" && !Array.isArray(m) && TIERS.includes(m.tier) &&
-    typeof m.minutes === "number" && Number.isFinite(m.minutes) && m.minutes >= 0 && Number.isInteger(m.tokens) && m.tokens >= 0
+    typeof m.minutes === "number" && Number.isFinite(m.minutes) && m.minutes >= 0 && Number.isInteger(m.tokens) && m.tokens >= 0 &&
+    (m.rounds === undefined || (Number.isInteger(m.rounds) && m.rounds >= 1))
   );
 }
 
@@ -82,7 +84,7 @@ export function collectVerdicts(prs, { now, days, names = REVIEWERS }) {
     .filter((e) => e !== null);
 }
 
-const emptyCounts = () => ({ runs: 0, runsWithMetrics: 0, runsWithoutMetrics: 0, realFindings: 0, minorFindings: 0, runsWithNoRealFinding: 0 });
+const emptyCounts = () => ({ runs: 0, runsWithMetrics: 0, runsWithoutMetrics: 0, realFindings: 0, minorFindings: 0, runsWithNoRealFinding: 0, failedRounds: 0 });
 
 function count(target, verdict) {
   const real = verdict.findings.filter((f) => REAL.has(f.severity)).length;
@@ -92,6 +94,7 @@ function count(target, verdict) {
   target.realFindings += real;
   target.minorFindings += verdict.findings.filter((f) => f.severity === "minor").length;
   if (real === 0) target.runsWithNoRealFinding += 1;
+  target.failedRounds += (verdict.metrics?.rounds ?? 1) - 1;
   return real;
 }
 
@@ -135,6 +138,7 @@ export function summarize(verdicts) {
         realFindings: t.realFindings,
         minorFindings: t.minorFindings,
         runsWithNoRealFinding: t.runsWithNoRealFinding,
+        failedRounds: t.failedRounds,
         noRealFindingShare: round(t.runsWithNoRealFinding / t.runs, 3),
         totalTokens: t.meteredTokens,
         tokensPerRealFinding: t.meteredRealFindings === 0 ? null : round(t.meteredTokens / t.meteredRealFindings),
@@ -150,6 +154,7 @@ export function summarize(verdicts) {
             realFindings: r.realFindings,
             minorFindings: r.minorFindings,
             runsWithNoRealFinding: r.runsWithNoRealFinding,
+            failedRounds: r.failedRounds,
           })),
       })),
   };
@@ -183,13 +188,13 @@ export function renderMarkdown(report) {
       `## Tier ${t.tier}`,
       "",
       `${t.runs} runs (${t.runsWithoutMetrics} without metrics); ${t.realFindings} real findings, ${t.minorFindings} minor; ` +
-        `runs with no real finding ${percent(t.noRealFindingShare)}; tokens per real finding ${show(t.tokensPerRealFinding)}.`,
+        `runs with no real finding ${percent(t.noRealFindingShare)}; tokens per real finding ${show(t.tokensPerRealFinding)}; ${t.failedRounds} failed rounds.`,
       "",
-      "| Reviewer | Runs | With metrics | Minutes median / total | Tokens median / total | Real findings | Minor | Runs with no real finding |",
-      "| --- | --- | --- | --- | --- | --- | --- | --- |",
+      "| Reviewer | Runs | With metrics | Minutes median / total | Tokens median / total | Real findings | Minor | Runs with no real finding | Failed rounds |",
+      "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
       ...t.reviewers.map(
         (r) =>
-          `| ${r.reviewer} | ${r.runs} | ${r.runsWithMetrics} | ${show(r.minutes.median)} / ${r.minutes.total} | ${show(r.tokens.median)} / ${r.tokens.total} | ${r.realFindings} | ${r.minorFindings} | ${r.runsWithNoRealFinding} |`,
+          `| ${r.reviewer} | ${r.runs} | ${r.runsWithMetrics} | ${show(r.minutes.median)} / ${r.minutes.total} | ${show(r.tokens.median)} / ${r.tokens.total} | ${r.realFindings} | ${r.minorFindings} | ${r.runsWithNoRealFinding} | ${r.failedRounds} |`,
       ),
       "",
     );

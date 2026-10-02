@@ -192,8 +192,9 @@ test("the metrics schema defines tier, minutes and tokens, all required, no othe
   assert.equal(metricsSchema.type, "object");
   assert.deepEqual([...metricsSchema.required].sort(), ["minutes", "tier", "tokens"]);
   assert.equal(metricsSchema.additionalProperties, false);
-  const { tier, minutes, tokens } = metricsSchema.properties;
-  assert.deepEqual(Object.keys(metricsSchema.properties).sort(), ["minutes", "tier", "tokens"]);
+  const { tier, minutes, tokens, rounds } = metricsSchema.properties;
+  assert.deepEqual(Object.keys(metricsSchema.properties).sort(), ["minutes", "rounds", "tier", "tokens"]);
+  assert.deepEqual([rounds.type, rounds.minimum], ["integer", 1]);
   assert.deepEqual(tier.enum, ["skip", "quick", "full"]);
   assert.deepEqual([minutes.type, minutes.minimum], ["number", 0]);
   assert.deepEqual([tokens.type, tokens.minimum], ["integer", 0]);
@@ -219,6 +220,14 @@ test("the metrics schema and validateVerdict agree", () => {
     ["NaN tokens", { ...valid, tokens: NaN }, false],
     ["Infinity tokens", { ...valid, tokens: Infinity }, false],
     ["a string tokens", { ...valid, tokens: "1200" }, false],
+    ["a valid rounds", { ...valid, rounds: 2 }, true],
+    ["rounds of 1", { ...valid, rounds: 1 }, true],
+    ["rounds of 0", { ...valid, rounds: 0 }, false],
+    ["a negative rounds", { ...valid, rounds: -1 }, false],
+    ["a fractional rounds", { ...valid, rounds: 1.5 }, false],
+    ["a string rounds", { ...valid, rounds: "2" }, false],
+    ["NaN rounds", { ...valid, rounds: NaN }, false],
+    ["null rounds", { ...valid, rounds: null }, false],
   ];
   const verdict = (metrics) => ({ reviewer: "security-reviewer", verdict: "success", summary: "ok", criteria: [], findings: [], metrics });
   for (const [name, metrics, expected] of cases) {
