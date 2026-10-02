@@ -438,7 +438,7 @@ test("edge: a security failure verdict is never refused over a failure status", 
 
 test("the team refusal for post-review.mjs owner is unchanged", () => {
   assert.equal(TEAM_REASON, "under the team profile, approve the PR in GitHub (ADR 0021)");
-  assert.throws(() => buildStatus("owner", "skipped", "x"), new RegExp(`there is no owner status: ${TEAM_REASON.replace(/[()]/g, "\\$&")}`));
+  assert.throws(() => buildStatus("owner", "skipped", "x"), (e) => e.message === `there is no owner status: ${TEAM_REASON}`);
 });
 
 test("mainCheckoutFrom finds the main checkout from the main checkout and from a worktree", () => {
