@@ -187,7 +187,7 @@ export function workflowsPlan({ repo, login }) {
     "  branch policy:      deployments from main only",
     `  secret:             ${SECRET} (the new App's private key, piped to gh, never written to disk)`,
     `  variable:           ${VARIABLE} (the new App's id)`,
-    "If an environment of that name exists, its reviewer is replaced and main is added to its branch policy; it stays if a later step fails.",
+    "If an environment of that name exists, its reviewer is replaced and every deployment branch policy except main is deleted; it stays if a later step fails.",
     "Creating an environment with reviewers needs repository admin. CODEOWNERS and rulesets are not touched.",
   ];
 }
@@ -211,13 +211,30 @@ export async function confirmAndCreateEnvironment({ gh, ask, print }) {
   if (uid.error || !Number.isSafeInteger(userId) || userId < 1) return { ok: false, error: uid.error ?? "failed while reading your user id" };
   const repo = read("reading the repository", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
   if (repo.error) return { ok: false, error: repo.error };
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo.value) || repo.value.split("/").some((p) => p === "." || p === ".." || p.startsWith("-"))) return { ok: false, error: "failed while reading the repository (not owner/name)" };
   for (const line of workflowsPlan({ repo: repo.value, login: login.value })) print(line);
   if ((await ask("Create this? [y/N] ")) !== "y") return { ok: false, error: "not confirmed; nothing was created" };
   const base = `repos/${repo.value}/environments/${ENVIRONMENT}`;
   const put = gh(["api", "--method", "PUT", base, "--input", "-"], JSON.stringify({ reviewers: [{ type: "User", id: userId }], prevent_self_review: false, deployment_branch_policy: { protected_branches: false, custom_branch_policies: true } }));
   if (put.status !== 0) return { ok: false, error: "failed while creating the environment" };
-  const post = gh(["api", "--method", "POST", `${base}/deployment-branch-policies`, "--input", "-"], JSON.stringify({ name: "main", type: "branch" }));
-  if (post.status !== 0) return { ok: false, error: "failed while restricting deployment branches to main" };
+  // An environment that already existed may carry other policies: make it main-only, whatever it had.
+  const policiesPath = `${base}/deployment-branch-policies`;
+  const listed = gh(["api", policiesPath, "--jq", '.branch_policies[] | "\\(.id) \\(.name)"']);
+  if (listed.status !== 0) return { ok: false, error: "failed while listing the deployment branch policies" };
+  let hasMain = false;
+  for (const line of String(listed.stdout).split("\n").filter((l) => l.trim() !== "")) {
+    const m = /^([1-9]\d{0,17}) (.+)$/.exec(line);
+    if (!m) return { ok: false, error: "failed while listing the deployment branch policies (unreadable answer)" };
+    if (m[2] === "main") {
+      hasMain = true;
+      continue;
+    }
+    if (gh(["api", "--method", "DELETE", `${policiesPath}/${m[1]}`]).status !== 0) return { ok: false, error: "failed while removing a deployment branch policy other than main" };
+  }
+  if (!hasMain) {
+    const post = gh(["api", "--method", "POST", policiesPath, "--input", "-"], JSON.stringify({ name: "main", type: "branch" }));
+    if (post.status !== 0) return { ok: false, error: "failed while restricting deployment branches to main" };
+  }
   return { ok: true, repo: repo.value };
 }
 
@@ -267,7 +284,8 @@ async function main(argv) {
     }
   };
   try {
-    readConfig();
+    // The workflows mode never reads the config, so a broken one must not fail it after the environment exists.
+    if (!args.workflows) readConfig();
   } catch {
     console.error("lanes.config.json is not valid JSON; fix it first (nothing was created)");
     return 1;

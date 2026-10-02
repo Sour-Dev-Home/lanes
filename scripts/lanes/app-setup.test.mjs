@@ -164,12 +164,14 @@ test("parseArgs accepts none, --org <name> and --workflows (with or without --or
 const KEYMARK = "SECRETKEYBODY";
 
 /** A fake gh: records every call (args and stdin) and fails the call whose first args match `failOn`. */
-function fakeGh({ failOn, login = "owner-login", id = 99 } = {}) {
+function fakeGh({ failOn, login = "owner-login", id = 99, repo = "acme/widgets", policies = "" } = {}) {
   const calls = [];
   const gh = (args, input) => {
     calls.push({ args, input });
     const joined = args.join(" ");
     if (failOn && joined.includes(failOn)) return { status: 1, stdout: "", stderr: `boom ${KEYMARK}` };
+    if (joined.includes("deployment-branch-policies") && !joined.includes("--method")) return { status: 0, stdout: policies };
+    if (joined.startsWith("repo view")) return { status: 0, stdout: `${repo}\n` };
     if (joined === "api user --jq .login") return { status: 0, stdout: `${login}\n` };
     if (joined === "api user --jq .id") return { status: 0, stdout: `${id}\n` };
     if (joined.startsWith("repo view")) return { status: 0, stdout: "acme/widgets\n" };
@@ -238,6 +240,47 @@ test("y creates the environment with the owner as reviewer, main-only deployment
   const post = calls.find((c) => c.args.includes("POST"));
   assert.ok(post.args.includes("repos/acme/widgets/environments/lanes-workflow-apply/deployment-branch-policies"));
   assert.deepEqual(JSON.parse(post.input), { name: "main", type: "branch" });
+});
+
+const base = "repos/acme/widgets/environments/lanes-workflow-apply/deployment-branch-policies";
+
+test("a pre-existing environment is made main-only: every other branch policy is deleted, main is kept", async () => {
+  const { gh, calls } = fakeGh({ policies: "11 *\n12 main\n13 release/*\n" });
+  const r = await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} });
+  assert.equal(r.ok, true);
+  const deletes = calls.filter((c) => c.args.includes("DELETE")).map((c) => c.args.find((a) => a.startsWith("repos/")));
+  assert.deepEqual(deletes, [`${base}/11`, `${base}/13`]);
+  assert.equal(calls.some((c) => c.args.includes("POST")), false, "main already exists, so no POST");
+});
+
+test("edge: a lookalike policy name is not main, and an unparseable policy line is refused", async () => {
+  let { gh, calls } = fakeGh({ policies: "5 main2\n6 Main\n" });
+  assert.equal((await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} })).ok, true);
+  assert.equal(calls.filter((c) => c.args.includes("DELETE")).length, 2);
+  assert.equal(calls.filter((c) => c.args.includes("POST")).length, 1);
+  ({ gh, calls } = fakeGh({ policies: "x/../1 main\n" }));
+  const r = await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} });
+  assert.equal(r.ok, false);
+  assert.equal(calls.some((c) => c.args.includes("DELETE") || c.args.includes("POST")), false);
+});
+
+test("edge: failing to list or delete a policy is reported by step and nothing further runs", async () => {
+  for (const [opts, step] of [[{ failOn: "deployment-branch-policies --jq" }, "listing the deployment branch policies"], [{ policies: "7 *\n", failOn: "--method DELETE" }, "removing a deployment branch policy other than main"]]) {
+    const { gh, calls } = fakeGh(opts);
+    const r = await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} });
+    assert.equal(r.ok, false, step);
+    assert.match(r.error, new RegExp(step));
+    assert.equal(calls.some((c) => c.args.includes("POST")), false);
+  }
+});
+
+test("edge: a repository name that is not owner/name is refused before any admin call", async () => {
+  for (const repo of ["acme", "a/b/c", "acme/../x", "acme/wid gets", "-x/y"]) {
+    const { gh, calls } = fakeGh({ repo });
+    const r = await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} });
+    assert.equal(r.ok, false, repo);
+    assert.equal(adminCalls(calls).length, 0, repo);
+  }
 });
 
 test("each failed environment step is reported by name and stops the run", async () => {

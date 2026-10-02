@@ -76,8 +76,8 @@ enforces that with `shell-lex.mjs`. Adopters today have no way to create the App
    read-only check (the existing `identity-check.mjs`, extended): is there a CODEOWNERS file, does a code-owner ruleset
    exist, is the App installed on the repository. For anything missing it prints the exact GitHub settings link and the
    CODEOWNERS line to add, and the owner does those steps in GitHub's UI.
-   *Amended 2026-10-02 by ADR 0029 part 3: `app-setup.mjs --workflows` makes one admin call, for the
-   `lanes-workflow-apply` environment only, after listing it and a `y/N`. CODEOWNERS and rulesets stay as above.*
+   *Amended 2026-10-02 by ADR 0029 part 3: `app-setup.mjs --workflows` makes admin calls for the
+   `lanes-workflow-apply` environment only (its creation, its secret and its variable), after listing them and a `y/N`. CODEOWNERS and rulesets stay as above.*
 9. **Sequencing, so nobody is locked out.** The setup script, its docs and the adopter manifest ship first. The refusal
    lands only after that. Removal of the gate owner stage and the approve machinery lands after the refusal. Amendments
    to other ADRs and to CLAUDE.md land last, so no text describes a state the code is not in.
