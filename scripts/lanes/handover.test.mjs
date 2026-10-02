@@ -3,7 +3,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { handover, handoverComment, handoverMode } from "./handover.mjs";
 import { TEAM_REQUIRED_MESSAGE, pendingFileHash } from "./lib.mjs";
-import { HANDOVER_MARKER, filterDecision, parseHandoverFiles } from "./workflow-apply.mjs";
 
 const WITH_REVIEWER = JSON.stringify({ name: "lanes-workflow-apply", protection_rules: [{ type: "required_reviewers", reviewers: [{ type: "User", reviewer: { login: "owner" } }] }, { type: "branch_policy" }] });
 
@@ -280,17 +279,19 @@ test("handoverMode (#649): edge: only a required_reviewers rule with a reviewer 
   assert.equal(handoverMode({ gh: () => { throw new Error("boom"); } }, "owner/lanes"), "copy-paste");
 });
 
-test("handover (#649): both modes' comments start with the marker workflow-apply matches and parse back to the same files", () => {
+// workflow-apply.mjs (not imported here: the module map keeps handover apart from it) matches the marker below and reads
+// each `#### \`path\`` heading followed by a ```yaml fence; its own tests read the same shape.
+test("handover (#649): both modes' comments start with the marker workflow-apply matches and keep the file layout it parses", () => {
   const text = "run: |\n  echo '```'\n";
   const files = [{ path: ".github/workflows/a.yml", status: "M", text }, { path: ".github/workflows/b.yml", status: "A", text: "on: push\n" }];
   for (const mode of ["one-click", "copy-paste"]) {
     const body = handoverComment({ repo: "o/r", branch: "b", files, mode });
-    assert.ok(body.startsWith(HANDOVER_MARKER), mode);
-    assert.deepEqual(parseHandoverFiles(body), { files: [{ path: ".github/workflows/a.yml", text: text.replace(/\n+$/, "") }, { path: ".github/workflows/b.yml", text: "on: push" }] }, mode);
+    assert.ok(body.startsWith("### Workflow change"), mode);
+    const lines = body.split("\n");
+    assert.equal(lines.filter((l) => /^#### `\.github\/workflows\/[ab]\.yml`/.test(l)).length, 2, mode);
+    assert.ok(lines.includes("````yaml") && lines.includes("````"), `${mode}: the fence is longer than the backticks inside`);
+    assert.ok(lines.includes("```yaml") && lines.includes("```"), mode);
   }
-  const identity = { profile: "team", app: { id: 1, installationId: 2, botLogin: "x[bot]" } };
-  const body = handoverComment({ repo: "o/r", branch: "b", files, mode: "one-click" });
-  assert.equal(filterDecision({ comment: { body, author: { login: "x[bot]", type: "Bot" } }, isPr: true, identity }).go, true);
 });
 
 test("handover (#595): edge: an unreadable config or a failing git or gh call is an error, never a post", () => {
