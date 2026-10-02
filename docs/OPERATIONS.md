@@ -160,10 +160,24 @@ cannot push a workflow file and hands it to you.
 
 **Fix.** All in the browser; the longer steps are in [USING.md](USING.md#when-a-team-lane-changes-a-workflow-file).
 1. Read each file in the comment first.
-2. Open its `edit/` or `new/` link, paste the content, choose **Commit directly to the branch**, click
-   **Commit changes**.
-3. A deleted workflow file is never handed over: delete it from the file's page (trash icon) on the PR branch.
-4. The reviewers run again on the new head; then review and approve as usual.
+2. When the comment says **Approve and deploy** ([ADR 0029](adr/0029-one-click-workflow-apply.md)), open the
+   `lanes-workflow-apply` run it links and press **Approve and deploy**. If the run refuses (the comment was edited, a
+   newer hand-over exists, the branch moved), the reason is in its log: have the lane post a new hand-over.
+3. Otherwise (the copy-paste fallback), open the `edit/` or `new/` link, paste the content, choose **Commit directly
+   to the branch**, click **Commit changes**.
+4. A deleted workflow file is never handed over: delete it from the file's page (trash icon) on the PR branch.
+5. The reviewers run again on the new head; then review and approve as usual.
+
+**The fallback.** The lane reads the `lanes-workflow-apply` environment on each hand-over. With no environment, no
+required reviewer or a failed read, the comment is the copy-paste one. Private repositories on GitHub Free have no
+required reviewers on environments, so they stay on copy-paste for good.
+
+**Rotating the key.** In the `lanes-workflows` App's settings generate a new private key, then set it with your own
+`gh`, reading from the downloaded file on stdin: `gh secret set LANES_WORKFLOWS_KEY --env lanes-workflow-apply < <file>`.
+Delete the downloaded file and the old key in the App's settings. Or rerun `node scripts/lanes/app-setup.mjs --workflows`.
+
+**Removing the App.** Delete the `lanes-workflow-apply` environment (Settings, Environments) and uninstall or delete the
+`lanes-workflows` App. Every hand-over is then copy-paste again, with nothing else to change.
 
 Incidents: #597 (the review ping workflow was delivered this way).
 

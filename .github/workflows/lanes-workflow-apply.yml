@@ -1,0 +1,91 @@
+# ADR 0029: one click for a lane's workflow change. A lane cannot push `.github/workflows/` (ADR 0023), so it posts a
+# hand-over comment; this workflow turns that comment into a deployment the owner approves ("Approve and deploy").
+# `issue_comment` always runs the default branch's copy of this file, so a PR cannot alter the workflow that handles its
+# own comments, and the checkout below is the default branch, never the PR head. Comment and PR fields reach the scripts
+# through `env:` and API reads, never through shell interpolation. The key of the `lanes-workflows` App lives in the
+# `lanes-workflow-apply` environment, whose deployment branch policy is `main` only, so no branch workflow can read it.
+name: lanes-workflow-apply
+on:
+  issue_comment:
+    types: [created]
+permissions: {}
+concurrency:
+  # Only bot comments (the lane's hand-overs) share a group per PR; any other commenter gets a run of its own, so a
+  # stranger's comment can never cancel the owner's pending approval.
+  group: lanes-workflow-apply-${{ github.event.issue.number }}-${{ endsWith(github.event.comment.user.login, '[bot]') && 'bot' || github.run_id }}
+  cancel-in-progress: true
+jobs:
+  filter:
+    # No environment and no secret: it only decides whether anything may wait for the owner's approval.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      head: ${{ steps.filter.outputs.head }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - id: filter
+        run: node scripts/lanes/workflow-apply.mjs filter
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_LOGIN: ${{ github.event.comment.user.login }}
+          COMMENT_TYPE: ${{ github.event.comment.user.type }}
+          IS_PR: ${{ github.event.issue.pull_request != null }}
+          LANES_REPO: ${{ github.repository }}
+          LANES_PR: ${{ github.event.issue.number }}
+          GITHUB_TOKEN: ${{ github.token }}
+  apply:
+    # Starts only after the owner presses "Approve and deploy".
+    needs: filter
+    if: needs.filter.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    environment: lanes-workflow-apply
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Mint a lanes-workflows installation token
+        # The App's own permissions (contents and workflows write) apply: no `permissions` body is sent.
+        run: |
+          node --input-type=module -e '
+          import { createSign } from "node:crypto";
+          import { appendFileSync } from "node:fs";
+          const { APP_ID, APP_KEY, LANES_REPO } = process.env;
+          const b64 = (v) => Buffer.from(v).toString("base64url");
+          const iat = Math.floor(Date.now() / 1000) - 60;
+          const unsigned = `${b64(JSON.stringify({ alg: "RS256", typ: "JWT" }))}.${b64(JSON.stringify({ iss: APP_ID, iat, exp: iat + 600 }))}`;
+          const jwt = `${unsigned}.${b64(createSign("RSA-SHA256").update(unsigned).sign(APP_KEY))}`;
+          const headers = { Authorization: `Bearer ${jwt}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "lanes-workflow-apply" };
+          const inst = await fetch(`https://api.github.com/repos/${LANES_REPO}/installation`, { headers });
+          if (!inst.ok) throw new Error(`finding the installation failed (HTTP ${inst.status})`);
+          const res = await fetch(`https://api.github.com/app/installations/${(await inst.json()).id}/access_tokens`, { method: "POST", headers, body: JSON.stringify({ repositories: [LANES_REPO.split("/")[1]] }) });
+          if (!res.ok) throw new Error(`minting the token failed (HTTP ${res.status})`);
+          const { token } = await res.json();
+          console.log(`::add-mask::${token}`);
+          appendFileSync(process.env.GITHUB_ENV, `LANES_WORKFLOWS_TOKEN=${token}\n`);
+          '
+        env:
+          APP_ID: ${{ vars.LANES_WORKFLOWS_APP_ID }}
+          APP_KEY: ${{ secrets.LANES_WORKFLOWS_KEY }}
+          LANES_REPO: ${{ github.repository }}
+      - name: Apply the reviewed workflow files
+        run: node scripts/lanes/workflow-apply.mjs apply
+        env:
+          LANES_REPO: ${{ github.repository }}
+          LANES_PR: ${{ github.event.issue.number }}
+          LANES_COMMENT_ID: ${{ github.event.comment.id }}
+          LANES_HEAD_SHA: ${{ needs.filter.outputs.head }}

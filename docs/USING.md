@@ -219,16 +219,36 @@ in the browser:
 1. **The note.** `/start` and the queue print `#N: Scope names .github/workflows/: the lane opens its PR without the
    workflow change and hands it over in a PR comment` and still launch the lane.
 2. **The PR comment.** The lane opens its PR without the workflow files and posts one comment (by
-   `node scripts/lanes/handover.mjs <pr>`) with each file's full content, a link to GitHub's web editor on the PR
-   branch (`edit/` for a changed file, `new/` for a new one) and a warning to read it first.
-3. **Commit changes.** Read each file. Then open its link, paste the content, choose "Commit directly to the branch" and
-   click **Commit changes**. Committing runs any push-triggered workflow in the file, so do not commit what you did not
-   read. The PR stays the bot's.
+   `node scripts/lanes/handover.mjs <pr>`) with each file's full content. It reads the `lanes-workflow-apply`
+   environment first, and the comment is in one of two modes: **Approve and deploy** when the environment has a required
+   reviewer (the one-click path below), otherwise **copy-paste**, with a link to GitHub's web editor on the PR branch
+   (`edit/` for a changed file, `new/` for a new one) and a warning to read it first.
+3. **Commit the files.** Read each file. In the one-click mode, open the `lanes-workflow-apply` run the comment links
+   (Actions tab) and press **Approve and deploy**: the workflow commits exactly the reviewed files to the PR branch, or
+   refuses with a reason if the comment was edited, a newer hand-over exists or the branch moved. In the copy-paste mode,
+   open each file's link, paste the content, choose "Commit directly to the branch" and click **Commit changes**.
+   Committing runs any push-triggered workflow in the file, so do not commit what you did not read. The PR stays the
+   bot's.
 4. **The gate's message.** Until the gate reuses reviews by file hash, the reviewers run again on the new head. When a
    committed file differs from the reviewed copy the gate says `workflow file <path> differs from the reviewed copy`,
    or `workflow file <path> is not committed yet` while it is missing.
 5. **Deleting a workflow file.** A lane never hands over a deletion: it stops and asks you to delete the file in the
    browser (the file's page, the trash icon, commit to the PR branch), after which its reviewers run on the head.
+
+### The one-click path (ADR 0029)
+
+Setup is two steps, done once:
+
+1. **Merge the apply workflow.** `.github/workflows/lanes-workflow-apply.yml` cannot apply itself, so it reaches the
+   repository through the copy-paste hand-over, the last one you do by hand. Until the next step, every hand-over is
+   copy-paste.
+2. **Run `node scripts/lanes/app-setup.mjs --workflows`.** It creates the second App (`lanes-workflows`), then, after
+   listing what it will create and a `y/N`, the `lanes-workflow-apply` environment (you as the required reviewer,
+   deployment branches `main` only) with the App's key as a secret. The key is never written to your disk.
+
+After that, a workflow change reaches you as an **Approve and deploy** button on the `lanes-workflow-apply` run. Never add
+`lanes-workflows` to a ruleset bypass list, to CODEOWNERS or to another repository. On a private repository on GitHub
+Free, environments have no required reviewers: skip both steps and keep the copy-paste flow, which loses nothing.
 
 ## Common pitfalls
 

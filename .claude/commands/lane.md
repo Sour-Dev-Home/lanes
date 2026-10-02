@@ -150,9 +150,12 @@ files with Edit, not Write.
    the reviewers (step 6) and `npm run preflight` on the full change including that commit, and push only the commit
    before it: `git push origin HEAD~1:refs/heads/<branch>`; never push the final commit. Open the PR as above, then post
    the hand-over comment with exactly `node scripts/lanes/handover.mjs <PR>` (never a free-text `gh pr comment`): it
-   reads the files from the final local commit, posts each file's full content in a fenced block, the web-editor link on
-   the PR branch (`edit/` for a changed file, `new/<branch>?filename=` for a new one) and the read-before-commit
-   warning, and prints a `pending: [...]` line with each file's `pendingFileHash`. Put that list in each reviewer
+   reads the files from the final local commit and posts each file's full content in a fenced block, in one of two modes
+   (ADR 0029 part 7) that it picks by reading the `lanes-workflow-apply` environment with the lane's token. With a
+   required reviewer, the comment tells the owner to open the `lanes-workflow-apply` run and press "Approve and
+   deploy", and the workflow commits exactly those files. Otherwise, or when the read fails, it is the copy-paste
+   comment: the web-editor link on the PR branch (`edit/` for a changed file, `new/<branch>?filename=` for a new one)
+   and the read-before-commit warning. It prints a `pending: [...]` line with each file's `pendingFileHash`. Put that list in each reviewer
    verdict's `pending` field (post-review.mjs validates it) before posting the verdicts for the pushed head. Until the
    gate's pending reuse exists (#593 is the pure check; the gate wiring is a later issue), the reviewers re-run on the
    final head once the owner commits the files, so say so in "Needs the owner": the owner commits each file in the

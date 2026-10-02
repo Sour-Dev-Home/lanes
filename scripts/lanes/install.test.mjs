@@ -27,6 +27,22 @@ test("#612: MANIFEST ships app-setup.mjs with the identity-check it imports, and
   assert.ok(install.paths.includes("scripts/lanes/app-setup."));
 });
 
+test("#649: MANIFEST ships the apply workflow with the script it runs and the lib that script imports", () => {
+  for (const f of [".github/workflows/lanes-workflow-apply.yml", "scripts/lanes/workflow-apply.mjs", "scripts/lanes/lib.mjs", "scripts/lanes/handover.mjs"]) assert.ok(MANIFEST.includes(f), f);
+});
+
+test("edge: #649 install copies the apply workflow byte for byte into a target", () => {
+  const target = mkdtempSync(path.join(tmpdir(), "lanes-apply-"));
+  try {
+    const r = install(".", target);
+    assert.ok(r.copied.includes(".github/workflows/lanes-workflow-apply.yml"));
+    assert.equal(readFileSync(path.join(target, ".github/workflows/lanes-workflow-apply.yml"), "utf8"), readFileSync(".github/workflows/lanes-workflow-apply.yml", "utf8"));
+    assert.ok(existsSync(path.join(target, "scripts/lanes/workflow-apply.mjs")));
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
 test("MANIFEST ships the OWASP licence, provenance note, index and every vendored sheet", () => {
   const dir = "vendor/owasp-cheatsheets";
   for (const f of ["LICENSE", "VENDORED.md", "INDEX.md"]) assert.ok(MANIFEST.includes(`${dir}/${f}`), f);

@@ -1,15 +1,17 @@
 // scripts/lanes/handover.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { handover, handoverComment } from "./handover.mjs";
+import { handover, handoverComment, handoverMode } from "./handover.mjs";
 import { TEAM_REQUIRED_MESSAGE, pendingFileHash } from "./lib.mjs";
+
+const WITH_REVIEWER = JSON.stringify({ name: "lanes-workflow-apply", protection_rules: [{ type: "required_reviewers", reviewers: [{ type: "User", reviewer: { login: "owner" } }] }, { type: "branch_policy" }] });
 
 const HEAD = "a".repeat(40);
 const TEAM_CFG = JSON.stringify({ identity: { profile: "team", app: { id: 1, installationId: 2, botLogin: "x[bot]" } } });
 const SOLO_CFG = JSON.stringify({ identity: { profile: "solo" } });
 
 // A fake world: `status` is the `--name-status -z` list, `files` maps path to its content at HEAD.
-function world({ config = TEAM_CFG, parent = HEAD, branch = "issue-9-x", status = ["M", ".github/workflows/ci.yml"], files = { ".github/workflows/ci.yml": "on: push\n" } } = {}) {
+function world({ config = TEAM_CFG, parent = HEAD, branch = "issue-9-x", status = ["M", ".github/workflows/ci.yml"], files = { ".github/workflows/ci.yml": "on: push\n" }, environment } = {}) {
   const calls = [];
   const posted = [];
   const deps = {
@@ -29,6 +31,11 @@ function world({ config = TEAM_CFG, parent = HEAD, branch = "issue-9-x", status 
       calls.push(`gh ${args.join(" ")}`);
       if (args[0] === "repo") return "owner/lanes\n";
       if (args[0] === "pr") return JSON.stringify({ headRefName: branch, headRefOid: HEAD });
+      // The environment read (ADR 0029 part 7): a string is the answer, an Error is a failed read, undefined is a 404.
+      if (args[0] === "api" && args[1] === "repos/owner/lanes/environments/lanes-workflow-apply") {
+        if (environment === undefined || environment instanceof Error) throw environment ?? new Error("gh: Not Found (HTTP 404)");
+        return environment;
+      }
       throw new Error(`unexpected gh ${args.join(" ")}`);
     },
     comment: (pr, body) => posted.push({ pr, body }),
@@ -225,6 +232,65 @@ test("handover (#595): edge: a bad or missing PR number is a usage error and rea
     const r = handover(argv, w.deps);
     assert.equal(r.code, 2, JSON.stringify(argv));
     assert.deepEqual(w.calls, []);
+  }
+});
+
+test("handover (#649): with a required reviewer the comment says Approve and deploy, still lists each file and has no editor link", () => {
+  const w = world({ environment: WITH_REVIEWER, status: ["M", ".github/workflows/ci.yml", "A", ".github/workflows/new.yml"], files: { ".github/workflows/ci.yml": "on: push\n", ".github/workflows/new.yml": "on: pull_request\n" } });
+  const r = handover(["9"], w.deps);
+  assert.equal(r.code, 0, r.lines.join("\n"));
+  const body = w.posted[0].body;
+  assert.match(body, /Approve and deploy/);
+  assert.ok(body.includes("https://github.com/owner/lanes/actions/workflows/lanes-workflow-apply.yml"));
+  assert.ok(body.includes("`.github/workflows/ci.yml`") && body.includes("```yaml\non: push\n```"));
+  assert.ok(body.includes("`.github/workflows/new.yml`") && body.includes("```yaml\non: pull_request\n```"));
+  assert.doesNotMatch(body, /web editor|\/edit\/|\/new\//);
+  assert.match(r.lines[0], /one-click/);
+  assert.ok(r.lines.some((l) => l.startsWith("pending: ")), "the pending line is still printed");
+});
+
+test("handover (#649): without the environment the comment is today's copy-paste text", () => {
+  const w = world();
+  const r = handover(["9"], w.deps);
+  assert.equal(r.code, 0);
+  assert.match(w.posted[0].body, /^### Workflow change to commit in GitHub's web editor/);
+  assert.match(w.posted[0].body, /Read each file before you click Commit changes/);
+  assert.doesNotMatch(w.posted[0].body, /Approve and deploy/);
+  assert.match(r.lines[0], /copy-paste/);
+});
+
+test("handover (#649): a failed environment read falls back to copy-paste and never stops the hand-over", () => {
+  for (const environment of [new Error("gh: HTTP 502"), "<html>not json</html>", "null", "{}"]) {
+    const w = world({ environment });
+    const r = handover(["9"], w.deps);
+    assert.equal(r.code, 0, String(environment));
+    assert.match(w.posted[0].body, /web editor/);
+    assert.match(r.lines[0], /copy-paste/);
+  }
+});
+
+test("handoverMode (#649): edge: only a required_reviewers rule with a reviewer counts", () => {
+  const mode = (answer) => handoverMode({ gh: () => answer }, "owner/lanes");
+  assert.equal(mode(WITH_REVIEWER), "one-click");
+  assert.equal(mode(JSON.stringify({ protection_rules: [{ type: "required_reviewers", reviewers: [] }] })), "copy-paste");
+  assert.equal(mode(JSON.stringify({ protection_rules: [{ type: "wait_timer", reviewers: [{ type: "User" }] }] })), "copy-paste");
+  assert.equal(mode(JSON.stringify({ protection_rules: [{ type: "wait_timer" }, { type: "branch_policy" }] })), "copy-paste");
+  assert.equal(mode(JSON.stringify({ protection_rules: "x" })), "copy-paste");
+  assert.equal(handoverMode({ gh: () => { throw new Error("boom"); } }, "owner/lanes"), "copy-paste");
+});
+
+// workflow-apply.mjs (not imported here: the module map keeps handover apart from it) matches the marker below and reads
+// each `#### \`path\`` heading followed by a ```yaml fence; its own tests read the same shape.
+test("handover (#649): both modes' comments start with the marker workflow-apply matches and keep the file layout it parses", () => {
+  const text = "run: |\n  echo '```'\n";
+  const files = [{ path: ".github/workflows/a.yml", status: "M", text }, { path: ".github/workflows/b.yml", status: "A", text: "on: push\n" }];
+  for (const mode of ["one-click", "copy-paste"]) {
+    const body = handoverComment({ repo: "o/r", branch: "b", files, mode });
+    assert.ok(body.startsWith("### Workflow change"), mode);
+    const lines = body.split("\n");
+    assert.equal(lines.filter((l) => /^#### `\.github\/workflows\/[ab]\.yml`/.test(l)).length, 2, mode);
+    assert.ok(lines.includes("````yaml") && lines.includes("````"), `${mode}: the fence is longer than the backticks inside`);
+    assert.ok(lines.includes("```yaml") && lines.includes("```"), mode);
   }
 });
 

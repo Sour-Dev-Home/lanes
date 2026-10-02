@@ -151,6 +151,11 @@ Amended by ADR 0021 (this ADR is amended, not superseded):
 - Parts 3 and 4 include `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`, set to
   the bot's name and its `users.noreply.github.com` address (#553). They are not secrets.
 
+## Amendment (2026-10-02, #649)
+
+Part 3 stands: the lanes App never gets `workflows: write`. A workflow change now reaches the owner as one click through
+a second App behind an owner-approved environment ([0029](0029-one-click-workflow-apply.md)).
+
 ## Governs
 
 - lanes.config.json

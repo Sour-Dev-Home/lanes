@@ -1073,3 +1073,86 @@ test("CODEOWNERS covers exactly the files paths.owner covers", () => {
   entries.forEach((e, i) => assert.ok(paths.some((f) => owners[i].test(f)), `no tracked file or sample reaches CODEOWNERS entry ${e}; add a sample`));
   owner.forEach((r) => assert.ok(paths.some((f) => r.test(f)), `no tracked file or sample reaches paths.owner ${r.source}; add a sample`));
 });
+
+// ADR 0029 part 4: the one-click apply workflow
+const applyYml = () => readFileSync(".github/workflows/lanes-workflow-apply.yml", "utf8");
+const jobBlock = (yml, name) => new RegExp(`\\n  ${name}:\\n([\\s\\S]*?)(?=\\n  [a-z][a-z-]*:\\n|$)`).exec(yml)?.[1] ?? "";
+
+test("lanes-workflow-apply triggers only on issue_comment created", () => {
+  const yml = applyYml();
+  assert.match(yml, /\non:\n  issue_comment:\n    types: \[created\]\n/);
+  assert.doesNotMatch(yml, /\n  (push|pull_request|pull_request_target|workflow_dispatch|workflow_run|schedule):/);
+});
+
+test("lanes-workflow-apply has the filter job without an environment and the apply job behind the environment", () => {
+  const yml = applyYml();
+  const filter = jobBlock(yml, "filter");
+  const apply = jobBlock(yml, "apply");
+  assert.ok(filter && apply, "expected a filter and an apply job");
+  assert.doesNotMatch(filter, /environment:/);
+  assert.doesNotMatch(filter, /secrets\./);
+  assert.match(apply, /needs: filter/);
+  assert.match(apply, /if: needs\.filter\.outputs\.go == 'true'/);
+  assert.match(apply, /environment: lanes-workflow-apply/);
+});
+
+test("lanes-workflow-apply grants nothing at the top and the filter job only contents and pull-requests read", () => {
+  const yml = applyYml();
+  assert.match(yml, /\npermissions: \{\}\n/);
+  assert.match(jobBlock(yml, "filter"), /permissions:\n      contents: read\n      pull-requests: read\n/);
+  assert.match(jobBlock(yml, "apply"), /permissions:\n      contents: read\n/);
+  assert.doesNotMatch(yml, /: write/);
+});
+
+test("lanes-workflow-apply serialises per PR and cancels an older waiting run", () => {
+  const yml = applyYml();
+  assert.match(yml, /concurrency:\n(  #.*\n)*  group: lanes-workflow-apply-\$\{\{ github\.event\.issue\.number \}\}-/);
+  assert.match(yml, /\n  cancel-in-progress: true/);
+});
+
+test("edge: lanes-workflow-apply gives a non-bot commenter its own group so it cannot cancel a pending approval", () => {
+  const group = /\n  group: (.*)/.exec(applyYml())[1];
+  assert.match(group, /endsWith\(github\.event\.comment\.user\.login, '\[bot\]'\) && 'bot' \|\| github\.run_id/);
+});
+
+test("lanes-workflow-apply pins every action to a full commit SHA, as the other workflows do", () => {
+  const uses = [...applyYml().matchAll(/uses: (\S+)/g)].map((m) => m[1]);
+  assert.ok(uses.length >= 4);
+  for (const u of uses) assert.match(u, /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/, u);
+});
+
+test("lanes-workflow-apply checks out the default branch, never the PR head, and keeps no credentials", () => {
+  const yml = applyYml();
+  const refs = [...yml.matchAll(/\n\s+ref: (.*)/g)].map((m) => m[1]);
+  assert.equal(refs.length, 2, "both jobs check out");
+  for (const ref of refs) assert.equal(ref, "${{ github.event.repository.default_branch }}");
+  assert.doesNotMatch(yml, /head\.(sha|ref)|refs\/pull|pull_request\.head/);
+  assert.equal([...yml.matchAll(/persist-credentials: false/g)].length, 2);
+});
+
+test("lanes-workflow-apply passes comment and PR fields through env: only, never into a run script", () => {
+  const yml = applyYml();
+  // A `${{ }}` inside a `run:` value would be shell interpolation; none may appear there.
+  const runs = [...yml.matchAll(/\n\s+run: (\|\n(?:\s{10,}.*\n?)+|.*)/g)].map((m) => m[1]);
+  assert.ok(runs.length >= 3, "expected the filter and two apply run steps");
+  for (const r of runs) assert.doesNotMatch(r, /\$\{\{/, r.slice(0, 60));
+  assert.match(yml, /COMMENT_BODY: \$\{\{ github\.event\.comment\.body \}\}/);
+  assert.match(yml, /COMMENT_LOGIN: \$\{\{ github\.event\.comment\.user\.login \}\}/);
+  assert.match(yml, /LANES_COMMENT_ID: \$\{\{ github\.event\.comment\.id \}\}/);
+  assert.match(yml, /LANES_PR: \$\{\{ github\.event\.issue\.number \}\}/);
+  assert.match(yml, /APP_KEY: \$\{\{ secrets\.LANES_WORKFLOWS_KEY \}\}/);
+});
+
+test("lanes-workflow-apply runs workflow-apply.mjs filter and apply and masks the minted token before exporting it", () => {
+  const yml = applyYml();
+  assert.match(yml, /run: node scripts\/lanes\/workflow-apply\.mjs filter/);
+  assert.match(yml, /run: node scripts\/lanes\/workflow-apply\.mjs apply/);
+  assert.ok(yml.indexOf("::add-mask::") > 0 && yml.indexOf("::add-mask::") < yml.indexOf("appendFileSync(process.env.GITHUB_ENV"));
+  assert.match(yml, /vars\.LANES_WORKFLOWS_APP_ID/);
+});
+
+test("edge: lanes-workflow-apply reads the key only in the apply job", () => {
+  const yml = applyYml();
+  assert.doesNotMatch(jobBlock(yml, "filter"), /LANES_WORKFLOWS/);
+  assert.equal([...yml.matchAll(/secrets\.[A-Z_]+/g)].length, 1);
+});

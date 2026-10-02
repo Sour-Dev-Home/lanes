@@ -159,6 +159,12 @@ change inside another file.
   (everything but the workflow file, then a PR comment), and its reviewers re-run on the final head, since no pending
   field exists yet to reuse their earlier verdicts.
 
+## Amendment (2026-10-02, #649)
+
+Part 2 is amended by [0029](0029-one-click-workflow-apply.md): one click ("Approve and deploy") is primary when the
+`lanes-workflow-apply` environment has a required reviewer, and the copy-paste hand-over described here is the fallback.
+Parts 1 and 3 stand.
+
 ## Governs
 
 - .claude/commands/lane.md

@@ -3,6 +3,8 @@
 // hands each workflow file to the owner in one PR comment: the full content, a link to GitHub's web editor on the PR
 // branch, and a read-before-commit warning. This is the one fixed command that posts that comment, so the lane never
 // writes a free-text `gh pr comment` carrying workflow files.
+// ADR 0029 part 7: with the `lanes-workflow-apply` environment holding a required reviewer (read with the lane's token),
+// the comment asks the owner to press "Approve and deploy"; otherwise, or when the read fails, it is the copy-paste text.
 // Usage: node scripts/lanes/handover.mjs <pr>
 // Run it after the lane pushed `HEAD~1` and opened the PR. Exit 0: posted. 1: refused.
 // 2: usage or an unreadable input. It prints each file's `pendingFileHash` as one `pending: [...]` JSON line for the
@@ -41,21 +43,53 @@ const encodePath = (p) => p.split("/").map(encodeURIComponent).join("/");
  * Each file gets its full content in a fenced block (the fence is longer than any backtick run inside) and the web
  * editor link on `branch`: `edit/<branch>/<path>` for an existing file, `new/<branch>?filename=<path>` for a new one.
  */
-export function handoverComment({ repo, branch, files }) {
+export function handoverComment({ repo, branch, files, mode = "copy-paste" }) {
   const base = `https://github.com/${repo}`;
-  const parts = [
-    "### Workflow change to commit in GitHub's web editor",
-    "",
-    "This lane cannot push `.github/workflows/` files (ADR 0023). Its reviewers reviewed this content. Commit each file to this PR's branch in the browser.",
-    "",
-    WARNING,
-  ];
+  const oneClick = mode === "one-click";
+  // Both headings start with the marker `workflow-apply.mjs` matches (ADR 0029 part 4).
+  const parts = oneClick
+    ? [
+        "### Workflow change to approve and deploy",
+        "",
+        "This lane cannot push `.github/workflows/` files (ADR 0023). Its reviewers reviewed this content. Open the `lanes-workflow-apply` run for this comment " +
+          `(${base}/actions/workflows/lanes-workflow-apply.yml) and press **Approve and deploy**: it commits exactly the files below to this PR's branch (ADR 0029). ` +
+          "It refuses, with the reason, if this comment was edited, a newer hand-over exists or the branch moved.",
+        "",
+        "Read each file below before you approve. Committing a workflow file to this branch runs any push-triggered workflow in it, with the permissions the file asks for.",
+      ]
+    : [
+        "### Workflow change to commit in GitHub's web editor",
+        "",
+        "This lane cannot push `.github/workflows/` files (ADR 0023). Its reviewers reviewed this content. Commit each file to this PR's branch in the browser.",
+        "",
+        WARNING,
+      ];
   for (const f of files) {
-    const link = f.status === "A" ? `${base}/new/${encodePath(branch)}?filename=${encodePath(f.path)}` : `${base}/edit/${encodePath(branch)}/${encodePath(f.path)}`;
     const fence = fenceFor(f.text);
-    parts.push("", `#### \`${f.path}\` (${f.status === "A" ? "new file" : "changed file"})`, "", `${f.status === "A" ? "Create" : "Edit"} it here: ${link}`, "", `${fence}yaml`, f.text.replace(/\n+$/, ""), fence);
+    parts.push("", `#### \`${f.path}\` (${f.status === "A" ? "new file" : "changed file"})`, "");
+    if (!oneClick) {
+      const link = f.status === "A" ? `${base}/new/${encodePath(branch)}?filename=${encodePath(f.path)}` : `${base}/edit/${encodePath(branch)}/${encodePath(f.path)}`;
+      parts.push(`${f.status === "A" ? "Create" : "Edit"} it here: ${link}`, "");
+    }
+    parts.push(`${fence}yaml`, f.text.replace(/\n+$/, ""), fence);
   }
   return `${parts.join("\n")}\n`;
+}
+
+const ENVIRONMENT = "lanes-workflow-apply";
+
+/**
+ * ADR 0029 part 7: "one-click" only when the lane's read of the environment shows a required reviewer. A missing
+ * environment, no reviewer, an unparsable answer or a failed read is "copy-paste", today's flow.
+ */
+export function handoverMode(deps, repo) {
+  try {
+    const env = JSON.parse(deps.gh(["api", `repos/${repo}/environments/${ENVIRONMENT}`]));
+    const rules = Array.isArray(env?.protection_rules) ? env.protection_rules : [];
+    return rules.some((r) => r?.type === "required_reviewers" && Array.isArray(r.reviewers) && r.reviewers.length > 0) ? "one-click" : "copy-paste";
+  } catch {
+    return "copy-paste";
+  }
 }
 
 /**
@@ -108,10 +142,11 @@ export function handover(argv, deps) {
       files.push({ path: c.path, status: c.status, text });
       pending.push({ path: c.path, sha256 });
     }
-    const body = handoverComment({ repo, branch, files });
+    const mode = handoverMode(deps, repo);
+    const body = handoverComment({ repo, branch, files, mode });
     if (body.length > MAX_COMMENT) throw refuse("the workflow files are too large for one PR comment");
     deps.comment(pr, body);
-    return { code: 0, lines: [`posted the hand-over comment on #${pr} for ${files.length} workflow file(s)`, `pending: ${JSON.stringify(pending)}`] };
+    return { code: 0, lines: [`posted the ${mode} hand-over comment on #${pr} for ${files.length} workflow file(s)`, `pending: ${JSON.stringify(pending)}`] };
   } catch (err) {
     if (err instanceof Refusal) return { code: 1, lines: [`refused: ${err.message}`] };
     return { code: 2, lines: [`hand-over failed: ${err.message.split("\n")[0]}`] };
