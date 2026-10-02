@@ -401,8 +401,21 @@ test("failingTests reads a long hostile log in bounded time, and caps the line l
   assert.deepEqual(failingTests(hostile), ["real failure"]);
   assert.ok(Date.now() - started < 1000);
   assert.equal(failingTests(`✖ ${"n".repeat(1000)}`)[0].length, 120);
+  const many = `✖ ${" ".repeat(396)}x\nnot ok 2 - ${" ".repeat(380)}y\n`.repeat(100_000);
+  const manyStarted = Date.now();
+  assert.equal(failingTests(many).length, 2);
+  assert.ok(Date.now() - manyStarted < 5000, "200000 padded lines are read in bounded time");
   const late = `${"noise\n".repeat(200_000)}✖ too late (1ms)`;
   assert.deepEqual(failingTests(late), []);
+});
+
+test("oneLine drops bidi override and zero-width format characters", () => {
+  assert.equal(oneLine(`a${String.fromCharCode(0x202e, 0x200b, 0xfeff)}b`), "ab");
+});
+
+test("failingTests: a marker inside a word is not a failure, and a duration after a long name is stripped before the cut", () => {
+  assert.deepEqual(failingTests("no✖ glued\nxnot ok 3 - glued"), []);
+  assert.deepEqual(failingTests(`✖ ${"n".repeat(110)} (12.5ms)`), ["n".repeat(110)]);
 });
 
 test("oneLine breaks markdown links and bare URLs in quoted text", () => {

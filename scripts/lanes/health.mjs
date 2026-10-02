@@ -48,14 +48,18 @@ export function readHeartbeat(comments, identity) {
 }
 
 // Quoted text in a comment is one line without control characters, and carries no `@` (a mention) or `#` (a cross-link).
-const CONTROL = /[\x00-\x1f\x7f-\x9f]/g; // Unicode line separators are whitespace, so the next replace folds them
+// Control and format characters (bidi overrides, zero-width): Unicode line separators are whitespace, so the next replace folds them.
+const CONTROL = /[\x00-\x1f\x7f-\x9f]/g;
+const FORMAT = /\p{Cf}/gu;
 export function oneLine(s, max = 120) {
-  const t = String(s ?? "").replace(CONTROL, " ").replace(/\s+/g, " ").trim().replace(/[@#`<>[\]]/g, "_").replace(/:\/\//g, ":/ /").replace(/www\./gi, "www_");
+  const t = String(s ?? "").replace(FORMAT, "").replace(CONTROL, " ").replace(/\s+/g, " ").trim().replace(/[@#`<>[\]]/g, "_").replace(/:\/\//g, ":/ /").replace(/www\./gi, "www_");
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
 
 const httpsUrl = (u) => (typeof u === "string" && /^https:\/\/[^\s]+$/.test(u) ? u : undefined);
-const FAILED_TEST = /(?:^|\s)(?:not ok \d+ - |✖ )(.+?)(?:\s+\(\d+(?:\.\d+)?ms\))?\s*$/;
+const TAP_MARK = /(?:^|\s)not ok \d{1,9} - /;
+const DURATION = / \(\d{1,9}(?:\.\d{1,9})?ms\)$/;
+const NAME_LIMIT = 120;
 const TEST_LIMIT = 10;
 const LINE_LIMIT = 400;
 const LOG_LINES = 200_000;
@@ -66,7 +70,13 @@ export function failingTests(log) {
   // A log is untrusted and can be 64 MB: bound each line before the regex (quadratic on a long whitespace run) and the lines read.
   for (const raw of String(log ?? "").split(/\r?\n/, LOG_LINES)) {
     const line = raw.slice(0, LINE_LIMIT).replace(/\u001b\[[0-9;]*m/g, "");
-    const name = oneLine(FAILED_TEST.exec(line)?.[1]);
+    // No regex backtracks over the untrusted tail: find the marker, collapse whitespace (linear), then strip the duration.
+    const at = line.indexOf("✖ ");
+    const tap = at < 0 ? TAP_MARK.exec(line) : null;
+    const rest = at >= 0 ? line.slice(at + 2) : tap ? line.slice(tap.index + tap[0].length) : null;
+    if (rest === null || (at > 0 && !/\s/.test(line[at - 1]))) continue;
+    const full = oneLine(rest, LINE_LIMIT).replace(DURATION, "");
+    const name = full.length > NAME_LIMIT ? `${full.slice(0, NAME_LIMIT - 1)}…` : full;
     if (name && !/^failing tests:?$/i.test(name) && !/^# /.test(name)) names.add(name);
     if (names.size >= TEST_LIMIT) break;
   }
