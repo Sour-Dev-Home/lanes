@@ -245,7 +245,7 @@ test("y creates the environment with the owner as reviewer, main-only deployment
 const base = "repos/acme/widgets/environments/lanes-workflow-apply/deployment-branch-policies";
 
 test("a pre-existing environment is made main-only: every other branch policy is deleted, main is kept", async () => {
-  const { gh, calls } = fakeGh({ policies: "11 *\n12 main\n13 release/*\n" });
+  const { gh, calls } = fakeGh({ policies: "11 branch *\n12 branch main\n13 branch release/*\n" });
   const r = await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} });
   assert.equal(r.ok, true);
   const deletes = calls.filter((c) => c.args.includes("DELETE")).map((c) => c.args.find((a) => a.startsWith("repos/")));
@@ -253,19 +253,51 @@ test("a pre-existing environment is made main-only: every other branch policy is
   assert.equal(calls.some((c) => c.args.includes("POST")), false, "main already exists, so no POST");
 });
 
+test("the policy listing is paginated, so every policy past the first page is deleted", async () => {
+  const lines = Array.from({ length: 45 }, (_, i) => `${i + 1} branch ${i === 40 ? "main" : `b${i}`}`).join("\n") + "\n";
+  const { gh, calls } = fakeGh({ policies: lines });
+  const r = await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} });
+  assert.equal(r.ok, true);
+  const list = calls.find((c) => c.args.includes(base) && !c.args.includes("--method"));
+  assert.ok(list.args.includes("--paginate"));
+  assert.equal(calls.filter((c) => c.args.includes("DELETE")).length, 44);
+  assert.equal(calls.some((c) => c.args.includes("POST")), false);
+});
+
+test("a tag policy named main is deleted and a branch policy main is created; a branch main is kept", async () => {
+  let { gh, calls } = fakeGh({ policies: "21 tag main\n" });
+  assert.equal((await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} })).ok, true);
+  assert.deepEqual(calls.filter((c) => c.args.includes("DELETE")).map((c) => c.args.find((a) => a.startsWith("repos/"))), [`${base}/21`]);
+  const post = calls.filter((c) => c.args.includes("POST"));
+  assert.equal(post.length, 1);
+  assert.deepEqual(JSON.parse(post[0].input), { name: "main", type: "branch" });
+  ({ gh, calls } = fakeGh({ policies: "21 tag main\n22 branch main\n" }));
+  assert.equal((await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} })).ok, true);
+  assert.deepEqual(calls.filter((c) => c.args.includes("DELETE")).map((c) => c.args.find((a) => a.startsWith("repos/"))), [`${base}/21`]);
+  assert.equal(calls.some((c) => c.args.includes("POST")), false);
+});
+
 test("edge: a lookalike policy name is not main, and an unparseable policy line is refused", async () => {
-  let { gh, calls } = fakeGh({ policies: "5 main2\n6 Main\n" });
+  let { gh, calls } = fakeGh({ policies: "5 branch main2\n6 branch Main\n" });
   assert.equal((await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} })).ok, true);
   assert.equal(calls.filter((c) => c.args.includes("DELETE")).length, 2);
   assert.equal(calls.filter((c) => c.args.includes("POST")).length, 1);
-  ({ gh, calls } = fakeGh({ policies: "x/../1 main\n" }));
+  ({ gh, calls } = fakeGh({ policies: "x/../1 branch main\n" }));
   const r = await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} });
   assert.equal(r.ok, false);
   assert.equal(calls.some((c) => c.args.includes("DELETE") || c.args.includes("POST")), false);
 });
 
+test("edge: a policy line with no type or an unknown type is refused before anything is deleted", async () => {
+  for (const policies of ["5 main\n", "5 other main\n"]) {
+    const { gh, calls } = fakeGh({ policies });
+    assert.equal((await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} })).ok, false, policies);
+    assert.equal(calls.some((c) => c.args.includes("DELETE") || c.args.includes("POST")), false);
+  }
+});
+
 test("edge: failing to list or delete a policy is reported by step and nothing further runs", async () => {
-  for (const [opts, step] of [[{ failOn: "deployment-branch-policies --jq" }, "listing the deployment branch policies"], [{ policies: "7 *\n", failOn: "--method DELETE" }, "removing a deployment branch policy other than main"]]) {
+  for (const [opts, step] of [[{ failOn: "deployment-branch-policies --jq" }, "listing the deployment branch policies"], [{ policies: "7 branch *\n", failOn: "--method DELETE" }, "removing a deployment branch policy other than main"]]) {
     const { gh, calls } = fakeGh(opts);
     const r = await confirmAndCreateEnvironment({ gh, ask: async () => "y", print: () => {} });
     assert.equal(r.ok, false, step);
