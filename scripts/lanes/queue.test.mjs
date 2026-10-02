@@ -83,8 +83,8 @@ test("softPaths never count as overlaps", () => {
 
 // Criterion 3
 test("waiting lists each in-flight PR needing review/owner, with the gate's reason", () => {
-  const out = tick({ prs: [pr(60, 6, ["src/x.mjs"], [gate("PENDING", "waiting on owner: review/owner")])] });
-  assert.deepEqual(out.waiting, [{ number: 60, reason: "waiting on owner: review/owner" }]);
+  const out = tick({ prs: [pr(60, 6, ["src/x.mjs"], [gate("PENDING", "waiting for a code-owner review in GitHub")])] });
+  assert.deepEqual(out.waiting, [{ number: 60, reason: "waiting for a code-owner review in GitHub" }]);
 });
 
 test("waiting lists a PR with a failing check or review", () => {
@@ -128,7 +128,7 @@ test("idle only when nothing is in flight and launch is empty", () => {
   assert.equal(tick({ issues: [issue(1, ["src/a.mjs"], { labels: ["tier:quick"] })] }).idle, true);
   assert.equal(tick({ issues: [issue(1, ["src/a.mjs"])] }).idle, false);
   assert.equal(tick({ sessions: [session(4)], issues: [issue(4, ["src/a.mjs"])] }).idle, false);
-  assert.equal(tick({ prs: [pr(60, 6, ["src/x.mjs"], [gate("PENDING", "waiting on owner: review/owner")])] }).idle, false);
+  assert.equal(tick({ prs: [pr(60, 6, ["src/x.mjs"], [gate("PENDING", "waiting for a code-owner review in GitHub")])] }).idle, false);
 });
 
 // Criterion 5
@@ -161,7 +161,7 @@ test("an issue that becomes ready between ticks launches on the next tick", () =
 
 test("owner waits do not affect launches", () => {
   const issues = [issue(1, ["src/a.mjs"]), issue(6, ["src/x.mjs"])];
-  const waitingPr = pr(60, 6, ["src/x.mjs"], [gate("PENDING", "waiting on owner: review/owner")]);
+  const waitingPr = pr(60, 6, ["src/x.mjs"], [gate("PENDING", "waiting for a code-owner review in GitHub")]);
   const withWait = tick({ issues, prs: [waitingPr] });
   const noWait = tick({ issues, prs: [{ ...waitingPr, statusCheckRollup: [gate("PENDING", "waiting on reviewers")] }] });
   assert.deepEqual(withWait.launch, [1]);
@@ -268,8 +268,8 @@ test("edge: a failing lanes/gate waits on the owner with its description", () =>
 });
 
 test("edge: the gate's description falls back to gateDescription when the rollup leaves it out", () => {
-  const p = { ...pr(67, 6, ["src/x.mjs"], [{ context: "lanes/gate", state: "PENDING" }]), gateDescription: "waiting on owner: review/owner" };
-  assert.deepEqual(tick({ prs: [p] }).waiting, [{ number: 67, reason: "waiting on owner: review/owner" }]);
+  const p = { ...pr(67, 6, ["src/x.mjs"], [{ context: "lanes/gate", state: "PENDING" }]), gateDescription: "waiting for a code-owner review in GitHub" };
+  assert.deepEqual(tick({ prs: [p] }).waiting, [{ number: 67, reason: "waiting for a code-owner review in GitHub" }]);
 });
 
 test("edge: maxLanes 0 launches nothing and says the cap is reached", () => {
@@ -285,11 +285,11 @@ test("edge: missing maxLanes and softPaths fall back to the start defaults", () 
 
 test("lines: one per launch, wait and skip, then a summary", () => {
   const issues = [issue(1, ["src/a.mjs"]), issue(2, ["src/a.mjs"]), issue(6, ["src/x.mjs"])];
-  const out = tick({ issues, prs: [pr(60, 6, ["src/x.mjs"], [gate("PENDING", "waiting on owner: review/owner")])] });
+  const out = tick({ issues, prs: [pr(60, 6, ["src/x.mjs"], [gate("PENDING", "waiting for a code-owner review in GitHub")])] });
   assert.deepEqual(out.lines, [
     "#1: launch",
     "#2: skipped: overlaps #1 on src/a.mjs",
-    "PR #60: needs the owner: waiting on owner: review/owner",
+    "PR #60: needs the owner: waiting for a code-owner review in GitHub",
     "1 in flight, 1 to launch, 1 waiting on the owner",
   ]);
 });
@@ -298,7 +298,7 @@ test("lines: one per launch, wait and skip, then a summary", () => {
 test("a PR status.mjs puts in the owner or failing stage is exactly one planTick lists in waiting", async () => {
   const { prStage } = await import("./status.mjs");
   const rollups = [
-    [gate("PENDING", "waiting on owner: review/owner")], // owner
+    [gate("PENDING", "waiting for a code-owner review in GitHub")], // owner
     [{ name: "test", conclusion: "FAILURE" }, gate("PENDING", "waiting on reviewers")], // failing
     [{ context: "review/security-reviewer", state: "ERROR" }], // failing, no gate yet
     [{ name: "test", conclusion: "TIMED_OUT" }], // failing
@@ -310,7 +310,7 @@ test("a PR status.mjs puts in the owner or failing stage is exactly one planTick
     [{ name: "test", conclusion: "SUCCESS" }, gate("PENDING", "waiting on reviewers")], // review
   ];
   const prs = rollups.map((rollup, i) => pr(100 + i, 10 + i, [`src/p${i}.mjs`], rollup));
-  prs.push({ ...pr(120, 30, ["src/q.mjs"], [{ context: "lanes/gate", state: "PENDING" }]), gateDescription: "waiting on owner: review/owner" });
+  prs.push({ ...pr(120, 30, ["src/q.mjs"], [{ context: "lanes/gate", state: "PENDING" }]), gateDescription: "waiting for a code-owner review in GitHub" });
   const listed = new Set(tick({ prs }).waiting.map((w) => w.number));
   const stages = new Map(prs.map((p) => [p.number, prStage(p, undefined, p.gateDescription).stage]));
   for (const p of prs) {
@@ -566,11 +566,11 @@ test("edge: a launch that prints no session id counts as failed and is not retri
 test("CLI: prints each owner wait once per state change, not every tick", async () => {
   const { main } = await import("./queue.mjs");
   const waitingPr = (description) => ({ ...pr(60, 6, ["src/x.mjs"], [gate("PENDING", description)]), title: "Add x" });
-  const world = { issues: [issue(6, ["src/x.mjs"], { labels: ["tier:quick"] })], prs: [waitingPr("waiting on owner: review/owner")], sessions: [] };
+  const world = { issues: [issue(6, ["src/x.mjs"], { labels: ["tier:quick"] })], prs: [waitingPr("waiting for a code-owner review in GitHub")], sessions: [] };
   const run = fakeRun(world, {
     onSleep: (t) => {
       if (t === 3) world.prs = [waitingPr("waiting on reviewers")];
-      if (t === 4) world.prs = [waitingPr("waiting on owner: review/owner")];
+      if (t === 4) world.prs = [waitingPr("waiting for a code-owner review in GitHub")];
       if (t === 6) world.prs[0] = { ...pr(60, 6, ["src/x.mjs"], [{ name: "test", conclusion: "FAILURE" }]), title: "Add x" };
       if (t === 8) (world.prs = []), (world.issues = []);
     },
@@ -578,8 +578,8 @@ test("CLI: prints each owner wait once per state change, not every tick", async 
   assert.equal(await main([], run.deps), 0);
   const waits = run.out.filter((l) => l.includes("#60 ")).map((l) => l.replace(STAMP, ""));
   assert.deepEqual(waits, [
-    "  #60 Add x — waiting 0m — waiting on owner: review/owner",
-    "  #60 Add x — waiting 0m — waiting on owner: review/owner",
+    "  #60 Add x — waiting 0m — waiting for a code-owner review in GitHub",
+    "  #60 Add x — waiting 0m — waiting for a code-owner review in GitHub",
     "  #60 Add x — waiting 6m — failing: test", // the age keeps running when the reason changes
   ]);
 });
@@ -588,7 +588,7 @@ test("CLI: prints each owner wait once per state change, not every tick", async 
 test("CLI: prints one grouped digest, oldest first, with ages and no /approve line under team, only when something changed", async () => {
   const { main } = await import("./queue.mjs");
   const now = Date.UTC(2026, 8, 28, 9, 0, 0);
-  const owner = (number, n, minutesAgo, title) => ({ ...pr(number, n, [`src/${n}.mjs`], [gate("PENDING", "waiting on owner: review/owner")]), title, gateSince: now - minutesAgo * 60_000 });
+  const owner = (number, n, minutesAgo, title) => ({ ...pr(number, n, [`src/${n}.mjs`], [gate("PENDING", "waiting for a code-owner review in GitHub")]), title, gateSince: now - minutesAgo * 60_000 });
   const failing = { ...pr(62, 8, ["src/8.mjs"], [{ name: "test", conclusion: "FAILURE" }]), title: "Fix y" };
   const world = { issues: [], prs: [owner(61, 7, 30, "Newer"), owner(60, 6, 190, "Older"), failing], sessions: [] };
   const run = fakeRun(world, { onSleep: (t) => t === 3 && (world.prs = []) });
@@ -596,29 +596,29 @@ test("CLI: prints one grouped digest, oldest first, with ages and no /approve li
   // The fake GitHub answers the gate query with each PR's gate time.
   run.deps.gh = (args) =>
     args[0] === "api"
-      ? JSON.stringify({ data: { repository: { pullRequests: { nodes: world.prs.filter((p) => p.gateSince).map((p) => ({ number: p.number, commits: { nodes: [{ commit: { status: { context: { description: "waiting on owner: review/owner", createdAt: new Date(p.gateSince).toISOString() } } } }] } })) } } } })
+      ? JSON.stringify({ data: { repository: { pullRequests: { nodes: world.prs.filter((p) => p.gateSince).map((p) => ({ number: p.number, commits: { nodes: [{ commit: { status: { context: { description: "waiting for a code-owner review in GitHub", createdAt: new Date(p.gateSince).toISOString() } } } }] } })) } } } })
       : seen(args);
   assert.equal(await main([], run.deps), 0);
   const block = run.out.map((l) => l.replace(STAMP, "")).filter((l) => /^(waiting on you|  #|\/approve)/.test(l));
   assert.deepEqual(block, [
     "waiting on you (3):",
-    "  #60 Older — waiting 3h 10m — waiting on owner: review/owner",
-    "  #61 Newer — waiting 30m — waiting on owner: review/owner",
+    "  #60 Older — waiting 3h 10m — waiting for a code-owner review in GitHub",
+    "  #61 Newer — waiting 30m — waiting for a code-owner review in GitHub",
     "  #62 Fix y — waiting 0m — failing: test",
   ]);
 });
 
-test("waitingDigest caps the /approve line at 10 numbers and lists only PRs waiting on /approve in it", async () => {
+test("waitingDigest lists every waiting PR and never prints an /approve line", async () => {
   const { waitingDigest } = await import("./queue.mjs");
-  const prs = Array.from({ length: 12 }, (_, i) => ({ ...pr(i + 1, i + 1, ["a"], [gate("PENDING", "waiting on owner: review/owner")]), title: `t${i + 1}`, gateSince: 1000 + i }));
-  const waiting = prs.map((p) => ({ number: p.number, reason: "waiting on owner: review/owner" }));
+  const prs = Array.from({ length: 12 }, (_, i) => ({ ...pr(i + 1, i + 1, ["a"], [gate("PENDING", "waiting for a code-owner review in GitHub")]), title: `t${i + 1}`, gateSince: 1000 + i }));
+  const waiting = prs.map((p) => ({ number: p.number, reason: "waiting for a code-owner review in GitHub" }));
   const lines = waitingDigest(prs, waiting, 1000 + 60_000);
   assert.equal(lines[0], "waiting on you (12):");
-  assert.equal(lines.length, 14);
-  assert.equal(lines.at(-1), "/approve 1 2 3 4 5 6 7 8 9 10");
+  assert.equal(lines.length, 13);
+  assert.ok(!lines.join("\n").includes("/approve"));
 });
 
-test("edge: waitingDigest prints nothing when nothing waits, and no /approve line when no PR waits on /approve", async () => {
+test("edge: waitingDigest prints nothing when nothing waits, and no /approve line when no PR waits on the owner", async () => {
   const { waitingDigest } = await import("./queue.mjs");
   assert.deepEqual(waitingDigest([], [], 5), []);
   const failing = { ...pr(5, 5, ["a"], [{ name: "test", conclusion: "FAILURE" }]), title: "t\u001b[31m" };
@@ -628,7 +628,7 @@ test("edge: waitingDigest prints nothing when nothing waits, and no /approve lin
 
 test("edge: a PR without a gate time is aged from when the queue first saw it", async () => {
   const { waitingDigest } = await import("./queue.mjs");
-  const p = { ...pr(5, 5, ["a"], [gate("PENDING", "waiting on owner: review/owner")]), title: "t" };
+  const p = { ...pr(5, 5, ["a"], [gate("PENDING", "waiting for a code-owner review in GitHub")]), title: "t" };
   const lines = waitingDigest([p], [{ number: 5, reason: "r" }], 10 * 60_000, new Map([[5, 0]]));
   assert.match(lines[1], /waiting 10m/);
 });
@@ -1325,7 +1325,7 @@ const launchDirs = (run) => run.calls.filter((c) => c[0] === "claude" && /^\/lan
 test("#444: planRecovery names a dead lane whose open PR waits on a missing review, and no other", async () => {
   const { planRecovery } = await import("./queue.mjs");
   const issues = [issue(7, ["src/a.mjs"]), issue(8, ["src/b.mjs"]), issue(9, ["src/c.mjs"]), issue(10, ["src/d.mjs"])];
-  const prs = [gatePr(70, 7, "waiting for review/security-reviewer"), gatePr(80, 8, "waiting on owner (/approve)"), gatePr(90, 9, "waiting for review/test-hunter"), pr(100, 10, ["src/d.mjs"], [gate("SUCCESS")])];
+  const prs = [gatePr(70, 7, "waiting for review/security-reviewer"), gatePr(80, 8, "waiting for a code-owner review in GitHub"), gatePr(90, 9, "waiting for review/test-hunter"), pr(100, 10, ["src/d.mjs"], [gate("SUCCESS")])];
   const sessions = [idleLane(7), idleLane(8), lane(9), idleLane(10)];
   const out = planRecovery({ issues, prs, sessions });
   assert.deepEqual(out.map((r) => [r.number, r.resume, r.id]), [[7, true, "old-7"]]);
@@ -1372,7 +1372,7 @@ test("#444: a dead lane whose worktree has unsaved work is not relaunched, and s
 
 test("#444: a live lane session, or a PR waiting only on /approve, is left alone", async () => {
   const { main } = await import("./queue.mjs");
-  for (const [sessions, description] of [[[lane(7)], "waiting for review/security-reviewer"], [[idleLane(7)], "waiting on owner (/approve)"]]) {
+  for (const [sessions, description] of [[[lane(7)], "waiting for review/security-reviewer"], [[idleLane(7)], "waiting for a code-owner review in GitHub"]]) {
     const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, description)], sessions };
     const run = recoveryRun(world);
     assert.equal(await main([], run.deps), 0);
@@ -1644,7 +1644,7 @@ const teamRows = (nums) => nums.map((n) => ({ ...pr(n, n, ["a"], [gate("PENDING"
 test("#604: under team the digest lists each review wait with its files URL and prints no /approve line", async () => {
   const { waitingDigest } = await import("./queue.mjs");
   const prs = teamRows([5, 6]);
-  const lines = waitingDigest(prs, prs.map((p) => ({ number: p.number, reason: teamGate })), 60_000, new Map(), true);
+  const lines = waitingDigest(prs, prs.map((p) => ({ number: p.number, reason: teamGate })), 60_000, new Map());
   assert.deepEqual(lines, [
     "waiting on you (2):",
     `  #5 t5 — waiting 1m — ${teamGate} — https://github.com/o/r/pull/5/files`,
@@ -1652,17 +1652,17 @@ test("#604: under team the digest lists each review wait with its files URL and 
   ]);
 });
 
-test("#604: under solo the digest keeps its /approve line and adds no URL", async () => {
+test("edge: a review wait whose PR has no https URL gets no URL and no /approve line", async () => {
   const { waitingDigest } = await import("./queue.mjs");
-  const prs = teamRows([5]).map((p) => ({ ...p, statusCheckRollup: [gate("PENDING", "waiting on owner: review/owner")] }));
-  const lines = waitingDigest(prs, [{ number: 5, reason: "waiting on owner: review/owner" }], 60_000);
-  assert.equal(lines.at(-1), "/approve 5");
-  assert.ok(!lines.join("\n").includes("https://"));
+  const prs = teamRows([5]).map((p) => ({ ...p, url: "http://github.com/o/r/pull/5" }));
+  const lines = waitingDigest(prs, [{ number: 5, reason: teamGate }], 60_000);
+  assert.ok(!lines.join("\n").includes("http"));
+  assert.ok(!lines.join("\n").includes("/approve"));
 });
 
 test("edge: under team a digest with nothing waiting is empty, and a failing PR gets no URL", async () => {
   const { waitingDigest } = await import("./queue.mjs");
-  assert.deepEqual(waitingDigest([], [], 5, new Map(), true), []);
+  assert.deepEqual(waitingDigest([], [], 5, new Map()), []);
   const failing = { ...pr(5, 5, ["a"], [{ name: "test", conclusion: "FAILURE" }]), title: "t", url: "https://github.com/o/r/pull/5" };
   assert.deepEqual(waitingDigest([failing], [{ number: 5, reason: "failing: test" }], 60_000, new Map([[5, 0]]), true), ["waiting on you (1):", "  #5 t — waiting 1m — failing: test"]);
 });
@@ -1677,7 +1677,7 @@ test("edge: under team a review wait with a missing or non-https url gets no lin
   const { waitingDigest } = await import("./queue.mjs");
   for (const url of [undefined, null, 5, "http://github.com/o/r/pull/5", "javascript:alert(1)"]) {
     const prs = teamRows([5]).map((p) => ({ ...p, url }));
-    const lines = waitingDigest(prs, [{ number: 5, reason: teamGate }], 60_000, new Map(), true);
+    const lines = waitingDigest(prs, [{ number: 5, reason: teamGate }], 60_000, new Map());
     assert.equal(lines.length, 2);
     assert.ok(!lines[1].includes("/files"), String(url));
   }

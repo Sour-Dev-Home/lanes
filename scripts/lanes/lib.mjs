@@ -62,8 +62,16 @@ export function compileConfig(raw) {
   // ADR 0018: the optional module map, kept as written; modules.mjs validates it.
   const config = raw.modules === undefined ? { requiredChecks, paths } : { requiredChecks, paths, modules: raw.modules };
   // ADR 0020 part 1: the validated identity, so the gate can read the configured lane bot. A config with no identity
-  // key, or a solo one, still compiles; start, queue and the gate refuse it with parseIdentity (ADR 0025).
-  const identity = parseLegacyIdentity(raw.identity);
+  // key, or one that is not team, still compiles; start, queue and the gate refuse it with parseIdentity (ADR 0025).
+  // A refused identity is kept as its bare profile name only, so that refusal can name it. A team identity with a bad
+  // shape throws.
+  let identity;
+  try {
+    identity = raw.identity === undefined ? undefined : parseIdentity(raw.identity);
+  } catch (err) {
+    if (!err.teamRequired) throw err;
+    if (typeof raw.identity?.profile === "string") identity = { profile: raw.identity.profile };
+  }
   return identity === undefined ? config : { ...config, identity };
 }
 
@@ -798,25 +806,6 @@ function validApp(app, bad, needLogin) {
     copy.botLogin = app.botLogin;
   }
   return copy;
-}
-
-/**
- * The pre-ADR-0025 reading of `identity`, which still accepts solo and a missing key (undefined), for the files whose
- * solo branches a later change removes (approve-guard, handover, identity-check). New code uses `parseIdentity`.
- */
-export function parseLegacyIdentity(identity) {
-  if (identity === undefined) return undefined;
-  const bad = (what) => new Error(`lanes.config.json: identity ${what}`);
-  if (identity === null || typeof identity !== "object" || Array.isArray(identity)) throw bad("must be an object");
-  const extra = Object.keys(identity).find((k) => k !== "profile" && k !== "app");
-  if (extra !== undefined) throw bad(`has an unknown key ${JSON.stringify(extra)}`);
-  // an unknown or missing profile is the one team-required refusal, like everywhere else
-  if (identity.profile !== "solo" && identity.profile !== "team") return parseIdentity(identity);
-  if (identity.app === undefined) {
-    if (identity.profile === "team") throw bad(".app { id, installationId, botLogin } is required for the team profile");
-    return { profile: "solo" };
-  }
-  return { profile: identity.profile, app: validApp(identity.app, bad, identity.profile === "team") };
 }
 
 /**

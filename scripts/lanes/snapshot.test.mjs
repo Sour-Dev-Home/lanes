@@ -38,7 +38,7 @@ const build = (over = {}) => buildSnapshot({ prs: [], issues: [], mergeQueue: []
 const one = (over) => build(over).issues[0];
 
 test("an empty repository gives an empty snapshot with the time", () => {
-  assert.deepEqual(build(), { version: 0, generatedAt: NOW, issues: [], edges: [], overlaps: [] });
+  assert.deepEqual(build(), { version: 0, generatedAt: NOW, profile: "team", issues: [], edges: [], overlaps: [] });
 });
 
 test("a ready issue with no blockers lists as ready with no blockedBy", () => {
@@ -81,7 +81,7 @@ test("a PR with a passing gate and auto-merge is queued with checks and its head
   const i = one({ issues: [issue(1)], prs: [pr(5)] });
   assert.equal(i.stage, "queued");
   assert.deepEqual(i.blockedBy, []);
-  assert.deepEqual(i.pr, { number: 5, headSha: SHA, checks: [{ name: "verify", result: "pass" }, { name: "lanes/gate", result: "pass" }] });
+  assert.deepEqual(i.pr, { number: 5, headSha: SHA, checks: [{ name: "verify", result: "pass" }, { name: "lanes/gate", result: "pass" }], ownerApproved: false });
 });
 
 test("a PR in the merge queue is blocked by the queue", () => {
@@ -92,7 +92,7 @@ test("a PR in the merge queue is blocked by the queue", () => {
 test("a failing CI check is a check blocker per failing check, and shows as fail", () => {
   const i = one({
     issues: [issue(1)],
-    prs: [pr(5, { statusCheckRollup: [{ name: "verify", conclusion: "FAILURE" }, { name: "security", conclusion: "CANCELLED" }, gate("PENDING", "waiting on owner (/approve)")] })],
+    prs: [pr(5, { statusCheckRollup: [{ name: "verify", conclusion: "FAILURE" }, { name: "security", conclusion: "CANCELLED" }, gate("PENDING", "waiting for a code-owner review in GitHub")] })],
   });
   assert.equal(i.stage, "failing");
   assert.deepEqual(i.blockedBy.map((b) => [b.kind, b.ref]), [["check", "verify"], ["check", "security"]]);
@@ -100,9 +100,9 @@ test("a failing CI check is a check blocker per failing check, and shows as fail
 });
 
 test("a gate waiting on the owner is an owner blocker with the description verbatim", () => {
-  const i = one({ issues: [issue(1)], prs: [pr(5, { statusCheckRollup: [gate("PENDING", "waiting on owner (/approve)")] })] });
+  const i = one({ issues: [issue(1)], prs: [pr(5, { statusCheckRollup: [gate("PENDING", "waiting for a code-owner review in GitHub")] })] });
   assert.equal(i.stage, "owner");
-  assert.deepEqual(i.blockedBy, [{ kind: "owner", ref: "review/owner", reason: "waiting on owner (/approve)" }]);
+  assert.deepEqual(i.blockedBy, [{ kind: "owner", ref: "code-owner review", reason: "waiting for a code-owner review in GitHub" }]);
 });
 
 test("a gate waiting on a reviewer is a review blocker naming it; the description may come from gateDescriptions", () => {
@@ -359,7 +359,7 @@ test("an open issue with lane:running and no PR has the running stage; with a PR
   const running = ["lane:running", "tier:quick"];
   assert.equal(one({ issues: [scoped(1, "`a.mjs`", running)] }).stage, "running");
   assert.deepEqual(one({ issues: [scoped(1, "`a.mjs`", running)] }).blockedBy, []);
-  const withPr = one({ issues: [scoped(1, "`a.mjs`", running)], prs: [pr(7)], gateDescriptions: new Map([[7, "waiting on owner (/approve)"]]) });
+  const withPr = one({ issues: [scoped(1, "`a.mjs`", running)], prs: [pr(7)], gateDescriptions: new Map([[7, "waiting for a code-owner review in GitHub"]]) });
   assert.notEqual(withPr.stage, "running");
   assert.equal(withPr.pr.number, 7);
 });
@@ -417,9 +417,9 @@ test("a CONFLICTING PR is stage owner with the reason conflict: rebase needed", 
   assert.deepEqual(i.blockedBy, [{ kind: "owner", ref: "merge conflict", reason: "conflict: rebase needed" }]);
 });
 test("an UNKNOWN mergeable state changes nothing", () => {
-  const i = one({ issues: [issue(1)], prs: [pr(5, { mergeable: "UNKNOWN", statusCheckRollup: [gate("PENDING", "waiting on owner (/approve)")] })] });
+  const i = one({ issues: [issue(1)], prs: [pr(5, { mergeable: "UNKNOWN", statusCheckRollup: [gate("PENDING", "waiting for a code-owner review in GitHub")] })] });
   assert.equal(i.stage, "owner");
-  assert.equal(i.blockedBy[0].ref, "review/owner");
+  assert.equal(i.blockedBy[0].ref, "code-owner review");
 });
 test("the default soft paths include lanes.config.json", () => {
   assert.ok(DEFAULT_SOFT_PATHS.includes("^lanes\\.config\\.json$"));
@@ -429,29 +429,27 @@ test("the default soft paths include lanes.config.json", () => {
 const REPO = "acme/lanes";
 const withRollup = (rollup, over = {}) => one({ issues: [issue(1)], prs: [pr(5, { statusCheckRollup: rollup })], repo: REPO, ...over }).pr.checks;
 
-test("profile and repo are written when given and valid, and omitted otherwise", () => {
-  const s = build({ profile: "team", repo: REPO });
+test("profile is always team, and repo is written when given and valid and omitted otherwise", () => {
+  const s = build({ repo: REPO });
   assert.equal(s.profile, "team");
   assert.equal(s.repo, REPO);
   const bare = build();
-  assert.equal("profile" in bare, false);
+  assert.equal(bare.profile, "team");
   assert.equal("repo" in bare, false);
   for (const repo of ["acme", "https://github.com/a/b", "a/b/c", "a b/c", "", 5, null, "../x", "a/..", "./.", "a/."]) assert.equal("repo" in build({ repo }), false, `edge: repo ${JSON.stringify(repo)}`);
-  assert.equal("profile" in build({ profile: "other" }), false, "edge: unknown profile");
+  assert.equal(build({ profile: "solo" }).profile, "team", "edge: a profile passed in is ignored");
 });
 
 test("ownerApproved is written under team from the approvals map: true, false, and false when unread", () => {
   const prs = [pr(5), pr(6, { closingIssuesReferences: [{ number: 2 }] }), pr(7, { closingIssuesReferences: [{ number: 3 }] })];
   const issues = [issue(1), issue(2), issue(3)];
-  const s = build({ issues, prs, profile: "team", ownerApprovals: new Map([[5, true], [6, false]]) });
+  const s = build({ issues, prs, ownerApprovals: new Map([[5, true], [6, false]]) });
   assert.deepEqual(s.issues.map((i) => i.pr.ownerApproved), [true, false, false]);
 });
 
-test("ownerApproved is absent under solo and with no profile, even when approvals are passed", () => {
-  for (const profile of ["solo", undefined]) {
-    const i = one({ issues: [issue(1)], prs: [pr(5)], profile, ownerApprovals: new Map([[5, true]]) });
-    assert.equal("ownerApproved" in i.pr, false);
-  }
+test("edge: ownerApproved is false with no approvals map, and only a true answer counts", () => {
+  assert.equal(one({ issues: [issue(1)], prs: [pr(5)] }).pr.ownerApproved, false);
+  assert.equal(one({ issues: [issue(1)], prs: [pr(5)], ownerApprovals: new Map([[5, "yes"]]) }).pr.ownerApproved, false);
 });
 
 test("a check url is kept for this repo from detailsUrl, or from targetUrl when there is no detailsUrl", () => {

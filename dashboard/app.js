@@ -105,15 +105,11 @@ function renderLegend(doc, ul) {
   });
 }
 
-// ADR 0024. The page links only under the team profile, and only into the snapshot's own repository. The repo is
+// ADR 0024. The page links only into the snapshot's own repository. The repo is
 // re-validated here, since a snapshot file can be edited or stale.
 var REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 // A "." or ".." part or path segment (also as %2e) would pass a prefix check yet resolve to another path.
 var DOT_SEGMENT = /(^|\/)(\.|%2e){1,2}(\/|\?|#|$)/i;
-
-function isTeam(snapshot) {
-  return !!snapshot && snapshot.profile === "team";
-}
 
 // "https://github.com/<repo>/" for a valid repo, "" otherwise.
 function linkBase(snapshot) {
@@ -139,19 +135,14 @@ function wholeNumber(n) {
 function renderTask(doc, issue, snapshot) {
   var stage = stageOf(issue);
   var li = el(doc, "li", "task stage-" + slug(stage));
-  var team = isTeam(snapshot);
-  var base = team ? linkBase(snapshot) : "";
-  if (team) {
-    li.appendChild(linkOrText(doc, base, wholeNumber(issue.number) ? base + "issues/" + issue.number : "", "#" + issue.number, "num"));
-  } else {
-    li.appendChild(el(doc, "span", "num", "#" + issue.number));
-  }
+  var base = linkBase(snapshot);
+  li.appendChild(linkOrText(doc, base, wholeNumber(issue.number) ? base + "issues/" + issue.number : "", "#" + issue.number, "num"));
   li.appendChild(el(doc, "span", "title", issue.title));
   li.appendChild(el(doc, "span", "chip stage-" + slug(stage), stage));
-  if (team && issue.pr && wholeNumber(issue.pr.number)) {
+  if (issue.pr && wholeNumber(issue.pr.number)) {
     li.appendChild(linkOrText(doc, base, base + "pull/" + issue.pr.number, "PR #" + issue.pr.number, "pr-link"));
   }
-  if (team && issue.pr) {
+  if (issue.pr) {
     (issue.pr.checks || []).forEach(function (c) {
       if (!c || c.result !== "fail") return;
       var p = el(doc, "p", "why", "Failing check: ");
@@ -176,30 +167,13 @@ function waitingOnOwner(issues) {
   });
 }
 
-function approveLine(issues) {
-  var numbers = waitingOnOwner(issues)
-    .map(function (i) {
-      return i.pr.number;
-    })
-    .sort(function (a, b) {
-      return a - b;
-    });
-  return numbers.length ? "/approve " + numbers.join(" ") : "";
-}
-
-function copyText(text) {
-  if (typeof navigator !== "undefined" && navigator.clipboard) return navigator.clipboard.writeText(text);
-  return Promise.reject(new Error("clipboard unavailable"));
-}
-
 function renderWaiting(doc, box, issues, snapshot) {
   var waiting = waitingOnOwner(issues);
   if (!waiting.length) {
     box.appendChild(el(doc, "p", "muted", "Nothing is waiting on you."));
     return;
   }
-  var team = isTeam(snapshot);
-  var base = team ? linkBase(snapshot) : "";
+  var base = linkBase(snapshot);
   waiting.forEach(function (i) {
     var card = el(doc, "div", "card");
     card.appendChild(el(doc, "span", "num", "PR #" + i.pr.number));
@@ -207,40 +181,13 @@ function renderWaiting(doc, box, issues, snapshot) {
     (i.blockedBy || []).forEach(function (b) {
       card.appendChild(el(doc, "p", "why", b.reason));
     });
-    if (team) {
-      var p = el(doc, "p", "review");
-      p.appendChild(linkOrText(doc, base, base + "pull/" + i.pr.number + "/files", "Review in GitHub", "review-link"));
-      card.appendChild(p);
-      card.appendChild(el(doc, "p", "why", i.pr.ownerApproved === true ? "your review covers this head" : "your review does not cover this head"));
-    }
+    var p = el(doc, "p", "review");
+    p.appendChild(linkOrText(doc, base, base + "pull/" + i.pr.number + "/files", "Review in GitHub", "review-link"));
+    card.appendChild(p);
+    card.appendChild(el(doc, "p", "why", i.pr.ownerApproved === true ? "your review covers this head" : "your review does not cover this head"));
     box.appendChild(card);
   });
-  if (team) {
-    box.appendChild(el(doc, "p", "muted", "Approve in GitHub; the gate re-runs on your review."));
-    return;
-  }
-  var line = approveLine(issues);
-  var row = el(doc, "div", "approve");
-  row.appendChild(el(doc, "code", "", line));
-  var button = el(doc, "button", "", "Copy");
-  button.setAttribute("type", "button");
-  button.addEventListener("click", function () {
-    copyText(line).then(
-      function () {
-        button.textContent = "Copied";
-      },
-      function () {
-        button.textContent = "Copy failed";
-      }
-    ).then(function () {
-      setTimeout(function () {
-        button.textContent = "Copy";
-      }, 2000);
-    });
-  });
-  row.appendChild(button);
-  box.appendChild(row);
-  box.appendChild(el(doc, "p", "muted", "Paste the line into the owner session. This page cannot approve anything."));
+  box.appendChild(el(doc, "p", "muted", "Approve in GitHub; the gate re-runs on your review."));
 }
 
 // The longest chain of "blocks" links among the listed issues (by issue count); ties go to the lowest numbers.
@@ -593,5 +540,5 @@ if (typeof document !== "undefined") {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { POLL_MS: POLL_MS, STALE_MS: STALE_MS, STAGES: STAGES, formatGenerated: formatGenerated, staleNote: staleNote, ageText: ageText, waitingNote: waitingNote, renderAge: renderAge, graphNote: graphNote, stageOf: stageOf, renderLegend: renderLegend, renderTask: renderTask, linkBase: linkBase, linkOrText: linkOrText, approveLine: approveLine, renderWaiting: renderWaiting, criticalPath: criticalPath, renderGraph: renderGraph, validMetrics: validMetrics, renderMetrics: renderMetrics, loadMetrics: loadMetrics };
+  module.exports = { POLL_MS: POLL_MS, STALE_MS: STALE_MS, STAGES: STAGES, formatGenerated: formatGenerated, staleNote: staleNote, ageText: ageText, waitingNote: waitingNote, renderAge: renderAge, graphNote: graphNote, stageOf: stageOf, renderLegend: renderLegend, renderTask: renderTask, linkBase: linkBase, linkOrText: linkOrText, renderWaiting: renderWaiting, criticalPath: criticalPath, renderGraph: renderGraph, validMetrics: validMetrics, renderMetrics: renderMetrics, loadMetrics: loadMetrics };
 }

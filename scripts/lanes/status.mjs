@@ -33,8 +33,8 @@ export function prStage(pr, queuePosition, gateDescription) {
   if (gate.state === "SUCCESS") return pr.autoMergeRequest ? { stage: "queued", note: "auto-merge on" } : { stage: "ready", note: "auto-merge is off" };
   const description = gate.description ?? gateDescription ?? "";
   if (gate.state === "FAILURE" || gate.state === "ERROR") return { stage: "contract", note: description };
-  // The solo wording, and the team wording (a code-owner review in GitHub, ADR 0021).
-  if (description.startsWith("waiting on owner") || description.startsWith(TEAM_OWNER_WAIT)) return { stage: "owner", note: description };
+  // A code-owner review in GitHub (ADR 0021).
+  if (description.startsWith(TEAM_OWNER_WAIT)) return { stage: "owner", note: description };
   // The gate waits for a reviewer's status: the lane owes it, not the owner, whatever the body asks for.
   if (/^waiting for review\/\S/.test(description)) return { stage: "gate", note: description };
   return { stage: "review", note: description };
@@ -63,15 +63,15 @@ export function trustedRollups(prs, reply, config) {
   });
 }
 
-// Solo: a `review/owner` success on the head. Team (`team` is `{ owners, identity }`): the PR's native review on its
-// head, as the gate reads it (`gh pr list`'s `latestReviews`, `author` and `headRefOid`); an unreadable one is no approval.
+// `team` is `{ owners, identity }`: the PR's native review on its head, as the gate reads it (`gh pr list`'s
+// `latestReviews`, `author` and `headRefOid`); an unreadable one, or a missing `team`, is no approval.
 function ownerApproved(pr, team) {
-  if (!team) return (pr.statusCheckRollup ?? []).some((c) => c.context === reviewContext("owner") && c.state === "SUCCESS");
+  if (!team) return false;
   const reviews = (pr.latestReviews ?? []).map((r) => ({ user: { login: r?.author?.login }, state: r?.state, commit_id: r?.commit?.oid }));
   return nativeCodeOwnerApproval(reviews, pr.author?.login, pr.headRefOid, team.owners, team.identity).approved;
 }
 
-// The team context for `summarize` from the config and the CODEOWNERS text: undefined under solo.
+// The team context for `summarize` from the config and the CODEOWNERS text: undefined when the config has no team identity.
 export function teamContext(config, codeOwnersText) {
   if (config?.identity?.profile !== "team") return undefined;
   return { owners: parseCodeOwnerUsers(codeOwnersText ?? ""), identity: config.identity };
@@ -342,7 +342,7 @@ const withSession = (item, session) => {
 // gateDescriptions (missing: the rollup's own descriptions only). `sessions` and `sessionsUnavailable` come from
 // loadSessions (missing: no sessions). `laneBranches` is the output of laneBranches (missing: no branches known).
 export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = new Map(), sessions: loaded = new Map(), stalled = new Map(), idle: idleLanesFound = new Map(), sessionsUnavailable, laneBranches = new Map(), branchesUnavailable, team }) {
-  // `team` is teamContext's output (missing: solo). `stalled` is the output of stalledLanes (issue N → minutes silent).
+  // `team` is teamContext's output (missing: no owner approval is read). `stalled` is the output of stalledLanes (issue N → minutes silent).
   const sessions = new Map([...loaded].map(([n, s]) => [n, stalled.has(n) ? { ...s, stalledMin: stalled.get(n) } : s]));
   const out = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
   const taken = new Set();
@@ -466,11 +466,6 @@ export function renderWaiting(waiting, stalled = []) {
   const approvals = waiting.map((w) => `#${w.number} ${w.title}${w.age ? ` — waiting ${w.age}` : ""}\n  Needs the owner: ${w.needs}\n  Contract changes: ${w.contract}\n  Files changed: ${w.files}`);
   const lines = stalled.map((s) => `#${s.number} ${plain(s.title ?? "")} — stalled ${s.session.stalledMin} min: claude attach ${plain(String(s.session.id))}`);
   return [...approvals, ...(lines.length ? [lines.join("\n")] : [])].join("\n\n");
-}
-
-// The `/approve N M K` line for the owner to paste: at most 10 numbers, empty when there are none.
-export function approveLine(numbers) {
-  return numbers.length ? `/approve ${numbers.slice(0, 10).join(" ")}` : "";
 }
 
 /**

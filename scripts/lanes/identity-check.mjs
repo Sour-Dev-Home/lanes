@@ -1,11 +1,11 @@
 // scripts/lanes/identity-check.mjs
 // #552: /lane step 0 as one allowed, prompt-free command. Under the team profile it checks that the lane holds only its
 // own App credentials, printing one redacted JSON line and never a token, password, URL or local path.
-// Usage: node scripts/lanes/identity-check.mjs (no arguments). Exit 0: solo, or every team check passed. 1: otherwise.
+// Usage: node scripts/lanes/identity-check.mjs (no arguments). Exit 0: every team check passed. 1: otherwise.
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { parseLegacyIdentity } from "./lib.mjs";
+import { TEAM_REQUIRED_MESSAGE, parseIdentity } from "./lib.mjs";
 
 // gh's token-source line for an account whose token sits in a lane's own GH_CONFIG_DIR (start.mjs makes
 // `lanes-gh-<issue>-<random>` under the temp folder); only the issue number is ever printed.
@@ -94,13 +94,12 @@ function checkEnv(env) {
  * @returns {{ code: 0|1, line: string }} the exit code and the one JSON line to print
  */
 export function identityCheck({ readConfig, run, env }) {
-  let identity;
   try {
-    identity = parseLegacyIdentity(JSON.parse(readConfig()).identity);
-  } catch {
-    return { code: 1, line: JSON.stringify({ profile: null, error: "lanes.config.json unreadable or its identity invalid" }) };
+    parseIdentity(JSON.parse(readConfig()).identity);
+  } catch (err) {
+    const error = err?.teamRequired ? TEAM_REQUIRED_MESSAGE : "lanes.config.json unreadable or its identity invalid";
+    return { code: 1, line: JSON.stringify({ profile: null, error }) };
   }
-  if ((identity?.profile ?? "solo") === "solo") return { code: 0, line: JSON.stringify({ profile: "solo" }) };
 
   const checks = { ghDir: checkGhDir(run), push: checkPush(run), credential: checkCredential(run, env), env: checkEnv(env) };
   const ok = Object.values(checks).every((c) => c.pass);
@@ -186,7 +185,7 @@ export function setupChecksMain({ run = realRun, exists = existsSync, config = (
   let app;
   let repo;
   try {
-    app = parseLegacyIdentity(config().identity)?.app;
+    app = parseIdentity(config().identity).app;
     const r = safeRun(run, "gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
     repo = r.status === 0 ? r.stdout.trim() : "";
   } catch {

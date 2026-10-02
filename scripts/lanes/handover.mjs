@@ -4,13 +4,13 @@
 // branch, and a read-before-commit warning. This is the one fixed command that posts that comment, so the lane never
 // writes a free-text `gh pr comment` carrying workflow files.
 // Usage: node scripts/lanes/handover.mjs <pr>
-// Run it after the lane pushed `HEAD~1` and opened the PR. Exit 0: posted, or solo (nothing to do). 1: refused.
+// Run it after the lane pushed `HEAD~1` and opened the PR. Exit 0: posted. 1: refused.
 // 2: usage or an unreadable input. It prints each file's `pendingFileHash` as one `pending: [...]` JSON line for the
 // verdicts' `pending` field, and never a token.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { parseLegacyIdentity, pendingFileHash } from "./lib.mjs";
+import { parseIdentity, pendingFileHash } from "./lib.mjs";
 
 const DIR = ".github/workflows/";
 const SAFE_PATH = /^[A-Za-z0-9._\/-]+$/;
@@ -66,13 +66,11 @@ export function handover(argv, deps) {
   if (argv.length !== 1 || !/^[1-9]\d{0,8}$/.test(argv[0])) return { code: 2, lines: ["usage: node scripts/lanes/handover.mjs <pr number>"] };
   const pr = argv[0];
   try {
-    let identity;
     try {
-      identity = parseLegacyIdentity(JSON.parse(deps.readConfig()).identity);
-    } catch {
-      return { code: 2, lines: ["lanes.config.json unreadable or its identity invalid"] };
+      parseIdentity(JSON.parse(deps.readConfig()).identity);
+    } catch (err) {
+      return { code: 2, lines: [err?.teamRequired ? err.message : "lanes.config.json unreadable or its identity invalid"] };
     }
-    if ((identity?.profile ?? "solo") !== "team") return { code: 0, lines: ["hand-over is team only: under solo the lane pushes workflow files itself, nothing posted"] };
 
     const text = (out) => String(out).trim();
     const repo = text(deps.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]));
