@@ -4,8 +4,9 @@
  * and nothing else.
  */
 import { createSign } from "node:crypto";
-import { chmodSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const API = "https://api.github.com";
 /** The minimum ADR 0019 lists: no workflows, no administration. */
@@ -25,21 +26,18 @@ function signJwt(appId, keyPem, nowMs) {
   }
 }
 
-/** Returns `{ token, expiresAt }` or throws an error naming the failed step. */
-export async function mintInstallationToken({ appId, installationId, keyPem, repo, fetch = globalThis.fetch, now = Date.now }) {
+function checkApp(appId, keyPem) {
   if (!/^\d+$/.test(String(appId ?? ""))) throw new Error("app-token: appId must be numeric");
-  if (!/^\d+$/.test(String(installationId ?? ""))) throw new Error("app-token: installationId must be numeric");
   if (typeof keyPem !== "string" || !keyPem.trim()) throw new Error("app-token: no private key given");
-  const name = String(repo ?? "").split("/");
-  const repoName = name.length <= 2 ? name[name.length - 1] : "";
-  if (!/^[A-Za-z0-9._-]+$/.test(repoName)) throw new Error("app-token: repo must be a repository name");
+}
 
-  const jwt = signJwt(appId, keyPem, typeof now === "function" ? now() : now);
+/** One GitHub call as the App; returns the parsed JSON body or throws an error naming `step` and the status only. */
+async function appRequest(fetch, url, jwt, step, init = {}) {
   let res;
   let text;
   try {
-    res = await fetch(`${API}/app/installations/${installationId}/access_tokens`, {
-      method: "POST",
+    res = await fetch(url, {
+      ...init,
       headers: {
         Authorization: `Bearer ${jwt}`,
         Accept: "application/vnd.github+json",
@@ -47,20 +45,50 @@ export async function mintInstallationToken({ appId, installationId, keyPem, rep
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "lanes-app-token",
       },
-      body: JSON.stringify({ repositories: [repoName], permissions: PERMISSIONS }),
     });
     text = await res.text();
   } catch {
-    throw new Error("app-token: request to GitHub failed");
+    throw new Error(`app-token: ${step} failed`);
   }
-  if (!res.ok) throw new Error(`app-token: request to GitHub failed with status ${res.status}`);
-
-  let body;
+  if (!res.ok) throw new Error(`app-token: ${step} failed with status ${res.status}`);
   try {
-    body = JSON.parse(text);
+    return JSON.parse(text);
   } catch {
-    body = null;
+    return null;
   }
+}
+
+/** Looks the App's installation id up from `owner/name` (`GET /repos/{repo}/installation`, signed with the JWT). */
+export async function findInstallationId({ appId, keyPem, repo, fetch = globalThis.fetch, now = Date.now }) {
+  checkApp(appId, keyPem);
+  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(String(repo ?? ""))) throw new Error("app-token: repo must be owner/name");
+  const jwt = signJwt(appId, keyPem, typeof now === "function" ? now() : now);
+  const body = await appRequest(fetch, `${API}/repos/${repo}/installation`, jwt, "installation lookup");
+  if (!Number.isInteger(body?.id) || body.id <= 0) throw new Error("app-token: malformed response from GitHub");
+  return String(body.id);
+}
+
+/**
+ * Returns `{ token, expiresAt }` or throws an error naming the failed step. By default the token carries the fixed
+ * PERMISSIONS above; `ownPermissions: true` sends no `permissions` body, so the App's own permissions (`workflows:
+ * write` among them) apply. A missing `installationId` is looked up from `repo`, which must then be `owner/name`.
+ */
+export async function mintInstallationToken({ appId, installationId, keyPem, repo, ownPermissions = false, fetch = globalThis.fetch, now = Date.now }) {
+  checkApp(appId, keyPem);
+  const hasId = installationId !== undefined && installationId !== null;
+  if (hasId && !/^\d+$/.test(String(installationId))) throw new Error("app-token: installationId must be numeric");
+  const name = String(repo ?? "").split("/");
+  const repoName = name.length <= 2 ? name[name.length - 1] : "";
+  if (!/^[A-Za-z0-9._-]+$/.test(repoName)) throw new Error("app-token: repo must be a repository name");
+  if (!hasId && name.length !== 2) throw new Error("app-token: installationId must be numeric");
+
+  const id = hasId ? String(installationId) : await findInstallationId({ appId, keyPem, repo, fetch, now });
+  const jwt = signJwt(appId, keyPem, typeof now === "function" ? now() : now);
+  const payload = ownPermissions ? { repositories: [repoName] } : { repositories: [repoName], permissions: PERMISSIONS };
+  const body = await appRequest(fetch, `${API}/app/installations/${id}/access_tokens`, jwt, "request to GitHub", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
   if (
     !body ||
     typeof body.token !== "string" ||
@@ -91,4 +119,29 @@ export function writeGhHosts(dir, token) {
   } catch {
     throw new Error("app-token: could not write hosts.yml");
   }
+}
+
+/**
+ * `node scripts/lanes/app-token.mjs workflows` (lanes-workflow-apply): reads APP_ID, APP_KEY and LANES_REPO
+ * (owner/name) from the environment, mints a token with the App's own permissions, masks it, then exports it as
+ * LANES_WORKFLOWS_TOKEN through GITHUB_ENV. Every failure prints its step only.
+ */
+export async function runWorkflows(env = process.env, { fetch, now, log = console.log, appendFile = appendFileSync } = {}) {
+  const { APP_ID: appId, APP_KEY: keyPem, LANES_REPO: repo, GITHUB_ENV: envFile } = env;
+  if (!envFile) throw new Error("app-token: no GITHUB_ENV to export the token to");
+  const { token } = await mintInstallationToken({ appId, keyPem, repo, ownPermissions: true, fetch, now });
+  if (!/^[A-Za-z0-9_.-]+$/.test(token)) throw new Error("app-token: invalid token");
+  log(`::add-mask::${token}`);
+  appendFile(envFile, `LANES_WORKFLOWS_TOKEN=${token}\n`);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  if (process.argv[2] !== "workflows") {
+    console.error("usage: app-token.mjs workflows");
+    process.exit(2);
+  }
+  runWorkflows().catch((e) => {
+    console.error(String(e?.message ?? "app-token: failed").startsWith("app-token:") ? e.message : "app-token: failed");
+    process.exit(1);
+  });
 }
