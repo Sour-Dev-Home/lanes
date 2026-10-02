@@ -7,6 +7,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test \"scripts/**/*.test.mjs\"",
+    "test:files": "node --test",
     "setup": "git config core.hooksPath .githooks",
     "preflight": "node scripts/preflight.mjs",
     "status": "node scripts/lanes/status.mjs",

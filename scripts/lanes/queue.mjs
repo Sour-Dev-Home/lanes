@@ -16,7 +16,7 @@ import { issuePaths } from "./paths.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
 import { appendStarts, budgetConfig, inFlightIssues, startDecisions, deadLaneSession, launchLane, localLaunchEnv, reaperLog, START_DEFAULTS, startConfig, teamSteps } from "./start.mjs";
-import { formatAge, gateDescriptions, gateSince, liveLanes, prStage, stalledLanes } from "./status.mjs";
+import { QUEUE_EVENTS, formatAge, gateDescriptions, gateSince, liveLanes, mergeGroupFailures, prStage, queueFailedNote, queueRemovals, stalledLanes } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
 // waiting on owner.
@@ -192,7 +192,7 @@ const WAIT_LINE = /^PR #(\d+): needs the owner: /;
 // `gh pr list` leaves the gate's description out of `statusCheckRollup`; this reads it from each open PR's head.
 const GATE_QUERY =
   "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ " +
-  `pullRequests(states:OPEN,first:100){ nodes { number commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description createdAt } } } } } } } } }`;
+  `pullRequests(states:OPEN,first:100){ nodes { number ${QUEUE_EVENTS} commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description createdAt } } } } } } } } }`;
 
 const reason = (err) => String(err?.stderr || err?.message || err).trim().split("\n")[0];
 const stamp = (ms) => new Date(ms).toTimeString().slice(0, 8);
@@ -225,7 +225,25 @@ function readSnapshot(deps, root) {
   }
   const sessions = JSON.parse(deps.claude(["agents", "--json", "--cwd", root], { cwd: root }));
   if (!Array.isArray(sessions)) throw new Error("claude agents --json printed no list");
-  return { issues, prs, sessions };
+  return { issues, prs, sessions, removals: queueRemovals(gate) };
+}
+
+// #621: a PR the merge queue removed (and that is open and not back in the queue), one line per removal. The failed
+// check is read from the merge group's runs only when a removal is new; a run list that cannot be read leaves it out.
+function removalLines(snapshot, deps, told) {
+  const lines = [];
+  const fresh = [...snapshot.removals].filter(([n, r]) => told.get(n) !== r.at);
+  if (!fresh.length) return lines;
+  let failures = new Map();
+  try {
+    failures = mergeGroupFailures(JSON.parse(deps.gh(["run", "list", "--event", "merge_group", "--status", "failure", "--limit", "50", "--json", "databaseId,headBranch,workflowName,url,createdAt"])));
+  } catch {}
+  for (const [n, r] of fresh) {
+    told.set(n, r.at);
+    const title = String(snapshot.prs.find((p) => p.number === n)?.title ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+    lines.push(`#${n} [queue failed] ${title} — ${queueFailedNote(r, failures.get(n))}`);
+  }
+  return lines;
 }
 
 // #382: stops each lane planRecovery names and, when its worktree is clean and fully pushed, removes it so the tick's
@@ -346,6 +364,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
   const firstWaiting = new Map();
   const attempted = new Set();
   const told = new Set();
+  const removalTold = new Map();
   let idleTicks = 0;
   let readFailures = 0;
   for (;;) {
@@ -414,6 +433,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     const current = new Map(plan.waiting.map((w) => [w.number, w.reason]));
     for (const line of plan.lines) if (!WAIT_LINE.test(line)) say(line);
     const changed = current.size !== waits.size || [...current].some(([n, r]) => waits.get(n) !== r);
+    for (const line of removalLines(snapshot, deps, removalTold)) say(line);
     if (changed) for (const line of waitingDigest(snapshot.prs, plan.waiting, now(), firstWaiting)) say(line);
     for (const n of [...firstWaiting.keys()]) if (!current.has(n)) firstWaiting.delete(n);
     for (const n of current.keys()) if (!firstWaiting.has(n)) firstWaiting.set(n, now());
