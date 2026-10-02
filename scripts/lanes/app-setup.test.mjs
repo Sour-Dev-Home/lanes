@@ -138,6 +138,18 @@ test("saveKey writes ~/.lanes/<slug>.pem owner-only, refuses to overwrite and re
   }
 });
 
+test("edge: a failed key write leaves no partial file, so a retry can save", () => {
+  const home = mkdtempSync(join(tmpdir(), "lanes-home-"));
+  try {
+    assert.throws(() => saveKey("my-lanes", 12345, home));
+    assert.equal(existsSync(join(home, ".lanes", "my-lanes.pem")), false);
+    saveKey("my-lanes", PEM, home);
+    assert.equal(readFileSync(join(home, ".lanes", "my-lanes.pem"), "utf8"), PEM);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("parseArgs accepts none or --org <name> and nothing else", () => {
   assert.deepEqual(parseArgs([]), { org: undefined });
   assert.deepEqual(parseArgs(["--org", "acme"]), { org: "acme" });
