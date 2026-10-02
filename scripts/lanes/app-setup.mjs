@@ -101,7 +101,7 @@ export function createHandler(deps) {
         } catch (err) {
           // The step name is ours, never gh's output, which could echo input.
           const step = typeof err?.step === "string" ? err.step : "storing the key";
-          return bad(500, `Failed while ${step}; the key was not kept. Delete the App ${slug} in GitHub and run --workflows again.`);
+          return bad(500, `Failed while ${step}; the key was not kept. Delete the App ${slug} in GitHub and run --workflows again (the ${ENVIRONMENT} environment stays and is reused).`);
         }
         app = { id, slug };
         deps.log(`App ${slug} created (id ${id}); key stored in ${ENVIRONMENT}, none on disk`);
@@ -187,6 +187,7 @@ export function workflowsPlan({ repo, login }) {
     "  branch policy:      deployments from main only",
     `  secret:             ${SECRET} (the new App's private key, piped to gh, never written to disk)`,
     `  variable:           ${VARIABLE} (the new App's id)`,
+    "If an environment of that name exists, its reviewer is replaced and main is added to its branch policy; it stays if a later step fails.",
     "Creating an environment with reviewers needs repository admin. CODEOWNERS and rulesets are not touched.",
   ];
 }

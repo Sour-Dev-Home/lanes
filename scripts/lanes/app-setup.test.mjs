@@ -319,3 +319,40 @@ test("edge: a failed provision keeps nothing, says which step failed, and the in
   assert.equal(r.body.includes(KEYMARK) || logs.join("\n").includes(KEYMARK), false);
   assert.equal((await handle({ method: "GET", url: `/setup?installation_id=9&state=${STATE}`, host: HOST })).status, 400);
 });
+
+test("edge: a failed, empty or non-numeric user id or login stops before any question or admin call", async () => {
+  const idCall = (a) => a.join(" ") === "api user --jq .id";
+  const cases = [
+    (a) => (idCall(a) ? { status: 1, stdout: "5\n" } : null),
+    (a) => (idCall(a) ? { status: 0, stdout: "\n" } : null),
+    (a) => (idCall(a) ? { status: 0, stdout: "abc\n" } : null),
+    (a) => (idCall(a) ? { status: 0, stdout: "0\n" } : null),
+    (a) => (a.join(" ") === "api user --jq .login" ? { status: 0, stdout: "  \n" } : null),
+  ];
+  for (const [i, override] of cases.entries()) {
+    const { gh, calls } = fakeGh();
+    let asked = false;
+    const r = await confirmAndCreateEnvironment({ gh: (a, inp) => override(a) ?? gh(a, inp), ask: async () => ((asked = true), "y"), print: () => {} });
+    assert.equal(r.ok, false, `case ${i}`);
+    assert.equal(asked, false, `case ${i}`);
+    assert.deepEqual(adminCalls(calls), [], `case ${i}`);
+  }
+});
+
+test("edge: a provision error without a step name still fails closed with the generic step and no key", async () => {
+  const handle = createHandler({
+    mode: "workflows",
+    state: STATE,
+    port: () => 4000,
+    name: "n",
+    convert: async () => ({ id: 42, slug: "my-workflows", pem: PEM }),
+    provision: () => {
+      throw new Error(`oops ${KEYMARK}`);
+    },
+    log: () => {},
+  });
+  const r = await handle({ method: "GET", url: `/redirect?code=abc&state=${STATE}`, host: HOST });
+  assert.equal(r.status, 500);
+  assert.match(r.body, /storing the key/);
+  assert.equal(r.body.includes(KEYMARK), false);
+});
