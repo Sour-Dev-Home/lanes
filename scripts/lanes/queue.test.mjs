@@ -1943,3 +1943,247 @@ test("#621: removed then re-added, or never removed, prints nothing", async () =
   await main([], run.deps);
   assert.deepEqual(failedLines(run), []);
 });
+
+// --- #630: the heartbeat comment on the lanes-health issue (ADR 0027 part 2). ---
+
+const BOT = { login: "sour-dev-lanes[bot]" };
+// A health.mjs-shaped client over one health issue (#900). `comments` is the issue's comments; `calls` records every operation.
+function fakeHealthClient({ comments = [], issues = [{ number: 900, state: "OPEN", body: "", lastWriter: null }], failEdit = false } = {}) {
+  const calls = [];
+  let nextId = 5000;
+  return {
+    calls,
+    comments,
+    async listIssues(label) {
+      calls.push(["listIssues", label]);
+      return issues;
+    },
+    async createLabel(label) {
+      calls.push(["createLabel", label]);
+    },
+    async createIssue(issueArgs) {
+      calls.push(["createIssue", issueArgs.labels]);
+      return 901;
+    },
+    async listComments(number) {
+      calls.push(["listComments", number]);
+      return comments;
+    },
+    async comment(number, text) {
+      calls.push(["comment", number]);
+      const id = nextId++;
+      comments.push({ id, body: text, author: BOT });
+      return id;
+    },
+    async editComment(id, text) {
+      calls.push(["editComment", id]);
+      if (failEdit) throw new Error("HTTP 404");
+      comments.find((c) => c.id === id).body = text;
+    },
+  };
+}
+const beatPayload = (findings = [], at = "2026-09-28T09:00:00.000Z") => ({ at, commit: "abc1234", findings });
+const blockOf = (text) => JSON.parse(/\{[\s\S]*\}/.exec(text.slice(text.indexOf("-->") + 3))[0]);
+
+// Criterion 1
+test("heartbeat: the first write creates one comment starting the marker, holding time, commit and findings", async () => {
+  const { heartbeatWriter } = await import("./queue.mjs");
+  const client = fakeHealthClient();
+  await heartbeatWriter(() => client, QUEUE_TEAM)(beatPayload(["queue-stopped:disk full"]));
+  assert.deepEqual(client.calls.filter(([op]) => op === "comment"), [["comment", 900]]);
+  assert.equal(client.comments.length, 1);
+  assert.ok(client.comments[0].body.startsWith("<!-- lanes:heartbeat -->"));
+  assert.deepEqual(blockOf(client.comments[0].body), beatPayload(["queue-stopped:disk full"]));
+});
+
+test("heartbeat: later writes edit that comment and never post a second one", async () => {
+  const { heartbeatWriter } = await import("./queue.mjs");
+  const client = fakeHealthClient();
+  const write = heartbeatWriter(() => client, QUEUE_TEAM);
+  await write(beatPayload([], "2026-09-28T09:00:00.000Z"));
+  await write(beatPayload(["stalled-lane:issue 7"], "2026-09-28T09:03:00.000Z"));
+  await write(beatPayload([], "2026-09-28T09:06:00.000Z"));
+  assert.equal(client.comments.length, 1);
+  assert.equal(client.calls.filter(([op]) => op === "comment").length, 1);
+  assert.deepEqual(client.calls.filter(([op]) => op === "editComment"), [["editComment", 5000], ["editComment", 5000]]);
+  assert.equal(client.calls.filter(([op]) => op === "listComments").length, 1, "the comment is found once, then remembered");
+  assert.equal(blockOf(client.comments[0].body).at, "2026-09-28T09:06:00.000Z");
+});
+
+// Criterion 2
+test("heartbeat: it finds the health issue with findOrCreateHealthIssue, creating it when there is none", async () => {
+  const { heartbeatWriter } = await import("./queue.mjs");
+  const client = fakeHealthClient({ issues: [] });
+  await heartbeatWriter(() => client, QUEUE_TEAM)(beatPayload());
+  assert.deepEqual(client.calls.slice(0, 3), [["listIssues", "lanes-health"], ["createLabel", "lanes-health"], ["createIssue", ["lanes-health"]]]);
+  assert.deepEqual(client.calls.filter(([op]) => op === "comment"), [["comment", 901]]);
+});
+
+test("heartbeat: an existing lane-bot heartbeat is edited, and other comments, even with the marker, are never touched", async () => {
+  const { heartbeatWriter } = await import("./queue.mjs");
+  const marker = "<!-- lanes:heartbeat -->\n{}";
+  const comments = [
+    { id: 11, body: "Recovered: lanes is healthy again.", author: BOT },
+    { id: 12, body: marker, author: { login: "someone-else" } },
+    { id: 13, body: marker, author: BOT },
+    { id: 14, body: marker, author: { login: "sour-dev-lanes" } },
+    { id: 15, body: "no marker here", author: BOT },
+  ];
+  const before = comments.map((c) => c.body);
+  const client = fakeHealthClient({ comments });
+  await heartbeatWriter(() => client, QUEUE_TEAM)(beatPayload());
+  assert.deepEqual(client.calls.filter(([op]) => op === "editComment" || op === "comment"), [["editComment", 13]]);
+  assert.deepEqual(comments.map((c) => c.body).filter((_, i) => i !== 2), before.filter((_, i) => i !== 2));
+  assert.ok(client.calls.every(([op, arg]) => (op !== "listComments" && op !== "comment") || arg === 900), "only the health issue is read or commented on");
+});
+
+test("edge: a heartbeat written for the wrong bot identity is not adopted: a new comment is made", async () => {
+  const { heartbeatWriter } = await import("./queue.mjs");
+  const client = fakeHealthClient({ comments: [{ id: 12, body: "<!-- lanes:heartbeat -->\n{}", author: { login: "other[bot]" } }] });
+  await heartbeatWriter(() => client, QUEUE_TEAM)(beatPayload());
+  assert.deepEqual(client.calls.filter(([op]) => op === "editComment"), []);
+  assert.equal(client.comments.length, 2);
+});
+
+test("heartbeat: a failed write throws and forgets the comment, so the next write looks again", async () => {
+  const { heartbeatWriter } = await import("./queue.mjs");
+  const client = fakeHealthClient({ comments: [{ id: 13, body: "<!-- lanes:heartbeat -->\n{}", author: BOT }], failEdit: true });
+  const write = heartbeatWriter(() => client, QUEUE_TEAM);
+  await assert.rejects(write(beatPayload()), /HTTP 404/);
+  await assert.rejects(write(beatPayload()), /HTTP 404/);
+  assert.equal(client.calls.filter(([op]) => op === "listComments").length, 2);
+});
+
+test("edge: a created comment that comes back with no id is an error, not a later edit of undefined", async () => {
+  const { heartbeatWriter } = await import("./queue.mjs");
+  const client = { ...fakeHealthClient(), comment: async () => undefined };
+  await assert.rejects(heartbeatWriter(() => client, QUEUE_TEAM)(beatPayload()), /without an id/);
+});
+
+test("edge: an asynchronous getClient that rejects (no token) is a failed write", async () => {
+  const { heartbeatWriter } = await import("./queue.mjs");
+  await assert.rejects(heartbeatWriter(async () => { throw new Error("key file unreadable"); }, QUEUE_TEAM)(beatPayload()), /key file unreadable/);
+});
+
+test("the heartbeat block is what health.mjs readHeartbeat reads from the lane bot", async () => {
+  const { heartbeatBody } = await import("./queue.mjs");
+  const { readHeartbeat } = await import("./health.mjs");
+  const body = heartbeatBody(beatPayload(["idle-lane:issue 5", "queue-stopped:cannot restart dirty"]));
+  const got = readHeartbeat([{ body, author: BOT, updatedAt: "2026-09-28T09:00:00Z" }], QUEUE_TEAM);
+  assert.deepEqual(got, { at: Date.parse("2026-09-28T09:00:00.000Z"), findings: ["idle-lane:issue 5", "queue-stopped:cannot restart dirty"] });
+});
+
+// Criterion 1: each finding
+test("findings: a lane session idle with no PR, a stalled lane, and a stop with its reason", async () => {
+  const { heartbeatFindings } = await import("./queue.mjs");
+  const prs = [pr(50, 5, ["src/a.mjs"])];
+  assert.deepEqual(heartbeatFindings({ idle: new Map([[5, 40], [6, 50]]), prs }), ["idle-lane:issue 6"], "issue 5 has a PR");
+  assert.deepEqual(heartbeatFindings({ stalled: new Map([[7, 45]]) }), ["stalled-lane:issue 7"]);
+  assert.deepEqual(heartbeatFindings({ stop: "cannot restart: the checkout is on feature, not main" }), ["queue-stopped:cannot restart the checkout is on feature not main"]);
+  assert.deepEqual(heartbeatFindings({}), []);
+});
+
+test("edge: a stop's reason is cut to the finding alphabet and 80 characters, and the stop survives the cap", async () => {
+  const { heartbeatFindings } = await import("./queue.mjs");
+  const [stop, ...rest] = heartbeatFindings({ stop: `@owner #1 \`rm\` ${"x".repeat(200)}`, stalled: new Map(Array.from({ length: 30 }, (_, i) => [i + 1, 40])) });
+  assert.match(stop, /^queue-stopped:[A-Za-z0-9 ._/()-]{1,80}$/);
+  assert.ok(!/[@#`]/.test(stop));
+  assert.equal(rest.length, 19, "20 findings at most");
+  assert.deepEqual(heartbeatFindings({ stop: "" }), ["queue-stopped"]);
+});
+
+// Criterion 1 and 2, through main
+function heartbeatRun(world, { failWith = null, idle, stalledIssues = [], ...options } = {}) {
+  const run = fakeRun(world, options);
+  const beats = [];
+  run.deps.heartbeat = ({ identity }) => {
+    beats.push({ identity });
+    return async (payload) => {
+      if (failWith) throw new Error(failWith);
+      beats.push(payload);
+    };
+  };
+  if (idle) run.deps.idle = idle;
+  if (stalledIssues.length) run.deps.recovery = recoveryRun(world, { stalledIssues }).deps.recovery;
+  return { ...run, beats, written: () => beats.filter((b) => b.at) };
+}
+
+test("main: every tick writes one heartbeat with the time and the script commit", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = heartbeatRun({ issues: [], prs: [], sessions: [] }, { idleContinues: true, maxTicks: 3 });
+  const git = fakeGit({ head: "abc1234def", remote: "abc1234def" });
+  await assert.rejects(main([], { ...run.deps, git: git.git }), /never stopped/);
+  assert.deepEqual(run.beats[0].identity, QUEUE_TEAM);
+  assert.equal(run.written().length, 4);
+  assert.deepEqual(run.written()[0], { at: "2026-09-28T09:00:00.000Z", commit: "abc1234def", findings: [] });
+  assert.equal(run.written()[1].at, "2026-09-28T09:03:00.000Z");
+});
+
+test("main: a lane session idle with no PR and a stalled lane are reported; an idle lane with a PR is not", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(4, ["src/d.mjs"])], prs: [pr(50, 5, ["src/a.mjs"])], sessions: [session(4), session(5), session(7)] };
+  const stop = () => {
+    throw Object.assign(new Error("stop"), { code: "QUEUE_STOP" });
+  };
+  const run = heartbeatRun(world, { idle: () => new Map([[4, 40], [5, 40]]), stalledIssues: [7], onSleep: stop });
+  await main([], run.deps);
+  assert.deepEqual(run.written()[0].findings, ["idle-lane:issue 4", "stalled-lane:issue 7"]);
+});
+
+test("main: an idle check that throws says so, and the heartbeat still goes out without that finding", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = heartbeatRun({ issues: [], prs: [], sessions: [] }, { idle: () => { throw new Error("EPERM"); } });
+  assert.equal(await main([], run.deps), 0);
+  assert.ok(run.out.some((l) => l.endsWith("idle check failed: EPERM")));
+  assert.deepEqual(run.written()[0].findings, []);
+});
+
+test("main: a stop it is about to make is in the heartbeat with its reason, before it exits", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = heartbeatRun({ issues: [], prs: [], sessions: [] });
+  const git = fakeGit({ remote: "bbbbbbb2222", changed: ["scripts/lanes/queue.mjs"], branch: "feature" });
+  assert.equal(await main([], { ...run.deps, git: git.git }), 3);
+  assert.deepEqual(run.written().map((b) => b.findings), [["queue-stopped:cannot restart the checkout is on feature not main"]]);
+});
+
+test("main: a restart is not a stop, so it writes no heartbeat finding", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = heartbeatRun({ issues: [], prs: [], sessions: [] });
+  const git = fakeGit({ remote: "bbbbbbb2222", changed: ["scripts/lanes/queue.mjs"] });
+  assert.equal(await main([], { ...run.deps, git: git.git }), 10);
+  assert.deepEqual(run.written(), []);
+});
+
+test("main: a failed heartbeat write prints one line, repeats nothing, and never stops the queue", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = heartbeatRun(world, { failWith: "HTTP 502: Bad Gateway", onSleep: (t) => t === 3 && (world.issues = []) });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [1], "launching goes on");
+  assert.ok(run.ticks() >= 3);
+  assert.equal(run.out.filter((l) => l.endsWith("heartbeat not written: HTTP 502: Bad Gateway")).length, 1, run.out.join("\n"));
+});
+
+test("main: a failed write is said again after a write that worked, and without a heartbeat dep nothing is written", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] }, { idleContinues: true, maxTicks: 5 });
+  let n = 0;
+  run.deps.heartbeat = () => async () => {
+    n += 1;
+    if (n === 1 || n === 3) throw new Error("HTTP 500");
+  };
+  await assert.rejects(main([], run.deps), /never stopped/);
+  assert.equal(run.out.filter((l) => l.endsWith("heartbeat not written: HTTP 500")).length, 2);
+  const plain = fakeRun({ issues: [], prs: [], sessions: [] });
+  assert.equal(await main([], plain.deps), 0);
+  assert.ok(plain.out.every((l) => !/heartbeat/.test(l)));
+});
+
+test("main: the heartbeat touches no other issue: the queue's own gh calls are unchanged", async () => {
+  const { main } = await import("./queue.mjs");
+  const withBeat = heartbeatRun({ issues: [], prs: [], sessions: [] });
+  const without = fakeRun({ issues: [], prs: [], sessions: [] });
+  await main([], withBeat.deps);
+  await main([], without.deps);
+  assert.deepEqual(withBeat.calls, without.calls);
+});

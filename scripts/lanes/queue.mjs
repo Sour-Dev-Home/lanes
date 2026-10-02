@@ -10,16 +10,19 @@
 // Exit 1 is retired: a failed GitHub read backs off and retries.
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { mintInstallationToken } from "./app-token.mjs";
 import { parseBlockedBy } from "./blockers.mjs";
 import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWorktree, waitForStop } from "./cleanup.mjs";
-import { GATE_CONTEXT, TEAM_REQUIRED_MESSAGE, laneIssueOf, parseIssueForm } from "./lib.mjs";
+import { HEARTBEAT_MARKER, findOrCreateHealthIssue, ghClient } from "./health.mjs";
+import { GATE_CONTEXT, TEAM_REQUIRED_MESSAGE, isLaneBot, laneIssueOf, parseIssueForm } from "./lib.mjs";
 import { issuePaths } from "./paths.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
-import { appendStarts, budgetConfig, inFlightIssues, isEntryScript, startDecisions, deadLaneSession, launchLane, localLaunchEnv, launchRefusal, reaperLog, START_DEFAULTS, startConfig, teamSteps } from "./start.mjs";
-import { QUEUE_EVENTS, formatAge, gateDescriptions, gateSince, liveLanes, mergeGroupFailures, prStage, queueFailedNote, queueRemovals, stalledLanes } from "./status.mjs";
+import { appendStarts, budgetConfig, inFlightIssues, isEntryScript, startDecisions, deadLaneSession, launchLane, localLaunchEnv, launchRefusal, reaperLog, resolveKeyFile, START_DEFAULTS, startConfig, teamSteps } from "./start.mjs";
+import { QUEUE_EVENTS, formatAge, gateDescriptions, gateSince, idleLanes, liveLanes, mergeGroupFailures, prStage, queueFailedNote, queueRemovals, stalledLanes } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
 // waiting on owner.
@@ -207,6 +210,61 @@ const GATE_QUERY =
 const reason = (err) => String(err?.stderr || err?.message || err).trim().split("\n")[0];
 const stamp = (ms) => new Date(ms).toTimeString().slice(0, 8);
 
+// #630 (ADR 0027 part 2): the queue's heartbeat is one comment on the lanes-health issue, edited every tick. Its JSON
+// block is what health.mjs's readHeartbeat reads: `at`, the queue's script commit, and the local findings.
+const FINDING_LIMIT = 20;
+// A finding is echoed by the watchdog, so its text keeps health.mjs's alphabet and length.
+const findingText = (s) => String(s ?? "").replace(/[^A-Za-z0-9 ._/()-]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80).trim();
+
+export function heartbeatBody({ at, commit, findings }) {
+  return `${HEARTBEAT_MARKER}\n\`\`\`json\n${JSON.stringify({ at, commit, findings })}\n\`\`\`\n`;
+}
+
+// The queue's findings for one tick: a stop it is about to make (first, so the cap never drops it), a lane session idle
+// with no open PR, and a stalled lane. `idle` and `stalled` are issue N → minutes silent, as status.mjs returns them.
+export function heartbeatFindings({ idle = new Map(), stalled = new Map(), prs = [], stop } = {}) {
+  const withPr = new Set(prs.map(branchIssue));
+  const out = [];
+  if (stop !== undefined) out.push(findingText(stop) ? `queue-stopped:${findingText(stop)}` : "queue-stopped");
+  for (const n of idle.keys()) if (Number.isInteger(n) && !withPr.has(n)) out.push(`idle-lane:issue ${n}`);
+  for (const n of stalled.keys()) if (Number.isInteger(n)) out.push(`stalled-lane:issue ${n}`);
+  return out.slice(0, FINDING_LIMIT);
+}
+
+/**
+ * The heartbeat writer. `getClient()` (sync or async) gives health.mjs's client plus `listComments(number)` returning
+ * `[{ id, body, author: { login } }]`, `comment(number, body)` returning the new id, and `editComment(id, body)`. The
+ * first call finds the health issue (findOrCreateHealthIssue) and the lane bot's existing heartbeat comment, creating
+ * one only when there is none; later calls edit it. It touches no other issue or comment. A failed call forgets what it
+ * found, so the next one looks again, and rethrows.
+ */
+export function heartbeatWriter(getClient, identity) {
+  let commentId = null;
+  return async (payload) => {
+    const body = heartbeatBody(payload);
+    try {
+      const client = await getClient();
+      if (commentId === null) {
+        const issue = await findOrCreateHealthIssue(client);
+        const mine = (await client.listComments(issue.number))
+          .filter((c) => typeof c?.body === "string" && c.body.startsWith(HEARTBEAT_MARKER) && Number.isInteger(c.id) && isLaneBot(identity, c.author))
+          .sort((a, b) => a.id - b.id)[0];
+        if (!mine) {
+          const id = await client.comment(issue.number, body);
+          if (!Number.isInteger(id)) throw new Error("the heartbeat comment was created without an id");
+          commentId = id;
+          return;
+        }
+        commentId = mine.id;
+      }
+      await client.editComment(commentId, body);
+    } catch (err) {
+      commentId = null;
+      throw err;
+    }
+  };
+}
+
 // #535: the paths a running queue has loaded. A directory pathspec ends in a slash so `scripts/lanes-other` never matches.
 export const LOADED_PATHS = ["scripts/lanes/", "lanes.config.json"];
 
@@ -223,7 +281,7 @@ function scriptsChanged(git, startedAt) {
 // clean, the pull fast-forwards and HEAD then equals origin/main. Returns { code, line } for a stop (3, or 4 for a pull
 // that cannot fast-forward) or { restart: { old, now } }.
 function pullForRestart(git, stale) {
-  const stop = (code, why) => ({ code, line: `lanes scripts changed (${stale.old.slice(0, 7)}..${stale.now.slice(0, 7)}) but cannot restart: ${why}; fix it, then start the queue again` });
+  const stop = (code, why) => ({ code, why, line: `lanes scripts changed (${stale.old.slice(0, 7)}..${stale.now.slice(0, 7)}) but cannot restart: ${why}; fix it, then start the queue again` });
   const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
   if (branch !== "main") return stop(3, `the checkout is on ${branch || "no branch"}, not main`);
   if (git(["status", "--porcelain"]).trim()) return stop(3, "the checkout has uncommitted changes");
@@ -280,12 +338,13 @@ function removalLines(snapshot, deps, told) {
 // a marker is written before anything is removed, so a crash cannot allow a second relaunch.
 // #444: a dead lane with an open PR is not removed: it is returned as `{ number, cwd, id, reason }` to be relaunched in
 // its own worktree, unless that worktree holds work that is not pushed, which is left and said.
-function recoverLanes(snapshot, { deps, dir, say, attempted, told }) {
+function recoverLanes(snapshot, { deps, dir, say, attempted, told, report = {} }) {
   const { recovery, claude } = deps;
   const resumes = [];
   let stalled;
   try {
     stalled = recovery.stalled(snapshot.sessions, dir);
+    report.stalled = stalled;
   } catch (err) {
     say(`stall check failed: ${reason(err)}`);
     return resumes;
@@ -346,7 +405,8 @@ function recoverLanes(snapshot, { deps, dir, say, attempted, told }) {
  * it spawns children until one exits with other than 10. `deps` holds fakes in tests: `env`,
  * `gh(args)` and `claude(args, { cwd })` return stdout, `root()` the main checkout, `config()` the parsed
  * lanes.config.json (undefined when missing), `cleanup()` cleanupMerged's lines, `spawn` and `reaperLog(root, n)` for
- * each launched lane's reaper (as in start.mjs), `team` the team profile's steps (start.mjs's launchLane, #556), `now()`
+ * each launched lane's reaper (as in start.mjs), `team` the team profile's steps (start.mjs's launchLane, #556),
+ * `heartbeat({ identity })` the heartbeat writer (#630; absent: none is written) and `idle(sessions, root)` the idle lanes, `now()`
  * ms, `sleep(ms)` a promise, `print(line)`.
  */
 export async function main(argv, deps = DEFAULT_DEPS) {
@@ -411,6 +471,29 @@ export async function main(argv, deps = DEFAULT_DEPS) {
   const attempted = new Set();
   const told = new Set();
   const removalTold = new Map();
+  // #630: this tick's heartbeat with the queue's findings. A failed write prints one line (again only when the reason
+  // changes) and never stops the queue; an idle check that fails leaves that finding out.
+  const writeBeat = deps.heartbeat?.({ identity });
+  let beatSaid = null;
+  const beat = async (say, snapshot, dir, extra = {}) => {
+    if (!writeBeat) return;
+    let idle;
+    if (deps.idle) {
+      try {
+        idle = deps.idle(snapshot.sessions, dir);
+      } catch (err) {
+        say(`idle check failed: ${reason(err)}`);
+      }
+    }
+    try {
+      await writeBeat({ at: new Date(now()).toISOString(), commit: startedAt, findings: heartbeatFindings({ prs: snapshot.prs, idle, ...extra }) });
+      beatSaid = null;
+    } catch (err) {
+      const line = `heartbeat not written: ${reason(err)}`;
+      if (line !== beatSaid) say(line);
+      beatSaid = line;
+    }
+  };
   let idleTicks = 0;
   let readFailures = 0;
   for (;;) {
@@ -450,17 +533,20 @@ export async function main(argv, deps = DEFAULT_DEPS) {
         try {
           outcome = pullForRestart(deps.git, stale);
         } catch (err) {
-          outcome = { code: 3, line: `lanes scripts changed (${stale.old.slice(0, 7)}..${stale.now.slice(0, 7)}) but cannot restart: ${reason(err)}; fix it, then start the queue again` };
+          outcome = { code: 3, why: reason(err), line: `lanes scripts changed (${stale.old.slice(0, 7)}..${stale.now.slice(0, 7)}) but cannot restart: ${reason(err)}; fix it, then start the queue again` };
         }
         if (outcome.restart) {
           say(`queue: lanes scripts changed (${outcome.restart.old.slice(0, 7)} -> ${outcome.restart.now.slice(0, 7)}), pulled, restarting (#${restartNumber})`);
           return RESTART_CODE;
         }
         say(outcome.line);
+        await beat(say, snapshot, dir, { stop: `cannot restart: ${outcome.why}` });
         return outcome.code;
       }
     }
-    const resumes = deps.recovery ? recoverLanes(snapshot, { deps, dir, say, attempted, told }) : [];
+    const report = {};
+    const resumes = deps.recovery ? recoverLanes(snapshot, { deps, dir, say, attempted, told, report }) : [];
+    await beat(say, snapshot, dir, { stalled: report.stalled });
     // An issue whose launch failed stays open (its blockers and ranking still count) but is no longer a candidate.
     const issues = snapshot.issues.map((i) => (failedLaunches.has(i.number) ? { ...i, labels: labelsOf(i).filter((l) => l !== "ready") } : i));
     // #390: a budget that cannot be read never stops the queue; it says so once and launches as before.
@@ -589,8 +675,55 @@ const DEFAULT_RECOVERY = {
   },
 };
 
+// #630: the heartbeat acts as the lane App (ADR 0027 part 2), so the watchdog's trust check (isLaneBot) accepts it. The
+// installation token is minted from the owner's key file and reused until five minutes before it expires; it goes to
+// `gh` only through that one call's environment.
+function appHeartbeat({ identity }) {
+  let session = null;
+  const tokenNow = async () => {
+    if (session && Date.parse(session.expiresAt) - Date.now() > 5 * 60_000) return session.token;
+    const file = resolveKeyFile({ env: process.env, identity, home: homedir() });
+    if (!file) throw new Error("LANES_APP_KEY_FILE is not set");
+    let keyPem;
+    try {
+      keyPem = readFileSync(file, "utf8");
+    } catch {
+      throw new Error("key file unreadable");
+    }
+    const repo = run("gh")(["repo", "view", "--json", "name", "--jq", ".name"], { cwd: repoRoot() }).trim();
+    session = await mintInstallationToken({ appId: identity.app.id, installationId: identity.app.installationId, keyPem, repo });
+    return session.token;
+  };
+  return heartbeatWriter(async () => {
+    const token = await tokenNow();
+    const gh = (args) => {
+      const out = run("gh")(args, { cwd: repoRoot(), env: { ...process.env, GH_TOKEN: token, GITHUB_TOKEN: token } });
+      try {
+        return JSON.parse(out);
+      } catch {
+        return out;
+      }
+    };
+    return {
+      ...ghClient(gh),
+      async listComments(number) {
+        const rows = gh(["api", "--paginate", "--slurp", `repos/{owner}/{repo}/issues/${Number(number)}/comments?per_page=100`]).flat();
+        return rows.map((c) => ({ id: c.id, body: c.body ?? "", author: { login: c.user?.login } }));
+      },
+      async comment(number, body) {
+        return gh(["api", `repos/{owner}/{repo}/issues/${Number(number)}/comments`, "-f", `body=${body}`]).id;
+      },
+      async editComment(id, body) {
+        gh(["api", "-X", "PATCH", `repos/{owner}/{repo}/issues/comments/${Number(id)}`, "-f", `body=${body}`]);
+      },
+    };
+  }, identity);
+}
+
 const DEFAULT_DEPS = {
   env: process.env,
+  heartbeat: appHeartbeat,
+  idle: (agents, root) => idleLanes(agents, root),
   file: import.meta.url,
   launchEnv: localLaunchEnv,
   recovery: DEFAULT_RECOVERY,
