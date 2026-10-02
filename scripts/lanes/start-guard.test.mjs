@@ -2860,6 +2860,9 @@ test("#669 edge: the same text unquoted or in double quotes, and a single-quoted
     // Piped into a shell, or run by awk itself, the quoted text runs.
     `echo 'node scripts/lanes/queue.mjs' | sh`, `echo '$(node queue.mjs)' | sh`, `echo '$(date)' | sh`, `awk '{print "node queue.mjs"}' | sh`,
     `awk 'BEGIN{system("node queue.mjs")}'`,
+    // Output a shell can still read: a redirect, a process substitution, a pipe into tee, xargs or awk's system().
+    `X=scripts/lanes/queue.mjs; echo 'node $X' > f; bash f`, `bash <(echo 'node $X')`, `echo 'node $X' | tee f`, `echo '$X' | xargs sh -c`,
+    `echo '$X' | awk '{system($0)}'`, `echo 'node $X' | head | sh`,
   ];
   for (const c of denied) assert.equal(decidePreToolUse(bash(c), null, NOW)?.decision, "deny", c);
 });
