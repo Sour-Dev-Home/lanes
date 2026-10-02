@@ -4,7 +4,7 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isLaneBot, loadConfig } from "./lib.mjs";
-import { STATUS_QUERY, gateSince, mergeGroupFailures, mergeQueueEntries, queueRemovals } from "./status.mjs";
+import { STATUS_QUERY, formatAge, gateDescriptions, gateSince, mergeGroupFailures, mergeQueueEntries, queueRemovals } from "./status.mjs";
 
 export const HEALTH_LABEL = "lanes-health";
 export const HEARTBEAT_MARKER = "<!-- lanes:heartbeat -->";
@@ -47,6 +47,75 @@ export function readHeartbeat(comments, identity) {
   return best;
 }
 
+// Quoted text in a comment is one line without control characters, and carries no `@` (a mention) or `#` (a cross-link).
+// Control and format characters (bidi overrides, zero-width): Unicode line separators are whitespace, so the next replace folds them.
+const CONTROL = /[\x00-\x1f\x7f-\x9f]/g;
+const FORMAT = /\p{Cf}/gu;
+export function oneLine(s, max = 120) {
+  const t = String(s ?? "").replace(FORMAT, "").replace(CONTROL, " ").replace(/\s+/g, " ").trim().replace(/[@#`<>[\]]/g, "_").replace(/:\/\//g, ":/ /").replace(/www\./gi, "www_");
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+const httpsUrl = (u) => (typeof u === "string" && /^https:\/\/[^\s]+$/.test(u) ? u : undefined);
+const TAP_MARK = /(?:^|\s)not ok \d{1,9} - /;
+const DURATION = / \(\d{1,9}(?:\.\d{1,9})?ms\)$/;
+const NAME_LIMIT = 120;
+const TEST_LIMIT = 10;
+const LINE_LIMIT = 400;
+const LOG_LINES = 200_000;
+
+// The names of up to 10 failing tests in a failed job's log (node:test's spec or TAP lines), each one line of at most 120 characters.
+export function failingTests(log) {
+  const names = new Set();
+  // A log is untrusted and can be 64 MB: bound each line before the regex (quadratic on a long whitespace run) and the lines read.
+  for (const raw of String(log ?? "").split(/\r?\n/, LOG_LINES)) {
+    const line = raw.slice(0, LINE_LIMIT).replace(/\u001b\[[0-9;]*m/g, "");
+    // No regex backtracks over the untrusted tail: find the marker, collapse whitespace (linear), then strip the duration.
+    const at = line.indexOf("✖ ");
+    const tap = at < 0 ? TAP_MARK.exec(line) : null;
+    const rest = at >= 0 ? line.slice(at + 2) : tap ? line.slice(tap.index + tap[0].length) : null;
+    if (rest === null || (at > 0 && !/\s/.test(line[at - 1]))) continue;
+    const full = oneLine(rest, LINE_LIMIT).replace(DURATION, "");
+    const name = full.length > NAME_LIMIT ? `${full.slice(0, NAME_LIMIT - 1)}…` : full;
+    if (name && !/^failing tests:?$/i.test(name) && !/^# /.test(name)) names.add(name);
+    if (names.size >= TEST_LIMIT) break;
+  }
+  return [...names];
+}
+
+function stuckReason(p, inQueue) {
+  if (p.approvalStale) return { cause: "the approval is on an older commit", fix: "a push dismissed your approval: approve again" };
+  if (p.gateState !== "SUCCESS") return { cause: `the gate is pending: ${oneLine(p.gateDescription) || "no reason given"}`, fix: "wait for the gate, or act on the reason it gives" };
+  if (!inQueue) return { cause: "the PR is not in the merge queue", fix: "click Enable auto-merge on the PR" };
+  return { cause: "the PR is in the merge queue but has not merged", fix: "open the queue's checks on the PR and see which one is waiting" };
+}
+
+function gateFailure(p, run) {
+  const pr = httpsUrl(p.url);
+  return {
+    anchor: "gate-failure",
+    pr,
+    run: run ?? (pr ? { url: `${pr}/checks` } : null),
+    cause: run?.name ? `the merge-group check ${run.name} failed` : `lanes/gate says: ${oneLine(p.gateDescription) || "failing"}`,
+    fix: "open the run, fix what it names, and push",
+  };
+}
+
+// The comment for a new problem. `tests` is the failing test names (an array), or null when the log could not be read;
+// undefined means the problem has no log to read.
+export function renderComment(p, tests, repoUrl) {
+  const lines = [`New problem: ${p.text}`];
+  if (p.pr) lines.push(`PR: ${p.pr}`);
+  if (p.run?.url) lines.push(`Run: ${p.run.url}`);
+  if (tests === null) lines.push("The failing test names could not be read from the log.");
+  else if (tests?.length) lines.push(`Failing tests (up to ${TEST_LIMIT}):`, ...tests.map((t) => `- ${t}`));
+  else if (tests) lines.push("No failing test names were found in the log.");
+  if (!p.cause) return lines.join("\n");
+  const base = httpsUrl(repoUrl);
+  lines.push(`Cause: ${p.cause}`, `Fix: ${p.fix}`, `Runbook: ${base ? `${base}/blob/main/` : ""}docs/OPERATIONS.md${p.anchor ? `#${p.anchor}` : ""}`);
+  return lines.join("\n");
+}
+
 /**
  * ADR 0027 part 3: the active problems, `[{ key, kind, text }]` sorted by key. `inputs`: `{ config, identity, reply,
  * mergeGroupRuns, prs: [{ number, gateState, gateSince }], readyCount, inFlightCount, checkRuns: [{ name, sha,
@@ -55,23 +124,49 @@ export function readHeartbeat(comments, identity) {
 export function evaluate(inputs, now) {
   const { approvedStuckMinutes, noProgressMinutes } = healthThresholds(inputs.config);
   const found = new Map();
-  const add = (key, kind, text) => found.set(key, { key, kind, text });
+  // `extra` is the owner's guidance: `cause`, `fix`, the runbook `anchor`, and for a PR its `pr` link and failed `run`.
+  const add = (key, kind, text, extra = {}) => found.set(key, { key, kind, text, ...extra });
   const prs = inputs.prs ?? [];
   const open = new Set(prs.map((p) => p.number));
+  const byNumber = new Map(prs.map((p) => [p.number, p]));
   const queued = mergeQueueEntries(inputs.reply).map((e) => e.number);
-  for (const [n] of queueRemovals(inputs.reply, queued)) add(`queue-removed:PR ${n}`, "queue-removed", `PR ${n} was removed from the merge queue and not re-queued`);
-  for (const p of prs) {
-    if (p.gateState === "SUCCESS" && Number.isFinite(p.gateSince) && now - p.gateSince >= approvedStuckMinutes * 60_000) {
-      add(`approved-stuck:PR ${p.number}`, "approved-stuck", `PR ${p.number} is approved and its gate is green but it has not merged in ${approvedStuckMinutes} minutes`);
-    }
-    if (FAILED_GATE.has(p.gateState)) add(`gate-failure:PR ${p.number}`, "gate-failure", `PR ${p.number}: lanes/gate is failing`);
+  const failures = mergeGroupFailures(inputs.mergeGroupRuns);
+  const prLink = (n) => httpsUrl(byNumber.get(n)?.url);
+  const runOf = (f) => (f ? { name: oneLine(f.name, 60), url: httpsUrl(f.url), id: /\/actions\/runs\/(\d+)/.exec(f.url ?? "")?.[1] } : null);
+  for (const [n] of queueRemovals(inputs.reply, queued)) {
+    const run = runOf(failures.get(n));
+    add(`queue-removed:PR ${n}`, "queue-removed", `PR ${n} was removed from the merge queue and not re-queued`, {
+      anchor: "merge-queue-removed",
+      pr: prLink(n),
+      run,
+      cause: run?.name ? `the merge-group check ${run.name} failed` : "the merge queue removed it and no failed merge-group check was found",
+      fix: "fix the cause, then click Enable auto-merge on the PR",
+    });
   }
-  for (const [n, f] of mergeGroupFailures(inputs.mergeGroupRuns)) {
-    if (open.has(n) && !queued.includes(n)) add(`gate-failure:PR ${n}`, "gate-failure", `PR ${n}: a merge-group check failed${f.name ? ` (${safeName(f.name)})` : ""}`);
+  for (const p of prs) {
+    // An approved PR stays stuck when its gate is green but it has not merged, or when the gate stays pending after the approval.
+    if ((p.gateState === "SUCCESS" || (p.approved === true && p.gateState === "PENDING")) && Number.isFinite(p.gateSince) && now - p.gateSince >= approvedStuckMinutes * 60_000) {
+      add(`approved-stuck:PR ${p.number}`, "approved-stuck", `PR ${p.number} is approved and its gate is green but it has not merged in ${approvedStuckMinutes} minutes`, {
+        anchor: "approved-not-merged",
+        pr: prLink(p.number),
+        ...stuckReason(p, queued.includes(p.number)),
+      });
+    }
+    if (FAILED_GATE.has(p.gateState)) add(`gate-failure:PR ${p.number}`, "gate-failure", `PR ${p.number}: lanes/gate is failing`, gateFailure(p, null));
+  }
+  for (const [n, f] of failures) {
+    if (open.has(n) && !queued.includes(n)) {
+      add(`gate-failure:PR ${n}`, "gate-failure", `PR ${n}: a merge-group check failed${f.name ? ` (${safeName(f.name)})` : ""}`, gateFailure(byNumber.get(n) ?? { number: n }, runOf(f)));
+    }
   }
   const heartbeat = readHeartbeat(inputs.comments, inputs.identity);
   if (inputs.readyCount > 0 && inputs.inFlightCount === 0 && (!heartbeat || now - heartbeat.at >= noProgressMinutes * 60_000)) {
-    add("no-progress", "no-progress", `issues are ready, nothing is in flight and the queue has not reported in ${noProgressMinutes} minutes`);
+    const paused = inputs.queuePaused === true;
+    add("no-progress", "no-progress", `issues are ready, nothing is in flight and the queue has not reported in ${noProgressMinutes} minutes`, {
+      anchor: paused ? "paused" : "no-progress",
+      cause: heartbeat ? `the queue's last heartbeat was ${formatAge(heartbeat.at, now)} ago` : "the queue has never reported a heartbeat",
+      fix: paused ? "the queue is paused; resume it" : "start the queue",
+    });
   }
   // A flake: the same check failed and then passed on the same head SHA. It has no recovery signal, so it stays for FLAKE_DAYS from the pass.
   const byCheck = new Map();
@@ -87,10 +182,19 @@ export function evaluate(inputs, now) {
   for (const e of byCheck.values()) {
     if (e.failedAt < e.passedAt && now - e.passedAt < FLAKE_DAYS * DAY) {
       const sha7 = e.sha.replace(/[^0-9a-f]/gi, "").slice(0, 7);
-      add(`flake:${safeName(e.name)}@${sha7}`, "flake", `check ${safeName(e.name)} failed and then passed on the same commit ${sha7}`);
+      add(`flake:${safeName(e.name)}@${sha7}`, "flake", `check ${safeName(e.name)} failed and then passed on the same commit ${sha7}`, {
+        anchor: "flaky-test",
+        cause: "the same check failed and then passed on one commit, so it is flaky",
+        fix: "no action unless it recurs; then follow the runbook",
+      });
     }
   }
-  for (const f of heartbeat?.findings ?? []) add(f, "queue", `the queue reports: ${f}`);
+  for (const f of heartbeat?.findings ?? []) {
+    const id = /^stalled:(.+)$/.exec(f)?.[1];
+    add(f, id ? "stalled" : "queue", `the queue reports: ${f}`, id
+      ? { anchor: "stalled-lane", cause: `lane session ${id} stopped making progress`, fix: `run /status: it gives the recovery for session ${id} (claude attach ${id})` }
+      : { anchor: "", cause: "the queue reported it in its heartbeat", fix: "run /status and follow what it says" });
+  }
   return [...found.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
@@ -149,7 +253,17 @@ export async function run({ client, inputs, now = Date.now() }) {
   if (issue.state !== "OPEN" && active.length > 0) await client.reopen(n);
   const body = renderBody(open, active, readHeartbeat(comments, inputs.identity));
   if (body !== issue.body) await client.editBody(n, body);
-  for (const p of added) await client.comment(n, `New problem: ${p.text}`);
+  for (const p of added) {
+    let tests;
+    if (p.run?.id) {
+      try {
+        tests = failingTests(await inputs.readLog?.(p.run.id));
+      } catch {
+        tests = null;
+      }
+    }
+    await client.comment(n, renderComment(p, tests, inputs.repoUrl));
+  }
   if (recovered && (issue.state === "OPEN" || active.length > 0)) await client.comment(n, "Recovered: lanes is healthy again.");
   return { number: n, active, added: added.map((p) => p.key), recovered };
 }
@@ -205,9 +319,16 @@ function ghJson(args) {
 export function gatherInputs(gh = ghJson, config = loadConfig()) {
   const reply = gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${STATUS_QUERY}`]);
   const since = gateSince(reply);
+  const descriptions = gateDescriptions(reply);
+  // An approval is stale when one exists but none is on the PR's current head.
+  const details = new Map();
+  for (const d of gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,url,headRefOid,latestReviews"]) ?? []) {
+    const approved = (d.latestReviews ?? []).filter((r) => r?.state === "APPROVED").map((r) => r?.commit?.oid);
+    details.set(d.number, { url: d.url, approved: approved.length > 0, approvalStale: approved.length > 0 && !approved.includes(d.headRefOid) });
+  }
   const prs = (reply?.data?.repository?.pullRequests?.nodes ?? []).map((node) => {
     const status = node.commits?.nodes?.[0]?.commit?.status;
-    return { number: node.number, gateState: status?.contexts?.find((c) => c.context === "lanes/gate")?.state ?? null, gateSince: since.get(node.number) };
+    return { number: node.number, gateState: status?.contexts?.find((c) => c.context === "lanes/gate")?.state ?? null, gateSince: since.get(node.number), gateDescription: descriptions.get(node.number), ...details.get(node.number) };
   });
   const issues = gh(["issue", "list", "--state", "open", "--limit", "1000", "--json", "number,labels"]);
   const has = (i, name) => i.labels.some((l) => l.name === name);
@@ -215,6 +336,8 @@ export function gatherInputs(gh = ghJson, config = loadConfig()) {
   return {
     config,
     identity: config.identity,
+    repoUrl: gh(["repo", "view", "--json", "url"])?.url,
+    readLog: (id) => gh(["run", "view", String(Number(id)), "--log-failed"]),
     reply,
     prs,
     mergeGroupRuns: gh(["run", "list", "--event", "merge_group", "--status", "failure", "--limit", "50", "--json", "databaseId,headBranch,workflowName,url,createdAt"]),

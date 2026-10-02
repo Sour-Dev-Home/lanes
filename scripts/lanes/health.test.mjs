@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { HEARTBEAT_MARKER, evaluate, ghClient, healthThresholds, readHeartbeat, readStored, reconcile, renderBody, run } from "./health.mjs";
+import { HEARTBEAT_MARKER, evaluate, failingTests, oneLine, ghClient, healthThresholds, readHeartbeat, readStored, reconcile, renderBody, run } from "./health.mjs";
 
 const NOW = Date.parse("2026-10-02T12:00:00Z");
 const MIN = 60_000;
@@ -301,13 +301,179 @@ test("gatherInputs shapes the gh replies into evaluate's inputs", async () => {
   const reply = { data: { repository: { pullRequests: { nodes: [node, { number: 6 }] } } } };
   const gh = (args) => {
     if (args[0] === "api") return reply;
+    if (args[0] === "pr") return [{ number: 5, url: "https://github.com/o/r/pull/5", headRefOid: "new", latestReviews: [{ state: "APPROVED", commit: { oid: "old" } }] }];
+    if (args[0] === "repo") return { url: "https://github.com/o/r" };
     if (args[0] === "issue") return [{ number: 1, labels: [{ name: "ready" }] }, { number: 2, labels: [{ name: "ready" }, { name: "lane:running" }] }, { number: 3, labels: [{ name: "lane:running" }] }];
     return args.includes("merge_group") ? [] : [{ name: "verify", headSha: "ab", conclusion: "success", updatedAt: "t" }];
   };
   const r = gatherInputs(gh, { identity });
-  assert.deepEqual(r.prs, [{ number: 5, gateState: "SUCCESS", gateSince: Date.parse("2026-10-02T10:00:00Z") }, { number: 6, gateState: null, gateSince: undefined }]);
+  assert.deepEqual(r.prs, [{ number: 5, gateState: "SUCCESS", gateSince: Date.parse("2026-10-02T10:00:00Z"), gateDescription: undefined, url: "https://github.com/o/r/pull/5", approved: true, approvalStale: true }, { number: 6, gateState: null, gateSince: undefined, gateDescription: undefined }]);
+  assert.equal(r.repoUrl, "https://github.com/o/r");
   assert.equal(r.readyCount, 1);
   assert.equal(r.inFlightCount, 4);
   assert.deepEqual(r.checkRuns, [{ name: "verify", sha: "ab", conclusion: "success", at: "t" }]);
   assert.equal(r.identity, identity);
+  assert.equal(typeof r.readLog, "function");
+});
+
+// The comment for a new problem: cause, fix and a runbook link (#641).
+const REPO = "https://github.com/o/r";
+const docs = (anchor) => `Runbook: ${REPO}/blob/main/docs/OPERATIONS.md#${anchor}`;
+// The new-problem comment whose key matches `kind` (a PR in the merge queue's trouble can raise several problems at once).
+const commentFor = async (inputs, readLog, kind = /^New problem/) => {
+  const f = fake({ comments: inputs.comments });
+  await run({ client: f.client, inputs: { ...inputs, repoUrl: REPO, readLog }, now: NOW });
+  return f.calls.filter((c) => c[0] === "comment" && kind.test(c[2])).map((c) => c[2]);
+};
+const REMOVED = /^New problem: PR \d+ was removed/;
+const removedReply = replyOf([{ number: 7, timelineItems: timeline(["AddedToMergeQueueEvent", "2026-10-02T10:00:00Z"], ["RemovedFromMergeQueueEvent", "2026-10-02T11:00:00Z"]) }]);
+const mgRun = { headBranch: "gh-readonly-queue/main/pr-7-abc", workflowName: "verify", url: `${REPO}/actions/runs/555`, createdAt: "2026-10-02T11:00:00Z" };
+const CTRL = String.fromCharCode(0, 7, 27, 127);
+
+test("failingTests: spec and TAP lines, deduplicated, at most 10, each one line of at most 120 characters", () => {
+  const log = ["job\tstep\t2026-10-02T11:00:00Z ✖ failing tests:", "x ✖ first test (3.2ms)", "x not ok 4 - second test", "x ✖ first test (1ms)", `x ✖ ${"a".repeat(300)} (1ms)`].join("\n");
+  const names = failingTests(log);
+  assert.deepEqual(names.slice(0, 2), ["first test", "second test"]);
+  assert.equal(names.length, 3);
+  assert.equal(names[2].length, 120);
+  const many = Array.from({ length: 25 }, (_, i) => `not ok ${i} - t${i}`).join("\n");
+  assert.equal(failingTests(many).length, 10);
+  assert.deepEqual(failingTests(""), []);
+  assert.deepEqual(failingTests(undefined), []);
+});
+
+test("oneLine: control characters and line breaks become one line, mentions and cross-links are neutralised", () => {
+  assert.equal(oneLine(`a${CTRL}b\nc\r\n  d`), "a b c d");
+  assert.equal(oneLine("ping @someone see #12"), "ping _someone see _12");
+  assert.equal(oneLine("x".repeat(500)).length, 120);
+  assert.equal(oneLine(undefined), "");
+});
+
+test("queue-removed comment: check name, failing tests, run link, fix and runbook link", async () => {
+  const [c] = await commentFor(withProblem({ reply: removedReply, mergeGroupRuns: [mgRun], prs: [{ number: 7, url: `${REPO}/pull/7` }] }), async () => "x ✖ broken thing (2ms)\nx not ok 2 - other thing", REMOVED);
+  assert.match(c, /Cause: the merge-group check verify failed/);
+  assert.match(c, /- broken thing\n- other thing/);
+  assert.match(c, new RegExp(`Run: ${REPO}/actions/runs/555`));
+  assert.match(c, new RegExp(`PR: ${REPO}/pull/7`));
+  assert.match(c, /Fix: fix the cause, then click Enable auto-merge on the PR/);
+  assert.ok(c.endsWith(docs("merge-queue-removed")));
+});
+
+test("a failed log read still posts the alert, saying the test names could not be read", async () => {
+  const [c] = await commentFor(withProblem({ reply: removedReply, mergeGroupRuns: [mgRun] }), async () => { throw new Error("boom"); }, REMOVED);
+  assert.match(c, /could not be read from the log/);
+  assert.match(c, /Cause: the merge-group check verify failed/);
+  const [d] = await commentFor(withProblem({ reply: removedReply, mergeGroupRuns: [mgRun] }), undefined, REMOVED);
+  assert.match(d, /No failing test names were found/);
+});
+
+test("edge: queue-removed with no merge-group run says so and reads no log", async () => {
+  let read = 0;
+  const [c] = await commentFor(withProblem({ reply: removedReply }), async () => { read++; return ""; }, REMOVED);
+  assert.equal(read, 0);
+  assert.match(c, /no failed merge-group check was found/);
+});
+
+test("approved-stuck comment gives the reason: stale approval, not queued, in the queue", async () => {
+  const stuck = (extra) => withProblem({ prs: [{ number: 3, gateState: "SUCCESS", gateSince: NOW - 40 * MIN, ...extra }] });
+  const [a] = await commentFor(stuck({ approvalStale: true }));
+  assert.match(a, /Fix: a push dismissed your approval: approve again/);
+  assert.ok(a.endsWith(docs("approved-not-merged")));
+  const [b] = await commentFor(stuck({}));
+  assert.match(b, /Cause: the PR is not in the merge queue/);
+  assert.match(b, /Fix: click Enable auto-merge on the PR/);
+  const [q] = await commentFor({ ...stuck({}), reply: replyOf([], [3]) });
+  assert.match(q, /in the merge queue but has not merged/);
+});
+
+test("approved-stuck with a pending gate quotes its reason on one line", async () => {
+  const pr = (extra) => ({ number: 3, gateState: "PENDING", gateSince: NOW - 40 * MIN, gateDescription: `waiting for review/test-hunter\n@x${CTRL}`, ...extra });
+  const [c] = await commentFor(base({ prs: [pr({ approved: true })] }), undefined, /is approved/);
+  assert.match(c, /Cause: the gate is pending: waiting for review\/test-hunter _x$/m);
+  assert.match(c, /Fix: wait for the gate/);
+  assert.deepEqual(keys(base({ prs: [pr({})] })), []);
+  assert.deepEqual(keys(base({ prs: [pr({ approved: true, gateSince: NOW - 29 * MIN })] })), []);
+});
+
+test("failingTests reads a long hostile log in bounded time, and caps the line length it reads", () => {
+  const started = Date.now();
+  const hostile = `✖ ${" ".repeat(80_000)}x\nnot ok 1 - ${" ".repeat(80_000)}y\n✖ real failure (1ms)`;
+  assert.deepEqual(failingTests(hostile), ["real failure"]);
+  assert.ok(Date.now() - started < 1000);
+  assert.equal(failingTests(`✖ ${"n".repeat(1000)}`)[0].length, 120);
+  const many = `✖ ${" ".repeat(396)}x\nnot ok 2 - ${" ".repeat(380)}y\n`.repeat(100_000);
+  const manyStarted = Date.now();
+  assert.equal(failingTests(many).length, 2);
+  assert.ok(Date.now() - manyStarted < 5000, "200000 padded lines are read in bounded time");
+  const late = `${"noise\n".repeat(200_000)}✖ too late (1ms)`;
+  assert.deepEqual(failingTests(late), []);
+});
+
+test("oneLine drops bidi override and zero-width format characters", () => {
+  assert.equal(oneLine(`a${String.fromCharCode(0x202e, 0x200b, 0xfeff)}b`), "ab");
+});
+
+test("failingTests: a marker inside a word is not a failure, and a duration after a long name is stripped before the cut", () => {
+  assert.deepEqual(failingTests("no✖ glued\nxnot ok 3 - glued"), []);
+  assert.deepEqual(failingTests(`✖ ${"n".repeat(110)} (12.5ms)`), ["n".repeat(110)]);
+});
+
+test("oneLine breaks markdown links and bare URLs in quoted text", () => {
+  assert.equal(oneLine("[x](https://evil.example) www.evil.example"), "_x_(https:/ /evil.example) www_evil.example");
+});
+
+test("gate-failure comment carries the gate's description and the run link", async () => {
+  const [a] = await commentFor(withProblem({ prs: [{ number: 4, gateState: "FAILURE", gateDescription: `tests failed\n@owner #9${CTRL}`, url: `${REPO}/pull/4` }] }));
+  assert.match(a, /Cause: lanes\/gate says: tests failed _owner _9$/m);
+  assert.match(a, new RegExp(`Run: ${REPO}/pull/4/checks`));
+  assert.ok(a.endsWith(docs("gate-failure")));
+  const [b] = await commentFor(withProblem({ prs: [{ number: 9, gateState: "PENDING" }], mergeGroupRuns: [{ ...mgRun, headBranch: "gh-readonly-queue/main/pr-9-abc" }] }), async () => "not ok 1 - flaky one");
+  assert.match(b, /Cause: the merge-group check verify failed/);
+  assert.match(b, /- flaky one/);
+});
+
+test("no-progress comment gives the heartbeat age and starts or resumes the queue", async () => {
+  const [a] = await commentFor(withProblem({ comments: [heartbeat(NOW - 95 * MIN)] }));
+  assert.match(a, /Cause: the queue's last heartbeat was 1h 35m ago/);
+  assert.match(a, /Fix: start the queue/);
+  assert.ok(a.endsWith(docs("no-progress")));
+  const [n] = await commentFor(withProblem());
+  assert.match(n, /never reported/);
+  const [p] = await commentFor(withProblem({ queuePaused: true }));
+  assert.match(p, /Fix: the queue is paused/);
+  assert.ok(p.endsWith(docs("paused")));
+});
+
+test("a stalled lane from the heartbeat names the session and the /status recovery", async () => {
+  const [c] = await commentFor(base({ comments: [heartbeat(NOW - MIN, ["stalled:abc123"])] }));
+  assert.match(c, /Cause: lane session abc123 stopped making progress/);
+  assert.match(c, /Fix: run \/status: it gives the recovery for session abc123 \(claude attach abc123\)/);
+  assert.ok(c.endsWith(docs("stalled-lane")));
+});
+
+test("flake and other findings still get a cause and a fix", async () => {
+  const [o] = await commentFor(base({ comments: [heartbeat(NOW - MIN, ["odd-thing"])] }));
+  assert.match(o, /Cause: .*\nFix: .*\nRunbook: https:\/\/github.com\/o\/r\/blob\/main\/docs\/OPERATIONS.md$/);
+  const [f] = await commentFor(base({ checkRuns: [{ name: "verify", sha: "abc1234", conclusion: "failure", at: "2026-10-02T10:00:00Z" }, { name: "verify", sha: "abc1234", conclusion: "success", at: "2026-10-02T11:00:00Z" }] }));
+  assert.ok(f.endsWith(docs("flaky-test")));
+});
+
+test("a comment holds no login: hostile quoted text is one line with no mention, and only an https PR link is kept", async () => {
+  const hostile = { ...mgRun, workflowName: `ver @ify${CTRL}\n#5` };
+  const [c] = await commentFor(withProblem({ reply: removedReply, mergeGroupRuns: [hostile], prs: [{ number: 7, url: `${REPO}/pull/7` }] }), async () => `x ✖ @victim please #1${CTRL} (1ms)`, REMOVED);
+  assert.doesNotMatch(c.replace(/https:\/\/\S+/g, ""), /@/);
+  assert.doesNotMatch(c, new RegExp(`[${CTRL}]`));
+  assert.doesNotMatch(c.replace(/^(New problem|PR|Run|Runbook).*$/gm, ""), /#\d/);
+  const [d] = await commentFor(withProblem({ reply: removedReply, prs: [{ number: 7, url: "http://evil.example/x" }] }), undefined, REMOVED);
+  assert.doesNotMatch(d, /evil/);
+});
+
+test("caps: 120 characters and 10 names are kept whole, one past is cut", () => {
+  assert.equal(oneLine("a".repeat(120)), "a".repeat(120));
+  assert.equal(oneLine("a".repeat(121)), `${"a".repeat(119)}…`);
+  const lines = (n) => Array.from({ length: n }, (_, i) => `not ok ${i} - t${i}`).join("\n");
+  assert.equal(failingTests(lines(9)).length, 9);
+  assert.equal(failingTests(lines(10)).length, 10);
+  assert.equal(failingTests(lines(11)).length, 10);
+  assert.deepEqual(failingTests(`not ok 1 - ${"b".repeat(120)}`), ["b".repeat(120)]);
 });
