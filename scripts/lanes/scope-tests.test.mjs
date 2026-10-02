@@ -47,6 +47,11 @@ test("edge: one file hit twice prints one line with both reasons", () => {
   assert.match(r.message, /^src\/a\.test\.mjs: affected by src\/a\.mjs, contains "import"$/m);
 });
 
+test("edge: a Windows-style path is matched as forward slashes, the reason keeps the path as given", () => {
+  const r = run("--paths", "src\\a.mjs");
+  assert.equal(r.message, "src/a.test.mjs: affected by src\\a.mjs\nsrc/b.test.mjs: affected by src\\a.mjs");
+});
+
 test("no hits prints nothing and exits 0", () => {
   assert.deepEqual(run("--paths", "src/c.mjs", "--strings", "zzz-none").message.split("\n").length, 1);
   assert.deepEqual(run("--paths", "docs/unmapped.md", "--strings", "zzz-none"), { code: 0, message: "" });
