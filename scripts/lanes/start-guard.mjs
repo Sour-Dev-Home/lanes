@@ -259,8 +259,21 @@ const PLACE_COMMANDS = new Set(["cd", "mkdir"]);
  * writes, not a pipe (`| sh`), a process substitution (`>(bash)`), a group or function (`{`), nor a later
  * `bash file`. Only the top level counts: a nested script's output may be run by the command around it.
  */
-const isDataOnly = ({ segments, writes }) =>
-  segments.every((words, k) => PLACE_COMMANDS.has(words[0]) || (WRITE_COMMANDS.has(words[0]) && writes[k] === true));
+const isDataOnly = ({ segments, writes, pipes }) =>
+  segments.every(
+    (words, k) =>
+      PLACE_COMMANDS.has(words[0]) ||
+      (WRITE_COMMANDS.has(words[0]) && writes[k] === true) ||
+      isQuietWrite(words, writes[k], pipes?.[k]),
+  );
+
+// Also plain: tee (it writes its stdin to the files named), or echo and printf with no redirection, as in
+// `tee notes.md <<'EOF' … EOF` or `cat > f <<'EOF' … EOF && echo ok` (#642). Nothing is piped on and every word is a
+// plain name or text, so no process substitution (`>(bash)`), expansion or later pipe can run what they print.
+const QUIET_COMMANDS = new Set(["tee", "echo", "printf"]);
+const PLAIN_WORD_RE = /^[^\s$`()<>|&;{}*?[\]!\\]*$/;
+const isQuietWrite = (words, writes, piped) =>
+  QUIET_COMMANDS.has(words[0]) && writes === false && piped !== true && words.slice(1).every((w) => PLAIN_WORD_RE.test(w));
 
 // The words that are a jq program or a Go template (#61): every argument of jq, and the value of gh's --jq, -q,
 // --template or -t. Neither language runs a command, so a quoted `$s` in one is that language's variable, which the
