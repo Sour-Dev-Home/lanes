@@ -17,3 +17,6 @@ Closes #
 
 ## Not done
 <!-- Anything left out, with follow-up issue links, or: nothing -->
+
+## Outside Scope
+<!-- One line per changed file outside the issue's Scope "In", with why it had to change, or: nothing -->

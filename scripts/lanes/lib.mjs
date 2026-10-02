@@ -280,6 +280,38 @@ export function parseSections(body, marker) {
   return out;
 }
 
+const cleanPath = (token) =>
+  token
+    .replace(/^[("'[]+|[)"'\].,;:]+$/g, "")
+    .replace(/^\.\//, "")
+    .replace(/\*+$/, "");
+// Only repo-relative paths are claimed: an email, a backslash path, a URI scheme or drive letter (`file:///C:/x`, `C:`),
+// a leading `/`, `~`, `%` or `$` (an absolute or home path) or a `..` segment never is.
+const notRepoRelative = (p) => /[@\\]/.test(p) || /^([a-z][a-z0-9+.-]*:|[/~%$])/i.test(p) || p.split("/").includes("..");
+const looksLikePath = (p) => p && !/\s/.test(p) && !/^(-|https?:)/.test(p) && !notRepoRelative(p) && (p.includes("/") || /\.[a-z][a-z0-9]{0,5}$/i.test(p));
+
+// The file paths an issue names: backticked or bare tokens with a `/` or a file extension, read from its Interface
+// contract and the "In:" part of its Scope (anything after "Out:" is ignored). A trailing `*` glob reads as its directory.
+export function issuePaths({ contract = "", scope = "" }) {
+  const inPart = scope.split(/(?<![\w-])Out:/i)[0].replace(/^[\s\S]*?(?<![\w-])In:/i, "");
+  // A contract of `none (reads `x` from #N)` only reads x, so the note right after `none` names no path to claim.
+  const owned = contract.replace(/^\s*none\s*\((?:[^()]|\([^()]*\))*\)/i, "none");
+  const paths = [];
+  for (const text of [owned, inPart]) {
+    for (const [, quoted, bare] of text.matchAll(/`([^`]+)`|(\S+)/g)) {
+      const p = cleanPath(quoted ?? bare);
+      if (looksLikePath(p) && !paths.includes(p)) paths.push(p);
+    }
+  }
+  return paths;
+}
+
+// Two path lists overlap when they share a path, or one names a directory (`dir/`) holding a path the other names.
+export function pathsOverlap(a, b) {
+  const within = (dir, p) => dir.endsWith("/") && p.startsWith(dir);
+  return a.some((x) => b.some((y) => x === y || within(x, y) || within(y, x)));
+}
+
 const ISSUE_FIELDS = ["goal", "acceptance criteria", "interface contract", "scope", "blocked by", "tier"];
 
 export function parseIssueForm(body) {
@@ -981,7 +1013,20 @@ function blockerStatus(blockers, closes) {
  * wait on the owner, and only `approved === true` passes: null (the default, "not read") or a missing value is
  * pending, never a pass.
  */
-export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, nativeApproval = null }) {
+export function gateDecision(inputs) {
+  const decision = decideGate(inputs);
+  const outside = Array.isArray(inputs.outsideScope) ? inputs.outsideScope.length : 0;
+  if (outside === 0) return decision;
+  // #635: a note only, never a state change. The status description is cut at 140 characters when posted, so the
+  // base text gives way to keep the note.
+  const note = `; ${outside} files outside Scope, see PR body`;
+  const room = 140 - note.length;
+  const base = decision.description.length > room ? `${decision.description.slice(0, room - 1)}…` : decision.description;
+  return { ...decision, description: `${base}${note}` };
+}
+
+// `outsideScope` (#635) is the PR's changed files its issue's Scope "In" and Interface contract do not cover.
+function decideGate({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, nativeApproval = null }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
