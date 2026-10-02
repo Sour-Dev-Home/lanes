@@ -1277,3 +1277,8 @@ test("mergeGroupFailures keeps the newest failed run per PR, only an https link,
   assert.deepEqual([...f], [[5, { name: "verify" }]]);
   assert.equal(mergeGroupFailures(undefined).size, 0);
 });
+
+test("edge: mergeGroupFailures drops a plain http link (only https is kept)", () => {
+  const f = mergeGroupFailures([{ headBranch: "gh-readonly-queue/main/pr-8-a", workflowName: "verify", url: "http://example.test/1", createdAt: "2026-10-02T02:00:00Z" }]);
+  assert.deepEqual([...f], [[8, { name: "verify" }]]);
+});
