@@ -330,8 +330,10 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   };
   let decision = gateDecision(inputs);
   // ADR 0023 part 3: a review refused for a pending workflow file names that file's reason instead of the bare wait.
-  const waiting = decision.state === "pending" && decision.stage === "review" ? /^waiting for review\/(\S+)$/.exec(decision.description) : null;
-  if (waiting && pendingBlocked.has(waiting[1])) decision = { ...decision, description: `${decision.description}: ${pendingBlocked.get(waiting[1])}` };
+  // #635: the outside-Scope note ends the description, so match the wait without it and put it back last.
+  const noted = /^(.*?)(; \d+ files outside Scope, see PR body)?$/s.exec(decision.description);
+  const waiting = decision.state === "pending" && decision.stage === "review" ? /^waiting for review\/(\S+)$/.exec(noted[1]) : null;
+  if (waiting && pendingBlocked.has(waiting[1])) decision = { ...decision, description: `${noted[1]}: ${pendingBlocked.get(waiting[1])}${noted[2] ?? ""}` };
   return { pr, decision };
 }
 

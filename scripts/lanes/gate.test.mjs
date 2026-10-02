@@ -72,6 +72,15 @@ test("evaluatePr notes files outside Scope without changing the state", () => {
   assert.match(several.description, /; 2 files outside Scope, see PR body$/);
 });
 
+test("evaluatePr counts a file the Interface contract names as inside Scope", () => {
+  const api = fakeApi({
+    ...scopedRoutes("lib/c.mjs\ndocs/a.md\n", "In: docs/a.md."),
+    "repos/o/r/issues/7": { ...readyIssue("leo"), body: "### Goal\n\ng\n\n### Interface contract\n\n`lib/c.mjs` exports f\n\n### Scope\n\nIn: docs/a.md.\n\n### Blocked by\n\nnone\n" },
+  }).api;
+  const d = evaluatePr(api, "o/r", 5, config);
+  assert.doesNotMatch(d.description, /outside Scope/);
+});
+
 test("evaluatePr notes nothing when the issue's Scope names no path", () => {
   const d = evaluatePr(fakeApi(scopedRoutes("docs/a.md\n", "tidy up the wording")).api, "o/r", 5, config);
   assert.equal(d.state, "success");
@@ -1701,6 +1710,15 @@ test("pending: a changed byte is refused and the file is named", () => {
   const d = evaluatePr(api, "o/r", 5, config);
   assert.equal(d.state, "pending");
   assert.equal(d.description, `${WAIT_HUNTER}: workflow file ${WF} differs from the reviewed copy`);
+});
+
+test("edge: pending, the outside-Scope note keeps the workflow-file reason and ends the description (#635)", () => {
+  const routes = pendingRoutes({ blob: "name: ci\non: pull_request\n" });
+  const issue = routes["repos/o/r/issues/7"];
+  routes["repos/o/r/issues/7"] = { ...issue, body: `${issue.body}\n### Scope\n\nIn: docs/only.md\n` };
+  const d = evaluatePr(throwing(routes).api, "o/r", 5, config);
+  assert.equal(d.state, "pending");
+  assert.match(d.description, new RegExp(`^${WAIT_HUNTER}: workflow file ${WF.replace(/[./]/g, "\\$&")} differs from the reviewed copy; \\d+ files outside Scope, see PR body$`));
 });
 
 test("pending: a file not yet committed is refused and named", () => {

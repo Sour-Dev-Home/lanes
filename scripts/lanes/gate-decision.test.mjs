@@ -42,6 +42,20 @@ test("outsideScope appends a count note for none, one and several files, keeping
   }
 });
 
+// boundary: a base description of exactly the room left is kept whole; one character more gives way with an ellipsis
+test("outsideScope note: base text at exactly the room is kept, one past is cut to fit 140", () => {
+  const room = 140 - "; 1 files outside Scope, see PR body".length;
+  const withError = (n, outsideScope) => run({ blockers: { ok: false, open: [], unreadable: [], error: "e".repeat(n) }, outsideScope });
+  const pad = withError(1).description.length - 1;
+  const keep = withError(room - pad, ["a.md"]);
+  assert.equal(withError(room - pad).description.length, room);
+  assert.equal(keep.description.length, 140);
+  assert.ok(!keep.description.includes("…"));
+  const cut = withError(room - pad + 1, ["a.md"]);
+  assert.equal(cut.description.length, 140);
+  assert.ok(cut.description.includes("…"));
+});
+
 test("outsideScope leaves failure and pending states as they are and keeps the note inside 140 characters", () => {
   const failing = run({ prBody: "no closing keyword", outsideScope: ["a.md"] });
   assert.equal(failing.state, "failure");
