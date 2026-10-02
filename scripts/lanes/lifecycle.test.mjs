@@ -1,4 +1,5 @@
-// A lane's life end to end (#233): start.mjs launches it, reap.mjs waits and removes it, cleanup.mjs sweeps what is left.
+// A lane's life end to end (#233): launchLane (the queue's launcher) starts it, reap.mjs waits and removes it, cleanup.mjs
+// sweeps what is left.
 // The real entry points run against a real temporary git repository with a bare `origin`; only `claude` and `gh` are
 // faked, in-process, from one shared state, and every `git` call goes to real git. No network and no binary but git.
 import { test } from "node:test";
@@ -9,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupMerged, loadCleanupInputs, shOptions } from "./cleanup.mjs";
 import { FIRST_POLL_MS, POLL_MS, STARTUP_GRACE_MS, main as reap, runOptions } from "./reap.mjs";
-import { main as start } from "./start.mjs";
+import { launchLane } from "./start.mjs";
 
 const ISSUE = 233;
 const SLUG = "issue-233-lifecycle";
@@ -81,6 +82,7 @@ function world() {
       if (args.includes("--jq")) return `${state}\n`;
       return JSON.stringify({ number: n, state, labels: ["ready", "tier:full"].map((name) => ({ name })), body: form(n) });
     }
+    if (args[0] === "issue" && args[1] === "edit") return ""; // launchLane's lane:running label
     if (args[0] === "issue" && args[1] === "list") return JSON.stringify([...w.issues].map(([number, state]) => ({ number, state, labels: [], body: form(number) })));
     if (args[0] === "api") return JSON.stringify({ state: "closed" });
     if (args[0] === "pr" && args[1] === "list") {
@@ -127,19 +129,15 @@ const branchThere = (w, branch) => {
   }
 };
 
-// start.mjs's dependencies over the shared fakes, with the /start grant the guard hook would have written.
+const IDENTITY = { profile: "team", app: { id: 11, installationId: 22, botLogin: "sour-dev-lanes[bot]" } };
+
+// launchLane's dependencies over the shared fakes, as the queue passes them.
 function startDeps(w) {
-  const grants = join(w.dir, "grants");
-  mkdirSync(grants);
-  const sessionId = "owner-session";
-  writeFileSync(join(grants, `${sessionId}.json`), JSON.stringify({ sessionId, issues: [ISSUE], at: new Date().toISOString() }));
   w.spawned = [];
   return {
     gh: (args) => w.run("gh", args, {}, "start"),
     claude: (args, options) => w.run("claude", args, options, "start"),
-    root: () => w.root,
     // ADR 0025: team is the only profile; the team steps are faked and the refresher's spawn is not a reaper's.
-    config: () => ({ identity: { profile: "team", app: { id: 11, installationId: 22, botLogin: "sour-dev-lanes[bot]" } } }),
     team: {
       keyFile: () => "/keys/app.pem",
       readable: () => {},
@@ -150,17 +148,16 @@ function startDeps(w) {
       mintInto: () => {},
       botUserId: () => "336249257",
     },
-    cleanup: ({ dryRun }) => cleanupMerged({ dryRun, deps: w.cleanupDeps("start-cleanup") }),
     spawn: (cmd, args, options) => {
       if (!args.includes("--refresh-token")) w.spawned.push({ cmd, args, options });
       return { pid: 4242, on() {}, unref() {} };
     },
     reaperLog: () => ({ fd: -1, close() {} }),
-    session: () => sessionId,
-    grantDir: () => grants,
-    now: Date.now,
   };
 }
+
+// One launch from the repository root, as the queue makes it.
+const launch = (w) => launchLane(ISSUE, startDeps(w), { tier: "full", models: {}, labels: ["ready", "tier:full"], identity: IDENTITY, root: w.root, env: {}, scope: [`scripts/x${ISSUE}.mjs`] });
 
 // reap.mjs over the shared fakes with a fake clock; `onSleep(i)` moves the world on before poll i (0 is the first poll).
 function reaper(w, session, onSleep, { jump } = {}) {
@@ -188,8 +185,8 @@ test("scenario 1: a lane starts, the reaper waits through the startup, and remov
   const w = world();
   t.after(w.cleanup);
 
-  const { code, lines } = start([String(ISSUE)], startDeps(w));
-  assert.equal(code, 0, lines.join("\n"));
+  const { failed, lines } = launch(w);
+  assert.equal(failed, false, lines.join("\n"));
   assert.match(lines.join("\n"), /#233 → sess1/);
   assert.equal(w.count("claude", "--bg"), 1);
   assert.equal(w.spawned.length, 1);
@@ -255,7 +252,7 @@ test("scenario 2: a replaced session's old reaper never removes the new worktree
   assert.equal(w.count("git", "branch", "-D"), 0);
 });
 
-test("scenario 3: cleanup at /start skips a working lane and removes a merged one", (t) => {
+test("scenario 3: the queue's cleanup step skips a working lane and removes a merged one", (t) => {
   const w = world();
   t.after(w.cleanup);
   const working = w.worktree(301, "issue-301-working");
@@ -265,9 +262,8 @@ test("scenario 3: cleanup at /start skips a working lane and removes a merged on
   w.sessions.set("idle2", { id: "idle2", kind: "background", cwd: merged.path, status: "idle", state: "idle" });
   w.prs.push({ number: 401, state: "MERGED", headRefName: "issue-301-working" }, { number: 402, state: "MERGED", headRefName: "issue-302-merged" });
 
-  const { code, lines } = start([String(ISSUE)], startDeps(w));
+  const lines = cleanupMerged({ dryRun: false, deps: w.cleanupDeps("queue-cleanup") });
 
-  assert.equal(code, 0, lines.join("\n"));
   const text = lines.join("\n");
   assert.match(text, /skipped issue-301-working: session still working/);
   assert.match(text, /removed issue-302-merged \(PR #402\)/);

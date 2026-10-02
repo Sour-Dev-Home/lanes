@@ -345,8 +345,8 @@ test("#76 criterion 3: another session's auto grant is refused by the hook", () 
   }
 });
 
-test("#76 criterion 4: start.md and USING.md no longer say the guard denies --auto", () => {
-  for (const file of [".claude/commands/start.md", "docs/USING.md"]) {
+test("#76 criterion 4: USING.md no longer says the guard denies --auto", () => {
+  for (const file of ["docs/USING.md"]) {
     const text = readFileSync(file, "utf8");
     assert.doesNotMatch(text, /not (yet )?allow the `--auto`|not yet `--auto`|#76/, file);
     assert.match(text, /\/start --auto/, file);

@@ -204,14 +204,15 @@ const normalPath = (p) => {
 };
 
 // #571: the one test for "this lane session has stopped": idle (any `state`, `blocked` included) and not on a permission
-// prompt. /status and /start both decide through it, so they cannot disagree about the same session.
+// prompt. /status and the queue both decide through it, so they cannot disagree about the same session.
 export function idleLaneSession(agent) {
   return agent?.status === "idle" && agent.waitingFor !== PROMPT_WAITING_FOR;
 }
 
-// #571: the recovery both /status and /start give for an idle lane session with no PR.
-export function idleLaneRecovery(id, n, unsaved = false) {
-  return `message it to continue, or stop it (claude stop ${id}) and run /start ${n} again${unsaved ? "; worktree has unsaved changes" : ""}`;
+// #571, #675: the recovery /status gives for an idle lane session with no PR: message it, or stop it so the queue
+// (ADR 0030, the only launcher) relaunches the issue.
+export function idleLaneRecovery(id, _n, unsaved = false) {
+  return `message it to continue, or stop it (claude stop ${id}) so the queue relaunches it${unsaved ? "; worktree has unsaved changes" : ""}`;
 }
 
 // The `issue-<N>[-slug]` worktree folder a session's cwd is in (cwd may be a subfolder), or null: a lane that entered its
@@ -430,10 +431,10 @@ export function summarize({ prs, issues, merged, mergeQueue, gateDescriptions = 
       continue;
     }
     if (!taken.has(issue.number) && labels.includes("ready") && branches.length && idle) {
-      const item = { number: issue.number, title: issue.title, stage: "stopped", note: `no PR yet: restart with /start ${issue.number}` };
-      // #571: /start refuses an issue with a session, so the note names the session and the recovery /start gives.
+      const item = { number: issue.number, title: issue.title, stage: "stopped", note: "no PR yet: the queue relaunches it" };
+      // #571: the queue skips an issue with a live session, so the note names the session and the recovery above.
       // An id that is not a plain token is never printed inside a command the owner would paste.
-      const note = SAFE_SESSION_ID.test(session?.id ?? "") ? `no PR yet: session ${session.id} is idle; ${idleLaneRecovery(session.id, issue.number, session.unsaved)}` : session && `no PR yet: a lane session is idle; stop it and run /start ${issue.number} again`;
+      const note = SAFE_SESSION_ID.test(session?.id ?? "") ? `no PR yet: session ${session.id} is idle; ${idleLaneRecovery(session.id, issue.number, session.unsaved)}` : session && "no PR yet: a lane session is idle; message it, or stop it so the queue relaunches it";
       out.waitingOnOwner.push(session ? { ...item, note, session: { id: session.id, state: session.state } } : item);
       // Its branch still holds work on the issue's paths, so other issues on those paths wait for it.
       runningIssues.push(issue);

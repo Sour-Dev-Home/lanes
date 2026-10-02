@@ -450,13 +450,55 @@ test("CLI: any argument prints a usage line and exits 2 before reading anything"
   }
 });
 
-test("CLI: exits 2 with a one-line reason when CLAUDECODE is set", async () => {
+// ADR 0030 parts 1 and 3 (#675): the queue refuses inside Claude (each variable) and from a lane worktree's copy, with
+// the one message and exit 2, before it reads or launches anything; a plain run is unaffected.
+const REFUSAL = "lanes are launched only by the owner's queue in their own terminal (ADR 0030)";
+
+test("CLI: exits 2 with the one-line refusal when CLAUDECODE or CLAUDE_CODE_CHILD_SESSION is set, each on its own", async () => {
   const { main } = await import("./queue.mjs");
-  const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] }, { env: { CLAUDECODE: "1" } });
-  assert.equal(await main([], run.deps), 2);
-  assert.equal(run.out.length, 1);
-  assert.match(run.out[0], /CLAUDECODE/);
-  assert.deepEqual(run.calls, []);
+  for (const env of [{ CLAUDECODE: "1" }, { CLAUDE_CODE_CHILD_SESSION: "1" }]) {
+    const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] }, { env });
+    assert.equal(await main([], run.deps), 2, JSON.stringify(env));
+    assert.deepEqual(run.out, [REFUSAL]);
+    assert.deepEqual(run.calls, []);
+  }
+});
+
+test("CLI: a queue.mjs under .claude/worktrees exits 2 with the refusal, whatever the working directory is", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const file of ["/repo/.claude/worktrees/issue-5-x/scripts/lanes/queue.mjs", "file:///repo/.claude/worktrees/issue-5-x/scripts/lanes/queue.mjs", "C:\\repo\\.claude\\worktrees\\issue-5-x\\scripts\\lanes\\queue.mjs"]) {
+    const run = fakeRun({ issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] });
+    assert.equal(await main([], { ...run.deps, file }), 2, file);
+    assert.deepEqual(run.out, [REFUSAL]);
+    assert.deepEqual(run.calls, []);
+  }
+});
+
+test("CLI: a plain run from the main checkout is not refused, and the refusal comes before the usage check", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const plain = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  assert.equal(await main([], { ...plain.deps, file: "file:///repo/scripts/lanes/queue.mjs" }), 0);
+  assert.ok(!plain.out.includes(REFUSAL));
+  const withArgs = fakeRun({ issues: [], prs: [], sessions: [] }, { env: { CLAUDECODE: "1" } });
+  assert.equal(await main(["x"], withArgs.deps), 2);
+  assert.deepEqual(withArgs.out, [REFUSAL]);
+});
+
+// #675: /start is gone, so the recovery for a lane with an idle session and no PR is to stop it; the queue then
+// relaunches the issue (status.mjs names that recovery).
+test("CLI: an issue whose idle lane session has no PR is not launched while the session lives, and is relaunched once it is stopped", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [{ ...session(1), id: "idle-1", status: "idle", state: "done" }] };
+  const run = fakeRun(world, {
+    onSleep: (t) => {
+      if (t === 1) world.sessions = []; // `claude stop idle-1`, as /status says
+      if (t === 3) world.issues = [];
+    },
+  });
+  assert.equal(await main([], run.deps), 0, run.out.join("\n"));
+  assert.deepEqual(run.launched.map((l) => [l.n, l.tick >= 1]), [[1, true]], "launched once, only after the session was gone");
+  assert.equal(run.launched[0].args.at(-1), "/lane 1");
 });
 
 test("CLI: each tick cleans up first, then reads, launches with claude --bg /lane N and prints time-stamped lines", async () => {
@@ -1726,7 +1768,7 @@ test("exit 2 inside Claude in both processes, before anything else: no child is 
   for (const env of [{ CLAUDECODE: "1" }, { CLAUDECODE: "1", LANES_QUEUE_CHILD: "1" }]) {
     const run = fakeRun({ issues: [], prs: [], sessions: [] }, { env });
     assert.equal(await main([], { ...run.deps, runChild, git: fakeGit().git }), 2);
-    assert.match(run.out[0], /CLAUDECODE/);
+    assert.deepEqual(run.out, [REFUSAL]);
     assert.deepEqual(run.calls, []);
   }
   assert.equal(spawned, 0);
