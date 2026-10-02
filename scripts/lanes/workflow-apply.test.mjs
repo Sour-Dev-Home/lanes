@@ -1,8 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { filterDecision, parseHandoverFiles, applyChecks, main, HANDOVER_MARKER } from "./workflow-apply.mjs";
-import { handoverComment } from "./handover.mjs";
 import { pendingFileHash } from "./lib.mjs";
+
+// The hand-over shape handover.mjs writes (the module map forbids importing it here): the marker, then per file a
+// `#### \`path\`` heading, an edit link and a fence longer than any backtick run inside.
+function handoverComment({ files }) {
+  const parts = [`${HANDOVER_MARKER} to commit in GitHub's web editor`, "", "Read each file before you commit."];
+  for (const f of files) {
+    const fence = "`".repeat(Math.max(3, ...[...f.text.matchAll(/`+/g)].map((m) => m[0].length + 1)));
+    parts.push("", `#### \`${f.path}\` (${f.status === "A" ? "new file" : "changed file"})`, "", "Edit it here: https://github.com/o/r/edit/b/x", "", `${fence}yaml`, f.text.replace(/\n+$/, ""), fence);
+  }
+  return `${parts.join("\n")}\n`;
+}
 
 const IDENTITY = { profile: "team", app: { id: 1, installationId: 2, botLogin: "lanes[bot]" } };
 const BOT = { login: "lanes[bot]", type: "Bot" };
@@ -11,7 +21,7 @@ const PATH = ".github/workflows/ci.yml";
 const TEXT = "name: ci\non: push\n";
 const TOKEN = "ghs_SECRETTOKEN123";
 
-const handover = (files = [{ path: PATH, status: "M", text: TEXT }]) => handoverComment({ repo: "o/r", branch: "issue-1-x", files });
+const handover = (files = [{ path: PATH, status: "M", text: TEXT }]) => handoverComment({ files });
 const verdict = (reviewer, pending, sha = HEAD) =>
   `<!-- lanes:verdict ${reviewer} ${sha} -->\n\`\`\`json\n${JSON.stringify({ reviewer, verdict: "success", pending })}\n\`\`\``;
 const pend = (path = PATH, text = TEXT) => [{ path, sha256: pendingFileHash(text) }];
@@ -273,4 +283,17 @@ test("main filter: go=true outputs the head; every other outcome is go=false wit
   }
   const unreadable = await main(["filter"], deps(env, async () => ({ status: 404, json: null })));
   assert.deepEqual([unreadable.code, unreadable.outputs.go], [0, "false"]);
+});
+
+test("filter strictness: isPr must be boolean true, not a truthy string, number or object", () => {
+  const base = { comment: { body: handover(), author: BOT }, identity: IDENTITY };
+  for (const isPr of ["true", 1, {}, undefined, null]) assert.equal(filterDecision({ ...base, isPr }).go, false);
+});
+
+test("apply edge: any non-null edit stamp refuses, and a marker-only body holds no files", () => {
+  for (const lastEditedAt of ["2026-10-02T10:05:00Z", 0, ""]) {
+    const base = inputs();
+    refusal({ comment: { ...base.comment, lastEditedAt }, comments: [{ ...base.comment, lastEditedAt }, base.comments[1]] }, /edited/);
+  }
+  assert.equal(parseHandoverFiles(HANDOVER_MARKER).error, "the comment holds no files");
 });
