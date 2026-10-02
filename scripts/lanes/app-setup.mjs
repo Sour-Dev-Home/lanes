@@ -219,13 +219,13 @@ export async function confirmAndCreateEnvironment({ gh, ask, print }) {
   if (put.status !== 0) return { ok: false, error: "failed while creating the environment" };
   // An environment that already existed may carry other policies: make it main-only, whatever it had.
   const policiesPath = `${base}/deployment-branch-policies`;
-  const listed = gh(["api", policiesPath, "--jq", '.branch_policies[] | "\\(.id) \\(.name)"']);
+  const listed = gh(["api", "--paginate", policiesPath, "--jq", '.branch_policies[] | "\\(.id) \\(.type) \\(.name)"']);
   if (listed.status !== 0) return { ok: false, error: "failed while listing the deployment branch policies" };
   let hasMain = false;
   for (const line of String(listed.stdout).split("\n").filter((l) => l.trim() !== "")) {
-    const m = /^([1-9]\d{0,17}) (.+)$/.exec(line);
+    const m = /^([1-9]\d{0,17}) (branch|tag) (.+)$/.exec(line);
     if (!m) return { ok: false, error: "failed while listing the deployment branch policies (unreadable answer)" };
-    if (m[2] === "main") {
+    if (m[2] === "branch" && m[3] === "main") {
       hasMain = true;
       continue;
     }
