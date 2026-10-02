@@ -102,9 +102,10 @@ files with Edit, not Write.
    by that agent name (`.claude/agents/<name>.md`) with the issue's criteria and no vendored checklist, and require
    the same JSON verdict. Run each reviewer in the foreground, so its result carries its figures. When a reviewer's verdict
    arrives, post it in that same turn, and never end a turn to wait for a completion notice: the notice does not wake
-   an idle session (#465), so a lane that waits for it hangs. After each reviewer subagent returns, add `"metrics": { "tier", "minutes", "tokens" }` to its verdict,
+   an idle session (#465), so a lane that waits for it hangs. After each reviewer subagent returns, add `"metrics": { "tier", "minutes", "tokens", "rounds" }` to its verdict,
    only from figures already in hand: taking tokens and duration from the Agent tool's result (rounded to 0.1 minute), and the tier from the issue; for
-   a second round, record the second run's figures in the second verdict. Never estimate: if the Agent tool reported
+   a second round, record the second run's figures in the second verdict. `rounds` is the number of runs of that reviewer for this verdict, failed
+   ones included (1 for a first-run verdict, 2 after one re-run), so failed rounds are countable (ADR 0027). Never estimate: if the Agent tool reported
    no figures, leave `metrics` out (`post-review.mjs` then warns but still posts). The one verdict that
    needs figures is a `security-reviewer` success on a commit whose latest security status is failure (#447): re-run
    that reviewer in the foreground so the figures come with the verdict, and if they still do not, stop and notify

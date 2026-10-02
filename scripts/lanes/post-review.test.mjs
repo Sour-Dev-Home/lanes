@@ -226,6 +226,14 @@ test("broken metrics are refused, naming the field", () => {
   for (const m of [null, [], "fast"]) assert.match(errors(m), /metrics must be an object/, JSON.stringify(m));
 });
 
+test("metrics.rounds is optional, an integer of 1 or more", () => {
+  const check = (m) => validateVerdict(verdict({ metrics: m }), { criteriaCount: 2 });
+  assert.equal(check(metrics({ rounds: 1 })).ok, true);
+  assert.equal(check(metrics({ rounds: 3 })).ok, true);
+  assert.equal(check(metrics()).ok, true);
+  for (const rounds of [0, -1, 1.5, "2", null, NaN, Infinity]) assert.match(check(metrics({ rounds })).errors.join(), /metrics\.rounds/, String(rounds));
+});
+
 test("metrics rejects NaN, Infinity and string numbers, but accepts -0 as zero", () => {
   const errors = (m) => validateVerdict(verdict({ metrics: m }), { criteriaCount: 2 }).errors.join();
   assert.match(errors(metrics({ minutes: NaN })), /metrics\.minutes/);
@@ -289,7 +297,7 @@ const laneStep6 = () => readFileSync(".claude/commands/lane.md", "utf8").match(/
 
 test("lane.md step 6 adds metrics from the Agent tool's result, tier from the issue, per round", () => {
   const step6 = laneStep6();
-  assert.match(step6, /[Aa]fter each reviewer subagent returns, add `"metrics": \{ "tier", "minutes", "tokens" \}` to its verdict/);
+  assert.match(step6, /[Aa]fter each reviewer subagent returns, add `"metrics": \{ "tier", "minutes", "tokens", "rounds" \}` to its verdict/);
   assert.match(step6, /tokens and duration from the Agent tool's result \(rounded to 0\.1 minute\)/);
   assert.match(step6, /the tier from the issue/);
   assert.match(step6, /for a second round, record the second run's figures in the second verdict/);

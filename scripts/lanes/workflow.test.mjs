@@ -152,6 +152,12 @@ test("lane.md step 2 runs blockers.mjs and stops on any non-zero exit", () => {
 });
 
 // #45: when reviewers.mjs names governing ADRs, the lane hands their paths on and the advisor checks the diff against them
+test("lane.md step 6 tells a lane to record rounds in each verdict's metrics, failed runs included", () => {
+  const step6 = readFileSync(".claude/commands/lane.md", "utf8").replace(/\r\n/g, "\n").match(/^6\. [\s\S]*?(?=^7\. )/m)[0].replace(/\s+/g, " ");
+  assert.match(step6, /"metrics": \{ "tier", "minutes", "tokens", "rounds" \}/);
+  assert.match(step6, /`rounds` is the number of runs of that reviewer for this verdict, failed ones included/);
+});
+
 test("lane.md step 6 hands the architecture-advisor the governing ADRs' paths when reviewers.mjs prints ADRs:", () => {
   const step6 = readFileSync(".claude/commands/lane.md", "utf8").replace(/\r\n/g, "\n").match(/^6\. [\s\S]*?(?=^7\. )/m)[0].replace(/\s+/g, " ");
   assert.match(step6, /When `reviewers\.mjs` also prints `ADRs: NNNN, \.\.\.`/);

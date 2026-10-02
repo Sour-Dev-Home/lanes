@@ -100,9 +100,36 @@ test("summarize groups two tiers by reviewer with medians, totals and finding co
     realFindings: 2,
     minorFindings: 1,
     runsWithNoRealFinding: 1,
+    failedRounds: 0,
   });
   assert.equal(group(s, "quick", "test-hunter").realFindings, 0);
   assert.equal(group(s, "quick", "test-hunter").minorFindings, 1);
+});
+
+test("failed rounds sum rounds - 1 per tier and reviewer, a verdict without rounds counting as 1", () => {
+  const m = (rounds) => ({ tier: "full", minutes: 1, tokens: 10, ...(rounds === undefined ? {} : { rounds }) });
+  const s = summarize([
+    entry("full", verdict("test-hunter", { metrics: m(3) })),
+    entry("full", verdict("test-hunter", { metrics: m(1) })),
+    entry("full", verdict("test-hunter", { metrics: m() })),
+    entry("full", verdict("test-hunter", {})),
+    entry("full", verdict("ui-reviewer", { metrics: m(2) })),
+  ]);
+  assert.equal(group(s, "full", "test-hunter").failedRounds, 2);
+  assert.equal(group(s, "full", "ui-reviewer").failedRounds, 1);
+  assert.equal(s.tiers[0].failedRounds, 3);
+  const report = buildReport({ entries: [entry("full", verdict("test-hunter", { metrics: m(3) }))], now: NOW, days: 7 });
+  assert.equal(report.tiers[0].failedRounds, 2);
+  assert.match(renderMarkdown(report), /2 failed rounds/);
+  assert.match(renderMarkdown(report), /Failed rounds/);
+});
+
+test("edge: a verdict with an invalid rounds is unreadable", () => {
+  for (const rounds of [0, 1.5, "2", null, -1]) {
+    const body = comment(verdict("test-hunter", { metrics: { tier: "full", minutes: 1, tokens: 1, rounds } }));
+    assert.deepEqual(readVerdict(body, null), { unreadable: true }, JSON.stringify(rounds));
+  }
+  assert.ok(readVerdict(comment(verdict("test-hunter", { metrics: { tier: "full", minutes: 1, tokens: 1, rounds: 2 } })), null).verdict);
 });
 
 test("summarize reports a reviewer with no findings", () => {

@@ -9,6 +9,7 @@
   "properties": {
     "tier": { "description": "The review depth the run used.", "enum": ["skip", "quick", "full"] },
     "minutes": { "description": "Wall-clock minutes the run took.", "type": "number", "minimum": 0 },
-    "tokens": { "description": "Tokens the run used.", "type": "integer", "minimum": 0 }
+    "tokens": { "description": "Tokens the run used.", "type": "integer", "minimum": 0 },
+    "rounds": { "description": "Optional. The reviewer's runs for this verdict, failed ones included; absent counts as 1.", "type": "integer", "minimum": 1 }
   }
 }
