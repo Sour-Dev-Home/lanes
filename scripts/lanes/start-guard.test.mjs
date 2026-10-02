@@ -894,7 +894,6 @@ test("#89 edge: a data command that only prints, or whose program word is not pl
     "PATH=/tmp cat > x <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF",
     "cat > x 2>&1 <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF",
     "{ echo 'node scripts/lanes/start.mjs 12'; } | sh",
-    "tee x <<'EOF'\nnode scripts/lanes/start.mjs 12\nEOF",
   ]) {
     assert.equal(decidePreToolUse(bash(cmd), grant(), NOW)?.decision, "deny", JSON.stringify(cmd));
   }
@@ -2806,4 +2805,35 @@ test("#588 criterion 3: an awk program with backticks and no call or pipe, and a
     // edge: a pipe into a harmless command, and a shell that reads output naming nothing
     `awk '{print "x" | "sort"}' f`, "awk '{print $1}' f | sh", "awk 'BEGIN{print \"queue.mjs\"}' f | sort",
   ]) allowed(cmd);
+});
+
+// --- a quoted heredoc that only writes text naming the scripts (#642) -----------------------------------------------
+
+const heredoc = (head, body, tail = "") => `${head} <<'EOF'\n${body}\nEOF${tail}`;
+const NAMING = ["node scripts/lanes/queue.mjs", "node scripts/lanes/start.mjs 12", "it's queue.mjs and \"start.mjs", `run ${T}node scripts/lanes/queue.mjs${T}`];
+
+test("#642 criterion 1: a quoted heredoc body naming queue.mjs or start.mjs, fed to cat, tee or a redirect, is allowed", () => {
+  for (const body of NAMING) {
+    for (const head of ["cat > plan.md", "cat >> plan.md", "tee plan.md", "tee -a plan.md", "mkdir -p d && cat > d/plan.md"]) allowed(heredoc(head, body));
+    allowed(heredoc("cat > plan.md", body).replace("<<'EOF'", '<<"EOF"'));
+    allowed(heredoc("cat > plan.md", body, " && echo ok"));
+  }
+});
+
+test("#642 criterion 2: an unquoted heredoc with a live expansion, a heredoc fed to a shell or runtime, and a run on the side stay denied", () => {
+  const live = ["$(node scripts/lanes/queue.mjs)", `${T}node scripts/lanes/start.mjs 12${T}`];
+  for (const body of live) denied(`cat > plan.md <<EOF\n${body}\nEOF`);
+  denied("X=queue.mjs; cat > plan.md <<EOF\nnode scripts/lanes/$X\nEOF");
+  for (const head of ["bash", "sh", "node -e 'x'", "node", "python -", "cat | bash", "cat | sh", "tee >(bash)", "tee $(echo f)"]) denied(heredoc(head, NAMING[0]));
+  denied(heredoc("cat", NAMING[0], " | tee plan.md | bash"));
+  denied(`echo ${NAMING[0]} | sh`);
+  denied("echo queue.mjs | sh");
+  denied(`echo x <<'EOF' | bash\n${NAMING[0]}\nEOF`);
+  denied(`printf x <<'EOF' | bash\n${NAMING[0]}\nEOF`);
+  denied(heredoc("cat f | tee plan.md", NAMING[0]));
+  denied(heredoc("tee plan.md 2>&1", NAMING[0]));
+  denied(`tee plan.md <<'EOF' | sh\n${NAMING[0]}\nEOF`);
+  denied(heredoc("cat > plan.md", NAMING[0], "\nbash plan.md"));
+  denied(heredoc("cat > plan.md", NAMING[0], "\nnode scripts/lanes/queue.mjs"));
+  denied(heredoc("cat > plan.md", NAMING[1], "\nnode scripts/lanes/start.mjs 12"));
 });
