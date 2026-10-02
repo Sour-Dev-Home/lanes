@@ -77,6 +77,37 @@ test("readHeartbeat: lane bot only, marker first, newest wins, solo profile trus
   assert.deepEqual(readHeartbeat([broken], identity), { at: NOW - MIN, findings: [] });
 });
 
+test("edge: thresholds are inclusive at exactly 30 minutes and the flake window ends at 7 days", () => {
+  assert.deepEqual(keys(base({ prs: [{ number: 3, gateState: "SUCCESS", gateSince: NOW - 30 * MIN }] })), ["approved-stuck:PR 3"]);
+  assert.deepEqual(keys(base({ readyCount: 1, comments: [heartbeat(NOW - 30 * MIN)] })), ["no-progress"]);
+  const flake = (at) => [{ name: "v", sha: "abcdef0", conclusion: "failure", at: "2026-09-01T00:00:00Z" }, { name: "v", sha: "abcdef0", conclusion: "success", at }];
+  assert.deepEqual(keys(base({ checkRuns: flake(new Date(NOW - 7 * 86_400_000 + 1000).toISOString()) })), ["flake:v@abcdef0"]);
+  assert.deepEqual(keys(base({ checkRuns: flake(new Date(NOW - 7 * 86_400_000).toISOString()) })), []);
+});
+
+test("edge: a finding with a mention or cross-link is dropped", () => {
+  assert.deepEqual(keys(base({ comments: [heartbeat(NOW, ["idle-lane:@someone", "idle-lane:#5", "idle-lane:issue 5"])] })), ["idle-lane:issue 5"]);
+});
+
+test("the client maps GraphQL actors so the real github-actions writer is trusted", async () => {
+  const body = renderBody([{ key: "no-progress", at: 1 }], [], null);
+  const reply = (author, editor) => ({ data: { repository: { issues: { nodes: [{ number: 5, state: "OPEN", body, author, editor }] } } } });
+  const actions = { login: "github-actions", __typename: "Bot" };
+  const [fromAuthor] = await ghClient(() => reply(actions, null)).listIssues("lanes-health");
+  assert.deepEqual(readStored(fromAuthor), [{ key: "no-progress", at: 1 }]);
+  const [edited] = await ghClient(() => reply(actions, { login: "someone", __typename: "User" })).listIssues("lanes-health");
+  assert.deepEqual(readStored(edited), []);
+  const [lookalike] = await ghClient(() => reply({ login: "github-actions", __typename: "User" }, null)).listIssues("lanes-health");
+  assert.deepEqual(readStored(lookalike), []);
+  const [ghost] = await ghClient(() => reply(null, null)).listIssues("lanes-health");
+  assert.deepEqual(readStored(ghost), []);
+});
+
+test("run: with a closed low number and an open higher one, the open one is used", async () => {
+  const f = fake({ issues: [{ number: 12, state: "CLOSED", body: "", lastWriter: null }, { number: 20, state: "OPEN", body: "", lastWriter: null }] });
+  assert.equal((await run({ client: f.client, inputs: withProblem(), now: NOW })).number, 20);
+});
+
 test("healthThresholds: defaults and invalid values", () => {
   assert.deepEqual(healthThresholds({}), { approvedStuckMinutes: 30, noProgressMinutes: 30 });
   assert.deepEqual(healthThresholds({ health: { approvedStuckMinutes: -1, noProgressMinutes: "5" } }), { approvedStuckMinutes: 30, noProgressMinutes: 30 });
@@ -244,4 +275,39 @@ test("ghClient only issues the health operations, each on the given number", asy
   await label.createLabel("lanes-health");
   const other = ghClient(() => { throw new Error("boom"); });
   await assert.rejects(other.createLabel("lanes-health"), /boom/);
+});
+
+test("thresholds are inclusive at exactly the limit and the flake window ends at exactly 7 days", () => {
+  assert.deepEqual(keys(base({ prs: [{ number: 3, gateState: "SUCCESS", gateSince: NOW - 30 * MIN }] })), ["approved-stuck:PR 3"]);
+  assert.deepEqual(keys(base({ prs: [{ number: 3, gateState: "SUCCESS", gateSince: NOW - 30 * MIN + 1 }] })), []);
+  assert.deepEqual(keys(base({ readyCount: 1, comments: [heartbeat(NOW - 30 * MIN)] })), ["no-progress"]);
+  assert.deepEqual(keys(base({ readyCount: 1, comments: [heartbeat(NOW - 30 * MIN + 1)] })), []);
+  const sha = "abcdef0123456789";
+  const runs = (pass) => [{ name: "v", sha, conclusion: "failure", at: "2026-09-01T00:00:00Z" }, { name: "v", sha, conclusion: "success", at: new Date(pass).toISOString() }];
+  assert.deepEqual(keys(base({ checkRuns: runs(NOW - 7 * 86_400_000) })), []);
+  assert.deepEqual(keys(base({ checkRuns: runs(NOW - 7 * 86_400_000 + 1000) })), ["flake:v@abcdef0"]);
+});
+
+test("an unparseable heartbeat time is absent, and a spoofed writer type is not trusted", () => {
+  assert.equal(readHeartbeat([{ body: `${HEARTBEAT_MARKER}\n{"at":"nonsense"}`, author: BOT, updatedAt: "also bad" }], identity), null);
+  const body = renderBody([{ key: "no-progress", at: 5 }], [], null);
+  assert.deepEqual(readStored({ body, lastWriter: { login: "github-actions", type: "User" } }), []);
+  assert.deepEqual(readStored({ body, lastWriter: { login: "github-actions", type: true } }), []);
+});
+
+test("gatherInputs shapes the gh replies into evaluate's inputs", async () => {
+  const { gatherInputs } = await import("./health.mjs");
+  const node = { number: 5, commits: { nodes: [{ commit: { status: { context: { createdAt: "2026-10-02T10:00:00Z" }, contexts: [{ context: "lanes/gate", state: "SUCCESS" }] } } }] } };
+  const reply = { data: { repository: { pullRequests: { nodes: [node, { number: 6 }] } } } };
+  const gh = (args) => {
+    if (args[0] === "api") return reply;
+    if (args[0] === "issue") return [{ number: 1, labels: [{ name: "ready" }] }, { number: 2, labels: [{ name: "ready" }, { name: "lane:running" }] }, { number: 3, labels: [{ name: "lane:running" }] }];
+    return args.includes("merge_group") ? [] : [{ name: "verify", headSha: "ab", conclusion: "success", updatedAt: "t" }];
+  };
+  const r = gatherInputs(gh, { identity });
+  assert.deepEqual(r.prs, [{ number: 5, gateState: "SUCCESS", gateSince: Date.parse("2026-10-02T10:00:00Z") }, { number: 6, gateState: null, gateSince: undefined }]);
+  assert.equal(r.readyCount, 1);
+  assert.equal(r.inFlightCount, 4);
+  assert.deepEqual(r.checkRuns, [{ name: "verify", sha: "ab", conclusion: "success", at: "t" }]);
+  assert.equal(r.identity, identity);
 });

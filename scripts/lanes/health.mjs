@@ -14,6 +14,8 @@ export const FLAKE_DAYS = 7;
 const DAY = 86_400_000;
 const FAILED_GATE = new Set(["FAILURE", "ERROR"]);
 const KEY = /^[a-z][a-z-]{0,30}(?::[A-Za-z0-9 #@._/()-]{1,80})?$/;
+// A finding from the queue is echoed into comments, so it cannot carry `@` or `#` (a mention or a cross-link).
+const FINDING = /^[a-z][a-z-]{0,30}(?::[A-Za-z0-9 ._/()-]{1,80})?$/;
 const FINDING_LIMIT = 20;
 
 // `config.health` over the defaults; a value that is not a positive number falls back to its default.
@@ -39,7 +41,7 @@ export function readHeartbeat(comments, identity) {
     }
     const at = Date.parse(data?.at) || Date.parse(c.updatedAt);
     if (!Number.isFinite(at)) continue;
-    const findings = (Array.isArray(data?.findings) ? data.findings : []).filter((f) => typeof f === "string" && KEY.test(f)).slice(0, FINDING_LIMIT);
+    const findings = (Array.isArray(data?.findings) ? data.findings : []).filter((f) => typeof f === "string" && FINDING.test(f)).slice(0, FINDING_LIMIT);
     if (!best || at > best.at) best = { at, findings };
   }
   return best;
@@ -153,13 +155,16 @@ export async function run({ client, inputs, now = Date.now() }) {
 }
 
 // The gh-backed client for `run`. `gh(args)` returns parsed JSON (or text for non-JSON).
+// A GraphQL actor is `{ login, __typename }`; the trust checks read `type`. A missing actor stays null.
+const actor = (a) => (a && typeof a.login === "string" ? { login: a.login, type: a.__typename } : null);
+
 export function ghClient(gh) {
   const quote = (s) => JSON.stringify(String(s));
   return {
     async listIssues(label) {
       const q = `query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ issues(labels:[${quote(label)}],states:[OPEN,CLOSED],first:50,orderBy:{field:CREATED_AT,direction:ASC}){ nodes { number state body author { login __typename } editor { login __typename } } } } }`;
       const nodes = gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${q}`])?.data?.repository?.issues?.nodes ?? [];
-      return nodes.map((i) => ({ number: i.number, state: i.state, body: i.body ?? "", lastWriter: i.editor ?? i.author }));
+      return nodes.map((i) => ({ number: i.number, state: i.state, body: i.body ?? "", lastWriter: actor(i.editor ?? i.author) }));
     },
     async createLabel(label) {
       try {
