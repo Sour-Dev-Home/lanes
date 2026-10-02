@@ -60,6 +60,18 @@ These are decided, not overlooked:
   cannot push a workflow file, and hands it over in a PR comment for the owner to read and commit in the web editor.
   The owner reading the content before clicking Commit changes is the control: committing it runs its push-triggered
   workflows. The comment is posted by one fixed command (`node scripts/lanes/handover.mjs`), never free text.
+- **One-click apply: a second App behind an owner-approved environment ([0029](adr/0029-one-click-workflow-apply.md)).**
+  The lanes App is unchanged. A second App, `lanes-workflows`, holds `contents` and `workflows` write, and its key is
+  the secret `LANES_WORKFLOWS_KEY` of the `lanes-workflow-apply` environment. Why a lane or a branch workflow cannot
+  reach it: the environment's deployment branch policy is `main` only, so only a job on `main` reads the secret; the
+  `issue_comment` trigger always runs the default branch's copy of the workflow, which checks out the default branch
+  and never the PR head; the `apply` job waits for the owner's **Approve and deploy**; and the `filter` job, which
+  holds no secret, starts that wait only for a lane-bot comment that starts with the hand-over marker. Before any
+  write `workflow-apply.mjs` checks that the comment is unedited and the newest hand-over, the PR is open and in this
+  repository, and each file's hash equals the one the reviewers recorded for the same head. The commit is a
+  non-forced ref update, so a moved branch fails it. Residual risk, unchanged from ADR 0023: if the owner approves
+  reviewed content that is itself malicious, its push-triggered workflows run once. The owner must never add
+  `lanes-workflows` to a ruleset bypass list, to CODEOWNERS or to another repository.
 - **Playwright's on-demand download.** The dashboard visual check runs Playwright through `npx --yes` at a pinned
   version and downloads a browser on first use, on the owner's machine, never in CI
   ([0014](adr/0014-dashboard-running-overlaps-visual.md)).
