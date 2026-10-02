@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { HEARTBEAT_MARKER, evaluate, failingTests, oneLine, ghClient, healthThresholds, readHeartbeat, readStored, reconcile, renderBody, run } from "./health.mjs";
+import { HEARTBEAT_MARKER, evaluate, failingTests, findOrCreateHealthIssue, oneLine, ghClient, healthThresholds, readHeartbeat, readStored, reconcile, renderBody, run } from "./health.mjs";
 
 const NOW = Date.parse("2026-10-02T12:00:00Z");
 const MIN = 60_000;
@@ -176,6 +176,33 @@ test("run creates the label and the issue when none exists, then every write tar
   assert.deepEqual(f.calls[1], ["createLabel", "lanes-health"]);
   for (const c of f.calls.filter((c) => ["listComments", "editBody", "reopen", "comment"].includes(c[0]))) assert.equal(c[1], 900);
   assert.equal(f.calls.filter((c) => c[0] === "comment").length, 1);
+});
+
+test("findOrCreateHealthIssue: an open issue is preferred over a lower closed one", async () => {
+  const f = fake({ issues: [{ number: 3, state: "CLOSED", body: "old", lastWriter: ACTIONS }, { number: 7, state: "OPEN", body: "new", lastWriter: ACTIONS }, { number: 9, state: "OPEN", body: "x", lastWriter: ACTIONS }] });
+  assert.deepEqual(await findOrCreateHealthIssue(f.client), { number: 7, state: "OPEN", body: "new", lastWriter: ACTIONS });
+  assert.deepEqual(names(f.calls), ["listIssues"]);
+});
+
+test("findOrCreateHealthIssue: only closed issues means the lowest one is used and none is created", async () => {
+  const f = fake({ issues: [{ number: 8, state: "CLOSED", body: "b", lastWriter: ACTIONS }, { number: 4, state: "CLOSED", body: "a", lastWriter: ACTIONS }] });
+  assert.equal((await findOrCreateHealthIssue(f.client)).number, 4);
+  assert.deepEqual(names(f.calls), ["listIssues"]);
+});
+
+test("findOrCreateHealthIssue: none creates the label and the issue once, and returns it", async () => {
+  const f = fake();
+  const issue = await findOrCreateHealthIssue(f.client);
+  assert.deepEqual(issue, { number: 900, state: "OPEN", body: "", lastWriter: null });
+  assert.deepEqual(names(f.calls), ["listIssues", "createLabel", "createIssue"]);
+  assert.deepEqual(f.calls[1], ["createLabel", "lanes-health"]);
+  assert.deepEqual(f.calls[2][1].labels, ["lanes-health"]);
+});
+
+test("edge: findOrCreateHealthIssue ignores entries without an integer number", async () => {
+  const f = fake({ issues: [{ number: 5, state: "OPEN", body: "ok", lastWriter: null }] });
+  const client = { ...f.client, listIssues: async () => [null, { state: "OPEN" }, { number: "2", state: "OPEN" }, { number: 5, state: "OPEN", body: "ok", lastWriter: null }] };
+  assert.equal((await findOrCreateHealthIssue(client)).number, 5);
 });
 
 test("run: the same problem on the next run adds no comment; recovery adds one; a recurrence is new", async () => {

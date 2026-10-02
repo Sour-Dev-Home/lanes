@@ -233,19 +233,27 @@ export function renderBody(open, active, heartbeat) {
 }
 
 /**
+ * The `lanes-health` issue every writer shares (the watchdog and the queue's heartbeat): the lowest-numbered open one,
+ * else the lowest-numbered one in any state, else a new one made after its label. `client` is `run`'s, using
+ * `listIssues`, `createLabel` and `createIssue`. Returns `{ number, state, body, lastWriter }`.
+ */
+export async function findOrCreateHealthIssue(client) {
+  const issues = (await client.listIssues(HEALTH_LABEL)).filter((i) => Number.isInteger(i?.number)).sort((a, b) => a.number - b.number);
+  const found = issues.find((i) => i.state === "OPEN") ?? issues[0];
+  if (found) return found;
+  await client.createLabel(HEALTH_LABEL);
+  const number = await client.createIssue({ title: "lanes health", body: renderBody([], [], null), labels: [HEALTH_LABEL] });
+  return { number, state: "OPEN", body: "", lastWriter: null };
+}
+
+/**
  * ADR 0027 parts 4 to 6. `client` is the only way to GitHub and has these operations: `listIssues(label)` (every
  * state, `[{ number, state, body, lastWriter }]`), `createLabel(label)`, `createIssue({ title, body, labels })` (the new
  * number), and, each given the one issue number this run found or created, `listComments(number)`, `editBody`,
  * `reopen` and `comment`. `inputs` is evaluate's, minus `comments`, which run reads from the health issue.
  */
 export async function run({ client, inputs, now = Date.now() }) {
-  const issues = (await client.listIssues(HEALTH_LABEL)).filter((i) => Number.isInteger(i?.number)).sort((a, b) => a.number - b.number);
-  let issue = issues.find((i) => i.state === "OPEN") ?? issues[0];
-  if (!issue) {
-    await client.createLabel(HEALTH_LABEL);
-    const number = await client.createIssue({ title: "lanes health", body: renderBody([], [], null), labels: [HEALTH_LABEL] });
-    issue = { number, state: "OPEN", body: "", lastWriter: null };
-  }
+  const issue = await findOrCreateHealthIssue(client);
   const n = issue.number;
   const comments = await client.listComments(n);
   const active = evaluate({ ...inputs, comments }, now);
