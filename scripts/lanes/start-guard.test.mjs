@@ -2055,7 +2055,7 @@ test("#318 edge: -p before --eval, a flag between, a script starting with -, -p 
   }
 });
 
-// Through shell-lex.mjs a backslash-led delimiter (`<<\EOF`) is literal, as in bash and approve-guard.mjs (#140);
+// Through shell-lex.mjs a backslash-led delimiter (`<<\EOF`) is literal, as in bash (#140);
 // start-guard.mjs read it as unquoted before #194, so a plain `$HOME` in such a commit message was denied.
 test("#194 edge: <<\\EOF reads like <<'EOF', and a live body is still walked", () => {
   for (const delim of ["\\EOF", "'EOF'"]) {
@@ -2067,7 +2067,7 @@ test("#194 edge: <<\\EOF reads like <<'EOF', and a live body is still walked", (
 
 // --- #308: remaining launchers, wildcard and glob names, deno eval and joined iex strings ----------------------------
 
-// The launchers of #308 criterion 1 with a program named only at run time; approve-guard.test.mjs checks the same list.
+// The launchers of #308 criterion 1 with a program named only at run time.
 const LAUNCHERS_308 = [
   "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$c}",
   "Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $c",

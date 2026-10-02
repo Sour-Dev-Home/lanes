@@ -415,7 +415,7 @@ const MAX_GLOB_BRACES = 64;
  * `names`: the last path component (after `/` or `\`) of one of its brace expansions, as a pattern, matches a name,
  * ignoring case as Windows does. A marked (quoted) glob character is plain text. A word with too many expansions to
  * check, longer than MAX_GLOB_WORD or with more than MAX_GLOB_BRACES braces counts as a match. Shared by
- * approve-guard.mjs (post-review.mjs) and start-guard.mjs (start.mjs, queue.mjs, claude), #308.
+ * start-guard.mjs (start.mjs, queue.mjs, claude), #308.
  */
 export function mayExpandTo(w, names) {
   if (!GLOB_RE.test(w)) return false;
@@ -434,8 +434,8 @@ const NODE_NAMES = ["node", "nodejs", "bun", "deno", "node.exe", "nodejs.exe", "
 
 /**
  * True when word `w` names node, nodejs, bun or deno, or is a glob that could expand to one (#378): `n*de`, `no?e` or
- * `[n]ode` runs node once a file of that name matches, so both guards read it as node. Shared by approve-guard.mjs
- * and start-guard.mjs.
+ * `[n]ode` runs node once a file of that name matches, so the guard reads it as node. Used by
+ * start-guard.mjs.
  */
 export const mayBeNode = (w) => NODE_RE.test(basename(w)) || mayExpandTo(w, NODE_NAMES);
 
@@ -1028,7 +1028,7 @@ export function withoutLiteralSubstitutions(cmd) {
 }
 
 // Text with every quote, backslash and backtick dropped (PowerShell's curly quotes too), for the checks that read raw
-// text: a name split by quoting, as in st"art.mjs or --"bg", reads whole (#61, like #62 in approve-guard.mjs). A name
+// text: a name split by quoting, as in st"art.mjs or --"bg", reads whole (#61). A name
 // spelled in `$'…'` escapes reads whole too: the text is followed by a copy with each `$'…'` resolved (#310), so what
 // either reading names counts.
 const DEQUOTE_RE = new RegExp(`['"\\\\\`${String.fromCharCode(0x2018)}-${String.fromCharCode(0x201e)}${LIT_TICK}${QUOTED_TICK}]`, "g");
@@ -1134,7 +1134,7 @@ function collapsedSubstitutions(cmd) {
  * to its segment's `heredocs`, and a literal `$(cat <<'EOF' … EOF)` reads as its body, with that word's index in the
  * segment's `literal`. A segment whose output a `|` or `|&` feeds into the next one has `pipedOut` set
  * (`(echo …) | sh` marks the echo). A quoted or escaped `$`, backtick, brace, comma or glob character is marked
- * literal (see LITERAL). Throws on an unterminated quote. That is approve-guard.mjs's shape.
+ * literal (see LITERAL). Throws on an unterminated quote. That is the words shape.
  *
  * With `{ bodies: true }` it returns start-guard.mjs's shape, `{ segments, writes, stdin, pipes, targets, bodies }`,
  * where a quoted or escaped `$` or backtick alone is marked (LIT_DOLLAR, LIT_TICK) and a literal substitution needs a
@@ -1267,7 +1267,7 @@ export function lex(cmd, { bodies: withBodies = false, collapse = false } = {}) 
     return { inner, close };
   };
 
-  // Words shape (approve-guard.mjs): `|`, `||`, `;`, `&`, parentheses and newlines split commands; `<` and `>` start a
+  // Words shape:`|`, `||`, `;`, `&`, parentheses and newlines split commands; `<` and `>` start a
   // redirection whose target is skipped as raw text into the segment's `redirects`, or a heredoc. Returns the index
   // to go on from, or null when `i` holds no operator.
   const wordsOperator = (i) => {
@@ -1472,7 +1472,7 @@ export function lex(cmd, { bodies: withBodies = false, collapse = false } = {}) 
   return { segments: kept, writes: writes.slice(0, kept.length), stdin: stdin.slice(0, kept.length), pipes: pipes.slice(0, kept.length), targets, bodies };
 }
 
-// --- Hook inputs and output (moved from the retired approve-guard.mjs, #616) -----------------------------------------
+// --- Hook inputs and output (moved here when the approve guard was retired, #616) -----------------------------------------
 // How the harness opens an input the owner did not type: a subagent or background task finishing, or a message or
 // idle notice from another session. It arrives as a prompt of its own. Shared with start-guard.mjs (#262).
 export const AUTOMATED_INPUT_PREFIXES = Object.freeze([

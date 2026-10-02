@@ -1,4 +1,4 @@
-// scripts/lanes/shell-lex.fixtures.mjs — test fixtures approve-guard.test.mjs and start-guard.test.mjs share (#351).
+// scripts/lanes/shell-lex.fixtures.mjs — test fixtures start-guard.test.mjs and shell-lex.test.mjs share (#351).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 

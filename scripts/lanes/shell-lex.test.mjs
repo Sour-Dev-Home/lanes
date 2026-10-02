@@ -1014,6 +1014,17 @@ test("#61 edge: powershellAsBash reads PowerShell quoting into Bash words", () =
   assert.throws(() => powershellAsBash("(".repeat(40) + ")".repeat(40)), (e) => /too deep/.test(e.message) && e.readerLimit === true);
 });
 
+test("#616 edge: an -e, -ec, -enc or -EncodedCommand base64 value is read decoded; another flag or a non-base64 value is not", () => {
+  const b64 = Buffer.from("node scripts/lanes/start.mjs 7", "utf16le").toString("base64");
+  const decoded = /'node' 'scripts\/lanes\/start\.mjs' '7'/;
+  for (const flag of ["-e", "-ec", "-enc", "-EncodedCommand", "/e"]) assert.match(powershellAsBash(`powershell ${flag} ${b64}`), decoded, flag);
+  for (const flag of ["-x", "-encx", "-File"]) assert.doesNotMatch(powershellAsBash(`powershell ${flag} ${b64}`), decoded, flag);
+  assert.doesNotMatch(powershellAsBash(`powershell -e ${b64}!`), decoded);
+  // Padding and the + and / characters of base64 are accepted, so a value holding them is decoded, not skipped.
+  const odd = Buffer.from("node scripts/lanes/start.mjs 7 ??>>", "utf16le").toString("base64");
+  assert.match(powershellAsBash(`powershell -e ${odd}`), decoded);
+});
+
 test("#616: preToolUseOutput is the PreToolUse hook JSON for a decision and its reason", () => {
   assert.deepEqual(JSON.parse(preToolUseOutput("deny", "why")), { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "why" } });
 });
