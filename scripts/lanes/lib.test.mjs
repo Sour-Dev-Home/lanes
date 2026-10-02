@@ -285,7 +285,6 @@ const OWNER_SAMPLES = {
   "(^|/)auth/": ["src/auth/login.ts", "src/oauth/x.ts"],
   "(^|/)secrets?/": ["secrets/key.txt", "src/secretsauce/x.ts"],
   "^deploy/": ["deploy/prod.sh", "docs/deploy/x.md"],
-  "^scripts/lanes/owner-diff(\\.test)?\\.mjs$": ["scripts/lanes/owner-diff.test.mjs", "scripts/lanes/owner-diffs.mjs"],
 };
 
 test("every regex in lanes.config.json paths.owner matches its sample and not its near-miss", () => {
@@ -856,49 +855,29 @@ const ownerOk = { ...hunterOk, context: "review/owner" };
 const OWNED = "c".repeat(40);
 const needsOwnerPr = { ...quickPr, prBody: quickPr.prBody.replace("## Needs the owner\nnothing", "## Needs the owner\ndecide x"), statuses: [hunterOk] };
 
-test("gateDecision counts a carried owner approval as the owner's approval of the head", () => {
-  const d = gateDecision({ ...needsOwnerPr, ownerCarry: { sha: OWNED, status: ownerOk, same: true }, prNumber: 9 });
-  assert.equal(d.state, "success");
-  assert.equal(d.description, "approved by owner (carried from ccccccc)");
-  assert.equal(d.stage, "ready");
+const TEAM_WAIT = (reason) => `waiting for a code-owner review in GitHub (${reason})`;
+
+test("gateDecision no longer reads a review/owner status or an owner carry: only the native approval passes", () => {
+  const withOwner = { ...needsOwnerPr, statuses: [hunterOk, ownerOk] };
+  assert.equal(gateDecision(withOwner).description, TEAM_WAIT("needs the owner"));
+  // An ownerCarry input is ignored whatever it says.
+  for (const ownerCarry of [{ sha: OWNED, status: ownerOk, same: true }, { sha: OWNED, status: ownerOk, same: false }, null, "x"]) {
+    const d = gateDecision({ ...needsOwnerPr, ownerCarry, prNumber: 9 });
+    assert.equal(d.state, "pending");
+    assert.equal(d.description, TEAM_WAIT("needs the owner"));
+  }
+  const approved = gateDecision({ ...needsOwnerPr, nativeApproval: { approved: true, by: "leo" } });
+  assert.deepEqual(approved, { state: "success", description: "approved by code owner @leo", stage: "ready" });
 });
 
-test("gateDecision says the diff changed when the carried approval's diff no longer matches", () => {
-  const d = gateDecision({ ...needsOwnerPr, ownerCarry: { sha: OWNED, status: ownerOk, same: false }, prNumber: 9 });
-  assert.equal(d.state, "pending");
-  assert.equal(d.description, "owner approval was for ccccccc; the PR's own diff changed since: /approve 9");
-});
-
-test("gateDecision never lets a carried approval skip a reviewer the head still owes", () => {
-  const d = gateDecision({ ...needsOwnerPr, statuses: [], ownerCarry: { sha: OWNED, status: ownerOk, same: true }, prNumber: 9 });
+test("gateDecision never lets the native approval skip a reviewer the head still owes", () => {
+  const d = gateDecision({ ...needsOwnerPr, statuses: [], nativeApproval: { approved: true, by: "leo" } });
   assert.equal(d.description, "waiting for review/test-hunter");
 });
 
-test("gateDecision lets the head's own owner status win over a carried approval", () => {
-  const failed = gateDecision({ ...needsOwnerPr, statuses: [hunterOk, { ...ownerOk, state: "failure" }], ownerCarry: { sha: OWNED, status: ownerOk, same: true }, prNumber: 9 });
-  assert.match(failed.description, /^waiting on owner/);
-  const own = gateDecision({ ...needsOwnerPr, statuses: [hunterOk, ownerOk], ownerCarry: { sha: OWNED, status: ownerOk, same: true }, prNumber: 9 });
-  assert.equal(own.description, "approved by owner");
-});
-
-test("edge: gateDecision refuses a carried approval that is not a trusted owner success on a real SHA", () => {
-  for (const ownerCarry of [
-    { sha: OWNED, status: { ...ownerOk, creator: { type: "Bot", login: "github-actions[bot]" } }, same: true },
-    { sha: OWNED, status: { ...ownerOk, state: "failure" }, same: true },
-    { sha: OWNED, status: { ...ownerOk, context: "review/test-hunter" }, same: true },
-    { sha: "not-a-sha", status: ownerOk, same: true },
-    { sha: OWNED, status: ownerOk },
-    { sha: OWNED, status: ownerOk, same: "true" },
-  ]) {
-    assert.match(gateDecision({ ...needsOwnerPr, ownerCarry, prNumber: 9 }).description, /^waiting on owner \(\/approve\)/, JSON.stringify(ownerCarry));
-  }
-});
-
-test("edge: a stale carried approval changes only the wording, never the state", () => {
-  const d = gateDecision({ ...needsOwnerPr, ownerCarry: { sha: OWNED, status: ownerOk, same: false } });
-  assert.equal(d.state, "pending");
-  assert.equal(d.stage, "owner");
-  assert.match(d.description, /^owner approval was for ccccccc; the PR's own diff changed since: \/approve/);
+test("edge: an ownerDiff input is ignored: an 'additive' verdict never clears the owner wait", () => {
+  const d = gateDecision({ ...needsOwnerPr, prBody: quickPr.prBody, files: ["scripts/lanes/gate.mjs"], config: ownerCfg, ownerDiff: "additive" });
+  assert.notEqual(d.state, "success");
 });
 
 test("edge: diffFingerprint keeps a hunk boundary: one hunk split in two is a different diff", () => {
@@ -970,7 +949,7 @@ test("edge: parseValidation throws a named error for malformed validate lines", 
   }
 });
 
-// #380, ADR 0015: the owner-path exemption for a diff owner-diff.mjs proved additive.
+// The owner stage under a config with its own owner-only paths (ADR 0021, 0025).
 const ownerCfg = compileConfig({
   requiredChecks: ["verify"],
   paths: {
@@ -992,74 +971,34 @@ const pinPr = (over = {}) => {
 };
 const pinReviewers = requiredReviewers("full", classifyFiles(PIN_FILES, ownerCfg));
 
-test("gateDecision clears the owner-only-path wait for an additive diff of the pin files with every reviewer passed", () => {
-  assert.equal(gateDecision(pinPr()).description, "waiting on owner (/approve) (owner-only path)");
-  const d = gateDecision(pinPr({ ownerDiff: "additive" }));
-  assert.equal(d.state, "success");
-  assert.equal(d.description, "unattended-eligible (tier:full), reviews in");
-  for (const files of [["lanes.config.json"], ["scripts/lanes/workflow.test.mjs"]]) {
-    assert.equal(gateDecision(pinPr({ files, ownerDiff: "additive" })).state, "success", files[0]);
-  }
-});
-
-test("gateDecision keeps the owner wait when an additive diff also changes a third file", () => {
-  for (const extra of ["scripts/lanes/gate.mjs", "docs/a.md", "src/a.ts"]) {
-    const d = gateDecision(pinPr({ files: [...PIN_FILES, extra], ownerDiff: "additive" }));
-    assert.equal(d.state, "pending", extra);
-    assert.match(d.description, /^waiting on owner \(\/approve\) \(owner-only path\)/, extra);
-  }
-});
-
-test("gateDecision keeps the owner wait for an additive diff whose reviewer failed or is missing", () => {
+test("gateDecision waits for the native review on every owner reason, with every reviewer passed", () => {
+  assert.equal(gateDecision(pinPr()).description, TEAM_WAIT("owner-only path"));
   const [first, ...rest] = pinReviewers;
   assert.ok(rest.length > 0);
   const failing = praised(pinReviewers).map((v) => (v.reviewer === first ? { ...v, verdict: { verdict: "failure", findings: [] } } : v));
-  assert.equal(gateDecision(pinPr({ ownerDiff: "additive", verdicts: failing })).description, `waiting on owner (/approve) (verdict from ${first} is not success)`);
-  assert.equal(gateDecision(pinPr({ ownerDiff: "additive", verdicts: praised(rest) })).description, `waiting on owner (/approve) (no verdict for head from ${first})`);
-  // A verdict for an older commit is no verdict for the head.
-  assert.equal(gateDecision(pinPr({ ownerDiff: "additive", verdicts: praised(pinReviewers, "c".repeat(40)) })).stage, "owner");
-  // A review status missing or failed on the head never reaches the owner stage, exempt or not.
-  assert.equal(gateDecision(pinPr({ ownerDiff: "additive", statuses: passed(rest) })).description, `waiting for review/${first}`);
+  assert.equal(gateDecision(pinPr({ files: ["src/a.ts", "docs/a.md"], verdicts: failing })).description, TEAM_WAIT(`verdict from ${first} is not success`));
+  assert.equal(gateDecision(pinPr({ files: ["src/a.ts", "docs/a.md"], verdicts: praised(rest) })).description, TEAM_WAIT(`no verdict for head from ${first}`));
+  // A review status missing or failed on the head never reaches the owner stage.
+  assert.equal(gateDecision(pinPr({ statuses: passed(rest) })).description, `waiting for review/${first}`);
   const failed = passed(pinReviewers).map((s, i) => (i === 0 ? { ...s, state: "failure" } : s));
-  assert.equal(gateDecision(pinPr({ ownerDiff: "additive", statuses: failed })).state, "failure");
+  assert.equal(gateDecision(pinPr({ statuses: failed })).state, "failure");
 });
 
-test("gateDecision keeps the owner wait for an additive diff whose Needs the owner is not nothing", () => {
+test("gateDecision waits on the owner when Needs the owner is not nothing", () => {
   const prBody = quickPr.prBody.replace("## Needs the owner\nnothing", "## Needs the owner\nDecide whether this pin belongs here.");
-  assert.equal(gateDecision(pinPr({ ownerDiff: "additive", prBody })).description, "waiting on owner (/approve) (needs the owner)");
+  assert.equal(gateDecision(pinPr({ files: ["src/a.ts"], prBody })).description, TEAM_WAIT("needs the owner"));
 });
 
-test("gateDecision is unchanged when ownerDiff is absent or anything but the string additive", () => {
-  const today = gateDecision(pinPr());
-  for (const ownerDiff of [undefined, null, "", "needs owner", "Additive", " additive", "additive ", true, 1, ["additive"], { additive: true }]) {
-    assert.deepEqual(gateDecision(pinPr({ ownerDiff })), today, String(ownerDiff));
-  }
-});
-
-test("edge: the owner-path exemption compares file names exactly, never after normalising them", () => {
-  for (const odd of ["./lanes.config.json", "Lanes.config.json", "scripts\\lanes\\workflow.test.mjs", "scripts/lanes/../lanes/workflow.test.mjs"]) {
-    const d = gateDecision(pinPr({ files: [PIN_FILES[0], odd], statuses: passed(pinReviewers), verdicts: praised(pinReviewers), ownerDiff: "additive" }));
-    assert.equal(d.stage, "owner", odd);
-  }
-});
-
-test("edge: a rename into a pin file still lists its old name, which keeps the owner wait", () => {
-  const d = gateDecision(pinPr({ files: ["scripts/lanes/gate.mjs", "lanes.config.json"], ownerDiff: "additive" }));
-  assert.equal(d.description, "waiting on owner (/approve) (owner-only path)");
-});
-
-test("edge: the owner-path exemption never applies where the tier requires no reviewer", () => {
-  const skipCfg = compileConfig({
-    requiredChecks: ["verify"],
-    paths: { skip: ["^lanes\\.config\\.json$", "\\.test\\.mjs$"], contract: [], sensitive: [], ui: [], owner: ["^lanes\\.config\\.json$", "^scripts/lanes/workflow\\.test\\.mjs$"] },
-  });
-  const d = gateDecision({ ...quickPr, issueLabels: ["tier:skip", "ready"], files: PIN_FILES, config: skipCfg, ownerDiff: "additive" });
-  assert.equal(d.description, "waiting on owner (/approve) (owner-only path)");
-});
-
-test("edge: an additive diff with an unfixed important finding still waits on the owner for that finding", () => {
+test("edge: an unfixed important finding waits on the owner for that finding", () => {
   const verdicts = praised(pinReviewers).map((v, i) => (i === 0 ? { ...v, verdict: { verdict: "success", findings: [{ severity: "important", fixed: false }] } } : v));
-  assert.match(gateDecision(pinPr({ ownerDiff: "additive", verdicts })).description, /^waiting on owner \(\/approve\) \(unfixed important finding from /);
+  assert.match(gateDecision(pinPr({ files: ["src/a.ts"], verdicts })).description, /^waiting for a code-owner review in GitHub \(unfixed important finding from /);
+});
+
+test("edge: no owner wait reason mentions /approve", () => {
+  for (const d of [gateDecision(pinPr()), gateDecision(pinPr({ files: ["src/a.ts"], prBody: quickPr.prBody.replace("## Needs the owner\nnothing", "## Needs the owner\nx") }))]) {
+    assert.equal(d.stage, "owner");
+    assert.doesNotMatch(d.description, /\/approve/);
+  }
 });
 
 // ---- #462: reviewers from config (ADR 0018) ----
@@ -1282,11 +1221,10 @@ test("gateDecision trusts the lane bot's reviewer statuses under team, but never
   const teamCfg = { ...ownerCfg, identity: TEAM_ID };
   const names = requiredReviewers("full", classifyFiles(PIN_FILES, ownerCfg));
   const botPassed = names.map((n) => botStatus(n));
-  const args = { ownerDiff: "additive", statuses: botPassed };
+  const args = { statuses: botPassed };
   assert.equal(gateDecision(pinPr({ ...args, config: teamCfg, nativeApproval: approvedBy })).state, "success");
   assert.equal(gateDecision(pinPr({ ...args, config: teamCfg })).state, "pending", "team: an unread native approval is pending (#575)");
   assert.notEqual(gateDecision(pinPr({ ...args, config: ownerCfg })).state, "success", "no identity: no bot trusted");
-  assert.notEqual(gateDecision(pinPr({ ...args, config: { ...ownerCfg, identity: { profile: "solo" } } })).state, "success");
   assert.notEqual(gateDecision(pinPr({ ...args, config: { ...ownerCfg, identity: { profile: "team", app: { id: 1, installationId: 2 } } } })).state, "success");
   // the bot's owner status is not approval
   const fromBot = gateDecision(pinPr({ files: ["src/a.ts", "lanes.config.json"], config: teamCfg, statuses: [...botPassed, botStatus("owner")] }));
@@ -1298,7 +1236,7 @@ test("gateDecision reuse takes a lane-bot status under team and refuses it other
   const names = requiredReviewers("full", classifyFiles(PIN_FILES, ownerCfg));
   const others = passed(names.filter((n) => n !== "test-hunter"));
   const reused = { sha, status: botStatus("test-hunter") };
-  const base = pinPr({ ownerDiff: "additive", statuses: others, verdicts: praised(names).map((v) => (v.reviewer === "test-hunter" ? { ...v, sha } : v)), reused });
+  const base = pinPr({ statuses: others, verdicts: praised(names).map((v) => (v.reviewer === "test-hunter" ? { ...v, sha } : v)), reused });
   assert.match(gateDecision({ ...base, config: { ...ownerCfg, identity: TEAM_ID } }).description, /reused test-hunter/);
   assert.doesNotMatch(gateDecision({ ...base, config: ownerCfg }).description, /reused test-hunter/);
 });
@@ -1397,14 +1335,14 @@ test("team gateDecision: a full-tier blocker waits for a native review", () => {
   assert.equal(gateDecision(teamPr({ verdicts: [], nativeApproval: approvedBy })).state, "success");
 });
 
-test("team gateDecision never says /approve, and ignores review/owner statuses, the carry and ADR 0015's exemption", () => {
+test("team gateDecision never says /approve, and ignores review/owner statuses", () => {
   const input = needsPr({ statuses: [...passed(["test-hunter"]), { ...ownerOk, creator: human }] });
-  const d = gateDecision({ ...input, ownerCarry: { sha: OWNED, status: ownerOk, same: true }, prNumber: 9, nativeApproval: { approved: false, by: null } });
+  const d = gateDecision({ ...input, prNumber: 9, nativeApproval: { approved: false, by: null } });
   assert.equal(d.state, "pending");
   assert.doesNotMatch(d.description, /approve/);
-  const onlyOwner = gateDecision(teamPr({ files: PIN_FILES, ownerDiff: "additive", nativeApproval: { approved: false, by: null } }));
+  const onlyOwner = gateDecision(teamPr({ files: PIN_FILES, nativeApproval: { approved: false, by: null } }));
   assert.equal(onlyOwner.description, teamWait("owner-only path"));
-  assert.equal(gateDecision(teamPr({ files: PIN_FILES, ownerDiff: "additive", nativeApproval: approvedBy })).state, "success");
+  assert.equal(gateDecision(teamPr({ files: PIN_FILES, nativeApproval: approvedBy })).state, "success");
 });
 
 test("team gateDecision with no owner reason does not need a native review and still needs its reviewers", () => {
@@ -1412,21 +1350,19 @@ test("team gateDecision with no owner reason does not need a native review and s
   assert.equal(gateDecision(teamPr({ statuses: [] })).stage, "review");
 });
 
-test("team gateDecision with nativeApproval null or absent is pending, never the solo owner stage (#575)", () => {
+test("gateDecision with nativeApproval null or absent is pending (#575)", () => {
   for (const nativeApproval of [undefined, null]) {
     const d = gateDecision(needsPr({ nativeApproval }));
     assert.deepEqual([d.state, d.stage, d.description], ["pending", "owner", teamWait("needs the owner")], String(nativeApproval));
   }
-  // review/owner success, the carry and the additive exemption do not pass it either
+  // a review/owner success does not pass it either
   const ownerStatus = { ...ownerOk, creator: human };
   for (const nativeApproval of [undefined, null]) {
     const withOwner = gateDecision(needsPr({ statuses: [...passed(["test-hunter"]), ownerStatus], nativeApproval }));
     assert.deepEqual([withOwner.state, withOwner.stage, withOwner.description], ["pending", "owner", teamWait("needs the owner")], `review/owner ${nativeApproval}`);
-    const carried = gateDecision(needsPr({ ownerCarry: { sha: OWNED, status: ownerStatus, same: true }, nativeApproval }));
-    assert.deepEqual([carried.state, carried.stage, carried.description], ["pending", "owner", teamWait("needs the owner")], `carry ${nativeApproval}`);
-    const exempt = gateDecision(teamPr({ files: PIN_FILES, ownerDiff: "additive", nativeApproval }));
-    assert.deepEqual([exempt.state, exempt.stage], ["pending", "owner"], `exempt ${nativeApproval}`);
-    assert.match(exempt.description, /^waiting for a code-owner review in GitHub \(owner-only path\)/);
+    const onlyOwner = gateDecision(teamPr({ files: PIN_FILES, nativeApproval }));
+    assert.deepEqual([onlyOwner.state, onlyOwner.stage], ["pending", "owner"], `owner-only ${nativeApproval}`);
+    assert.match(onlyOwner.description, /^waiting for a code-owner review in GitHub \(owner-only path\)/);
   }
   // edge: a non-object nativeApproval (a bare true) is not an approval either
   assert.equal(gateDecision(needsPr({ nativeApproval: true })).state, "pending");
@@ -1438,14 +1374,6 @@ test("team gateDecision with a nativeApproval object ignores a review/owner succ
   const d = gateDecision({ ...withOwner, nativeApproval: { approved: false, by: null } });
   assert.deepEqual([d.state, d.description], ["pending", teamWait("needs the owner")]);
   assert.equal(gateDecision({ ...withOwner, nativeApproval: approvedBy }).state, "success");
-});
-
-test("solo gateDecision ignores nativeApproval and keeps the /approve wording", () => {
-  const solo = pinPr({ files: ["lanes.config.json"] });
-  const today = gateDecision(solo);
-  assert.equal(today.description, "waiting on owner (/approve) (owner-only path)");
-  assert.deepEqual(gateDecision({ ...solo, nativeApproval: approvedBy }), today);
-  assert.deepEqual(gateDecision({ ...solo, config: { ...ownerCfg, identity: { profile: "solo" } }, nativeApproval: approvedBy }), today);
 });
 
 // #593: pure reuse check for pending workflow files (ADR 0023 part 3)

@@ -21,8 +21,7 @@
         "paths": [
           "scripts/lanes/gate.", "scripts/lanes/gate-decision.", "scripts/lanes/blockers.", "scripts/lanes/approve-guard.", "scripts/lanes/shell-lex.",
           "scripts/lanes/post-review.", "scripts/lanes/issue-contract.", "scripts/lanes/reviewers.", "scripts/lanes/contracts.",
-          "scripts/lanes/workflow.", "scripts/gate-workflow.", "scripts/dashboard-workflow.", "scripts/dashboard.", "scripts/dashboard-visual.",
-          "scripts/lanes/owner-diff."
+          "scripts/lanes/workflow.", "scripts/gate-workflow.", "scripts/dashboard-workflow.", "scripts/dashboard.", "scripts/dashboard-visual."
         ],
         "imports": ["lib", "preflight"],
         "contracts": ["contracts/dashboard-visual."],
@@ -105,8 +104,7 @@
       "(^|/)\\.env",
       "(^|/)auth/",
       "(^|/)secrets?/",
-      "^deploy/",
-      "^scripts/lanes/owner-diff(\\.test)?\\.mjs$"
+      "^deploy/"
     ]
   }
 }

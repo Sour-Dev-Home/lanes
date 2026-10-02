@@ -690,21 +690,19 @@ test("an owner word next to a $ is no longer an owner command on its own (#140)"
   allowed("gh pr create --title x --body-file - <<'EOF'\n## Needs the owner\n\nnothing; the gate costs $0\nEOF");
 });
 
-test("a disguised owner command the hook no longer catches is refused by post-review.mjs without a grant (#140, #81)", async () => {
-  // Before #140 the `owner` word plus a `$` failed closed; now only the script's own grant check (#81) stops it.
+test("a disguised owner command the hook no longer catches is refused by post-review.mjs, which has no owner path (#140, #614)", async () => {
+  // Before #140 the `owner` word plus a `$` failed closed; now post-review.mjs itself refuses the owner post (#614).
   const cmd = "python3 -c \"import subprocess,sys; subprocess.run(['node','scripts/lanes/post-review.mjs']+sys.argv[1:])\" owner success x --pr $PR";
   assert.deepEqual(findOwnerInvocations(cmd), []);
-  // What that command ends up running: post-review.mjs owner, with no /approve grant anywhere.
+  // What that command ends up running: post-review.mjs owner, which refuses before any gh call.
   const { main } = await import("./post-review.mjs");
-  withDir((dir) => {
-    const calls = [];
-    const run = (...args) => {
-      calls.push(args);
-      throw new Error("gh must not be called without a grant");
-    };
-    assert.throws(() => main(["owner", "success", "x", "--pr", "16"], { run, log: () => {}, warn: () => {}, grantDir: dir, now: NOW }), /no fresh \/approve 16 grant/);
-    assert.deepEqual(calls, []);
-  });
+  const calls = [];
+  const run = (...args) => {
+    calls.push(args);
+    throw new Error("gh must not be called for the owner post");
+  };
+  assert.throws(() => main(["owner", "success", "x", "--pr", "16"], { run, log: () => {}, warn: () => {} }), /there is no owner status: .*GitHub/);
+  assert.deepEqual(calls, []);
 });
 
 test("a NAME=value argument after the command word is an argument, not an assignment (#152)", () => {
@@ -889,17 +887,15 @@ test("a quoted heredoc written by tee or cat to a file a later command runs is d
   denied('echo "node scripts/lanes/post-review.mjs owner --pr 16" > script.sh; bash script.sh');
 });
 
-test("post-review.mjs itself refuses the owner post a written script would make, without a fresh grant (#193, #81)", async () => {
+test("post-review.mjs itself refuses the owner post a written script would make (#193, #614)", async () => {
   const { main } = await import("./post-review.mjs");
-  withDir((dir) => {
-    const calls = [];
-    const run = (...args) => {
-      calls.push(args);
-      throw new Error("gh must not be called without a grant");
-    };
-    assert.throws(() => main(["owner", "success", "x", "--pr", "16"], { run, log: () => {}, warn: () => {}, grantDir: dir, now: NOW }), /no fresh \/approve 16 grant/);
-    assert.deepEqual(calls, []);
-  });
+  const calls = [];
+  const run = (...args) => {
+    calls.push(args);
+    throw new Error("gh must not be called for the owner post");
+  };
+  assert.throws(() => main(["owner", "success", "x", "--pr", "16"], { run, log: () => {}, warn: () => {} }), /there is no owner status: .*GitHub/);
+  assert.deepEqual(calls, []);
 });
 
 // --- #119: powershell, pwsh, cmd and fish run a string as a command too --------------------------------------------
@@ -1303,34 +1299,35 @@ test("#275 criterion 2: a new /approve list replaces the session's earlier grant
 }));
 
 test("#275 criterion 3: two PRs approved in one prompt are each allowed once; a PR not listed is refused", async () => {
-  const { requireOwnerGrant, claimGrant } = await import("./post-review.mjs");
+  // post-review.mjs no longer consumes grants (#614); the grant reader itself is still approve-guard's.
+  const { findFreshGrant } = await import("./approve-guard.mjs");
   withDir((dir) => {
     submit(dir, "/approve 16 17");
     assert.equal(hookDecision(dir, 16), "allow");
     assert.equal(hookDecision(dir, 17), "allow");
     assert.equal(hookDecision(dir, 18), "deny");
-    assert.throws(() => requireOwnerGrant("18", dir, NOW + 1000), /no fresh \/approve 18 grant/);
-    // post-review claims and then deletes PR 16's grant; PR 17's is untouched and still works.
-    const file16 = requireOwnerGrant("16", dir, NOW + 1000);
+    assert.equal(findFreshGrant(dir, 18, NOW + 1000), null);
+    // Deleting PR 16's grant leaves PR 17's untouched and still working.
+    const file16 = findFreshGrant(dir, 16, NOW + 1000);
     assert.equal(file16, join(dir, "s1.16.json"));
-    rmSync(claimGrant(file16, "16"));
+    rmSync(file16);
     assert.equal(hookDecision(dir, 16), "deny");
-    assert.throws(() => requireOwnerGrant("16", dir, NOW + 1000), /no fresh \/approve 16 grant/);
+    assert.equal(findFreshGrant(dir, 16, NOW + 1000), null);
     assert.equal(hookDecision(dir, 17), "allow");
-    assert.equal(requireOwnerGrant("17", dir, NOW + 1000), join(dir, "s1.17.json"));
+    assert.equal(findFreshGrant(dir, 17, NOW + 1000), join(dir, "s1.17.json"));
     // Each grant still lapses after its TTL.
     assert.equal(hookDecision(dir, 17, NOW + GRANT_TTL_MS), "deny");
-    assert.throws(() => requireOwnerGrant("17", dir, NOW + GRANT_TTL_MS), /no fresh \/approve 17 grant/);
+    assert.equal(findFreshGrant(dir, 17, NOW + GRANT_TTL_MS), null);
   });
 });
 
 test("#275 criterion 3: a stale grant among fresh ones is refused, the fresh ones allowed", async () => {
-  const { requireOwnerGrant } = await import("./post-review.mjs");
+  const { findFreshGrant } = await import("./approve-guard.mjs");
   withDir((dir) => {
     submit(dir, "/approve 16 17");
     writeFileSync(join(dir, "s1.18.json"), JSON.stringify(grant({ pr: 18, at: new Date(NOW - GRANT_TTL_MS).toISOString() })));
     assert.equal(hookDecision(dir, 18, NOW), "deny");
-    assert.throws(() => requireOwnerGrant("18", dir, NOW), /no fresh \/approve 18 grant/);
+    assert.equal(findFreshGrant(dir, 18, NOW), null);
     assert.equal(hookDecision(dir, 16, NOW), "allow");
     assert.equal(hookDecision(dir, 17, NOW), "allow");
   });

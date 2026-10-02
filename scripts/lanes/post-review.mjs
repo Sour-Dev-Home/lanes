@@ -2,17 +2,16 @@
 // Posts a review result as the commit status review/<reviewer> on a PR's current head.
 // A reviewer's success or failure is a JSON verdict (the reviewer contract), validated first:
 //   node scripts/lanes/post-review.mjs --file .lanes/verdicts/test-hunter.json [--pr N]
-// Free text only for the owner's approval and for a reviewer the tier does not need:
-//   node scripts/lanes/post-review.mjs owner success "approved by owner" --pr N
-//     (the approve guard allows this only from /approve <N>, and this script itself refuses it without a fresh,
-//     unused /approve <N> grant, which it consumes once the status is posted)
+// Free text only for a reviewer the tier does not need:
 //   node scripts/lanes/post-review.mjs ui-reviewer skipped "no visible change"
+// The owner's approval is a native code-owner review in GitHub (ADR 0021, 0025); there is no owner status to post.
 import { execFileSync } from "node:child_process";
-import { linkSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { basename, join } from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { configuredReviewers, findFreshGrant, grantDir, isFreshGrant, profileForGrantDir, readGrant, TEAM_REASON } from "./approve-guard.mjs";
+import { configuredReviewers, TEAM_REASON } from "./approve-guard.mjs";
 import { parseIssueForm, parsePending, parsePrBody, REVIEWERS, reviewContext } from "./lib.mjs";
+
+const OWNER_REASON = TEAM_REASON;
 
 const RESULTS = ["pass", "fail", "not-applicable"];
 const SEVERITIES = ["critical", "important", "minor"];
@@ -21,9 +20,10 @@ const MUST_COVER = ["test-hunter", "ui-reviewer"];
 
 /** `names` is the set a session may post (configuredReviewers of the main checkout's config, #463); `owner` is never in it. */
 export function buildStatus(reviewer, verdict, summary, names = REVIEWERS) {
-  if (![...names.filter((n) => n !== "owner"), "owner"].includes(reviewer)) throw new Error(`reviewer must be one of ${[...names.filter((n) => n !== "owner"), "owner"].join(", ")}`);
-  if (reviewer === "owner" && verdict !== "success") throw new Error("the owner verdict is only 'success' (approve); to reject, comment on the PR");
-  if (reviewer !== "owner" && verdict !== "skipped") throw new Error("a reviewer posts success or failure as a JSON verdict: --file <verdict.json>");
+  if (reviewer === "owner") throw new Error(`there is no owner status: ${OWNER_REASON}`);
+  const allowed = names.filter((n) => n !== "owner");
+  if (!allowed.includes(reviewer)) throw new Error(`reviewer must be one of ${allowed.join(", ")}`);
+  if (verdict !== "skipped") throw new Error("a reviewer posts success or failure as a JSON verdict: --file <verdict.json>");
   const text = String(summary ?? "").trim();
   if (!text) throw new Error("summary is required");
   return {
@@ -190,98 +190,30 @@ export function parseArgs(argv) {
   return out;
 }
 
-/** M5: refuses a stale `--sha` (a push landed between /approve reading the head and posting the status). */
+/** M5: refuses a stale `--sha` (a push landed between reading the head and posting the status). */
 export function checkSha(sha, headRefOid) {
   if (sha === undefined) return null;
   if (sha.toLowerCase() !== String(headRefOid ?? "").toLowerCase()) {
-    return `refusing: --sha ${sha} does not match the PR's current head ${headRefOid} (a new commit landed; re-run /approve)`;
+    return `refusing: --sha ${sha} does not match the PR's current head ${headRefOid} (a new commit landed; re-run the reviewer)`;
   }
   return null;
-}
-
-/**
- * #81: the owner's approval needs an unused, unexpired `/approve N` grant for exactly that PR, however the command was
- * built. Returns the grant file to consume once the status is posted; throws when there is none.
- */
-export function requireOwnerGrant(prArg, dir, now) {
-  if (prArg === undefined || !/^[1-9][0-9]{0,8}$/.test(prArg)) throw new Error("the owner's approval needs --pr N (the PR the /approve grant names)");
-  const file = findFreshGrant(dir, Number(prArg), now);
-  if (file !== null) return file;
-  const claimed = claimedGrant(dir, Number(prArg), now);
-  if (claimed !== null) throw new Error(claimedMessage(prArg, claimed));
-  throw new Error(`no fresh /approve ${prArg} grant in ${dir}: run /approve ${prArg} in the owner's session`);
-}
-
-const CLAIMED_SUFFIX = ".claimed";
-const claimedMessage = (prArg, file) => `refusing: the /approve ${prArg} grant ${basename(file)} is already claimed by another run`;
-
-/** The grant file (without the marker suffix) whose claimed marker in `dir` holds a fresh grant for `pr`, or null. */
-function claimedGrant(dir, pr, now) {
-  let names;
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return null;
-  }
-  const marker = names.sort().find((name) => name.endsWith(`.json${CLAIMED_SUFFIX}`) && isFreshGrant(readGrant(join(dir, name)), pr, now));
-  return marker === undefined ? null : join(dir, marker.slice(0, -CLAIMED_SUFFIX.length));
-}
-
-/**
- * #180: claims a grant for this run by renaming it to its marker, so a second run racing on the same grant cannot
- * spend it too. A rename that fails because the grant is gone means another run claimed it first: refuse. Returns
- * the marker's path.
- */
-export function claimGrant(file, prArg) {
-  const marker = `${file}${CLAIMED_SUFFIX}`;
-  try {
-    renameSync(file, marker);
-  } catch (e) {
-    if (e.code === "ENOENT") throw new Error(claimedMessage(prArg, file));
-    throw e;
-  }
-  return marker;
-}
-
-/** Puts a claimed grant back for a retry, unless a newer grant has been written in its place meanwhile. */
-function restoreGrant(marker) {
-  // A hard link fails when the name is taken, so a newer grant is never overwritten (no check-then-rename window).
-  try {
-    linkSync(marker, marker.slice(0, -CLAIMED_SUFFIX.length));
-  } catch (e) {
-    if (e.code !== "EEXIST") throw e;
-  }
-  rmSync(marker, { force: true });
 }
 
 /**
  * Runs the CLI. `run` stands in for `gh` in tests. With `--file` the verdict comment is posted before the status: the
  * status event re-runs lanes/gate, which must find the comment then (#42). A failed comment throws before any status.
  */
-export function main(argv = process.argv.slice(2), { run = gh, log = console.log, warn = console.warn, grantDir: dir = grantDir(), now = Date.now(), reviewers = configuredReviewers(), profile = profileForGrantDir(dir) } = {}) {
+export function main(argv = process.argv.slice(2), { run = gh, log = console.log, warn = console.warn, reviewers = configuredReviewers() } = {}) {
   const parsed = parseArgs(argv);
-  // ADR 0021 part 3: under team the owner approves in GitHub; nothing is claimed or posted (#560).
-  if (!parsed.file && parsed.positional[0] === "owner" && profile === "team") throw new Error(TEAM_REASON);
-  // #180: the grant is claimed before any gh call, so two racing runs cannot both spend it.
-  const marker = !parsed.file && parsed.positional[0] === "owner" ? claimGrant(requireOwnerGrant(parsed.pr, dir, now), parsed.pr) : null;
-  let pr;
-  let status;
-  try {
-    ({ pr, status } = post(parsed, marker !== null, { run, warn, reviewers }));
-  } catch (e) {
-    // The status was not written: give the grant back for a retry.
-    if (marker) restoreGrant(marker);
-    throw e;
-  }
-  // Consumed only after the post succeeds.
-  if (marker) rmSync(marker, { force: true });
+  // Refused before any gh call: nothing is read or posted.
+  if (!parsed.file && parsed.positional[0] === "owner") throw new Error(`there is no owner status: ${OWNER_REASON}`);
+  const { pr, status } = post(parsed, { run, warn, reviewers });
   log(`${status.context}=${status.state} on #${pr.number} at ${pr.headRefOid.slice(0, 7)}`);
 }
 
 /** Everything up to and including the status post. Throws, with nothing posted as the status, on any failure. */
-function post(parsed, owner, { run, warn, reviewers }) {
+function post(parsed, { run, warn, reviewers }) {
   const pr = JSON.parse(run(["pr", "view", ...(parsed.pr ? [parsed.pr] : []), "--json", "number,headRefOid,body"]));
-  if (owner && String(pr.number) !== parsed.pr) throw new Error(`refusing: gh resolved --pr ${parsed.pr} to #${pr.number}`);
   const staleSha = checkSha(parsed.sha, pr.headRefOid);
   if (staleSha) throw new Error(staleSha);
   const repo = run(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).trim();

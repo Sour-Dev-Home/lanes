@@ -78,11 +78,12 @@ test("a reviewed sensitive quick change merges unattended (ADR 0002)", () => {
   assert.deepEqual(run({ files, statuses: reviews }), { state: "success", description: "unattended-eligible (tier:quick), reviews in", stage: "ready" });
 });
 
-test("an owner-only quick change waits on the owner, then passes with review/owner", () => {
+test("an owner-only quick change waits for the code-owner review, then passes with it", () => {
   const files = ["scripts/lanes/gate.mjs"];
   const reviews = [st("review/test-hunter")];
-  assert.deepEqual(run({ files, statuses: reviews }), { state: "pending", description: "waiting on owner (/approve) (owner-only path)", stage: "owner" });
-  assert.equal(run({ files, statuses: [...reviews, st("review/owner")] }).state, "success");
+  assert.deepEqual(run({ files, statuses: reviews }), { state: "pending", description: "waiting for a code-owner review in GitHub (owner-only path)", stage: "owner" });
+  assert.equal(run({ files, statuses: [...reviews, st("review/owner")] }).state, "pending");
+  assert.equal(run({ files, statuses: reviews, nativeApproval: { approved: true, by: "leo" } }).state, "success");
 });
 
 test("a skip PR on a sensitive path still fails", () => {
@@ -114,7 +115,7 @@ const full = (over) =>
 const waits = (d, reason) => {
   assert.equal(d.state, "pending");
   assert.equal(d.stage, "owner");
-  assert.equal(d.description, `waiting on owner (/approve) (${reason})`);
+  assert.equal(d.description, `waiting for a code-owner review in GitHub (${reason})`);
 };
 
 test("a clean full PR passes unattended", () => {
@@ -222,9 +223,10 @@ test("full: a trusted success status is still required even with a verdict comme
   assert.equal(full({ statuses: [] }).stage, "review");
 });
 
-test("full: review/owner success still passes a blocked PR", () => {
-  const d = full({ verdicts: [], statuses: [st("review/test-hunter"), st("review/owner")] });
-  assert.deepEqual(d, { state: "success", description: "approved by owner", stage: "ready" });
+test("full: the native approval passes a blocked PR; a review/owner status does not", () => {
+  const statuses = [st("review/test-hunter"), st("review/owner")];
+  assert.equal(full({ verdicts: [], statuses }).state, "pending");
+  assert.deepEqual(full({ verdicts: [], statuses, nativeApproval: { approved: true, by: "leo" } }), { state: "success", description: "approved by code owner @leo", stage: "ready" });
 });
 
 test("full: a blocked PR is never a failure", () => {
@@ -236,7 +238,7 @@ test("quick and skip PRs that need the owner wait", () => {
   const prBody = body().replace("## Needs the owner\nnothing", "## Needs the owner\npick a name");
   waits(run({ prBody, statuses: [st("review/test-hunter")] }), "needs the owner");
   waits(run({ prBody, issueLabels: ["tier:skip", "ready"], files: ["docs/a.md"] }), "needs the owner");
-  assert.equal(run({ prBody, statuses: [st("review/test-hunter"), st("review/owner")] }).state, "success");
+  assert.equal(run({ prBody, statuses: [st("review/test-hunter")], nativeApproval: { approved: true, by: "leo" } }).state, "success");
 });
 
 test("gateDecision does not mutate its verdicts input", () => {
@@ -333,9 +335,9 @@ test("gateDecision fails on duplicate PR template sections", () => {
 
 // ---- #48 / ADR 0002: owner-only paths, against the repo's real lanes.config.json ----
 
-// The repository config is on the team profile (ADR 0019); these cases pin the solo owner stage (ADR 0002).
+// The repository config is on the team profile (ADR 0019, 0025): the owner stage is a native code-owner review.
 const realTeam = loadConfig();
-const real = { ...realTeam, identity: { profile: "solo" } };
+const real = realTeam;
 const clean = (names) => ({ statuses: names.map((n) => st(`review/${n}`)), verdicts: names.map((n) => verdict(n)) });
 const onReal = (tier, files, reviewers, over = {}) =>
   run({ config: real, issueLabels: [`tier:${tier}`, "ready"], headSha: HEAD, files, ...clean(reviewers), ...over });
@@ -372,13 +374,7 @@ test("real config: a sensitive full PR whose security verdict has an unfixed imp
   waits(onReal("full", ["scripts/lanes/status.mjs"], ["test-hunter", "security-reviewer"], { verdicts }), "unfixed important finding from security-reviewer");
 });
 
-test("real config: review/owner success still passes anything, owner-only included", () => {
-  const withOwner = (reviewers) => ({ statuses: [...reviewers.map((n) => st(`review/${n}`)), st("review/owner")], verdicts: [] });
-  assert.deepEqual(onReal("full", ["scripts/lanes/gate.mjs", "lanes.config.json"], [], withOwner(["test-hunter", "security-reviewer", "architecture-advisor"])), { state: "success", description: "approved by owner", stage: "ready" });
-  assert.equal(onReal("skip", ["docs/adr/0003-x.md"], [], withOwner([])).state, "success");
-});
-
-test("real config under the team profile: an owner-only path waits for a native code-owner review (ADR 0021)", () => {
+test("real config: an owner-only path waits for a native code-owner review (ADR 0021)", () => {
   assert.equal(realTeam.identity?.profile, "team");
   const input = { config: realTeam, ...clean(["test-hunter", "security-reviewer"]), nativeApproval: { approved: false, by: null } };
   const d = onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"], input);
@@ -418,11 +414,14 @@ test("team: review/owner success with nativeApproval null or missing is pending 
   }
 });
 
-test("solo: nativeApproval is ignored, so the decision is unchanged", () => {
-  const files = ["scripts/lanes/gate.mjs"];
-  const d = onReal("full", files, ["test-hunter", "security-reviewer"], { nativeApproval: { approved: true, by: "leo" } });
-  assert.equal(d.state, "pending");
-  assert.match(d.description, /waiting on owner \(\/approve\)/);
+test("edge: no owner reason ever says /approve, and a review/owner success never passes without the native approval", () => {
+  const prBody = body().replace("## Needs the owner\nnothing", "## Needs the owner\npick a name");
+  for (const over of [{ files: ["scripts/lanes/gate.mjs"] }, { prBody, files: ["scripts/lanes/status.mjs"] }]) {
+    const d = onReal("full", over.files, ["test-hunter", "security-reviewer"], { ...over, statuses: [...clean(["test-hunter", "security-reviewer"]).statuses, st("review/owner")] });
+    assert.equal(d.state, "pending");
+    assert.equal(d.stage, "owner");
+    assert.doesNotMatch(d.description, /\/approve|approved by owner/);
+  }
 });
 
 test("owner-only is reported before the other owner reasons", () => {
@@ -519,7 +518,7 @@ test("tier skip on a governed file is unchanged: no reviewers", () => {
 
 test("a tier:skip PR adding an ADR still waits on the owner (ADR 0002 owner-only path)", () => {
   const d = onReal("skip", ["docs/adr/0003-new.md"], [], { adrs: [adrOf(1, ["docs/adr/"])] });
-  assert.deepEqual(d, { state: "pending", description: "waiting on owner (/approve) (owner-only path)", stage: "owner" });
+  assert.deepEqual(d, { state: "pending", description: "waiting for a code-owner review in GitHub (owner-only path)", stage: "owner" });
 });
 
 test("edge: without adrs the gate decides as before", () => {
@@ -615,23 +614,23 @@ test("a reused failure is never turned into a pass, as a status or as a verdict 
   }
   const comment = fullBoth({ verdicts: [verdict("test-hunter"), verdict("security-reviewer", { sha: OLD, result: "failure" }), verdict("architecture-advisor", { sha: OLD })] });
   assert.equal(comment.state, "pending");
-  assert.equal(comment.description, `waiting on owner (/approve) (verdict from security-reviewer is not success)${NOTE}`);
+  assert.equal(comment.description, `waiting for a code-owner review in GitHub (verdict from security-reviewer is not success)${NOTE}`);
   const finding = { severity: "important", file: "a", line: 1, summary: "s", fixed: false };
   const unfixed = fullBoth({ verdicts: [verdict("test-hunter"), verdict("security-reviewer", { sha: OLD }), verdict("architecture-advisor", { sha: OLD, findings: [finding] })] });
-  assert.equal(unfixed.description, `waiting on owner (/approve) (unfixed important finding from architecture-advisor)${NOTE}`);
+  assert.equal(unfixed.description, `waiting for a code-owner review in GitHub (unfixed important finding from architecture-advisor)${NOTE}`);
 });
 
 test("a reused status brings along only its own reviewer's verdict for the reused commit", () => {
   // The security-reviewer's verdict at OLD does not stand in for the architecture-advisor's, nor the test-hunter's.
   const d = fullBoth({ verdicts: [verdict("test-hunter"), verdict("security-reviewer", { sha: OLD }), verdict("architecture-advisor", { sha: "c".repeat(40) })] });
-  assert.equal(d.description, `waiting on owner (/approve) (no verdict for head from architecture-advisor)${NOTE}`);
+  assert.equal(d.description, `waiting for a code-owner review in GitHub (no verdict for head from architecture-advisor)${NOTE}`);
   const hunter = fullBoth({ verdicts: [verdict("test-hunter", { sha: OLD }), verdict("security-reviewer", { sha: OLD }), verdict("architecture-advisor", { sha: OLD })] });
   assert.match(hunter.description, /no verdict for head from test-hunter/);
 });
 
 test("review/owner is never reused, nor the ui-reviewer", () => {
   const owner = run({ files: ["scripts/lanes/gate.mjs"], statuses: [st("review/test-hunter")], reused: [{ sha: OLD, status: st("review/owner") }] });
-  assert.equal(owner.description, "waiting on owner (/approve) (owner-only path)");
+  assert.equal(owner.description, "waiting for a code-owner review in GitHub (owner-only path)");
   const ui = run({ files: ["frontend/a.tsx"], statuses: [st("review/test-hunter")], reused: [{ sha: OLD, status: st("review/ui-reviewer") }] });
   assert.equal(ui.description, "waiting for review/ui-reviewer");
 });

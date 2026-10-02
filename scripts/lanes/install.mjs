@@ -80,7 +80,6 @@ export const MANIFEST = [
   "scripts/lanes/identity-check.mjs",
   "scripts/lanes/app-setup.mjs",
   "scripts/lanes/handover.mjs",
-  "scripts/lanes/owner-diff.mjs",
   "scripts/lanes/pick.mjs",
   "scripts/lanes/paths.mjs",
   "scripts/lanes/cleanup.mjs",

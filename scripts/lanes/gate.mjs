@@ -32,7 +32,6 @@ import {
   trustedStatuses,
 } from "./lib.mjs";
 import { parseBlockedBy, readBlockerReport } from "./blockers.mjs";
-import { classifyOwnerDiff, OWNER_DIFF_FILES } from "./owner-diff.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -193,30 +192,7 @@ function pendingBlobHash(api, repo, path, ref) {
 }
 
 /**
- * #493, ADR 0002: the owner's approval on an earlier commit of PR `number`, as `{ sha, status, same }` for
- * `gateDecision`'s `ownerCarry`, or null when there is none to consider. Walks as `reusableReviews` does to the newest
- * earlier commit with a trusted review/owner status; `same` is whether that commit's own diff has the head's
- * `diffFingerprint`. Nothing else is checked between the two: an approval covers byte-identical approved code only, so
- * the reviewers' own inputs (their briefs, checklists, ADRs) do not matter to it. A status that is not a success, any
- * API error or an empty diff means null (a diff that cannot be compared is never `same`).
- */
-export function carriedOwnerApproval(api, repo, number, pr, config = undefined) {
-  const w = reviewWalk(api, repo, number, pr, config);
-  if (w === null) return null;
-  const context = reviewContext("owner");
-  try {
-    const sha = w.walk.find((s) => w.statusesAt(s).has(context));
-    if (sha === undefined) return null;
-    const status = w.statusesAt(sha).get(context);
-    if (status.state !== "success") return null;
-    return { sha, status, same: w.ownDiff(sha) === w.ownDiff(w.head) };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The lookups `reusableReviews` and `carriedOwnerApproval` share, or null when they cannot run: the head, each
+ * The lookups `reusableReviews` uses, or null when they cannot run: the head, each
  * commit's own diff fingerprint (three-dot compare against the base branch), the files changed since a commit, a
  * commit's trusted statuses, and the PR's newest `REUSE_WALK` commits before the head, newest first.
  */
@@ -256,31 +232,6 @@ function reviewWalk(api, repo, number, pr, config = undefined) {
     return null;
   }
   return { head, ownDiff, rawDiff, changedSince, statusesAt, walk };
-}
-
-/**
- * #381, ADR 0015: owner-diff.mjs's verdict on PR `pr`'s changes, for `gateDecision`'s `ownerDiff`. Only when every
- * changed file is one of `OWNER_DIFF_FILES` does it fetch those files raw at the PR's base and head commits and classify
- * them; otherwise it fetches nothing and returns null. Fails closed: a malformed commit SHA or any fetch failure (a file
- * missing at base included) is "needs-owner".
- */
-export function ownerDiffFor(api, repo, pr, files) {
-  if (!Array.isArray(files) || files.length === 0 || !files.every((f) => OWNER_DIFF_FILES.includes(f))) return null;
-  const sides = { base: pr?.base?.sha, head: pr?.head?.sha };
-  if (!SHA.test(sides.base ?? "") || !SHA.test(sides.head ?? "")) return "needs-owner";
-  // Paths come from OWNER_DIFF_FILES, never from the PR, so they are safe in the URL as they are.
-  const changed = OWNER_DIFF_FILES.filter((f) => files.includes(f));
-  const contents = { base: {}, head: {} };
-  try {
-    for (const [side, sha] of Object.entries(sides)) {
-      for (const file of changed) {
-        contents[side][file] = api([`repos/${repo}/contents/${file}?ref=${sha}`, "-H", "Accept: application/vnd.github.raw"]);
-      }
-    }
-  } catch {
-    return "needs-owner";
-  }
-  return classifyOwnerDiff({ files: changed, base: contents.base, head: contents.head }).verdict;
 }
 
 /**
@@ -350,12 +301,10 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   const candidates = reusableReviewers({ issueLabels, files, statuses, config, adrs, interfaceContract });
   const pendingBlocked = new Map();
   const reused = candidates.length > 0 ? reusableReviews(api, repo, number, pr, candidates, { files, adrs, config, blocked: pendingBlocked }) : [];
-  // ADR 0021: under team the owner stage is a native code-owner review, read live here so a merge_group run re-reads it
-  // against the queued head. Under solo nothing is read and the decision is unchanged. Team never passes null.
-  const team = config.identity?.profile === "team";
+  // ADR 0021, 0025: the owner stage is a native code-owner review, read live here so a merge_group run re-reads it
+  // against the queued head.
   const inputs = {
-    ...(team ? { nativeApproval: readNativeApproval(api, repo, { number, user: pr.user, head: pr.head }, config) } : {}),
-    prNumber: number,
+    nativeApproval: readNativeApproval(api, repo, { number, user: pr.user, head: pr.head }, config),
     prBody: pr.body,
     issueLabels,
     issueState,
@@ -371,19 +320,11 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     interfaceContract,
     reused,
     blockers,
-    ownerDiff: ownerDiffFor(api, repo, pr, files),
   };
   let decision = gateDecision(inputs);
   // ADR 0023 part 3: a review refused for a pending workflow file names that file's reason instead of the bare wait.
   const waiting = decision.state === "pending" && decision.stage === "review" ? /^waiting for review\/(\S+)$/.exec(decision.description) : null;
   if (waiting && pendingBlocked.has(waiting[1])) decision = { ...decision, description: `${decision.description}: ${pendingBlocked.get(waiting[1])}` };
-  // #493: an earlier owner approval is only looked for when the gate waits on the owner and the head has no trusted
-  // review/owner status of its own; every other outcome (a reviewer still owed included) is final without it.
-  // Under team there is no review/owner status to carry: the native review decides.
-  if (!team && decision.stage === "owner" && !latestByContext(trustedStatuses(statuses, config.identity, reviewerNames(config))).has(reviewContext("owner"))) {
-    const ownerCarry = carriedOwnerApproval(api, repo, number, pr, config);
-    if (ownerCarry !== null) decision = gateDecision({ ...inputs, ownerCarry });
-  }
   return { pr, decision };
 }
 
@@ -430,33 +371,6 @@ export function reevaluateBlocked(api, repo, closed, config, adrs = []) {
     out.push(evaluatePr(api, repo, pr.number, config, adrs));
   }
   return out;
-}
-
-const OWNER_CONTEXT = reviewContext("owner");
-// The login GITHUB_TOKEN comments as: only its markers count, so nobody else can pre-empt the notice.
-const GATE_BOT = "github-actions[bot]";
-
-/**
- * #82 (ADR 0004): comments on PR `number` that an owner approval was recorded for `sha`, so the owner hears of every
- * approval whatever route posted it. Skips when the gate already left its marker for that SHA. Returns whether it
- * commented. A comment list that cannot be read throws rather than risk a missed or doubled notice.
- */
-export function noteOwnerApproval(api, repo, number, sha, now = new Date()) {
-  const marker = `<!-- lanes:owner-approval ${sha} -->`;
-  const lines = api([`repos/${repo}/issues/${number}/comments`, "--paginate", "--jq", ".[] | {login: .user.login, body} | @json"]).split("\n").filter(Boolean);
-  for (const line of lines) {
-    let comment;
-    try {
-      comment = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (comment?.login === GATE_BOT && typeof comment.body === "string" && comment.body.includes(marker)) return false;
-  }
-  const at = `${now.toISOString().slice(0, 16).replace("T", " ")} UTC`;
-  const text = `Owner approval recorded for ${sha.slice(0, 7)} at ${at}. If you didn't approve this, dismiss the ${OWNER_CONTEXT} status and report it.\n\n${marker}`;
-  api([`repos/${repo}/issues/${number}/comments`, "-f", `body=${text}`]);
-  return true;
 }
 
 export function evaluatePr(api, repo, number, config, adrs = []) {
@@ -527,21 +441,10 @@ function decide(env, api) {
     case "status": {
       // Intentionally duplicates the workflow's job-level if (defence in depth for manual runs).
       if (env.STATUS_CONTEXT === GATE_CONTEXT || !SHA.test(env.STATUS_SHA ?? "")) return;
-      const ownerApproval = env.STATUS_CONTEXT === OWNER_CONTEXT && env.STATUS_STATE === "success";
-      // A failed notice must not stop the gate re-evaluating; it fails the run once every PR has been decided.
-      const failures = [];
       for (const pr of JSON.parse(api([`repos/${repo}/commits/${env.STATUS_SHA}/pulls`]))) {
         if (pr.state !== "open" || pr.head?.sha !== env.STATUS_SHA) continue;
-        if (ownerApproval) {
-          try {
-            noteOwnerApproval(api, repo, pr.number, env.STATUS_SHA);
-          } catch (e) {
-            failures.push(`#${pr.number}: ${e.message}`);
-          }
-        }
         console.log(JSON.stringify(evaluatePr(api, repo, pr.number, config, adrs)));
       }
-      if (failures.length > 0) throw new Error(`owner approval comment failed on ${failures.join("; ")}`);
       return;
     }
     // ADR 0021: the review ping workflow completed. Default-branch code, like every trigger here. The PR comes from the
