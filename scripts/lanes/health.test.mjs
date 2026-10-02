@@ -307,7 +307,7 @@ test("gatherInputs shapes the gh replies into evaluate's inputs", async () => {
     return args.includes("merge_group") ? [] : [{ name: "verify", headSha: "ab", conclusion: "success", updatedAt: "t" }];
   };
   const r = gatherInputs(gh, { identity });
-  assert.deepEqual(r.prs, [{ number: 5, gateState: "SUCCESS", gateSince: Date.parse("2026-10-02T10:00:00Z"), gateDescription: undefined, url: "https://github.com/o/r/pull/5", approvalStale: true }, { number: 6, gateState: null, gateSince: undefined, gateDescription: undefined }]);
+  assert.deepEqual(r.prs, [{ number: 5, gateState: "SUCCESS", gateSince: Date.parse("2026-10-02T10:00:00Z"), gateDescription: undefined, url: "https://github.com/o/r/pull/5", approved: true, approvalStale: true }, { number: 6, gateState: null, gateSince: undefined, gateDescription: undefined }]);
   assert.equal(r.repoUrl, "https://github.com/o/r");
   assert.equal(r.readyCount, 1);
   assert.equal(r.inFlightCount, 4);
@@ -386,12 +386,27 @@ test("approved-stuck comment gives the reason: stale approval, not queued, in th
   assert.match(q, /in the merge queue but has not merged/);
 });
 
-test("approved-stuck with a pending gate quotes its reason on one line", () => {
-  const p = { number: 3, gateState: "SUCCESS", gateSince: NOW - 40 * MIN, gateDescription: "unused" };
-  const [stuck] = evaluate(base({ prs: [p] }), NOW);
-  assert.equal(stuck.kind, "approved-stuck");
-  const [pending] = evaluate(base({ prs: [{ ...p, gateState: "PENDING" }] }), NOW);
-  assert.equal(pending, undefined);
+test("approved-stuck with a pending gate quotes its reason on one line", async () => {
+  const pr = (extra) => ({ number: 3, gateState: "PENDING", gateSince: NOW - 40 * MIN, gateDescription: `waiting for review/test-hunter\n@x${CTRL}`, ...extra });
+  const [c] = await commentFor(base({ prs: [pr({ approved: true })] }), undefined, /is approved/);
+  assert.match(c, /Cause: the gate is pending: waiting for review\/test-hunter _x$/m);
+  assert.match(c, /Fix: wait for the gate/);
+  assert.deepEqual(keys(base({ prs: [pr({})] })), []);
+  assert.deepEqual(keys(base({ prs: [pr({ approved: true, gateSince: NOW - 29 * MIN })] })), []);
+});
+
+test("failingTests reads a long hostile log in bounded time, and caps the line length it reads", () => {
+  const started = Date.now();
+  const hostile = `✖ ${" ".repeat(80_000)}x\nnot ok 1 - ${" ".repeat(80_000)}y\n✖ real failure (1ms)`;
+  assert.deepEqual(failingTests(hostile), ["real failure"]);
+  assert.ok(Date.now() - started < 1000);
+  assert.equal(failingTests(`✖ ${"n".repeat(1000)}`)[0].length, 120);
+  const late = `${"noise\n".repeat(200_000)}✖ too late (1ms)`;
+  assert.deepEqual(failingTests(late), []);
+});
+
+test("oneLine breaks markdown links and bare URLs in quoted text", () => {
+  assert.equal(oneLine("[x](https://evil.example) www.evil.example"), "_x_(https:/ /evil.example) www_evil.example");
 });
 
 test("gate-failure comment carries the gate's description and the run link", async () => {
@@ -438,4 +453,14 @@ test("a comment holds no login: hostile quoted text is one line with no mention,
   assert.doesNotMatch(c.replace(/^(New problem|PR|Run|Runbook).*$/gm, ""), /#\d/);
   const [d] = await commentFor(withProblem({ reply: removedReply, prs: [{ number: 7, url: "http://evil.example/x" }] }), undefined, REMOVED);
   assert.doesNotMatch(d, /evil/);
+});
+
+test("caps: 120 characters and 10 names are kept whole, one past is cut", () => {
+  assert.equal(oneLine("a".repeat(120)), "a".repeat(120));
+  assert.equal(oneLine("a".repeat(121)), `${"a".repeat(119)}…`);
+  const lines = (n) => Array.from({ length: n }, (_, i) => `not ok ${i} - t${i}`).join("\n");
+  assert.equal(failingTests(lines(9)).length, 9);
+  assert.equal(failingTests(lines(10)).length, 10);
+  assert.equal(failingTests(lines(11)).length, 10);
+  assert.deepEqual(failingTests(`not ok 1 - ${"b".repeat(120)}`), ["b".repeat(120)]);
 });

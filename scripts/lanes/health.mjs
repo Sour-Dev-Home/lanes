@@ -50,18 +50,22 @@ export function readHeartbeat(comments, identity) {
 // Quoted text in a comment is one line without control characters, and carries no `@` (a mention) or `#` (a cross-link).
 const CONTROL = /[\x00-\x1f\x7f-\x9f]/g; // Unicode line separators are whitespace, so the next replace folds them
 export function oneLine(s, max = 120) {
-  const t = String(s ?? "").replace(CONTROL, " ").replace(/\s+/g, " ").trim().replace(/[@#`<>]/g, "_");
+  const t = String(s ?? "").replace(CONTROL, " ").replace(/\s+/g, " ").trim().replace(/[@#`<>[\]]/g, "_").replace(/:\/\//g, ":/ /").replace(/www\./gi, "www_");
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
 
 const httpsUrl = (u) => (typeof u === "string" && /^https:\/\/[^\s]+$/.test(u) ? u : undefined);
 const FAILED_TEST = /(?:^|\s)(?:not ok \d+ - |✖ )(.+?)(?:\s+\(\d+(?:\.\d+)?ms\))?\s*$/;
 const TEST_LIMIT = 10;
+const LINE_LIMIT = 400;
+const LOG_LINES = 200_000;
 
 // The names of up to 10 failing tests in a failed job's log (node:test's spec or TAP lines), each one line of at most 120 characters.
 export function failingTests(log) {
   const names = new Set();
-  for (const line of String(log ?? "").replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/)) {
+  // A log is untrusted and can be 64 MB: bound each line before the regex (quadratic on a long whitespace run) and the lines read.
+  for (const raw of String(log ?? "").split(/\r?\n/, LOG_LINES)) {
+    const line = raw.slice(0, LINE_LIMIT).replace(/\u001b\[[0-9;]*m/g, "");
     const name = oneLine(FAILED_TEST.exec(line)?.[1]);
     if (name && !/^failing tests:?$/i.test(name) && !/^# /.test(name)) names.add(name);
     if (names.size >= TEST_LIMIT) break;
@@ -130,7 +134,8 @@ export function evaluate(inputs, now) {
     });
   }
   for (const p of prs) {
-    if (p.gateState === "SUCCESS" && Number.isFinite(p.gateSince) && now - p.gateSince >= approvedStuckMinutes * 60_000) {
+    // An approved PR stays stuck when its gate is green but it has not merged, or when the gate stays pending after the approval.
+    if ((p.gateState === "SUCCESS" || (p.approved === true && p.gateState === "PENDING")) && Number.isFinite(p.gateSince) && now - p.gateSince >= approvedStuckMinutes * 60_000) {
       add(`approved-stuck:PR ${p.number}`, "approved-stuck", `PR ${p.number} is approved and its gate is green but it has not merged in ${approvedStuckMinutes} minutes`, {
         anchor: "approved-not-merged",
         pr: prLink(p.number),
@@ -309,7 +314,7 @@ export function gatherInputs(gh = ghJson, config = loadConfig()) {
   const details = new Map();
   for (const d of gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,url,headRefOid,latestReviews"]) ?? []) {
     const approved = (d.latestReviews ?? []).filter((r) => r?.state === "APPROVED").map((r) => r?.commit?.oid);
-    details.set(d.number, { url: d.url, approvalStale: approved.length > 0 && !approved.includes(d.headRefOid) });
+    details.set(d.number, { url: d.url, approved: approved.length > 0, approvalStale: approved.length > 0 && !approved.includes(d.headRefOid) });
   }
   const prs = (reply?.data?.repository?.pullRequests?.nodes ?? []).map((node) => {
     const status = node.commits?.nodes?.[0]?.commit?.status;
