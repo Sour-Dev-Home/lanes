@@ -22,6 +22,7 @@ and `vendor/agent-skills/references/security-checklist.md` differ, the sheet win
 Scripts that import `node:child_process` (each call site runs `gh`, `git`, `claude` or a notifier), one per line, sorted by path:
 
 - `scripts/lanes/affected-tests.mjs`
+- `scripts/lanes/app-setup.mjs` (`--workflows` runs `gh` through an argument array, never a shell; the App key goes to `gh secret set` on stdin only and is never written to disk, printed or logged; the environment is created only after a printed plan and a `y`)
 - `scripts/lanes/blockers.mjs`
 - `scripts/lanes/cleanup.mjs`
 - `scripts/lanes/consolidate.mjs`
