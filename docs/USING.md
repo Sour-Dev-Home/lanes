@@ -52,8 +52,10 @@
    oldest first, in each tick where one started waiting, stopped or changed its reason and in no other: each line has the
    PR's number, title, how long it has waited and what you must decide, and the block ends with one `/approve N M K`
    line (at most 10 numbers, the PRs waiting on `/approve`). The queue keeps working the rest. A failed launch is printed and that issue is not tried
-   again until you restart the queue. A GitHub read that fails is retried next tick; three in a row exit 1. It exits
-   0 after three idle ticks in a row (nothing in flight, nothing to launch); Ctrl-C stops it at any time. Each lane it
+   again until you restart the queue. A GitHub read that fails is retried after 1, 2, 4, 8 and then at most 15
+   minutes (one line names the delay; a success resets it), and never ends the queue. After three idle ticks in a row
+   (nothing in flight, nothing to launch) the tick lengthens from 3 to 15 minutes and the queue keeps polling, printing
+   nothing new; picked work returns it to 3 minutes (ADR 0026). Ctrl-C stops it at any time (exit 0). Each lane it
    launches gets the same detached reaper `/start` starts (ADR 0010, logged to `.lanes/reap/<N>.log`), so a lane that
    merges after the queue exits is still cleaned up; a reaper that fails to start prints one line and the queue goes on.
    **The queue works under the team profile** when you run it in a shell with `LANES_APP_KEY_FILE` set: it launches
@@ -61,11 +63,18 @@
    minted token, the settings file, `--strict-mcp-config`, the bot commit identity and the token refresher, and never
    your credentials. When that preparation fails (no `LANES_APP_KEY_FILE`, a mint failure, no bot user id) the queue
    prints `#N: launch failed: team profile: <reason>`, launches nothing for that issue and does not try it again.
-   **The queue stops itself after a lanes merge.** It records the commit its scripts came from at startup; each tick
-   it fetches `origin/main`, and when `scripts/lanes/` or `lanes.config.json` differ from that commit it launches
-   nothing and exits 3 with `lanes scripts changed since the queue started (<old>..<new>): git pull --ff-only, then
-   restart the queue`. Run that, then start the queue again (a running Node process never reloads its scripts, so
-   without this it would keep launching lanes with old guards). A failed fetch prints a line and launches nothing
+   **The queue restarts itself after a lanes merge (ADR 0026).** The command you type is a thin supervisor that runs
+   the queue as one child process (`LANES_QUEUE_CHILD=1`); never more than those two processes exist. The child records
+   the commit its scripts came from at startup; each tick it fetches `origin/main`, and when `scripts/lanes/` or
+   `lanes.config.json` differ from that commit it launches nothing and, if the branch is `main`, the checkout is clean,
+   `git pull --ff-only` succeeds and `HEAD` then equals `origin/main`, pulls and exits 10, and the supervisor starts
+   the next child. Each restart prints one line: `queue: lanes scripts changed (<old> -> <new>), pulled, restarting
+   (#N)`. Otherwise it stops and names the failed precondition: exit 3 for not on `main`, uncommitted changes or a
+   `HEAD` that is not `origin/main`; exit 4 when the pull cannot fast-forward. Fix the checkout, then start the queue
+   again. The other exits are 0 (Ctrl-C) and 2 (an argument, a bad `lanes.config.json`, or run inside Claude); exit 1
+   no longer exists. Every script the queue loads is an owner path, so a PR changing one waits for your code-owner
+   review in GitHub before the queue can restart into it. A change to the supervisor part itself takes effect at your
+   next manual start. A failed fetch prints a line and launches nothing
    that tick; the queue keeps running and tries again. The queue runs on your machine, so it stops when the machine
    sleeps; what to do about that and other stops is in [docs/OPERATIONS.md](OPERATIONS.md).
 3. **Watch with `/status`**: WAITING ON YOU, IN FLIGHT (each PR's stage), READY TO START, MERGED.

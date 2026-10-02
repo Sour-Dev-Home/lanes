@@ -29,13 +29,16 @@ no persistent state, global cap, cleanup each tick, `start.mjs` cleanup first).
 4. The queue exits when it has been idle for three ticks in a row: nothing in flight and nothing startable. Ctrl-C
    stops it at any time.
 
+   > Amended by [ADR 0026](0026-queue-sustains-itself.md): part 4 no longer holds. The queue does not exit when idle; it
+   > polls every 15 minutes after three idle ticks.
+
 ## Consequences
 
 - Planning or approving issues feeds a running queue with no extra step; overlap-skipped issues start on their own.
 - The queue can start any `ready` issue, not only ones the owner named; `ready` and the `lane-filed` hold are the
   only gates, as they already are for `/start --auto`.
 - The queue and `/start --auto` always agree on order, because both use `pickStartable`.
-- A queue left running idles out instead of polling forever; the owner restarts it after planning new work.
+- A queue left running idles out instead of polling forever; the owner restarts it after planning new work. (Superseded by [ADR 0026](0026-queue-sustains-itself.md): the queue now keeps polling.)
 
 ## Governs
 

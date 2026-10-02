@@ -1010,6 +1010,46 @@ function codeownersRegex(pattern) {
   return new RegExp(`${anchored ? "^" : "(^|/)"}${body}${dir ? "/" : "(/|$)"}`);
 }
 
+// ADR 0026 part 1: the queue holds the App key and re-executes what it pulls, so every file it loads is an owner path.
+// The closure is queue.mjs, every relative module it imports (static, re-exported or dynamic with a literal), and every
+// scripts/lanes script a file in it spawns (spelled `join(root, "scripts", "lanes", "x.mjs")`, as start.mjs does; a path
+// inside a message string is not a spawn), each with its .test.mjs file.
+export function queueClosure(entry = "scripts/lanes/queue.mjs") {
+  const seen = new Set();
+  const todo = [entry];
+  const refs = (text) => [
+    ...[...text.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)["'](\.\.?\/[^"']+\.mjs)["']/g)].map((m) => ["relative", m[1]]),
+    ...[...text.matchAll(/"scripts",\s*"lanes",\s*"([\w.-]+\.mjs)"/g)].map((m) => ["lanes", m[1]]),
+  ];
+  while (todo.length) {
+    const file = todo.pop();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const dir = file.slice(0, file.lastIndexOf("/"));
+    for (const [kind, ref] of refs(readFileSync(file, "utf8").replace(/^\s*\/\/.*$/gm, ""))) {
+      const next = kind === "lanes" ? `scripts/lanes/${ref}` : new URL(ref, `file:///${dir}/`).pathname.slice(1);
+      if (existsSync(next)) todo.push(next);
+    }
+  }
+  for (const file of [...seen]) if (!file.endsWith(".test.mjs") && existsSync(file.replace(/\.mjs$/, ".test.mjs"))) seen.add(file.replace(/\.mjs$/, ".test.mjs"));
+  return [...seen].sort();
+}
+
+test("every file in the queue's import and spawn closure is an owner path, with its test (ADR 0026)", () => {
+  const owner = JSON.parse(readFileSync("lanes.config.json", "utf8")).paths.owner.map((s) => new RegExp(s));
+  const closure = queueClosure();
+  for (const f of ["scripts/lanes/queue.mjs", "scripts/lanes/queue.test.mjs", "scripts/lanes/start.mjs", "scripts/lanes/reap.mjs", "scripts/lanes/lib.mjs"]) assert.ok(closure.includes(f), `the closure misses ${f}: the computation is broken`);
+  const uncovered = closure.filter((f) => !owner.some((r) => r.test(f)));
+  assert.deepEqual(uncovered, [], `queue.mjs loads these files but paths.owner does not match them: ${uncovered.join(", ")}`);
+});
+
+test("edge: queueClosure follows a literal dynamic import, a re-export and a spawned script path, and ignores comments", () => {
+  assert.ok(queueClosure().includes("scripts/lanes/cleanup.mjs"), "status.mjs's dynamic import of cleanup.mjs");
+  assert.ok(queueClosure().includes("scripts/lanes/lane-cost.mjs"), "start.mjs's re-export");
+  assert.ok(queueClosure().includes("scripts/lanes/reap.mjs"), "start.mjs's spawn of reap.mjs");
+  assert.ok(!queueClosure().includes("scripts/lanes/gate-decision.mjs"));
+});
+
 // ADR 0019 part 6: CODEOWNERS lists exactly the owner-only paths, so a native code-owner review covers what /approve does (#520).
 test("CODEOWNERS covers exactly the files paths.owner covers", () => {
   const entries = readFileSync(".github/CODEOWNERS", "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
