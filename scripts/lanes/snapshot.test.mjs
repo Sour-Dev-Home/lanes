@@ -620,3 +620,20 @@ test("buildSnapshot writes trends only when given them", () => {
   const trends = [{ week: "2026-W40", queueRemovals: 1, gateFailures: 0, flakes: 0, reviewRounds: 0 }];
   assert.deepEqual(build({ trends }).trends, trends);
 });
+
+test("edge: buildTrends window boundaries, oldest week's first instant in, one ms before out, now in, one ms after out", () => {
+  const at = (iso) => buildTrends({ now: TREND_NOW, weeks: 2, prs: [richPr({ queueRemoved: [iso] })] }).map((r) => r.queueRemovals);
+  assert.deepEqual(at("2026-09-21T00:00:00.000Z"), [1, 0]);
+  assert.deepEqual(at("2026-09-20T23:59:59.999Z"), [0, 0]);
+  assert.deepEqual(at("2026-10-02T12:00:00.000Z"), [0, 1]);
+  assert.deepEqual(at("2026-10-02T12:00:00.001Z"), [0, 0]);
+  assert.deepEqual(at("2026-09-28T00:00:00.000Z"), [0, 1]);
+  assert.deepEqual(at("2026-09-27T23:59:59.999Z"), [1, 0]);
+});
+
+test("edge: buildTrends counts only failure and error statuses, and no flakes from first attempts", () => {
+  const statuses = ["pending", "success", "failure", "error"].map((state) => ({ state, at: "2026-10-01T00:00:00Z" }));
+  const [row] = buildTrends({ now: TREND_NOW, weeks: 1, prs: [richPr({ statuses, checkRunAttempts: [1, 1] })] });
+  assert.equal(row.gateFailures, 2);
+  assert.equal(row.flakes, 0);
+});
