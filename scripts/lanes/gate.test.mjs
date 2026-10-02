@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { carry, evaluatePr, main, makeGhApi, noteOwnerApproval } from "./gate.mjs";
+import { carry, evaluatePr, main, makeGhApi } from "./gate.mjs";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -206,7 +206,7 @@ test("evaluatePr passes a clean full PR on a trusted verdict comment for its hea
 test("evaluatePr ignores a verdict comment from an author without write access", () => {
   const routes = { ...fullRoutes([verdictComment("guest", "test-hunter")]), "repos/o/r/collaborators/guest/permission": { permission: "read" } };
   const { api } = fakeApi(routes);
-  assert.equal(evaluatePr(api, "o/r", 5, config).description, "waiting on owner (/approve) (no verdict for head from test-hunter)");
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, "waiting for a code-owner review in GitHub (no verdict for head from test-hunter)");
 });
 
 test("evaluatePr ignores a verdict comment from a bot login (fails closed without a lookup)", () => {
@@ -218,7 +218,7 @@ test("evaluatePr ignores a verdict comment for an older SHA, and an old-format o
   const oldFormat = { login: "leo", body: verdictComment("leo", "test-hunter").body.replace(` ${SHA} -->`, " -->") };
   for (const c of [verdictComment("leo", "test-hunter", "d".repeat(40)), oldFormat]) {
     const { api } = fakeApi(fullRoutes([c]));
-    assert.equal(evaluatePr(api, "o/r", 5, config).description, "waiting on owner (/approve) (no verdict for head from test-hunter)");
+    assert.equal(evaluatePr(api, "o/r", 5, config).description, "waiting for a code-owner review in GitHub (no verdict for head from test-hunter)");
   }
 });
 
@@ -550,64 +550,39 @@ function carryRoutes({ headDiff = ownDiff("2222222", "-40,1 +41,1"), ownerStatus
   routes[statusesRoute(SHA)] = headStatuses;
   return routes;
 }
-const WAIT_STALE = `owner approval was for ${OLD.slice(0, 7)}; the PR's own diff changed since: /approve 5`;
+const WAIT_OWNER = /^waiting for a code-owner review in GitHub \(needs the owner\)/;
 
-test("evaluatePr carries the owner's approval across a clean merge from main", () => {
-  const { api, posted } = fakeApi(carryRoutes());
-  const d = evaluatePr(api, "o/r", 5, config);
-  assert.equal(d.state, "success");
-  assert.equal(d.description, `approved by owner (carried from ${OLD.slice(0, 7)})`);
-  assert.equal(descriptionOf(posted[0]), d.description);
-});
-
-test("evaluatePr does not carry the approval when a conflict resolution changed the PR's own diff", () => {
-  const { api } = fakeApi(carryRoutes({ headDiff: ownDiff("2222222", "-40,1 +41,1", "+resolved") }));
-  const d = evaluatePr(api, "o/r", 5, config);
-  assert.equal(d.state, "pending");
-  assert.equal(d.description, WAIT_STALE);
-});
-
-test("evaluatePr does not carry the approval past a new commit", () => {
-  const routes = carryRoutes({ headDiff: ownDiff("2222222", "-40,1 +41,1") + "diff --git a/src/b.ts b/src/b.ts\n--- a/src/b.ts\n+++ b/src/b.ts\n@@ -1 +1 @@\n-p\n+q\n" });
-  assert.equal(evaluatePr(fakeApi(routes).api, "o/r", 5, config).description, WAIT_STALE);
-});
-
-test("evaluatePr does not carry the approval past a whitespace-only change", () => {
-  const { api } = fakeApi(carryRoutes({ headDiff: ownDiff("2222222", "-40,1 +41,1", "+y ") }));
-  assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_STALE);
-});
-
-test("evaluatePr lets the head's own owner status win over a carried approval", () => {
-  const { api } = fakeApi(carryRoutes({ headStatuses: [{ ...reviewStatus }, { ...ownerStatus, state: "failure" }] }));
-  const calls = [];
-  const d = evaluatePr((a) => (calls.push(a[0]), api(a)), "o/r", 5, config);
-  assert.match(d.description, /^waiting on owner \(\/approve\)/);
-  assert.ok(!calls.some((c) => c.startsWith("repos/o/r/compare/")));
-});
-
-test("evaluatePr never carries a bot-posted, failed or missing owner status", () => {
-  for (const ownerStatuses of [[{ ...ownerStatus, creator: { type: "Bot", login: "github-actions[bot]" } }], [{ ...ownerStatus, state: "failure" }], []]) {
-    const d = evaluatePr(fakeApi(carryRoutes({ ownerStatuses })).api, "o/r", 5, config);
-    assert.match(d.description, /^waiting on owner \(\/approve\)/, JSON.stringify(ownerStatuses));
+test("evaluatePr never carries an owner status from an earlier commit, however the diff moved", () => {
+  for (const headDiff of [ownDiff("2222222", "-40,1 +41,1"), ownDiff("2222222", "-40,1 +41,1", "+resolved"), null]) {
+    const { api } = fakeApi(carryRoutes({ headDiff }));
+    const calls = [];
+    const d = evaluatePr((a) => (calls.push(a[0]), api(a)), "o/r", 5, config);
+    assert.equal(d.state, "pending");
+    assert.match(d.description, WAIT_OWNER);
+    assert.doesNotMatch(d.description, /approve|carried/);
+    assert.ok(!calls.some((c) => c.startsWith("repos/o/r/compare/")), "no earlier commit is compared for an owner carry");
   }
 });
 
-test("carry passes the merge queue on a carried owner approval", () => {
+test("evaluatePr ignores a review/owner status on the head or an earlier commit, whoever posted it", () => {
+  const bot = { ...ownerStatus, creator: { type: "Bot", login: "github-actions[bot]" } };
+  for (const headStatuses of [[{ ...reviewStatus }, ownerStatus], [{ ...reviewStatus }, { ...ownerStatus, state: "failure" }], [{ ...reviewStatus }, bot]]) {
+    const d = evaluatePr(fakeApi(carryRoutes({ headStatuses })).api, "o/r", 5, config);
+    assert.match(d.description, WAIT_OWNER, JSON.stringify(headStatuses));
+  }
+});
+
+test("carry fails the merge queue on an owner status: only the native review passes", () => {
   const group = "b".repeat(40);
   const { api, posted } = fakeApi(carryRoutes());
   const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, group, config);
-  assert.equal(d.state, "success");
+  assert.equal(d.state, "failure");
   assert.equal(posted[0].sha, group);
 });
 
-test("edge: a carried owner approval still leaves a reviewer the head owes blocking", () => {
+test("edge: a reviewer the head owes still blocks ahead of the owner wait", () => {
   const { api } = fakeApi(carryRoutes({ headStatuses: [] }));
   assert.equal(evaluatePr(api, "o/r", 5, config).description, WAIT_HUNTER);
-});
-
-test("edge: an unreadable diff carries nothing and the gate waits on the owner", () => {
-  const { api } = fakeApi(carryRoutes({ headDiff: null }));
-  assert.match(evaluatePr(api, "o/r", 5, config).description, /^waiting on owner \(\/approve\)/);
 });
 
 // #154: the same reuse for the security-reviewer and the architecture-advisor
@@ -690,7 +665,7 @@ test("edge: a failure verdict comment on the reused commit still waits on the ow
   const routes = threeRoutes(["security-reviewer"], { comments: [failed, ...["test-hunter", "architecture-advisor"].map((n) => verdictComment("leo", n, SHA))] });
   const d = decide(routes);
   assert.equal(d.state, "pending");
-  assert.match(d.description, /^waiting on owner \(\/approve\) \(verdict from security-reviewer is not success\), reused security-reviewer from eeeeeee$/);
+  assert.match(d.description, /^waiting for a code-owner review in GitHub \(verdict from security-reviewer is not success\), reused security-reviewer from eeeeeee$/);
 });
 
 test("edge: no reuse when the files changed since the review cannot be listed, or the list may be cut short", () => {
@@ -951,12 +926,11 @@ test("edge: an issues event skips a PR whose issue's Blocked by field is malform
   assert.ok(!calls.includes("repos/o/r/pulls/5"), "the PR itself must never be fetched for a skipped entry");
 });
 
-// #82 (ADR 0004): an owner approval on a PR head is announced by a PR comment, whatever route posted the status.
+// ADR 0025: a review/owner status event is no approval and is no longer announced by a PR comment.
 const OWNER = "review/owner";
 const STATUS_PULLS = `repos/o/r/commits/${SHA}/pulls`;
 const COMMENTS_5 = "repos/o/r/issues/5/comments";
 const GATE_BOT = "github-actions[bot]";
-const MARKER = `<!-- lanes:owner-approval ${SHA} -->`;
 const statusRoutes = (pulls = [{ number: 5, state: "open", head: { sha: SHA } }]) => ({
   [STATUS_PULLS]: pulls,
   "repos/o/r/pulls/5": { state: "open", body, head: { sha: SHA } },
@@ -985,26 +959,14 @@ function commentingApi(routes, existing = []) {
 
 const statusEvent = (context, state) => ({ REPO: "o/r", EVENT_NAME: "status", STATUS_SHA: SHA, STATUS_CONTEXT: context, STATUS_STATE: state });
 
-test("an owner success status comments once on the PR, with the sha7, UTC time and marker, then re-evaluates the gate", () => {
-  const { api, posted, comments } = commentingApi(statusRoutes());
-  main(statusEvent(OWNER, "success"), api);
-  assert.equal(comments.length, 1);
-  assert.equal(comments[0].path, COMMENTS_5);
-  assert.match(
-    comments[0].body,
-    new RegExp(`^Owner approval recorded for ${SHA.slice(0, 7)} at \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2} UTC\\. If you didn't approve this, dismiss the review/owner status and report it\\.`),
-  );
-  assert.ok(comments[0].body.includes(MARKER));
-  assert.equal(posted.length, 1, "the gate is still re-evaluated on the PR head");
-  assert.equal(posted[0].sha, SHA);
-});
-
-test("a repeat owner success event for the same SHA posts no second comment but still re-evaluates", () => {
+test("an owner success status posts no comment and is no approval: the gate is only re-evaluated on the PR head", () => {
   const { api, posted, comments } = commentingApi(statusRoutes());
   main(statusEvent(OWNER, "success"), api);
   main(statusEvent(OWNER, "success"), api);
-  assert.equal(comments.length, 1);
+  assert.equal(comments.length, 0);
   assert.equal(posted.length, 2);
+  assert.equal(posted[0].sha, SHA);
+  assert.doesNotMatch(descriptionOf(posted[0]), /approved by owner/);
 });
 
 test("a review/test-hunter success posts no comment", () => {
@@ -1039,41 +1001,15 @@ test("edge: a closed PR, or an open PR whose head moved on, gets no comment", ()
   assert.equal(comments.length, 0);
 });
 
-test("edge: a missing STATUS_STATE posts no comment", () => {
-  const { api, posted, comments } = commentingApi(statusRoutes());
-  main({ ...statusEvent(OWNER, "success"), STATUS_STATE: undefined }, api);
-  assert.equal(comments.length, 0);
-  assert.equal(posted.length, 1);
-});
-
-test("edge: an owner pending or error status posts no comment", () => {
-  for (const state of ["pending", "error"]) {
+test("edge: a missing STATUS_STATE or an owner failure, pending or error status posts no comment", () => {
+  for (const env of [{ ...statusEvent(OWNER, "success"), STATUS_STATE: undefined }, statusEvent(OWNER, "pending"), statusEvent(OWNER, "error")]) {
     const { api, comments } = commentingApi(statusRoutes());
-    main(statusEvent(OWNER, state), api);
-    assert.equal(comments.length, 0, state);
+    main(env, api);
+    assert.equal(comments.length, 0, String(env.STATUS_STATE));
   }
 });
 
-test("edge: the marker in a comment by anyone but the gate's bot does not suppress the notice", () => {
-  const { api, comments } = commentingApi(statusRoutes(), [{ login: "leo", body: `pre-empted ${MARKER}` }]);
-  main(statusEvent(OWNER, "success"), api);
-  assert.equal(comments.length, 1);
-});
-
-test("edge: the gate's marker for a different SHA does not suppress the notice", () => {
-  const { api, comments } = commentingApi(statusRoutes(), [{ login: GATE_BOT, body: `<!-- lanes:owner-approval ${"c".repeat(40)} -->` }]);
-  main(statusEvent(OWNER, "success"), api);
-  assert.equal(comments.length, 1);
-});
-
-test("edge: malformed comment lines are skipped, and a bot marker after them still suppresses", () => {
-  const { api: inner, comments } = commentingApi(statusRoutes());
-  const api = (args) => (args[0] === COMMENTS_5 && !args.includes("-f") ? `not json\n{"login":null}\n${JSON.stringify({ login: GATE_BOT, body: MARKER })}\n` : inner(args));
-  main(statusEvent(OWNER, "success"), api);
-  assert.equal(comments.length, 0);
-});
-
-test("edge: owner success on a SHA with two open PRs comments on each", () => {
+test("edge: owner success on a SHA with two open PRs re-evaluates each and comments on neither", () => {
   const routes = {
     ...statusRoutes([
       { number: 5, state: "open", head: { sha: SHA } },
@@ -1085,35 +1021,17 @@ test("edge: owner success on a SHA with two open PRs comments on each", () => {
   };
   const { api, posted, comments } = commentingApi(routes);
   main(statusEvent(OWNER, "success"), api);
-  assert.deepEqual(comments.map((c) => c.path), [COMMENTS_5, "repos/o/r/issues/6/comments"]);
+  assert.equal(comments.length, 0);
   assert.equal(posted.length, 2);
 });
 
-// Not required by the criteria or a listed edge: case, but noteOwnerApproval's own return-value contract ("Returns
-// whether it commented") and its zero-padded date formatting are otherwise only exercised indirectly through main().
-test("edge: noteOwnerApproval reports whether it commented, and zero-pads a single-digit month, day, hour and minute", () => {
-  const { api, comments } = commentingApi(statusRoutes());
-  const now = new Date("2026-01-05T03:04:00Z");
-  const first = noteOwnerApproval(api, "o/r", 5, SHA, now);
-  assert.equal(first, true);
-  assert.equal(
-    comments[0].body,
-    `Owner approval recorded for ${SHA.slice(0, 7)} at 2026-01-05 03:04 UTC. If you didn't approve this, dismiss the review/owner status and report it.\n\n${MARKER}`,
-  );
-  const second = noteOwnerApproval(api, "o/r", 5, SHA, now);
-  assert.equal(second, false, "a second call for the same PR and SHA must not comment again");
-  assert.equal(comments.length, 1);
-});
-
-test("edge: an unreadable comment list still re-evaluates the gate, then fails the run naming the PR", () => {
-  const { api: inner, posted, comments } = commentingApi(statusRoutes());
+test("edge: the gate never reads a PR's comment list on a status event", () => {
+  const { api: inner } = commentingApi(statusRoutes());
   const api = (args) => {
-    if (args[0] === COMMENTS_5) throw new Error("HTTP 502");
+    if (args[0] === COMMENTS_5) throw new Error("the comment list must not be read");
     return inner(args);
   };
-  assert.throws(() => main(statusEvent(OWNER, "success"), api), /owner approval comment failed on #5: HTTP 502/);
-  assert.equal(comments.length, 0);
-  assert.equal(posted.length, 1, "the gate status is still posted");
+  main(statusEvent(OWNER, "success"), api);
 });
 
 // #281: transient GitHub errors are retried, and a gate that still cannot decide posts an explicit error status.
@@ -1217,8 +1135,7 @@ test("main posts no error status for a failure that is not a GitHub call", () =>
   assert.equal(posted.length, 0);
 });
 
-// #381, ADR 0015: the gate fetches lanes.config.json and workflow.test.mjs at base and head only when the PR changes
-// nothing else, and passes owner-diff.mjs's verdict to gateDecision.
+// ADR 0025: the ADR 0015 additive exemption is gone; the gate fetches no file contents for an owner-only change.
 const BASE = "b".repeat(40);
 const CONFIG_FILE = "lanes.config.json";
 const WORKFLOW_FILE = "scripts/lanes/workflow.test.mjs";
@@ -1248,78 +1165,36 @@ function recording(routes) {
 }
 const contentCalls = (calls) => calls.filter((a) => a[0].includes("/contents/"));
 
-test("a PR that only appends to paths.owner passes the gate without the owner once reviews are in", () => {
+test("a PR that only appends to paths.owner no longer skips the owner: it waits for the code-owner review, fetching no file contents", () => {
   const { api, calls } = recording(
     ownerDiffRoutes([CONFIG_FILE], {
       [contentsRoute(CONFIG_FILE, BASE)]: baseConfigText,
       [contentsRoute(CONFIG_FILE, SHA)]: appendedConfigText,
     }),
   );
-  const d = evaluatePr(api, "o/r", 5, ownerConfig);
-  assert.equal(d.state, "success");
-  assert.equal(d.description, "unattended-eligible (tier:full), reviews in");
-  // Fetched raw, once per side.
-  assert.equal(contentCalls(calls).length, 2);
-  assert.ok(contentCalls(calls).every((a) => a.includes("Accept: application/vnd.github.raw")));
+  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).description, "waiting for a code-owner review in GitHub (owner-only path)");
+  assert.deepEqual(contentCalls(calls), []);
 });
 
-test("a PR that edits a paths.owner entry still waits on the owner", () => {
-  const { api } = recording(
-    ownerDiffRoutes([CONFIG_FILE], {
-      [contentsRoute(CONFIG_FILE, BASE)]: baseConfigText,
-      [contentsRoute(CONFIG_FILE, SHA)]: JSON.stringify({ paths: { owner: ["^x$", "^b$"] } }),
-    }),
-  );
-  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).description, "waiting on owner (/approve) (owner-only path)");
-});
-
-test("a PR appending a test block to workflow.test.mjs passes; both files together are both checked", () => {
+test("edge: a workflow.test.mjs append, a renamed-in owner file and a malformed base SHA all wait the same way", () => {
   const tests = 'import { test } from "node:test";\n';
-  const block = 'test("new pin", () => {\n});\n';
-  const { api, calls } = recording(
-    ownerDiffRoutes([CONFIG_FILE, WORKFLOW_FILE], {
-      [contentsRoute(CONFIG_FILE, BASE)]: baseConfigText,
-      [contentsRoute(CONFIG_FILE, SHA)]: appendedConfigText,
-      [contentsRoute(WORKFLOW_FILE, BASE)]: tests,
-      [contentsRoute(WORKFLOW_FILE, SHA)]: tests + block,
-    }),
-  );
-  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).state, "success");
-  assert.equal(contentCalls(calls).length, 4);
+  const cases = [
+    ownerDiffRoutes([CONFIG_FILE, WORKFLOW_FILE], { [contentsRoute(WORKFLOW_FILE, BASE)]: tests, [contentsRoute(WORKFLOW_FILE, SHA)]: tests + 'test("pin", () => {});\n' }),
+    ownerDiffRoutes([CONFIG_FILE, "old.json"], {}),
+    (() => {
+      const routes = ownerDiffRoutes([CONFIG_FILE], {});
+      routes["repos/o/r/pulls/5"] = { ...routes["repos/o/r/pulls/5"], base: { ref: "main", sha: "../x" } };
+      return routes;
+    })(),
+  ];
+  for (const routes of cases) {
+    const { api, calls } = recording(routes);
+    assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).description, "waiting for a code-owner review in GitHub (owner-only path)");
+    assert.deepEqual(contentCalls(calls), []);
+  }
 });
 
-test("a fetch failure passes needs-owner, so the PR waits on the owner", () => {
-  // No base route: the fake API throws for it, as GitHub does for a file missing at base.
-  const { api } = recording(ownerDiffRoutes([CONFIG_FILE], { [contentsRoute(CONFIG_FILE, SHA)]: appendedConfigText }));
-  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).description, "waiting on owner (/approve) (owner-only path)");
-});
-
-test("the gate fetches nothing when the PR changes any other file", () => {
-  const { api, calls } = recording(
-    ownerDiffRoutes([CONFIG_FILE, "src/a.ts"], {
-      [contentsRoute(CONFIG_FILE, BASE)]: baseConfigText,
-      [contentsRoute(CONFIG_FILE, SHA)]: appendedConfigText,
-    }),
-  );
-  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).description, "waiting on owner (/approve) (owner-only path)");
-  assert.deepEqual(contentCalls(calls), []);
-});
-
-test("edge: a renamed-in owner file lists its old name too, so nothing is fetched", () => {
-  const { api, calls } = recording(ownerDiffRoutes([CONFIG_FILE, "old.json"], {}));
-  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).description, "waiting on owner (/approve) (owner-only path)");
-  assert.deepEqual(contentCalls(calls), []);
-});
-
-test("edge: a malformed base or head SHA fetches nothing and waits on the owner", () => {
-  const routes = ownerDiffRoutes([CONFIG_FILE], {});
-  routes["repos/o/r/pulls/5"] = { ...routes["repos/o/r/pulls/5"], base: { ref: "main", sha: "../x" } };
-  const { api, calls } = recording(routes);
-  assert.equal(evaluatePr(api, "o/r", 5, ownerConfig).description, "waiting on owner (/approve) (owner-only path)");
-  assert.deepEqual(contentCalls(calls), []);
-});
-
-test("edge: a PR with no owner-diff files fetches nothing", () => {
+test("edge: a PR with no owner-only files fetches no file contents and passes", () => {
   const { api, calls } = recording(fullRoutes([verdictComment("leo", "test-hunter")]));
   assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
   assert.deepEqual(contentCalls(calls), []);
@@ -1532,13 +1407,6 @@ test("team: a lane bot review never counts, and an earlier review/owner status i
   const { api } = fakeApi(routes);
   const d = teamCheckout(`* @${BOT} @code-owner\n`, () => evaluatePr(api, "o/r", 5, laneConfig("team")));
   assert.equal(d.state, "pending");
-});
-
-test("solo unchanged: no reviews or CODEOWNERS are read and the stage still says /approve", () => {
-  const { api } = fakeApi(teamRoutes(null));
-  const d = teamCheckout(null, () => evaluatePr(api, "o/r", 5, laneConfig("solo")), { profile: "solo" });
-  assert.equal(d.state, "pending");
-  assert.equal(d.description, "waiting on owner (/approve) (needs the owner)");
 });
 
 test("team merge_group: the queued PR's reviews are re-read against its head, so a dismissal after enqueue fails the merge", () => {

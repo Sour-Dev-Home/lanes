@@ -51,5 +51,3 @@ auth/ @SourE-dev
 secret/ @SourE-dev
 secrets/ @SourE-dev
 /deploy/ @SourE-dev
-/scripts/lanes/owner-diff.mjs @SourE-dev
-/scripts/lanes/owner-diff.test.mjs @SourE-dev

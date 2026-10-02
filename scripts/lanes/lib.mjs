@@ -956,44 +956,11 @@ function acceptReused(reused, latest, identity, names) {
   return out;
 }
 
-/**
- * #493: the `ownerCarry` `gateDecision` trusts, as `{ sha, status, same }`, or null. Defence in depth: a trusted
- * review/owner success on a real commit SHA, `same` exactly true or false, and only when the head has no trusted
- * review/owner status of its own (`latest`), whatever its state.
- */
-function acceptOwnerCarry(carry, latest, identity, names) {
-  const ok =
-    carry !== null &&
-    typeof carry === "object" &&
-    typeof carry.same === "boolean" &&
-    !latest.has(reviewContext("owner")) &&
-    COMMIT_SHA_RE.test(carry.sha ?? "") &&
-    carry.status?.context === reviewContext("owner") &&
-    carry.status.state === "success" &&
-    trustedStatuses([carry.status], identity, names).length === 1;
-  return ok ? { sha: carry.sha.toLowerCase(), same: carry.same } : null;
-}
-
 /** `, reused <reviewer>[+<reviewer>...] from <sha7>` per reviewed commit, in the order first reused. */
 function reuseNote(reuse) {
   const bySha = new Map();
   for (const [name, { sha }] of reuse) bySha.set(sha, [...(bySha.get(sha) ?? []), name]);
   return [...bySha].map(([sha, names]) => `, reused ${names.join("+")} from ${sha.slice(0, 7)}`).join("");
-}
-
-// ADR 0015: the only files a proven-additive diff may change and still skip the owner-only-path wait.
-const OWNER_DIFF_FILES = Object.freeze(["lanes.config.json", "scripts/lanes/workflow.test.mjs"]);
-
-/**
- * #380, ADR 0015: whether a PR's owner-only paths need no /approve because owner-diff.mjs proved the diff additive.
- * Fails closed: `ownerDiff` must be exactly "additive", every changed file one of `OWNER_DIFF_FILES` (compared as
- * given, never normalised), and the tier must require at least one reviewer; `gateDecision` has already checked that
- * each required reviewer passed on the head before it asks.
- */
-function ownerPathExempt(ownerDiff, files, required) {
-  if (ownerDiff !== "additive") return false;
-  if (!Array.isArray(files) || files.length === 0) return false;
-  return required.length > 0 && files.every((f) => OWNER_DIFF_FILES.includes(f));
 }
 
 const NO_BLOCKERS = Object.freeze({ ok: true, open: [], unreadable: [] });
@@ -1020,18 +987,12 @@ function blockerStatus(blockers, closes) {
  * list: each a trusted review/<reviewer> success, for a reviewer in `REUSABLE_REVIEWERS`, from an earlier commit of
  * the PR whose own diff matches the head's. Each counts only when the head has no trusted status of its own for that
  * reviewer, and brings along that reviewer's verdict for its `sha`. `interfaceContract` (#241) is the issue's Interface
- * contract text; a path it names that the diff changes requires the architecture-advisor. `ownerDiff` (#380, ADR 0015)
- * is owner-diff.mjs's verdict on the diff: only the string "additive" can clear the owner-only-path wait, and only
- * under `ownerPathExempt`'s conditions; the other reasons to wait on the owner still apply. `ownerCarry` (#493, ADR
- * 0002) is the owner's approval on an earlier commit, `{ sha, status, same }`, where `same` says that commit's own diff
- * has the head's `diffFingerprint`: only `same === true` counts as the owner's approval, and only once every required
- * reviewer has passed on the head; otherwise it only changes what the gate says while it waits on the owner, and
- * `prNumber` names the PR in the `/approve` line. `nativeApproval` (ADR 0021) is `nativeCodeOwnerApproval`'s
- * `{ approved, by }`; under the team profile it replaces review/owner, the carry and the ADR 0015 exemption at every
- * point the gate would wait on the owner, and only `approved === true` passes: null (the default, "not read") or a
- * missing value is pending, never a pass. Solo ignores `nativeApproval` entirely.
+ * contract text; a path it names that the diff changes requires the architecture-advisor. `nativeApproval` (ADR 0021,
+ * 0025) is `nativeCodeOwnerApproval`'s `{ approved, by }`; it is the only owner stage, at every point the gate would
+ * wait on the owner, and only `approved === true` passes: null (the default, "not read") or a missing value is
+ * pending, never a pass.
  */
-export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, ownerDiff = null, ownerCarry = null, prNumber = null, nativeApproval = null }) {
+export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, nativeApproval = null }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
@@ -1078,35 +1039,17 @@ export function gateDecision({ prBody, issueLabels, issueState, issueAuthorCanWr
       return fail(`review/${name} is required for this diff and cannot be skipped`, "review");
     }
   }
-  // ADR 0021: under team, once the gate passes a native approval object, the owner stage is a native code-owner review
-  // and review/owner and the carry are ignored. A null or missing approval (unread) is pending, never the solo stage.
-  const team = config.identity?.profile === "team";
-  let carried = null;
-  if (!team) {
-    if (latest.get(reviewContext("owner"))?.state === "success") {
-      return { state: "success", description: `approved by owner${note}`, stage: "ready" };
-    }
-    carried = acceptOwnerCarry(ownerCarry, latest, config.identity, reviewerNames(config));
-    if (carried?.same === true) {
-      return { state: "success", description: `approved by owner (carried from ${carried.sha.slice(0, 7)})${note}`, stage: "ready" };
-    }
-  }
-  const approved = team && nativeApproval?.approved === true;
+  // ADR 0021, 0025: the owner stage is a native code-owner review; review/owner is never read. A null or missing
+  // approval (unread) is pending.
+  const approved = nativeApproval?.approved === true;
   const waitOwner = (reason) => {
     // Fails closed: only a literal `approved: true` clears the wait; null (unread) and anything else is pending.
     if (approved) return { state: "success", description: `approved by code owner${typeof nativeApproval.by === "string" ? ` @${nativeApproval.by}` : ""}${note}`, stage: "ready" };
-    if (team) return { state: "pending", description: `waiting for a code-owner review in GitHub (${reason})${note}`, stage: "owner" };
-    return {
-      state: "pending",
-      description: carried
-        ? `owner approval was for ${carried.sha.slice(0, 7)}; the PR's own diff changed since: /approve ${prNumber ?? ""}`.trimEnd()
-        : `waiting on owner (/approve) (${reason})${note}`,
-      stage: "owner",
-    };
+    return { state: "pending", description: `waiting for a code-owner review in GitHub (${reason})${note}`, stage: "owner" };
   };
   // ADR 0002: the files that decide what gets checked and who approves always need the owner, at every tier. A
   // sensitive path only adds the security-reviewer (requiredReviewers); it no longer sends a PR to the owner.
-  if (cls.owner && (team || !ownerPathExempt(ownerDiff, files, required))) return waitOwner("owner-only path");
+  if (cls.owner) return waitOwner("owner-only path");
   if (!NEEDS_NOTHING.test(pr.sections["needs the owner"] ?? "")) return waitOwner("needs the owner");
   let blocker = null;
   if (tier === "full") blocker = fullTierBlocker({ pr, required, verdicts, headSha, reuse });
