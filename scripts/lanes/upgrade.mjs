@@ -126,6 +126,20 @@ export function applyUpgrade(source, target, plan) {
   return keys;
 }
 
+const SETTINGS = ".claude/settings.json";
+const GUARD_NOTICE =
+  "your kept .claude/settings.json still names start-guard.mjs: remove the start-guard.mjs hook from .claude/settings.json and add the ADR 0030 deny rules (docs/adr/0030-retire-start-guard-and-start.md)";
+
+/** True when the plan keeps the target's own settings.json and that file still wires the retired start guard. */
+function keepsGuardHook(target, plan) {
+  if (!plan.some(({ file, action }) => file === SETTINGS && action === "refuse")) return false;
+  try {
+    return readFileSync(safePath(target, SETTINGS), "utf8").includes("start-guard.mjs");
+  } catch {
+    return false; // an unreadable or missing file is the plan's business, not the notice's
+  }
+}
+
 const USAGE = "usage: upgrade.mjs <target-dir> [--apply]: the target must be an existing directory";
 
 export function main(argv, env = process.env, { source = path.join(HERE, "..", ".."), manifest = MANIFEST, print = console.log } = {}) {
@@ -151,6 +165,7 @@ export function main(argv, env = process.env, { source = path.join(HERE, "..", "
   try {
     const plan = planUpgrade(source, target, manifest);
     for (const { file, action } of plan) print(`${action} ${file}`);
+    if (keepsGuardHook(target, plan)) print(GUARD_NOTICE);
     if (!flags.includes("--apply")) {
       print("Nothing written. Run again with --apply to perform this plan.");
       return 0;

@@ -28,8 +28,7 @@ You are the planner. The idea: $ARGUMENTS
    an interface, the first issue is the contract itself (a type plus schema plus contract test) and the others list
    it under Blocked by. Prefer fewer, sharper issues; leave anything speculative out and list it under "Not planned"
    at the end. Follow `planning-and-task-breakdown`: each issue is one vertical slice; size each issue at roughly 100
-   to 300 changed lines, tests included, keep changes to the guards and the gate (`scripts/lanes/*-guard.mjs`,
-   `shell-lex.mjs`, `gate.mjs`, `lib.mjs`'s gate decision) near 200, and split anything over 300. Every lane pays a
+   to 300 changed lines, tests included, keep changes to the gate (`gate.mjs`, `lib.mjs`'s gate decision) near 200, and split anything over 300. Every lane pays a
    fixed cost, so merge related changes smaller than about 100 lines into one issue, unless they need different tiers
    or one is a contract another issue consumes (numbers: docs/history/2026-09-30-lane-size-and-cost.md). Before drafting a new issue, check the open issues from step 2 for one that
    changes the same files for a related goal, and propose extending it instead (as #145 was merged into #105).

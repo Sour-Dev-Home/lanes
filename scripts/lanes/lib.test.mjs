@@ -270,9 +270,7 @@ const OWNER_SAMPLES = {
   "^scripts/lanes/gate-decision\\.test\\.mjs$": ["scripts/lanes/gate-decision.test.mjs", "scripts/lanes/gate-decision.mjs"],
   "^scripts/lanes/workflow\\.test\\.mjs$": ["scripts/lanes/workflow.test.mjs", "scripts/lanes/workflow.mjs"],
   "^scripts/lanes/contracts\\.test\\.mjs$": ["scripts/lanes/contracts.test.mjs", "scripts/lanes/contracts.test.mjs.bak"],
-  "^scripts/lanes/start-guard(\\.test)?\\.mjs$": ["scripts/lanes/start-guard.test.mjs", "scripts/lanes/start-guards.mjs"],
   "^scripts/lanes/(queue|start|status|app-token|reap|cleanup|lane-cost|modules|paths|pick|blockers|health)(\\.test)?\\.mjs$": ["scripts/lanes/health.test.mjs", "scripts/lanes/health-extra.mjs"],
-  "^scripts/lanes/shell-lex(\\.test|\\.fixtures)?\\.mjs$": ["scripts/lanes/shell-lex.fixtures.mjs", "scripts/lanes/shell-lexer.mjs"],
   "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$": ["scripts/lanes/setup-repo.mjs", "scripts/lanes/new-project-x.mjs"],
   "^scripts/gate-workflow\\.test\\.mjs$": ["scripts/gate-workflow.test.mjs", "scripts/gate-workflow.test.mjs.bak"],
   "^\\.claude/settings\\.json$": [".claude/settings.json", ".claude/settings.local.json"],
@@ -310,19 +308,20 @@ test("every regex in lanes.config.json paths.owner matches its sample and not it
   }
 });
 
-test("the real config: start-guard.mjs and contracts.test.mjs are owner-only, reviewers.mjs is not (ADR 0003)", () => {
+test("the real config: start.mjs and contracts.test.mjs are owner-only, reviewers.mjs and the retired start guard are not (ADR 0003, 0030)", () => {
   const real = loadConfig();
-  for (const file of ["scripts/lanes/contracts.test.mjs", "scripts/lanes/start-guard.mjs", "scripts/lanes/start-guard.test.mjs", "scripts/lanes/start.mjs"]) {
+  for (const file of ["scripts/lanes/contracts.test.mjs", "scripts/lanes/start.mjs", ".claude/settings.json"]) {
     assert.equal(classifyFiles([file], real).owner, true, file);
   }
   for (const file of [
     "scripts/lanes/reviewers.mjs",
     "scripts/lanes/reviewers.test.mjs",
     "scripts/lanes/contracts.mjs",
-    "scripts/lanes/start-guard.mjs.orig",
+    "scripts/lanes/start-guard.mjs", // retired: no owner pattern names it any more
+    "scripts/lanes/shell-lex.mjs",
     // edge: the new regexes are anchored to scripts/lanes/ exactly, not any nested directory under it.
     "scripts/lanes/sub/contracts.test.mjs",
-    "scripts/lanes/sub/start-guard.mjs",
+    "scripts/lanes/sub/start.mjs",
   ]) {
     assert.equal(classifyFiles([file], real).owner, false, file);
   }

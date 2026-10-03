@@ -64,16 +64,17 @@ test("edge: install copies the OWASP sheets byte for byte", () => {
     assert.deepEqual(readFileSync(path.join(target, "vendor/owasp-cheatsheets", f)), readFileSync(path.join("vendor/owasp-cheatsheets", f)));
 });
 
-test("MANIFEST includes the start guard and ships nothing of the retired approve guard (#616)", () => {
-  assert.ok(MANIFEST.includes("scripts/lanes/start-guard.mjs"));
-  for (const gone of ["scripts/lanes/approve-guard.mjs", "scripts/lanes/approve-guard.test.mjs", ".claude/commands/approve.md", ".claude/commands/approvals.md"]) {
+test("MANIFEST ships nothing of the retired start guard, its lexer or the approve guard (#616, ADR 0030)", () => {
+  assert.ok(MANIFEST.includes(".claude/settings.json"));
+  for (const gone of ["scripts/lanes/start-guard.mjs", "scripts/lanes/start-guard.test.mjs", "scripts/lanes/shell-lex.mjs",
+    "scripts/lanes/shell-lex.test.mjs", "scripts/lanes/shell-lex.fixtures.mjs", "scripts/lanes/approve-guard.mjs", "scripts/lanes/approve-guard.test.mjs", ".claude/commands/approve.md", ".claude/commands/approvals.md"]) {
     assert.equal(MANIFEST.includes(gone), false, gone);
   }
 });
 
 test("every script a settings.json hook runs is in MANIFEST", () => {
   const scripts = hookScripts(JSON.parse(readFileSync(".claude/settings.json", "utf8")));
-  assert.ok(scripts.includes("scripts/lanes/start-guard.mjs"), "hook extraction found the start guard");
+  assert.ok(scripts.includes("scripts/lanes/notify-hook.mjs"), "hook extraction found the notification hook");
   for (const s of scripts) assert.ok(MANIFEST.includes(s), `${s} is wired as a hook but not installed`);
 });
 
@@ -90,15 +91,14 @@ test("edge: hookScripts reads every event and ignores hooks without a project sc
 });
 
 test("edge: hookScripts dedupes a script wired to more than one hook event", () => {
-  // start-guard.mjs is wired on several events and tools in the real settings.json
-  // (UserPromptSubmit and PreToolUse); a naive list (not a Set) would count it twice.
+  // a script can be wired on several events and tools; a naive list (not a Set) would count it twice.
   const settings = {
     hooks: {
-      UserPromptSubmit: [{ hooks: [{ type: "command", command: 'node "$CLAUDE_PROJECT_DIR/scripts/lanes/start-guard.mjs" user-prompt-submit' }] }],
-      PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: 'node "$CLAUDE_PROJECT_DIR/scripts/lanes/start-guard.mjs" pre-tool-use' }] }],
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: 'node "$CLAUDE_PROJECT_DIR/scripts/lanes/x.mjs" user-prompt-submit' }] }],
+      PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: 'node "$CLAUDE_PROJECT_DIR/scripts/lanes/x.mjs" pre-tool-use' }] }],
     },
   };
-  assert.deepEqual(hookScripts(settings), ["scripts/lanes/start-guard.mjs"]);
+  assert.deepEqual(hookScripts(settings), ["scripts/lanes/x.mjs"]);
 });
 
 test("edge: every local module a hook script imports is in MANIFEST", () => {
@@ -211,10 +211,13 @@ test("edge: localImports reads static, multi-line and dynamic imports and skips 
   ]);
 });
 
-test("edge: install copies the start guard into the target and none of the approve files", () => {
+test("edge: a fresh install writes the deny-rule settings.json and no guard, lexer or approve files", () => {
   const target = mkdtempSync(path.join(tmpdir(), "lanes-"));
   install(".", target, {});
-  assert.ok(existsSync(path.join(target, "scripts/lanes/start-guard.mjs")));
+  const settings = readFileSync(path.join(target, ".claude/settings.json"), "utf8");
+  assert.ok(JSON.parse(settings).permissions.deny.includes("Bash(claude --bg:*)"));
+  assert.doesNotMatch(settings, /start-guard/);
+  for (const gone of ["start-guard.mjs", "shell-lex.mjs"]) assert.equal(existsSync(path.join(target, "scripts/lanes", gone)), false, gone);
   assert.equal(existsSync(path.join(target, "scripts/lanes/approve-guard.mjs")), false);
   assert.equal(existsSync(path.join(target, ".claude/commands/approve.md")), false);
 });

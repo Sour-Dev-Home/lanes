@@ -41,34 +41,46 @@
       "Bash(git merge origin/main:*)",
       "Bash(git push:*)"
     ],
-    "deny": ["Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git push --force-with-lease:*)"]
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(claude --bg:*)",
+      "Bash(claude --background:*)",
+      "Bash(node scripts/lanes/queue.mjs:*)",
+      "Bash(node ./scripts/lanes/queue.mjs:*)",
+      "Bash(node scripts/lanes/start.mjs:*)",
+      "Bash(node ./scripts/lanes/start.mjs:*)",
+      "Bash(git tag:*)",
+      "Bash(git push --tags:*)",
+      "Bash(git push --follow-tags:*)",
+      "Bash(git push origin v*:*)",
+      "PowerShell(claude --bg:*)",
+      "PowerShell(claude --background:*)",
+      "PowerShell(node scripts/lanes/queue.mjs:*)",
+      "PowerShell(node ./scripts/lanes/queue.mjs:*)",
+      "PowerShell(node scripts\\lanes\\queue.mjs:*)",
+      "PowerShell(node .\\scripts\\lanes\\queue.mjs:*)",
+      "PowerShell(node scripts/lanes/start.mjs:*)",
+      "PowerShell(node ./scripts/lanes/start.mjs:*)",
+      "PowerShell(node scripts\\lanes\\start.mjs:*)",
+      "PowerShell(node .\\scripts\\lanes\\start.mjs:*)",
+      "PowerShell(git tag:*)",
+      "PowerShell(git push --tags:*)",
+      "PowerShell(git push --follow-tags:*)",
+      "PowerShell(git push origin v*:*)"
+    ]
   },
   "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/start-guard.mjs\" user-prompt-submit" }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/start-guard.mjs\" pre-tool-use" }
-        ]
-      },
-      {
-        "matcher": "PowerShell",
-        "hooks": [
-          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/start-guard.mjs\" pre-tool-use" }
-        ]
-      }
-    ],
     "Notification": [
       {
         "matcher": "permission_prompt|agent_needs_input|elicitation_dialog|agent_completed",
-        "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/notify-hook.mjs\"" }]
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/scripts/lanes/notify-hook.mjs\""
+          }
+        ]
       }
     ]
   },

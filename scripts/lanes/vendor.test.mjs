@@ -130,9 +130,9 @@ test("criterion 4: INDEX.md stays within about 2k tokens", () => {
   assert.ok(index().length <= 9000, `INDEX.md is ${index().length} characters`);
 });
 
-test("criterion 4: INDEX.md maps the guards, workflows, secrets, logging and Node.js topics", () => {
+test("criterion 4: INDEX.md maps the gate, workflows, secrets, logging and Node.js topics", () => {
   const i = index();
-  for (const needle of ["scripts/lanes/start-guard.mjs", ".github/workflows/", "pull_request_target"]) {
+  for (const needle of ["scripts/lanes/gate.mjs", ".github/workflows/", "pull_request_target"]) {
     assert.ok(i.includes(needle), `INDEX.md does not mention ${needle}`);
   }
   for (const topic of [/secret/i, /token/i, /logging/i, /Node\.js/]) assert.match(i, topic);
@@ -199,7 +199,7 @@ test("edge: gitBlobSha matches git's id for the empty blob and for LF-only text"
 });
 
 // .claude/agents/security-reviewer.md (#160, ADR 0009 decision 3): the brief reads INDEX.md, then 1-3 sheets, cites
-// sheet and section, lets a sheet beat the checklist, and keeps the ADR 0004 and 0007 accepted-risk paragraphs verbatim.
+// sheet and section, lets a sheet beat the checklist, and keeps the ADR 0004 and 0030 accepted-risk paragraphs verbatim.
 const BRIEF = ".claude/agents/security-reviewer.md";
 // Markdown hard-wraps at 120 columns, so compare prose with whitespace runs collapsed.
 export const flat = (text) => text.replace(/\s+/g, " ").trim();
@@ -207,7 +207,7 @@ const brief = () => flat(read(BRIEF));
 
 const ACCEPTED_RISK = {
   "ADR 0004": "Accepted risk (ADR 0004, `docs/adr/0004-approve-guard-accepted-risk.md`): the approve guard is best-effort defence in depth, not a barrier to a determined lane. A newly found way to build a command that reaches `post-review.mjs owner`, or to post `review/owner` directly, is `minor`, not a blocker. File it as a follow-up issue with the `lane-filed` label (`gh issue create --label lane-filed --body-file <file>`, the body in the Task form's layout) and name that issue in the finding. A regression, where something the guard or the script check previously caught now passes, is `critical`.",
-  "ADR 0007": "Accepted risk (ADR 0007, `docs/adr/0007-start-guard-accepted-risk.md`): the start guard is best-effort defence in depth, not a barrier to a determined lane. A newly found way to build a command that reaches `start.mjs`, `queue.mjs` or `claude --bg` is `minor`, not a blocker. File it as a follow-up issue with the `lane-filed` label (`gh issue create --label lane-filed --body-file <file>`, the body in the Task form's layout) and name that issue in the finding. A regression, where something the guard or the script check previously caught now passes, is `critical`.",
+  "ADR 0030": "Accepted risk (ADR 0030, `docs/adr/0030-retire-start-guard-and-start.md`): the permission deny rules and the script refusals are best-effort defence in depth, not a barrier to a determined lane (`bash -c`, an absolute path or `npx` pass a rule). A newly found way to reach `start.mjs`, `queue.mjs`, `claude --bg` or a release tag is `minor`, not a blocker. File it as a follow-up issue with the `lane-filed` label (`gh issue create --label lane-filed --body-file <file>`, the body in the Task form's layout) and name that issue in the finding. A regression, where a form the rules or refusals list now passes, is `critical`.",
 };
 
 test("criterion 1 (#160): the brief reads INDEX.md first, then only the 1-3 sheets it points to, never the whole folder", () => {
@@ -236,7 +236,7 @@ test("criterion 3 (#160): where a sheet and security-checklist.md differ, the sh
   assert.match(brief(), /Where a sheet and `vendor\/agent-skills\/references\/security-checklist\.md` differ, the sheet wins/);
 });
 
-test("criterion 4 (#160): the ADR 0004 and ADR 0007 accepted-risk paragraphs are present word for word", () => {
+test("criterion 4 (#160): the ADR 0004 and ADR 0030 accepted-risk paragraphs are present word for word", () => {
   const b = brief();
   for (const [adr, para] of Object.entries(ACCEPTED_RISK)) assert.ok(b.includes(flat(para)), `the ${adr} accepted-risk paragraph changed or is missing`);
 });
