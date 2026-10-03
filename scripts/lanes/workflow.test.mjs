@@ -1313,11 +1313,20 @@ const CHILD_PROCESS_FUNCTIONS = ["execFileSync", "spawnSync", "execSync", "execF
 
 function windowsHideViolations(source) {
   const imported = new Set();
-  for (const m of source.matchAll(/import\s*\{([^}]*)\}\s*from\s*["'](?:node:)?child_process["']/g)) {
-    for (const name of m[1].split(",")) imported.add(name.trim().split(/\s+as\s+/)[0]);
+  const unscannable = [];
+  const lineOf = (index) => source.slice(0, index).split("\n").length;
+  for (const m of source.matchAll(/^[ \t]*import\s*\{([^}]*)\}\s*from\s*["'](?:node:)?child_process["']/gm)) {
+    for (const name of m[1].split(",")) {
+      if (/\bas\b/.test(name)) unscannable.push({ line: lineOf(m.index), call: `aliased child_process import: ${name.trim()}` });
+      imported.add(name.trim().split(/\s+as\s+/)[0]);
+    }
+  }
+  // A namespace, default or require form puts the call behind a name the scan does not follow, so it is refused outright.
+  for (const m of source.matchAll(/^[ \t]*import\s+(?:\*\s+as\s+\w+|\w+)(?:\s*,\s*\{[^}]*\})?\s+from\s*["'](?:node:)?child_process["']|^[^'"`\n]*\brequire\(\s*["'](?:node:)?child_process["']\s*\)/gm)) {
+    unscannable.push({ line: lineOf(m.index + m[0].search(/\S/)), call: "child_process imported as a namespace, default or require" });
   }
   const names = CHILD_PROCESS_FUNCTIONS.filter((n) => imported.has(n));
-  if (!names.length) return [];
+  if (!names.length) return unscannable;
   // Comment lines are blanked, not removed, so the line numbers still match the file.
   const code = source.split("\n").map((line) => (/^\s*(\/\/|\*|\/\*)/.test(line) ? "" : line)).join("\n");
   const violations = [];
@@ -1337,7 +1346,7 @@ function windowsHideViolations(source) {
     if (/windowsHide:\s*true/.test(call) || HIDING_HELPERS.test(call)) continue;
     violations.push({ line: code.slice(0, m.index).split("\n").length, call: call.replace(/\s+/g, " ").slice(0, 80) });
   }
-  return violations;
+  return [...unscannable, ...violations];
 }
 
 test("every child_process call in scripts/ passes windowsHide: true, or a helper that adds it", () => {
@@ -1378,6 +1387,19 @@ test("edge: the windowsHide scan skips injected fakes, regex exec, comments, str
 });
 
 test("edge: the windowsHide scan reads the import of a renamed or multi-name child_process import", () => {
-  const src = 'import {\n  execFileSync as run,\n  spawnSync,\n} from "node:child_process";\nspawnSync("a", []);';
-  assert.equal(windowsHideViolations(src).length, 1);
+  const multi = 'import {\n  execFileSync,\n  spawnSync,\n} from "node:child_process";\nspawnSync("a", []);';
+  assert.deepEqual(windowsHideViolations(multi).map((v) => v.line), [5]);
+});
+
+test("edge: the windowsHide scan refuses an aliased, namespace, default or require import it cannot follow", () => {
+  const aliased = windowsHideViolations('import {\n  execFileSync as run,\n} from "node:child_process";\nrun("a", [], { windowsHide: true });');
+  assert.deepEqual(aliased.map((v) => v.line), [1]);
+  assert.match(aliased[0].call, /aliased/);
+  for (const src of [
+    'import * as cp from "node:child_process";',
+    'import cp from "child_process";',
+    "import cp, { spawn } from 'node:child_process';",
+    'const cp = require("node:child_process");',
+  ]) assert.equal(windowsHideViolations(`\n${src}\n`).length, 1, src);
+  assert.deepEqual(windowsHideViolations('import { join } from "node:path";\nconst c = require("node:fs");'), []);
 });
