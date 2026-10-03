@@ -60,24 +60,8 @@ jobs:
           node-version: 22
       - name: Mint a lanes-workflows installation token
         # The App's own permissions (contents and workflows write) apply: no `permissions` body is sent.
-        run: |
-          node --input-type=module -e '
-          import { createSign } from "node:crypto";
-          import { appendFileSync } from "node:fs";
-          const { APP_ID, APP_KEY, LANES_REPO } = process.env;
-          const b64 = (v) => Buffer.from(v).toString("base64url");
-          const iat = Math.floor(Date.now() / 1000) - 60;
-          const unsigned = `${b64(JSON.stringify({ alg: "RS256", typ: "JWT" }))}.${b64(JSON.stringify({ iss: APP_ID, iat, exp: iat + 600 }))}`;
-          const jwt = `${unsigned}.${b64(createSign("RSA-SHA256").update(unsigned).sign(APP_KEY))}`;
-          const headers = { Authorization: `Bearer ${jwt}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "lanes-workflow-apply" };
-          const inst = await fetch(`https://api.github.com/repos/${LANES_REPO}/installation`, { headers });
-          if (!inst.ok) throw new Error(`finding the installation failed (HTTP ${inst.status})`);
-          const res = await fetch(`https://api.github.com/app/installations/${(await inst.json()).id}/access_tokens`, { method: "POST", headers, body: JSON.stringify({ repositories: [LANES_REPO.split("/")[1]] }) });
-          if (!res.ok) throw new Error(`minting the token failed (HTTP ${res.status})`);
-          const { token } = await res.json();
-          console.log(`::add-mask::${token}`);
-          appendFileSync(process.env.GITHUB_ENV, `LANES_WORKFLOWS_TOKEN=${token}\n`);
-          '
+        # app-token.mjs masks the token before it exports it, and its errors name the step only.
+        run: node scripts/lanes/app-token.mjs workflows
         env:
           APP_ID: ${{ vars.LANES_WORKFLOWS_APP_ID }}
           APP_KEY: ${{ secrets.LANES_WORKFLOWS_KEY }}

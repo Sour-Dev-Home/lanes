@@ -1764,3 +1764,53 @@ test("pending: a verdict without pending is handled as before", () => {
   const { api: api2 } = throwing(reuseRoutes({ headDiff: ownDiff("1111111", "-1,1 +1,1") + wfDiff }));
   assert.equal(evaluatePr(api2, "o/r", 5, config).description, WAIT_HUNTER);
 });
+
+// #684: a pending workflow file must be at the head even when the verdict is for the head itself (the #662 case).
+const headPending = (pending) => ({
+  login: "leo",
+  body: `<!-- lanes:verdict test-hunter ${SHA} -->\n\`\`\`json\n${JSON.stringify({ reviewer: "test-hunter", verdict: "success", summary: "s", criteria: [], findings: [], pending }, null, 2)}\n\`\`\``,
+});
+const HANDOVER = (what) => `waiting for the workflow hand-over: ${what}`;
+function headPendingRoutes(pending, blobs = {}) {
+  const routes = fullRoutes([headPending(pending)]);
+  for (const [path, blob] of Object.entries(blobs)) routes[`repos/o/r/contents/${path}?ref=${SHA}`] = blob;
+  return routes;
+}
+const WF2 = ".github/workflows/dashboard.yml";
+
+test("pending at the reviewed head: a file that was never committed holds the gate (#662)", () => {
+  const routes = headPendingRoutes([{ path: WF, sha256: hashOfWf }], { [WF]: notFound });
+  const d = evaluatePr(throwing(routes).api, "o/r", 5, config);
+  assert.deepEqual({ state: d.state, description: d.description }, { state: "pending", description: HANDOVER(WF) });
+});
+
+test("pending at the reviewed head: the listed hash at the head passes", () => {
+  const { api } = throwing(headPendingRoutes([{ path: WF, sha256: hashOfWf }], { [WF]: WF_TEXT }));
+  assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
+});
+
+test("pending at the reviewed head: another hash at the head holds the gate", () => {
+  const { api } = throwing(headPendingRoutes([{ path: WF, sha256: hashOfWf }], { [WF]: "name: other\n" }));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, HANDOVER(WF));
+});
+
+test("pending at the reviewed head: several missing files name the first and count the rest", () => {
+  const pending = [{ path: WF, sha256: hashOfWf }, { path: WF2, sha256: hashOfWf }];
+  const { api } = throwing(headPendingRoutes(pending, { [WF]: notFound, [WF2]: notFound }));
+  assert.equal(evaluatePr(api, "o/r", 5, config).description, HANDOVER(`${WF} and 1 more`));
+});
+
+test("pending at the reviewed head: a read failure holds the gate and names it", () => {
+  const boom = () => Object.assign(new Error("boom"), { httpStatus: 500 });
+  const { api } = throwing(headPendingRoutes([{ path: WF, sha256: hashOfWf }], { [WF]: boom }));
+  const d = evaluatePr(api, "o/r", 5, config);
+  assert.equal(d.state, "pending");
+  assert.equal(d.description, HANDOVER(`could not read ${WF}`));
+});
+
+test("pending at the reviewed head: a verdict with no pending is unchanged", () => {
+  for (const pending of [undefined, []]) {
+    const { api } = throwing(headPendingRoutes(pending));
+    assert.equal(evaluatePr(api, "o/r", 5, config).state, "success", JSON.stringify(pending));
+  }
+});

@@ -53,7 +53,7 @@ test("an unmapped file is ALL", () => {
 
 for (const path of [
   ".github/workflows/verify.yml", "contracts/a.schema.json", "package.json", "package-lock.json", "lanes.config.json",
-  "scripts/lanes/shell-lex.fixtures.mjs", "scripts/test/helper.mjs", "scripts/__tests__/data.json", "test/fixtures/a.json",
+  "scripts/lanes/queue.fixtures.mjs", "scripts/test/helper.mjs", "scripts/__tests__/data.json", "test/fixtures/a.json",
 ]) {
   test(`ALL path class: ${path}`, () => {
     assert.equal(run(["scripts/other.mjs", path]), "ALL");

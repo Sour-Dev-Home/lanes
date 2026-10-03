@@ -13,16 +13,26 @@ on:
     # The default branch. Change it here if the repository's is not main.
     branches: [main]
   schedule:
-    # A scheduled run can start 10 to 20 minutes late; the page shows generatedAt for that reason.
+    # GitHub throttles scheduled runs: in this repository they started 4 to 7 hours apart (#689), so the schedule is
+    # only a backstop. The health job also runs on the events below, which start the snapshot jobs never.
     - cron: "*/5 * * * *"
+  # ADR 0027 part 5: the health job's Run workflow button; it takes no input.
+  workflow_dispatch:
+  # A finished verify, lanes-gate or security run (a merge-group failure included) wakes the health job. These events
+  # run the default branch's copy of this file; the payload is never read.
+  workflow_run:
+    workflows: [verify, lanes-gate, security]
+    types: [completed]
 permissions:
   contents: read
-# Only the freshest snapshot matters.
-concurrency:
-  group: dashboard-publish
-  cancel-in-progress: true
 jobs:
   build:
+    # The snapshot jobs run for the original triggers only, never for the health job's new ones.
+    if: github.event_name != 'workflow_run' && github.event_name != 'workflow_dispatch'
+    # Only the freshest snapshot matters.
+    concurrency:
+      group: dashboard-publish
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     # read-only: the snapshot is built from gh reads of issues, PRs, checks and statuses.
     permissions:
@@ -109,6 +119,10 @@ jobs:
           path: _site
   deploy:
     needs: build
+    if: github.event_name != 'workflow_run' && github.event_name != 'workflow_dispatch'
+    concurrency:
+      group: dashboard-publish
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     # The only job that may write Pages or mint an OIDC token.
     permissions:
@@ -120,3 +134,34 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+  health:
+    # ADR 0027 parts 5 and 9: the watchdog keeps the one lanes-health issue current. It runs the default branch's own
+    # code on the schedule, the button, finished workflows and issue events, never a pull_request event, and reads
+    # nothing from the event. Its one write permission is issues: write; the others are the reads health.mjs needs. The
+    # snapshot job above stays read-only.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run' || github.event_name == 'issues'
+    # Its own group: one run finishes and only the newest waiting run follows; no other event can cancel it.
+    concurrency:
+      group: lanes-health
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      actions: read
+      checks: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Run the watchdog
+        run: node scripts/lanes/health.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

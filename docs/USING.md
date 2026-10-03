@@ -170,8 +170,10 @@ check name, and never the health issue's text. If GitHub cannot be read, the sna
 
 ## The lanes-health issue
 
-One open issue labelled `lanes-health` is your alert inbox (ADR 0027). A scheduled job in the dashboard workflow runs
-`scripts/lanes/health.mjs` and keeps it current: the body says `healthy` or `N problems`, lists each active problem
+One open issue labelled `lanes-health` is your alert inbox (ADR 0027). A job in the dashboard workflow runs
+`scripts/lanes/health.mjs` and keeps it current. It runs within minutes of a finished `verify`, `lanes-gate` or
+`security` run and of an issue change, on the cron as a backstop, and by hand: open the Actions tab, choose
+`dashboard`, then Run workflow (only the health job runs). It keeps it current: the body says `healthy` or `N problems`, lists each active problem
 with when it was first seen and the last heartbeat time, and each new problem is posted once as a comment, so GitHub
 notifies you. When every problem clears, the body says `healthy` and one recovery comment is posted.
 
@@ -198,8 +200,9 @@ trusts it only when the lane bot wrote it, and `no-progress` fires when it is ol
 queue is not running the heartbeat age is the only signal for local problems.
 
 **Thresholds.** `approvedStuckMinutes` and `noProgressMinutes` are in `lanes.config.json` under `health` (30 each by
-default; a value that is not a positive number falls back to its default). The dashboard cron runs every 5 minutes and
-GitHub may delay scheduled runs, so the times are approximate.
+default; a value that is not a positive number falls back to its default). The dashboard cron is set to every 5 minutes,
+but GitHub throttles scheduled runs (here they start 4 to 7 hours apart), so the event triggers above do the real
+work and the times are approximate.
 
 **When you close the issue.** The watchdog reopens it only when a problem is active, and never creates a second one
 while a closed `lanes-health` issue exists. If you edit the body by hand, the next run rewrites it and may repeat the

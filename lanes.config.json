@@ -20,7 +20,7 @@
       {
         "id": "gate",
         "paths": [
-          "scripts/lanes/gate.", "scripts/lanes/gate-decision.", "scripts/lanes/blockers.", "scripts/lanes/shell-lex.",
+          "scripts/lanes/gate.", "scripts/lanes/gate-decision.", "scripts/lanes/blockers.",
           "scripts/lanes/post-review.", "scripts/lanes/issue-contract.", "scripts/lanes/reviewers.", "scripts/lanes/contracts.",
           "scripts/lanes/workflow.", "scripts/gate-workflow.", "scripts/dashboard-workflow.", "scripts/dashboard.", "scripts/dashboard-visual."
         ],
@@ -31,7 +31,7 @@
       {
         "id": "queue",
         "paths": [
-          "scripts/lanes/pick.", "scripts/lanes/status.", "scripts/lanes/paths.", "scripts/lanes/start.", "scripts/lanes/start-guard.",
+          "scripts/lanes/pick.", "scripts/lanes/status.", "scripts/lanes/paths.", "scripts/lanes/start.",
           "scripts/lanes/queue.", "scripts/lanes/cleanup.", "scripts/lanes/reap.", "scripts/lanes/lifecycle.",
           "scripts/lanes/snapshot.", "scripts/lanes/health.", "scripts/lanes/lane-cost.", "scripts/lanes/consolidate.",
           "scripts/lanes/app-token.", "scripts/lanes/identity-check.", "scripts/lanes/handover."
@@ -86,9 +86,7 @@
       "^scripts/lanes/workflow\\.test\\.mjs$",
       "^scripts/gate-workflow\\.test\\.mjs$",
       "^scripts/lanes/contracts\\.test\\.mjs$",
-      "^scripts/lanes/start-guard(\\.test)?\\.mjs$",
-      "^scripts/lanes/(queue|start|status|app-token|reap|cleanup|lane-cost|modules|paths|pick|blockers)(\\.test)?\\.mjs$",
-      "^scripts/lanes/shell-lex(\\.test|\\.fixtures)?\\.mjs$",
+      "^scripts/lanes/(queue|start|status|app-token|reap|cleanup|lane-cost|modules|paths|pick|blockers|health)(\\.test)?\\.mjs$",
       "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$",
       "^\\.claude/settings\\.json$",
       "^\\.github/",

@@ -19,6 +19,15 @@ calls in one turn; read the issue once (step 1) and reuse it rather than calling
 (`gh run watch <id>`), never a polling loop (step 7 explains why `lanes/gate` is never watched); change existing
 files with Edit, not Write.
 
+Stop comment (#666): every other stop after step 1 where the lane says it needs the owner (a stop in step 4 or 5, a
+stuck hook, a failed check, a missing file) comments on its issue (on its PR when one exists) before it ends: one line
+starting `Lane stopped: <reason>`, then the cause and the owner's next step. After the comment, the lane removes `ready`
+and `lane:running` and adds `needs-owner`, so GitHub shows the issue as waiting on the owner, the queue skips it, and the
+issue-contract check does not re-add `ready` until the owner removes `needs-owner`. It runs `gh label create needs-owner`
+(description "A lane stopped and needs the owner; see its last comment") only if it is missing. The comment holds no
+absolute local path, no session transcript and no personal data, the same rule as the notification. Steps 0, 1 and 2 do
+nothing on GitHub (the identity may be wrong there).
+
 0. Identity check (#540, #552), before any other step and before anything touches GitHub: run
    `node scripts/lanes/identity-check.mjs` as its own command, exactly so (it is allowed, needs no prompt and prints no
    secret; never run the gh auth, git remote or git credential commands it wraps, or print the environment, yourself).
@@ -68,7 +77,10 @@ files with Edit, not Write.
     only the reviewers it waits for or whose verdict failed, post them with `post-review.mjs`, fix a failing CI check,
     and finish with step 7's report. Never open a second PR.
 4. Read the issue's Interface contract and Scope. Touch nothing out of scope. If the contract is wrong or missing,
-   stop and file a new task issue for the contract instead of inventing one.
+   stop and file a new task issue for the contract instead of inventing one. After filing it, the lane comments on its
+   own issue before it stops: one line starting `Lane stopped: contract`, the cause in one or two sentences, the filed
+   issue as `#N`, and the owner's steps (remove `lane-filed` from `#N`; add `#N` to this issue's "Blocked by"; then
+   remove `needs-owner`). It never edits the issue's text.
 4b. Practice (the project skills, agent-skills): build in thin vertical slices with `incremental-implementation` and
     `test-driven-development`; a contract issue follows `api-and-interface-design`; an unexpected failure goes through
     `debugging-and-error-recovery`; UI work follows `frontend-ui-engineering` and the project's design tokens.
@@ -79,8 +91,8 @@ files with Edit, not Write.
 4c. Already built: when every acceptance criterion is already met on `origin/main`, the lane comments the evidence
     (each criterion with the file, test or commit that meets it), then removes the `ready` label and adds
     `needs-owner`, and stops without a worktree change or PR. It never closes the issue: the owner closes or rewrites
-    it. It runs `gh label create needs-owner` (description "A lane found nothing to build; the owner closes or
-    rewrites it") only if it is missing. Notify `lanes #$ARGUMENTS: already met: close or rewrite it`.
+    it. It runs `gh label create needs-owner` (description "A lane stopped and needs the owner; see its last comment")
+    only if it is missing. Notify `lanes #$ARGUMENTS: already met: close or rewrite it`.
 5. Tests first: one failing test per acceptance criterion. Run it narrowly (`node --test <file>` or the project's
    equivalent) and watch it fail, then implement until it passes. The criteria are a minimum: after the
    per-criterion tests, add tests for the edge cases you found while implementing (empty, boundary, malformed and
@@ -88,6 +100,10 @@ files with Edit, not Write.
    A `validate:` criterion is not a test: loop on `node scripts/lanes/validate.mjs --issue $ARGUMENTS --criterion <index>`
    (the 1-based criterion), making a fix and then a run, until it exits 0 or 2, and put the attempt table under that
    criterion in "What changed". Exit 0 means met, and exit 2 reports the best value and stops.
+   When `npm test` needs a file outside Scope only because of a file this lane adds (registering it in a manifest, an
+   index or a module map), the lane does not file a separate issue for it, which could never pass on its own. It stops
+   and comments `Lane stopped: Scope needs <paths>`, naming each path and the check that needs it, so the owner extends
+   this issue's Scope.
 6. Commit your work first, so the reviewers listed match what the gate will see; then
    `node scripts/lanes/reviewers.mjs <tier> $ARGUMENTS` lists the reviewers this diff needs, counting the paths the
    issue's Interface contract names as the gate does (it refuses when there is no diff at all). Spawn each as a fresh subagent,

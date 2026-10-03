@@ -15,8 +15,6 @@
 /scripts/lanes/workflow.test.mjs @SourE-dev
 /scripts/gate-workflow.test.mjs @SourE-dev
 /scripts/lanes/contracts.test.mjs @SourE-dev
-/scripts/lanes/start-guard.mjs @SourE-dev
-/scripts/lanes/start-guard.test.mjs @SourE-dev
 /scripts/lanes/queue.mjs @SourE-dev
 /scripts/lanes/queue.test.mjs @SourE-dev
 /scripts/lanes/start.mjs @SourE-dev
@@ -39,9 +37,8 @@
 /scripts/lanes/pick.test.mjs @SourE-dev
 /scripts/lanes/blockers.mjs @SourE-dev
 /scripts/lanes/blockers.test.mjs @SourE-dev
-/scripts/lanes/shell-lex.mjs @SourE-dev
-/scripts/lanes/shell-lex.test.mjs @SourE-dev
-/scripts/lanes/shell-lex.fixtures.mjs @SourE-dev
+/scripts/lanes/health.mjs @SourE-dev
+/scripts/lanes/health.test.mjs @SourE-dev
 /scripts/lanes/install.mjs @SourE-dev
 /scripts/lanes/install.test.mjs @SourE-dev
 /scripts/lanes/setup-repo.mjs @SourE-dev

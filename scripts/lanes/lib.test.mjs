@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TEAM_REQUIRED_MESSAGE, identityRefusal,adrGoverns, pendingFileHash, parsePending, pendingReuseBlockedBy, botIssueReleased, readBotIssueRelease, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, issuePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { TEAM_REQUIRED_MESSAGE, identityRefusal,adrGoverns, pendingFileHash, parsePending, pendingReuseBlockedBy, pendingHandoverBlockedBy, currentVerdicts, botIssueReleased, readBotIssueRelease, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, issuePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // #635: issuePaths lives here; paths.test.mjs covers it through its re-export
 test("issuePaths reads the contract and Scope's In: part, and drops Out:, absolute and traversal tokens", () => {
@@ -270,9 +270,7 @@ const OWNER_SAMPLES = {
   "^scripts/lanes/gate-decision\\.test\\.mjs$": ["scripts/lanes/gate-decision.test.mjs", "scripts/lanes/gate-decision.mjs"],
   "^scripts/lanes/workflow\\.test\\.mjs$": ["scripts/lanes/workflow.test.mjs", "scripts/lanes/workflow.mjs"],
   "^scripts/lanes/contracts\\.test\\.mjs$": ["scripts/lanes/contracts.test.mjs", "scripts/lanes/contracts.test.mjs.bak"],
-  "^scripts/lanes/start-guard(\\.test)?\\.mjs$": ["scripts/lanes/start-guard.test.mjs", "scripts/lanes/start-guards.mjs"],
-  "^scripts/lanes/(queue|start|status|app-token|reap|cleanup|lane-cost|modules|paths|pick|blockers)(\\.test)?\\.mjs$": ["scripts/lanes/queue.test.mjs", "scripts/lanes/queue-extra.mjs"],
-  "^scripts/lanes/shell-lex(\\.test|\\.fixtures)?\\.mjs$": ["scripts/lanes/shell-lex.fixtures.mjs", "scripts/lanes/shell-lexer.mjs"],
+  "^scripts/lanes/(queue|start|status|app-token|reap|cleanup|lane-cost|modules|paths|pick|blockers|health)(\\.test)?\\.mjs$": ["scripts/lanes/health.test.mjs", "scripts/lanes/health-extra.mjs"],
   "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$": ["scripts/lanes/setup-repo.mjs", "scripts/lanes/new-project-x.mjs"],
   "^scripts/gate-workflow\\.test\\.mjs$": ["scripts/gate-workflow.test.mjs", "scripts/gate-workflow.test.mjs.bak"],
   "^\\.claude/settings\\.json$": [".claude/settings.json", ".claude/settings.local.json"],
@@ -310,19 +308,20 @@ test("every regex in lanes.config.json paths.owner matches its sample and not it
   }
 });
 
-test("the real config: start-guard.mjs and contracts.test.mjs are owner-only, reviewers.mjs is not (ADR 0003)", () => {
+test("the real config: start.mjs and contracts.test.mjs are owner-only, reviewers.mjs and the retired start guard are not (ADR 0003, 0030)", () => {
   const real = loadConfig();
-  for (const file of ["scripts/lanes/contracts.test.mjs", "scripts/lanes/start-guard.mjs", "scripts/lanes/start-guard.test.mjs", "scripts/lanes/start.mjs"]) {
+  for (const file of ["scripts/lanes/contracts.test.mjs", "scripts/lanes/start.mjs", ".claude/settings.json"]) {
     assert.equal(classifyFiles([file], real).owner, true, file);
   }
   for (const file of [
     "scripts/lanes/reviewers.mjs",
     "scripts/lanes/reviewers.test.mjs",
     "scripts/lanes/contracts.mjs",
-    "scripts/lanes/start-guard.mjs.orig",
+    "scripts/lanes/start-guard.mjs", // retired: no owner pattern names it any more
+    "scripts/lanes/shell-lex.mjs",
     // edge: the new regexes are anchored to scripts/lanes/ exactly, not any nested directory under it.
     "scripts/lanes/sub/contracts.test.mjs",
-    "scripts/lanes/sub/start-guard.mjs",
+    "scripts/lanes/sub/start.mjs",
   ]) {
     assert.equal(classifyFiles([file], real).owner, false, file);
   }
@@ -1506,4 +1505,30 @@ test("edge: pendingReuseBlockedBy fails closed on malformed inputs", () => {
 
 test("edge: pendingReuseBlockedBy ignores a hash that is only inherited from Object.prototype", () => {
   assert.equal(reuse({ headHashes: Object.create({ [WF]: H }) }), `workflow file ${WF} is not committed yet`);
+});
+
+// #684: pendingHandoverBlockedBy and currentVerdicts
+const HEADSHA = "a".repeat(40);
+const pv = (pending, over = {}) => ({ reviewer: "test-hunter", sha: HEADSHA, verdict: { verdict: "success", pending }, ...over });
+const handoverBy = (v, headHashes) => pendingHandoverBlockedBy({ verdicts: [v], headSha: HEADSHA, reuse: new Map(), headHashes });
+
+test("pendingHandoverBlockedBy: null when every listed file matches, else names the first and counts the rest", () => {
+  const list = [{ path: WF, sha256: H }];
+  assert.equal(handoverBy(pv(list), new Map([[WF, H]])), null);
+  assert.equal(handoverBy(pv(list), new Map([[WF, null]])), `waiting for the workflow hand-over: ${WF}`);
+  assert.equal(handoverBy(pv(list), new Map()), `waiting for the workflow hand-over: could not read ${WF}`);
+});
+
+test("edge: pendingHandoverBlockedBy with no verdicts, no inputs or no pending is null", () => {
+  assert.equal(pendingHandoverBlockedBy(), null);
+  assert.equal(handoverBy(pv(undefined), new Map()), null);
+  assert.equal(handoverBy(pv([]), new Map()), null);
+});
+
+test("edge: currentVerdicts keeps the newest per reviewer and a reused commit's verdict", () => {
+  const old = "b".repeat(40);
+  const vs = [pv(undefined, { sha: old }), pv(undefined, { reviewer: "security-reviewer", sha: old }), pv([], { sha: HEADSHA }), pv(undefined, { sha: HEADSHA })];
+  assert.equal(currentVerdicts(vs, HEADSHA).length, 1);
+  assert.equal(currentVerdicts(vs, HEADSHA, new Map([["security-reviewer", { sha: old }]])).length, 2);
+  assert.deepEqual(currentVerdicts("x", null), []);
 });

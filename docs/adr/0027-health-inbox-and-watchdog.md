@@ -64,6 +64,11 @@ Forces:
    default branch using `issues: write` repository-wide, is the same exposure default-branch workflow code already has.
    *Amendment (2026-10-02, #631, approved by the owner in the operability item 1 plan):* no other write; the read
    permissions it needs.
+   *Amendment (2026-10-02, #689):* the health job also runs on `workflow_dispatch` (a Run workflow button), on
+   `workflow_run` `completed` for `verify`, `lanes-gate` and `security` (which covers merge-group failures) and on
+   `issues` events, with the schedule as a backstop, because GitHub's scheduled runs started 3.7 to 7.2 hours apart
+   here. It reads nothing from the event, and concurrency moves to the job level: the health job has its own group
+   `lanes-health` without cancel-in-progress, so no other event cancels it.
 6. **Health issue closed or edited by hand.** If the issue is closed, the watchdog reopens it only when there is an
    active problem; it never creates a second one while a closed one carries the label. If the `lanes:health` block is
    missing, unparseable or not written by `github-actions[bot]`, the stored set is empty: the next run rewrites the body

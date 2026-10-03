@@ -863,6 +863,47 @@ export function identityRefusal(read, configPath = "lanes.config.json") {
 const NEEDS_NOTHING = /^nothing\.?$/i;
 
 /**
+ * The trusted verdicts that count for this head: bound to `headSha`, or (a reused status) to its reviewer's reused
+ * commit; the newest per reviewer, oldest first otherwise. `verdicts` are `parseVerdictComment` results.
+ */
+export function currentVerdicts(verdicts, headSha, reuse = new Map()) {
+  const head = typeof headSha === "string" ? headSha.toLowerCase() : null;
+  const bound = (v) => (head !== null && v.sha === head) || (reuse.has(v.reviewer) && v.sha === reuse.get(v.reviewer).sha);
+  const newest = new Map();
+  for (const v of Array.isArray(verdicts) ? verdicts : []) if (v?.verdict && bound(v)) newest.set(v.reviewer, v);
+  return [...newest.values()];
+}
+
+/**
+ * ADR 0023 part 3: why the gate still waits for a workflow hand-over, or null when none is outstanding. Every current
+ * verdict that lists `pending` files needs each at the head with its listed sha256. `headHashes` maps a path to
+ * `pendingFileHash` of its blob at the head: a string, null (not committed), or anything else (an Error, or a missing
+ * key) for a read that failed. Fails closed: a malformed `pending` list also waits.
+ */
+export function pendingHandoverBlockedBy({ verdicts, headSha, reuse, headHashes } = {}) {
+  const hashOf = headHashes instanceof Map ? (p) => headHashes.get(p) : () => undefined;
+  const problems = new Map();
+  for (const v of currentVerdicts(verdicts, headSha, reuse)) {
+    const list = v.verdict.pending;
+    if (list === undefined || list === null || (Array.isArray(list) && list.length === 0)) continue;
+    const entries = parsePending(v.verdict);
+    if (entries === null) {
+      problems.set(`invalid pending list from ${v.reviewer}`, true);
+      continue;
+    }
+    for (const { path, sha256 } of entries) {
+      const got = hashOf(path);
+      if (got === sha256) continue;
+      problems.set(typeof got === "string" || got === null ? path : `could not read ${path}`, true);
+    }
+  }
+  if (problems.size === 0) return null;
+  const [first] = problems.keys();
+  const more = problems.size - 1;
+  return `waiting for the workflow hand-over: ${first}${more > 0 ? ` and ${more} more` : ""}`;
+}
+
+/**
  * Why a full-tier PR still needs the owner, or null when it may merge unattended. `verdicts` are the parsed verdict
  * comments (`parseVerdictComment`) whose author already passed `authorCanWrite`, oldest first; only those bound to
  * `headSha` count, and the newest per reviewer is its verdict for this head.
@@ -1026,7 +1067,7 @@ export function gateDecision(inputs) {
 }
 
 // `outsideScope` (#635) is the PR's changed files its issue's Scope "In" and Interface contract do not cover.
-function decideGate({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, nativeApproval = null }) {
+function decideGate({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, nativeApproval = null, pendingHeadHashes = undefined }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
@@ -1073,6 +1114,10 @@ function decideGate({ prBody, issueLabels, issueState, issueAuthorCanWrite, issu
       return fail(`review/${name} is required for this diff and cannot be skipped`, "review");
     }
   }
+  // ADR 0023 part 3 (#684): a workflow file a current verdict lists as pending must be at the head as reviewed, at
+  // every tier and even after the owner's approval; merging without it loses the handed-over change.
+  const handover = pendingHandoverBlockedBy({ verdicts, headSha, reuse, headHashes: pendingHeadHashes });
+  if (handover !== null) return { state: "pending", description: handover, stage: "handover" };
   // ADR 0021, 0025: the owner stage is a native code-owner review; review/owner is never read. A null or missing
   // approval (unread) is pending.
   const approved = nativeApproval?.approved === true;

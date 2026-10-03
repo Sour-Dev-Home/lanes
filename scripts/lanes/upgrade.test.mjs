@@ -257,3 +257,44 @@ test("edge: an empty lock plan adds every manifest file and applies cleanly", ()
   applyUpgrade(source, target, plan);
   assert.equal(get(target, "new.txt"), "source new.txt");
 });
+
+const SETTINGS = ".claude/settings.json";
+const NOTICE = /remove the start-guard\.mjs hook from \.claude\/settings\.json and add the ADR 0030 deny rules/;
+function settingsFixture(targetText, lockText) {
+  const f = fixture({ manifest: [SETTINGS, "lanes.config.json"], lockFiles: lockText === undefined ? {} : { [SETTINGS]: sha(lockText) } });
+  put(f.source, SETTINGS, "{}");
+  if (targetText !== undefined) put(f.target, SETTINGS, targetText);
+  return f;
+}
+const run = (f, argv) => {
+  const o = out();
+  main(argv, {}, { source: f.source, manifest: f.manifest, print: o.print });
+  return o.lines;
+};
+
+test("a kept settings.json that still names start-guard.mjs gets one notice line, in a dry run and with --apply", () => {
+  const edited = '{"hooks":{"x":"node scripts/lanes/start-guard.mjs"}}';
+  for (const argv of [[], ["--apply"]]) {
+    const f = settingsFixture(edited, "shipped");
+    const lines = run(f, [f.target, ...argv]);
+    assert.ok(lines.includes(`refuse ${SETTINGS}`));
+    assert.equal(lines.filter((l) => NOTICE.test(l)).length, 1);
+  }
+});
+
+test("a settings.json the lock does not track is kept too, so the notice shows", () => {
+  const f = settingsFixture('{"a":"start-guard.mjs"}');
+  assert.equal(run(f, [f.target]).filter((l) => NOTICE.test(l)).length, 1);
+});
+
+test("no notice for a kept settings.json that does not name the guard, an overwritten one, or none at all", () => {
+  const kept = settingsFixture('{"hooks":{}}', "shipped");
+  assert.equal(run(kept, [kept.target]).some((l) => NOTICE.test(l)), false);
+  const text = '{"a":"start-guard.mjs"}';
+  const replaced = settingsFixture(text, text); // unedited since install: overwritten by the shipped file
+  const lines = run(replaced, [replaced.target]);
+  assert.ok(lines.includes(`overwrite ${SETTINGS}`));
+  assert.equal(lines.some((l) => NOTICE.test(l)), false);
+  const missing = settingsFixture(undefined);
+  assert.equal(run(missing, [missing.target]).some((l) => NOTICE.test(l)), false);
+});
