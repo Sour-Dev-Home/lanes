@@ -72,7 +72,93 @@ export function compileConfig(raw) {
     if (!err.teamRequired) throw err;
     if (typeof raw.identity?.profile === "string") identity = { profile: raw.identity.profile };
   }
-  return identity === undefined ? config : { ...config, identity };
+  // ADR 0032 part 1: the opt-in switch for the Dependabot action-bump path. Absent is false; any non-boolean is a typo.
+  const actionBumps = raw.dependabot?.actionBumps === undefined ? false : raw.dependabot.actionBumps;
+  if (typeof actionBumps !== "boolean") throw new Error("lanes.config.json: dependabot.actionBumps must be a boolean");
+  const withDependabot = { ...config, dependabot: { actionBumps } };
+  return identity === undefined ? withDependabot : { ...withDependabot, identity };
+}
+
+const BUMP_FILE = /^(?:\.github\/workflows\/[^/]+\.ya?ml|\.github\/actions\/.+\/action\.ya?ml)$/;
+const BUMP_HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+const BUMP_USES =
+  /^([ \t]*(?:-[ \t]+)?uses:[ \t]+)([A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*(?:\/[\w.-]+)*)@([0-9a-f]{40})([ \t]+#[ \t]*[\w.+ /-]{1,64})?$/;
+// The API caps a PR's file list at 3000, so a list that long may be cut.
+const FILES_API_CAP = 3000;
+
+/** The `-` and `+` lines of each change block in a unified-diff patch, or null when the patch is not well formed. */
+function patchBlocks(patch) {
+  if (typeof patch !== "string" || patch === "") return null;
+  const lines = (patch.endsWith("\n") ? patch.slice(0, -1) : patch).split("\n");
+  const blocks = [];
+  let at = 0;
+  while (at < lines.length) {
+    const head = BUMP_HUNK.exec(lines[at]);
+    if (!head) return null;
+    let oldLeft = head[2] === undefined ? 1 : Number(head[2]);
+    let newLeft = head[4] === undefined ? 1 : Number(head[4]);
+    at++;
+    let block = null;
+    while (oldLeft > 0 || newLeft > 0) {
+      const line = lines[at++];
+      if (line === undefined) return null;
+      const mark = line[0];
+      if (mark === " ") {
+        oldLeft--;
+        newLeft--;
+        block = null;
+      } else if (mark === "-" || mark === "+") {
+        if (mark === "-") oldLeft--;
+        else newLeft--;
+        if (!block) blocks.push((block = { removed: [], added: [] }));
+        block[mark === "-" ? "removed" : "added"].push(line.slice(1));
+      } else return null; // "\ No newline", an empty line or anything else
+      if (oldLeft < 0 || newLeft < 0) return null;
+    }
+    if (lines[at] !== undefined && lines[at][0] === "\\") return null;
+  }
+  return blocks;
+}
+
+/**
+ * ADR 0032 part 2: does this PR do nothing but re-pin SHA-pinned actions? Pure and fail-closed: any condition not met,
+ * and any input of an unexpected shape, is `bump: false`. Never throws.
+ * @param {{ author?: { login?: string, type?: string }, files?: Array<{ filename?: string, status?: string,
+ *   previous_filename?: string | null, patch?: string }> }} input
+ * @returns {{ bump: true } | { bump: false, reason: string }}
+ */
+export function dependabotActionBump(input) {
+  const no = (reason) => ({ bump: false, reason });
+  try {
+    const { author, files } = input ?? {};
+    if (author?.login !== "dependabot[bot]" || author?.type !== "Bot") return no("author is not dependabot[bot]");
+    if (!Array.isArray(files) || files.length === 0) return no("no file list");
+    if (files.length >= FILES_API_CAP) return no("file list may be cut at the API cap");
+    for (const file of files) {
+      if (!file || typeof file !== "object") return no("unreadable file entry");
+      const { filename, status, previous_filename: previous, patch } = file;
+      if (typeof filename !== "string" || !BUMP_FILE.test(filename) || filename.split("/").includes("..")) {
+        return no(`${String(filename)} is not a workflow or action file`);
+      }
+      if (status !== "modified") return no(`${filename} is not modified`);
+      if (previous !== undefined && previous !== null) return no(`${filename} was renamed`);
+      const blocks = patchBlocks(patch);
+      if (!blocks) return no(`${filename} has a missing, truncated or malformed patch`);
+      if (blocks.length === 0) return no(`${filename} has no changed line`);
+      for (const { removed, added } of blocks) {
+        if (removed.length !== added.length) return no(`${filename} adds or removes a line`);
+        for (let i = 0; i < removed.length; i++) {
+          const before = BUMP_USES.exec(removed[i]);
+          const after = BUMP_USES.exec(added[i]);
+          if (!before || !after || [before, after].some((m) => m[2].split("/").some((s) => s === "." || s === ".."))) return no(`${filename} changes a line that is not a SHA-pinned uses:`);
+          if (before[1] !== after[1] || before[2] !== after[2]) return no(`${filename} changes more than the SHA or comment`);
+        }
+      }
+    }
+    return { bump: true };
+  } catch {
+    return no("unexpected input");
+  }
 }
 
 export function loadConfig(file = "lanes.config.json") {
