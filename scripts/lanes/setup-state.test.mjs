@@ -5,8 +5,8 @@ import { LABELS } from "./setup-repo.mjs";
 import { setupState, formatSetupState, setupStateMain } from "./setup-state.mjs";
 
 const REPO = "acme/widgets";
-const HOME = "/home/x";
-const TARGET = "/work/widgets";
+const HOME = "fake-home";
+const TARGET = "fake-target";
 const APP = { id: 1, installationId: 42, botLogin: "widgets-lanes[bot]" };
 const CONFIG = JSON.stringify({ identity: { profile: "team", app: APP } });
 
