@@ -288,7 +288,7 @@ test("edge: workflows mode refuses a token that could inject another env line, a
 });
 
 test("edge: the CLI refuses a missing mode and prints only the step when the key is bad", () => {
-  const run = (a, env) => spawnSync(process.execPath, ["scripts/lanes/app-token.mjs", ...a], { env: { PATH: process.env.PATH, ...env }, encoding: "utf8" });
+  const run = (a, env) => spawnSync(process.execPath, ["scripts/lanes/app-token.mjs", ...a], { env: { PATH: process.env.PATH, ...env }, encoding: "utf8", windowsHide: true });
   assert.equal(run([], {}).status, 2);
   const bad = run(["workflows"], { APP_ID: "1", APP_KEY: "SECRETKEYTEXT", LANES_REPO: "o/lanes", GITHUB_ENV: "x" });
   assert.equal(bad.status, 1);

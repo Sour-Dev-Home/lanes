@@ -15,7 +15,7 @@ const sha = (f) => createHash("sha256").update(readFileSync(f)).digest("hex");
 // upgrade.mjs refuses to run inside Claude, so the children never inherit CLAUDECODE.
 const { CLAUDECODE: _unused, ...env } = process.env;
 function run(script, ...args) {
-  const r = spawnSync(process.execPath, [path.join(ROOT, "scripts", "lanes", script), ...args], { cwd: ROOT, env, encoding: "utf8", timeout: 60_000 });
+  const r = spawnSync(process.execPath, [path.join(ROOT, "scripts", "lanes", script), ...args], { cwd: ROOT, env, encoding: "utf8", timeout: 60_000, windowsHide: true });
   assert.equal(r.status, 0, `${script} ${args.join(" ")} exited ${r.status}: ${r.stdout}${r.stderr}`);
   return r.stdout;
 }
@@ -38,7 +38,7 @@ function assertValidLock(lock) {
 test("install then upgrade keeps an adopter's edits", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "lanes-adopter-"));
   try {
-    execFileSync("git", ["init", "--quiet", dir]);
+    execFileSync("git", ["init", "--quiet", dir], { windowsHide: true });
     run("install.mjs", dir, "--private");
 
     const lock = readLock(dir);

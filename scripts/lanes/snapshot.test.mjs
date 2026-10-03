@@ -279,9 +279,9 @@ test("the command builds a snapshot offline with --from and writes it with --out
     // Run in the temp directory, so the repository's own lanes.config.json is not read; ADR 0025: it must be a team one.
     const script = resolve("scripts/lanes/snapshot.mjs");
     writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity: TEAM_ID }));
-    execFileSync(process.execPath, [script, "--from", join(dir, "in.json"), "--out", join(dir, "out.json")], { stdio: "pipe", cwd: dir });
+    execFileSync(process.execPath, [script, "--from", join(dir, "in.json"), "--out", join(dir, "out.json")], { stdio: "pipe", cwd: dir, windowsHide: true });
     assert.deepEqual(JSON.parse(readFileSync(join(dir, "out.json"), "utf8")), build({ issues: [issue(1)], profile: "team" }));
-    const stdout = execFileSync(process.execPath, [script, "--from", join(dir, "in.json")], { encoding: "utf8", cwd: dir });
+    const stdout = execFileSync(process.execPath, [script, "--from", join(dir, "in.json")], { encoding: "utf8", cwd: dir, windowsHide: true });
     assert.equal(JSON.parse(stdout).generatedAt, NOW);
     // The profile comes from the config's identity in the working directory.
     assert.equal(JSON.parse(stdout).profile, "team");
@@ -301,14 +301,14 @@ test("the command prints the team-required line instead of a snapshot for a miss
       rmSync(join(dir, "lanes.config.json"), { force: true });
       if (config !== null) writeFileSync(join(dir, "lanes.config.json"), config);
       for (const extra of [[], ["--out", join(dir, "out.json")]]) {
-        const stdout = execFileSync(process.execPath, [script, "--from", join(dir, "in.json"), ...extra], { encoding: "utf8", cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
+        const stdout = execFileSync(process.execPath, [script, "--from", join(dir, "in.json"), ...extra], { encoding: "utf8", cwd: dir, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
         assert.ok(stdout.startsWith(TEAM_REQUIRED_MESSAGE), stdout);
         assert.equal(stdout.trim().split("\n").length, 1, "one line");
         assert.equal(existsSync(join(dir, "out.json")), false, "no snapshot file");
       }
     }
     writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity: { profile: "solo" } }));
-    assert.match(execFileSync(process.execPath, [script, "--from", join(dir, "in.json")], { encoding: "utf8", cwd: dir }), /profile "solo"/);
+    assert.match(execFileSync(process.execPath, [script, "--from", join(dir, "in.json")], { encoding: "utf8", cwd: dir, windowsHide: true }), /profile "solo"/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -393,7 +393,7 @@ test("edge: an issue with no Scope paths is never listed, and overlaps is empty 
 test("edge: the command reads start.softPaths from lanes.config.json in the working directory, and refuses a malformed one", () => {
   const dir = mkdtempSync(join(tmpdir(), "snapshot-cfg-"));
   const script = join(process.cwd(), "scripts/lanes/snapshot.mjs");
-  const run = () => JSON.parse(execFileSync(process.execPath, [script, "--from", "in.json"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  const run = () => JSON.parse(execFileSync(process.execPath, [script, "--from", "in.json"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
   try {
     writeFileSync(join(dir, "in.json"), JSON.stringify({ prs: [], issues: [scoped(1, "`a.mjs`"), scoped(2, "`a.mjs`")], generatedAt: NOW }));
     writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity: TEAM_ID }));

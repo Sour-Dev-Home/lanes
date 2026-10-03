@@ -128,16 +128,16 @@ test("edge: the CLI itself passes a sheet with a users/profile line, and fails t
     writeFileSync(join(sheetDir, "CSRF.md"), `${URL_LINE}\n`);
     writeFileSync(join(dir, "README.md"), "clean\n");
     const env = { ...process.env, ...GIT_IDENTITY };
-    execFileSync("git", ["init", "-q"], { cwd: dir });
-    execFileSync("git", ["add", "-A"], { cwd: dir });
-    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir, env });
+    execFileSync("git", ["init", "-q"], { cwd: dir, windowsHide: true });
+    execFileSync("git", ["add", "-A"], { cwd: dir, windowsHide: true });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir, env, windowsHide: true });
 
-    const clean = spawnSync("node", [PREFLIGHT_CLI], { cwd: dir, encoding: "utf8" });
+    const clean = spawnSync("node", [PREFLIGHT_CLI], { cwd: dir, encoding: "utf8", windowsHide: true });
     assert.equal(clean.status, 0, clean.stdout + clean.stderr);
 
     writeFileSync(join(dir, "other.md"), `${URL_LINE}\n`);
-    execFileSync("git", ["add", "-A"], { cwd: dir });
-    const dirty = spawnSync("node", [PREFLIGHT_CLI], { cwd: dir, encoding: "utf8" });
+    execFileSync("git", ["add", "-A"], { cwd: dir, windowsHide: true });
+    const dirty = spawnSync("node", [PREFLIGHT_CLI], { cwd: dir, encoding: "utf8", windowsHide: true });
     assert.equal(dirty.status, 1, dirty.stdout + dirty.stderr);
     assert.match(dirty.stderr, /other\.md:1 contains a local absolute path/);
   } finally {

@@ -22,7 +22,7 @@ const GIT_ENV = {
 // A throwaway repo whose origin/main is the first commit; the branch then adds `committed` in a second commit.
 function inRepo(fn, committed = { "src/app.js": "x\n" }) {
   const root = mkdtempSync(join(tmpdir(), "lanes-reviewers-"));
-  const git = (...args) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd: root, env: GIT_ENV, encoding: "utf8" });
+  const git = (...args) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd: root, env: GIT_ENV, encoding: "utf8", windowsHide: true });
   const write = (file, text = "x\n") => {
     mkdirSync(dirname(join(root, file)), { recursive: true });
     writeFileSync(join(root, file), text);
@@ -47,7 +47,7 @@ function inRepo(fn, committed = { "src/app.js": "x\n" }) {
 // A throwaway repo whose HEAD is origin/main: the lane has not committed yet.
 function atBase(fn) {
   const root = mkdtempSync(join(tmpdir(), "lanes-reviewers-"));
-  const git = (...args) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd: root, env: GIT_ENV, encoding: "utf8" });
+  const git = (...args) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd: root, env: GIT_ENV, encoding: "utf8", windowsHide: true });
   const write = (file, text = "x\n") => {
     mkdirSync(dirname(join(root, file)), { recursive: true });
     writeFileSync(join(root, file), text);
@@ -65,7 +65,7 @@ function atBase(fn) {
     rmSync(root, { recursive: true, force: true });
   }
 }
-const run = (root, tier = "quick") => spawnSync(process.execPath, [SCRIPT, tier], { cwd: root, encoding: "utf8" });
+const run = (root, tier = "quick") => spawnSync(process.execPath, [SCRIPT, tier], { cwd: root, encoding: "utf8", windowsHide: true });
 const reviewers = (root, tier) => {
   const r = run(root, tier);
   assert.equal(r.status, 0, r.stderr);
@@ -231,7 +231,7 @@ test("edge: an unknown tier on an empty diff still reports usage, not the empty-
 
 // #241/#250 (AC7): the optional issue-number argument is validated the same way as the tier, before any git or gh
 // work, so a malformed issue number never reaches `gh issue view`.
-const runWithIssue = (root, tier, issue) => spawnSync(process.execPath, [SCRIPT, tier, issue], { cwd: root, encoding: "utf8" });
+const runWithIssue = (root, tier, issue) => spawnSync(process.execPath, [SCRIPT, tier, issue], { cwd: root, encoding: "utf8", windowsHide: true });
 
 test("edge: a malformed issue-number argument is refused, before reading any diff", () => {
   atBase(({ root }) => {

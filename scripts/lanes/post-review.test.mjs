@@ -451,7 +451,7 @@ test("the team refusal for post-review.mjs owner is unchanged", () => {
 
 test("mainCheckoutFrom finds the main checkout from the main checkout and from a worktree", () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "grant-repo-")));
-  const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "core.hooksPath=", ...args], { cwd, stdio: "pipe" });
+  const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "core.hooksPath=", ...args], { cwd, stdio: "pipe", windowsHide: true });
   const mainCheckout = join(root, "main");
   mkdirSync(join(mainCheckout, "scripts", "lanes"), { recursive: true });
   git(mainCheckout, "init", "-q", "-b", "main");
@@ -489,7 +489,7 @@ test("edge: an inherited GIT_DIR cannot redirect mainCheckoutFrom", () => {
   mkdirSync(dir, { recursive: true });
   const other = join(root, "elsewhere", ".git");
   mkdirSync(join(root, "elsewhere"), { recursive: true });
-  execFileSync("git", ["init", "-q", join(root, "elsewhere")], { stdio: "pipe" });
+  execFileSync("git", ["init", "-q", join(root, "elsewhere")], { stdio: "pipe", windowsHide: true });
   const saved = process.env.GIT_DIR;
   process.env.GIT_DIR = other;
   try {
@@ -542,14 +542,14 @@ test("main posts a configured reviewer's verdict file and refuses an unknown one
 
 test("the configured set is read from the main checkout's config, from a worktree path too (#463)", () => {
   const dir = mkdtempSync(join(tmpdir(), "post-review-cfg-"));
-  execFileSync("git", ["init", "-q", dir]);
+  execFileSync("git", ["init", "-q", dir], { windowsHide: true });
   mkdirSync(join(dir, "scripts", "lanes"), { recursive: true });
   writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({
     requiredChecks: ["verify"],
     paths: { skip: [], contract: [], sensitive: [], ui: [] },
     modules: { entries: [{ id: "m", paths: ["x/"], imports: [], risk: "normal", reviewers: ["compliance-reviewer"] }] },
   }));
-  const git = (...a) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", ...a]);
+  const git = (...a) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", ...a], { windowsHide: true });
   git("commit", "-q", "--allow-empty", "-m", "x");
   const wt = join(dir, "wt");
   git("worktree", "add", "-q", "-b", "b", wt);
@@ -603,7 +603,7 @@ test("edge: --file with owner as the verdict's reviewer is refused as an unknown
 
 const cfgRepo = (text) => {
   const dir = mkdtempSync(join(tmpdir(), "post-review-cfg2-"));
-  execFileSync("git", ["init", "-q", dir]);
+  execFileSync("git", ["init", "-q", dir], { windowsHide: true });
   mkdirSync(join(dir, "scripts", "lanes"), { recursive: true });
   if (text !== undefined) writeFileSync(join(dir, "lanes.config.json"), text);
   return dir;

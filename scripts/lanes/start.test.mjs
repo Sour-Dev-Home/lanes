@@ -66,7 +66,7 @@ const cleanEnv = () => {
   delete env.CLAUDE_CODE_CHILD_SESSION;
   return env;
 };
-const runStart = (file, args, env) => spawnSync(process.execPath, [file, ...args], { env, encoding: "utf8", timeout: 30_000 });
+const runStart = (file, args, env) => spawnSync(process.execPath, [file, ...args], { env, encoding: "utf8", timeout: 30_000, windowsHide: true });
 
 test("start.mjs at the command line exits 2 with the refusal inside a Claude session, for each variable", () => {
   for (const name of ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION"]) {
@@ -89,10 +89,10 @@ test("start.mjs at the command line exits 2 with the refusal from a copy under .
       cpSync(SCRIPTS_DIR, target, { recursive: true, filter: (src) => !src.endsWith(".test.mjs") });
     }
     // The working directory is the plain checkout in both runs: only the script's own location decides.
-    const refused = spawnSync(process.execPath, [join(lane, "start.mjs"), "--refresh-token"], { cwd: join(dir, "repo"), env: cleanEnv(), encoding: "utf8", timeout: 30_000 });
+    const refused = spawnSync(process.execPath, [join(lane, "start.mjs"), "--refresh-token"], { cwd: join(dir, "repo"), env: cleanEnv(), encoding: "utf8", timeout: 30_000, windowsHide: true });
     assert.equal(refused.status, 2);
     assert.equal(refused.stderr.trim(), LAUNCH_REFUSAL);
-    const ran = spawnSync(process.execPath, [join(plain, "start.mjs"), "--refresh-token"], { cwd: join(dir, "repo"), env: cleanEnv(), encoding: "utf8", timeout: 30_000 });
+    const ran = spawnSync(process.execPath, [join(plain, "start.mjs"), "--refresh-token"], { cwd: join(dir, "repo"), env: cleanEnv(), encoding: "utf8", timeout: 30_000, windowsHide: true });
     assert.equal(ran.status, 2);
     assert.match(ran.stderr, /^usage: start\.mjs --refresh-token /, "the refresher ran and printed its own usage");
     assert.ok(!ran.stderr.includes(LAUNCH_REFUSAL));
@@ -126,7 +126,7 @@ test("start.mjs and queue.mjs reach their command line when started through a sy
     }
     const env = { ...cleanEnv(), CLAUDECODE: "1" };
     for (const name of ["start.mjs", "queue.mjs"]) {
-      const r = spawnSync(process.execPath, [join(link, "scripts", "lanes", name)], { env, encoding: "utf8", timeout: 30_000 });
+      const r = spawnSync(process.execPath, [join(link, "scripts", "lanes", name)], { env, encoding: "utf8", timeout: 30_000, windowsHide: true });
       assert.equal(r.status, 2, `${name}: ${r.stdout}${r.stderr}`);
       assert.equal(`${r.stdout}${r.stderr}`.trim(), LAUNCH_REFUSAL, name);
     }
