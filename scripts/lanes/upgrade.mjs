@@ -140,7 +140,7 @@ function keepsGuardHook(target, plan) {
   }
 }
 
-const USAGE ="usage: upgrade.mjs <target-dir> [--apply]: the target must be an existing directory";
+const USAGE = "usage: upgrade.mjs <target-dir> [--apply]: the target must be an existing directory";
 
 export function main(argv, env = process.env, { source = path.join(HERE, "..", ".."), manifest = MANIFEST, print = console.log } = {}) {
   if (argv.includes("--help") || argv.includes("-h")) {
