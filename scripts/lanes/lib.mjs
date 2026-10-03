@@ -105,6 +105,14 @@ export function compileConfig(raw, codeownersText = undefined) {
     if (!Array.isArray(list)) throw new Error(`lanes.config.json: paths.${key} must be an array of regex strings`);
     paths[key] = list.map((source) => new RegExp(source));
   }
+  // ADR 0031 part 3: a module with risk "sensitive" adds a literal prefix pattern per path. It only adds, never removes.
+  const entries = Array.isArray(raw?.modules?.entries) ? raw.modules.entries : [];
+  for (const e of entries) {
+    if (e?.risk !== "sensitive" || !Array.isArray(e.paths)) continue;
+    for (const p of e.paths) {
+      if (typeof p === "string" && p !== "") paths.sensitive.push(new RegExp(`^${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    }
+  }
   // ADR 0002: owner-only paths force /approve at every tier. Optional so older installed configs still load.
   // A present but null owner list is a typo, not an absent key, so it is rejected rather than read as [].
   const owner = raw?.paths?.owner === undefined ? [] : raw.paths.owner;

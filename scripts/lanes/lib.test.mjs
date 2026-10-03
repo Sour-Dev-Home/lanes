@@ -241,6 +241,36 @@ test("compileConfig rejects empty requiredChecks", () => {
   assert.throws(() => compileConfig({ requiredChecks: [], paths: { skip: [], contract: [], sensitive: [], ui: [] } }), /requiredChecks/);
 });
 
+// ADR 0031 part 3: a module's risk can only add to the sensitive set, as a literal prefix of each of its paths.
+test("compileConfig adds a sensitive module's path prefixes to paths.sensitive and nothing for a normal one", () => {
+  const raw = (entries, sensitive = ["^scripts/lanes/"]) => ({
+    requiredChecks: ["verify"],
+    paths: { skip: [], contract: [], sensitive, ui: [] },
+    modules: { entries },
+  });
+  const mod = (id, paths, risk) => ({ id, paths, imports: [], risk });
+  const base = compileConfig(raw([])).paths.sensitive;
+  assert.equal(compileConfig(raw([mod("n", ["src/normal."], "normal")])).paths.sensitive.length, base.length);
+  assert.equal(compileConfig(raw([{ id: "u", paths: ["src/unset."], imports: [] }])).paths.sensitive.length, base.length);
+  const s = compileConfig(raw([mod("s", ["src/risky.", "pay/"], "sensitive")])).paths.sensitive;
+  assert.equal(s.length, base.length + 2);
+  assert.ok(s.some((r) => r.test("src/risky.mjs")) && s.some((r) => r.test("pay/x/y.js")));
+  assert.ok(!s.some((r) => r.test("lib/src/risky.mjs")), "anchored at the repo root");
+  assert.ok(!s.some((r) => r.test("src/riskyx")), "the prefix is literal, the dot is not a wildcard");
+  assert.ok(s.some((r) => r.test("scripts/lanes/gate.mjs")), "the explicit list is kept");
+  assert.equal(classifyFiles(["src/risky.mjs"], compileConfig(raw([mod("s", ["src/risky."], "sensitive")]))).sensitive, true);
+  assert.equal(classifyFiles(["src/risky.mjs"], compileConfig(raw([mod("n", ["src/risky."], "normal")]))).sensitive, false);
+});
+
+test("edge: compileConfig escapes regex metacharacters in a module prefix and tolerates a malformed module map", () => {
+  const raw = (modules) => ({ requiredChecks: ["verify"], paths: { skip: [], contract: [], sensitive: [], ui: [] }, ...(modules === undefined ? {} : { modules }) });
+  const s = compileConfig(raw({ entries: [{ id: "m", paths: ["a+b(c)/"], imports: [], risk: "sensitive" }] })).paths.sensitive;
+  assert.ok(s.some((r) => r.test("a+b(c)/x")) && !s.some((r) => r.test("aab(c)/x")));
+  for (const modules of [null, {}, { entries: null }, { entries: [null, { risk: "sensitive" }, { risk: "sensitive", paths: [3, ""] }] }]) {
+    assert.deepEqual(compileConfig(raw(modules)).paths.sensitive, [], JSON.stringify(modules));
+  }
+});
+
 test("compileConfig defaults paths.owner to [] and rejects a non-array one", () => {
   const paths = { skip: [], contract: [], sensitive: [], ui: [] };
   assert.deepEqual(compileConfig({ requiredChecks: ["verify"], paths }).paths.owner, []);
