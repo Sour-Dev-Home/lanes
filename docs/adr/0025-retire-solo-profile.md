@@ -2,6 +2,8 @@
 
 Status: accepted
 
+*Amended 2026-10-02 by ADR 0030: part 4's `start-guard.mjs` and `shell-lex.mjs` no longer stay; both are retired and deleted.*
+
 ## Context
 
 Lanes has two identity profiles. Under solo, lanes run as the owner's own GitHub account, the owner approves with

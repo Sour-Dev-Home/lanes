@@ -14,7 +14,7 @@ private channel in a public issue that contains no details.
 
 | Threat | How | ADRs |
 | --- | --- | --- |
-| A lane or model **launching lanes** (itself or others) | `start-guard.mjs` allows `start.mjs` only in the turn the owner typed a matching `/start`; `start.mjs` itself refuses without that single-use, short-lived grant; `queue.mjs` exits when it runs inside Claude | [0005](adr/0005-owner-run-lane-queue.md), [0007](adr/0007-start-guard-accepted-risk.md) |
+| A lane or model **launching lanes** (itself or others) | The queue is the only launcher. `permissions.deny` rules in `.claude/settings.json` refuse `claude --bg`, `queue.mjs`, `start.mjs` and release-tag commands (`git tag`, `git push --tags`, a push of a `v*` ref) in every permission mode, and `queue.mjs` and `start.mjs` exit 2 when they run under `.claude/worktrees/` or inside Claude | [0030](adr/0030-retire-start-guard-and-start.md), [0005](adr/0005-owner-run-lane-queue.md), [0007](adr/0007-start-guard-accepted-risk.md) |
 | A lane or model **approving itself**, and **forged owner approvals** | Lanes act as the App bot and hold only an installation token, never the owner's; the approval is a GitHub code-owner review the bot cannot post, enforced by the ruleset | [0025](adr/0025-retire-solo-profile.md), [0019](adr/0019-team-identity-profile.md), [0021](adr/0021-team-native-code-owner-review.md) |
 | **Weakened gates**, and a PR changing its own rules | `lanes/gate` is a required status; it reads its path lists and configuration from the default branch, and verdicts and approvals count only for the PR's current head SHA (a new push invalidates them); the merge queue re-decides the gate from live inputs ([USING.md](USING.md)) | [0002](adr/0002-owner-only-paths.md) |
 | **Unreviewed changes to the files that decide what is checked and who approves** | Owner paths (`paths.owner`): any PR touching them waits for the owner's code-owner review in GitHub, at every tier | [0002](adr/0002-owner-only-paths.md), [0003](adr/0003-owner-only-amendment.md) |
@@ -47,9 +47,10 @@ These are decided, not overlooked:
   installation token, never the owner's, so they cannot post the owner's review; GitHub enforces the code-owner
   ruleset. The residual risk is a stolen App private key, which stays in `~/.lanes/` outside the repository
   ([0025](adr/0025-retire-solo-profile.md)).
-- **The start guard parses command text on a best-effort basis.** It defends against accident and casual misuse, not
-  a determined lane: a shell can build a command in more ways than any parser covers. A newly found bypass is a
-  `minor` follow-up; a regression is `critical` ([0007](adr/0007-start-guard-accepted-risk.md)).
+- **The deny rules and the scripts' refusals are best-effort.** They defend against accident and casual misuse, not
+  a determined lane: `bash -c`, an absolute path or `npx` passes a rule, and a scrubbed environment with a copied script
+  passes a refusal. A newly found way past them is a `minor` follow-up; a regression is `critical`
+  ([0030](adr/0030-retire-start-guard-and-start.md), [0007](adr/0007-start-guard-accepted-risk.md)).
 - **The team App never gets `workflows: write`; the owner's read is the control.** A workflow file pushed to a branch
   of this repository runs on `push` before any review, and it can raise its own `GITHUB_TOKEN` with a `permissions:`
   block (for example `statuses: write`) to post `lanes/gate=success` as `github-actions[bot]`, the same creator the real

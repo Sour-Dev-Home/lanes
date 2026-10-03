@@ -2,6 +2,8 @@
 
 Status: accepted
 
+*Amended 2026-10-02 by ADR 0030: part 3's tag rule (denying creating or pushing a `v*` tag from a Claude session) no longer lives in `start-guard.mjs`; it is now in the `permissions.deny` list (ADR 0030 part 4).*
+
 ## Context
 
 `verify.yml` runs the full `npm test` (every `scripts/**/*.test.mjs`) on ubuntu Node 22 and 24 and windows Node 22, on

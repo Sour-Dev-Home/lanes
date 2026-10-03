@@ -7,46 +7,45 @@
    tier. The `issue-contract` check labels a complete issue `tier:*` and `ready`, or comments what is missing.
    Faster: `/plan-issues "<your idea in 1-4 sentences>"` drafts up to 6 such issues (the contract issue first) into
    `.lanes/plans/`; edit or approve the draft, and only then are they created.
-2. **Start up to 8 lanes**: open a fresh Claude Code session per issue and run `/lane <issue>`. Each lane works in its
-   own worktree, writes the failing tests first, runs its reviewers, opens the PR and turns auto-merge on, then ends.
-   Faster: `/start <issue> [<issue> ...]` checks each issue the way `/lane` does and launches the rest as background
-   sessions named `lane-<issue>` with `claude --bg --name lane-<issue> "/lane <issue>"`, printing `#<issue> → <id>`
-   for `claude attach` or `claude logs`. It refuses, with the reason, an issue that is not open, lacks `ready` or one
-   `tier:*` label, carries `needs-owner`, is assigned to anyone (see below), has an open blocker or is already in flight; both issues of a pair whose paths overlap (pick one and run `/start` again); and anything past
-   `start.maxLanes` in `lanes.config.json` (8) lanes in flight, counting open `issue-*` PRs and running sessions.
-   `/start --auto` picks for you: it prints which ready issues it would start and why it skips each of the rest (a
-   blocker, an overlap with another pick or with files running work already touches, the cap), and launches nothing.
-   `/start --auto --go` recomputes that plan and launches exactly its picks; the paths in `start.softPaths` (this file
-   and `README.md` by default) never count as overlaps, for `/start <N...>` either.
-   Owner only: a lane or a schedule never runs it.
+2. **Start up to 8 lanes**: the queue (below) is the only launcher. It checks each issue the way `/lane` does and
+   launches the rest as background sessions named `lane-<issue>` with `claude --bg --name lane-<issue> "/lane <issue>"`,
+   for `claude attach` or `claude logs`. It skips, with the reason, an issue that is not open, lacks `ready` or one
+   `tier:*` label, carries `needs-owner`, is assigned to anyone (see below), has an open blocker or is already in
+   flight; one of a pair whose paths overlap (the other starts once the first merges); and anything past
+   `start.maxLanes` in `lanes.config.json` (8) lanes in flight, counting open `issue-*` PRs and running sessions. The
+   paths in `start.softPaths` (this file and `README.md` by default) never count as overlaps. To hold an issue back,
+   remove its `ready` label or press Pause; there is no command to launch a chosen issue by hand. A lane or a
+   schedule never launches lanes: the deny rules in `.claude/settings.json` (`claude --bg`, `queue.mjs`, `start.mjs`
+   and the release-tag commands, in every permission mode) and the scripts' own refusals inside Claude hold that line
+   ([ADR 0030](adr/0030-retire-start-guard-and-start.md)).
    Claiming an issue (#522): when the owner session files a Task issue it will do itself, it assigns it in the same
-   call (`gh issue create --assignee @me ...`). The queue, `/start --auto` and `/start <N>` skip or refuse an issue
+   call (`gh issue create --assignee @me ...`). The queue skips an issue
    with any assignee, with the reason `assigned to <login>`, so no lane races the owner session. Removing `ready`
    does not claim it: the gate refuses a PR whose issue is not `ready`.
    `start.models` (optional) picks each lane's model by its issue's tier: it maps `skip`, `quick` and `full` to a
-   model name, and `/start` adds `--model <name>` to that tier's launches. A tier left
+   model name, and the queue adds `--model <name>` to that tier's launches. A tier left
    out runs on your default model. This repository sets all three tiers to `sonnet`: issues are scoped
    tightly enough for it, and three independent reviewers check every full-tier lane. Any other key, or a value that is not one word (or starts
    with `-`), refuses the whole run with nothing launched.
-   An issue labelled `model:opus` launches on Opus whatever its tier's model, in `--auto` and in the queue too (a resumed lane as well). Use it for the issues
+   An issue labelled `model:opus` launches on Opus whatever its tier's model, in the queue (a resumed lane as well). Use it for the issues
    where a subtle bug is a security hole: security-critical parsing, guards, and contracts the reviewers found hard.
    Any other `model:*` label is ignored and logged as `#N: ignored label model:<x>`.
    Lanes run without MCP servers: `start.mjs` launches them with `--strict-mcp-config`
    and the lane's settings deny `mcp__github` and `mcp__*` (a best-effort backstop behind `--strict-mcp-config`:
    `mcp__<server>` is the documented permission form, the bare wildcard is not). A user-level MCP server (a GitHub one, say) holds your own token, so a lane
    that loaded it could open PRs or review as you and defeat the bot identity.
-   The start guard (`scripts/lanes/start-guard.mjs`, two hooks in `.claude/settings.json`)
-   enforces that: it lets `start.mjs` run only for the same issue numbers or the same `--auto` form, within 15 minutes
-   of you typing `/start <N ...>`, `/start --auto` or `/start --auto --go` in that session (a `/start --auto` never
-   allows `--go`), and it denies a direct `claude --bg` in every session and permission mode. `start.mjs` checks the
-   same grant itself and deletes it after its launches, so it runs once per `/start` however it was reached (ADR 0007).
-   **Recommended: keep the queue running**, and use `/start` (above) as the manual alternative when you want to pick
-   the issues yourself. Review in GitHub about twice a day, in one or two batches: the queue prints
+   The deny rules in `.claude/settings.json` keep a lane from launching others: they refuse `claude --bg`, `queue.mjs`
+   and `start.mjs` (and their PowerShell and `./` spellings) in every session and permission mode, and `queue.mjs` and
+   `start.mjs` exit 2 with `lanes are launched only by the owner's queue in their own terminal (ADR 0030)` when the
+   script's file is under `.claude/worktrees/` or `CLAUDECODE` or `CLAUDE_CODE_CHILD_SESSION` is set. The same deny list
+   refuses the release-tag commands (`git tag`, `git push --tags`, `git push --follow-tags`, a push of a `v*` ref;
+   `git ls-remote --tags` still works). They are best-effort, not a barrier around a determined lane (ADR 0030, ADR 0007).
+   **Keep the queue running.** Review in GitHub about twice a day, in one or two batches: the queue prints
    each waiting PR with how long it has waited, oldest first.
    `node scripts/lanes/queue.mjs` in your own terminal (never from Claude: it exits 2
-   when `CLAUDECODE` is set, and the start guard denies it in every session). It takes no arguments. Every 3 minutes
-   it cleans up merged lanes, re-reads every open `ready` issue, the open PRs and the sessions, and launches what
-   `/start --auto --go` would, under the same `start.maxLanes`, `start.softPaths` and `start.models`; an issue made
+   inside Claude, and the deny rules refuse it in every session). It takes no arguments. Every 3 minutes
+   it cleans up merged lanes, re-reads every open `ready` issue, the open PRs and the sessions, and launches the
+   unblocked, unassigned ones, under `start.maxLanes`, `start.softPaths` and `start.models`; an issue made
    `ready` mid-run joins on the next tick, and one skipped for an overlap or the cap is tried again. Each line is
    time-stamped. The PRs waiting on you (a code-owner review, a failing check or review, a failing gate) print as one block,
    oldest first, in each tick where one started waiting, stopped or changed its reason and in no other: each line has the
@@ -55,10 +54,10 @@
    minutes (one line names the delay; a success resets it), and never ends the queue. After three idle ticks in a row
    (nothing in flight, nothing to launch) the tick lengthens from 3 to 15 minutes and the queue keeps polling, printing
    nothing new; picked work returns it to 3 minutes (ADR 0026). Ctrl-C stops it at any time (exit 0). Each lane it
-   launches gets the same detached reaper `/start` starts (ADR 0010, logged to `.lanes/reap/<N>.log`), so a lane that
+   launches gets a detached reaper (ADR 0010, logged to `.lanes/reap/<N>.log`), so a lane that
    merges after the queue exits is still cleaned up; a reaper that fails to start prints one line and the queue goes on.
    **The queue acts as the App bot**: it reads the App's key from `~/.lanes/<slug>.pem` (or `LANES_APP_KEY_FILE`) and launches
-   each lane through the same launcher as `/start` (`launchLane` in `start.mjs`), so a queued team lane gets its own
+   each lane through `launchLane` in `start.mjs`, so a queued team lane gets its own
    minted token, the settings file, `--strict-mcp-config`, the bot commit identity and the token refresher, and never
    your credentials. When that preparation fails (no key file, a mint failure, no bot user id) the queue
    prints `#N: launch failed: team profile: <reason>`, launches nothing for that issue and does not try it again.
@@ -95,9 +94,8 @@
    `.claude/worktrees`. For each `issue-<N>-…` lane whose PR merged at exactly its local branch tip and whose worktree
    has no uncommitted or untracked changes, it runs `claude rm <id>` for its background session, `git worktree remove` and `git branch -D`,
    never with a force or discard flag; anything else is skipped with the reason, and a failed step stops only that
-   lane. `/health` runs it; `/status` prints `N lanes or folders to clean up` when some are waiting. Every `/start`, with
-   issue numbers or with `--auto`, runs the same cleanup first, so merged lanes no longer count as in flight;
-   `--auto` without `--go` only prints what it would remove. Remote branches are left to GitHub's delete-on-merge, and
+   lane. `/health` runs it; `/status` prints `N lanes or folders to clean up` when some are waiting. Every queue tick runs
+   the same cleanup first, so merged lanes no longer count as in flight. Remote branches are left to GitHub's delete-on-merge, and
    lanes with an open PR or unpushed commits are never touched.
 
 ## What merges without you
@@ -214,7 +212,7 @@ A lane cannot push `.github/workflows/` (the App has no `workflows` permission; 
 [ADR 0023](adr/0023-workflow-changes-owner-web-editor.md) and `docs/SECURITY.md`). The steps are all
 in the browser:
 
-1. **The note.** `/start` and the queue print `#N: Scope names .github/workflows/: the lane opens its PR without the
+1. **The note.** The queue prints `#N: Scope names .github/workflows/: the lane opens its PR without the
    workflow change and hands it over in a PR comment` and still launch the lane.
 2. **The PR comment.** The lane opens its PR without the workflow files and posts one comment (by
    `node scripts/lanes/handover.mjs <pr>`) with each file's full content. It reads the `lanes-workflow-apply`
@@ -342,7 +340,7 @@ Lanes act as a GitHub App, not as you (ADR 0019, 0025). From the repository's ro
      **Require review from Code Owners**. Optionally add a tag ruleset restricting tag creation to you.
    - **The install**: if the App is not on this repository, use the printed install link.
 
-`/start` and the queue find the key at `~/.lanes/<slug>.pem` (the slug is `botLogin` without `[bot]`), so no environment
+The queue finds the key at `~/.lanes/<slug>.pem` (the slug is `botLogin` without `[bot]`), so no environment
 variable is needed. Setting `LANES_APP_KEY_FILE` still overrides it. A missing key file stops the launch with a message
 naming the path.
 

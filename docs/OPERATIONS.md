@@ -206,8 +206,8 @@ Incidents: #586.
 <a id="scope-miss"></a>
 ## scope-miss
 
-**What you see.** A lane stops because the change needs a file its issue's Scope does not name, or `/start` and the
-queue skip an issue because its Scope names no repository path. A PR may also be rejected because it touches files
+**What you see.** A lane stops because the change needs a file its issue's Scope does not name, or the
+queue skips an issue because its Scope names no repository path. A PR may also be rejected because it touches files
 outside its Scope.
 
 **Likely causes.**
