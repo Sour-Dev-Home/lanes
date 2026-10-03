@@ -47,6 +47,11 @@ Forces:
    - `no-progress`: ready issues, nothing in flight, and the heartbeat older than the threshold.
    - `flake`: a check run that failed and then passed under the same name on the same head SHA.
    - The queue's local findings, copied from a trusted heartbeat.
+
+   *Amendment, 2026-10-02 (#637):* the merge queue and main run the full suite through `scripts/lanes/test-retry.mjs`,
+   which reruns a failing test file once and prints a `::warning title=lanes-flaky::<file> :: <test>` annotation for each
+   test that then passed. `flake` also counts that annotation on a successful `verify` run, keyed `flake:<file>@<sha7>`.
+
    The two thresholds (30 minutes each by default) live in `lanes.config.json`.
 4. **Keying, so each problem is commented once and recovery once.** A problem key is its kind plus its subject
    (`queue-removed:PR 412`, `approved-stuck:PR 412`, `no-progress`, `flake:<check>@<sha7>`). The open keys are stored in

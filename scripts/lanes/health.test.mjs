@@ -77,6 +77,23 @@ test("readHeartbeat: lane bot only, marker first, newest wins, solo profile trus
   assert.deepEqual(readHeartbeat([broken], identity), { at: NOW - MIN, findings: [] });
 });
 
+test("flake: a lanes-flaky annotation on a verify check run is a flake keyed by file and sha, cleared after 7 days (#637)", () => {
+  const sha = "abcdef0123456789";
+  const note = (extra = {}) => ({ file: "scripts/lanes/reap.test.mjs", sha, at: "2026-10-02T10:00:00Z", ...extra });
+  assert.deepEqual(keys(base({ flakyAnnotations: [note()] })), ["flake:scripts/lanes/reap.test.mjs@abcdef0"]);
+  assert.deepEqual(keys(base({ flakyAnnotations: [note(), note({ at: "2026-10-02T11:00:00Z" })] })), ["flake:scripts/lanes/reap.test.mjs@abcdef0"]);
+  assert.deepEqual(keys(base({ flakyAnnotations: [note({ at: "2026-09-24T10:00:00Z" })] })), []);
+  assert.deepEqual(keys(base({ flakyAnnotations: [note({ file: "a.test.mjs" }), note({ sha: "1234567890" })] })), ["flake:a.test.mjs@abcdef0", "flake:scripts/lanes/reap.test.mjs@1234567"]);
+});
+
+test("edge: a malformed or hostile lanes-flaky annotation is dropped or made safe", () => {
+  const sha = "abcdef0123456789";
+  const at = "2026-10-02T10:00:00Z";
+  assert.deepEqual(keys(base({ flakyAnnotations: [{ file: 5, sha, at }, { file: "a.test.mjs", sha: 7, at }, { file: "a.test.mjs", sha, at: "nonsense" }, null, { file: "", sha, at }] })), []);
+  assert.deepEqual(keys(base({ flakyAnnotations: [{ file: "a`b@x\n#1.test.mjs", sha, at }] })), ["flake:a_b_x__1.test.mjs@abcdef0"]);
+  assert.deepEqual(keys(base({ flakyAnnotations: "nope" })), []);
+});
+
 test("edge: thresholds are inclusive at exactly 30 minutes and the flake window ends at 7 days", () => {
   assert.deepEqual(keys(base({ prs: [{ number: 3, gateState: "SUCCESS", gateSince: NOW - 30 * MIN }] })), ["approved-stuck:PR 3"]);
   assert.deepEqual(keys(base({ readyCount: 1, comments: [heartbeat(NOW - 30 * MIN)] })), ["no-progress"]);
@@ -339,8 +356,46 @@ test("gatherInputs shapes the gh replies into evaluate's inputs", async () => {
   assert.equal(r.readyCount, 1);
   assert.equal(r.inFlightCount, 4);
   assert.deepEqual(r.checkRuns, [{ name: "verify", sha: "ab", conclusion: "success", at: "t" }]);
+  assert.deepEqual(r.flakyAnnotations, []);
   assert.equal(r.identity, identity);
   assert.equal(typeof r.readLog, "function");
+});
+
+test("gatherInputs reads lanes-flaky annotations from the jobs of successful verify runs (#637)", async () => {
+  const { gatherInputs } = await import("./health.mjs");
+  const calls = [];
+  const gh = (args) => {
+    calls.push(args.join(" "));
+    if (args[0] === "api" && args.includes("graphql")) return { data: { repository: { pullRequests: { nodes: [] } } } };
+    if (args[0] === "api" && /actions\/runs\/11\/jobs/.test(args[1])) return { jobs: [{ id: 901 }, { id: 902 }] };
+    if (args[0] === "api" && /check-runs\/901\/annotations/.test(args[1])) return [{ title: "lanes-flaky", annotation_level: "warning", message: "scripts/lanes/reap.test.mjs :: reaps one" }, { title: "other", message: "x :: y" }];
+    if (args[0] === "api" && /check-runs\/902\/annotations/.test(args[1])) return [];
+    if (args[0] === "api") return [];
+    if (args[0] === "pr" || args[0] === "issue") return [];
+    if (args[0] === "repo") return { url: "https://github.com/o/r" };
+    if (args.includes("merge_group")) return [];
+    return [
+      { databaseId: 11, name: "verify", headSha: "abcdef0123", conclusion: "success", updatedAt: "2026-10-02T10:00:00Z" },
+      { databaseId: 12, name: "verify", headSha: "bbbbbbb", conclusion: "failure", updatedAt: "2026-10-02T10:00:00Z" },
+      { databaseId: 13, name: "dashboard", headSha: "ccccccc", conclusion: "success", updatedAt: "2026-10-02T10:00:00Z" },
+    ];
+  };
+  const r = gatherInputs(gh, { identity });
+  assert.deepEqual(r.flakyAnnotations, [{ file: "scripts/lanes/reap.test.mjs", sha: "abcdef0123", at: "2026-10-02T10:00:00Z" }]);
+  assert.equal(calls.filter((c) => /actions\/runs\//.test(c)).length, 1, "only the successful verify run is read");
+});
+
+test("edge: a failing annotations read or an odd reply leaves flakyAnnotations empty, never throws (#637)", async () => {
+  const { gatherInputs } = await import("./health.mjs");
+  const gh = (args) => {
+    if (args[0] === "api" && args.includes("graphql")) return { data: { repository: { pullRequests: { nodes: [] } } } };
+    if (args[0] === "api") throw new Error("boom");
+    if (args[0] === "pr" || args[0] === "issue") return [];
+    if (args[0] === "repo") return { url: "https://github.com/o/r" };
+    if (args.includes("merge_group")) return [];
+    return [{ databaseId: 11, name: "verify", headSha: "abcdef0", conclusion: "success", updatedAt: "t" }];
+  };
+  assert.deepEqual(gatherInputs(gh, { identity }).flakyAnnotations, []);
 });
 
 // The comment for a new problem: cause, fix and a runbook link (#641).

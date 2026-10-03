@@ -200,6 +200,23 @@ export function evaluate(inputs, now) {
       });
     }
   }
+  // #637: the merge queue's test-retry.mjs reruns a failing test file once and annotates a test that then passed (`lanes-flaky`).
+  const noted = new Map();
+  for (const a of Array.isArray(inputs.flakyAnnotations) ? inputs.flakyAnnotations : []) {
+    const at = Date.parse(a?.at);
+    if (typeof a?.file !== "string" || a.file === "" || typeof a?.sha !== "string" || !Number.isFinite(at)) continue;
+    const k = `${a.file}\u0000${a.sha}`;
+    noted.set(k, { file: a.file, sha: a.sha, at: Math.max(at, noted.get(k)?.at ?? -Infinity) });
+  }
+  for (const e of noted.values()) {
+    if (now - e.at >= FLAKE_DAYS * DAY) continue;
+    const sha7 = e.sha.replace(/[^0-9a-f]/gi, "").slice(0, 7);
+    add(`flake:${safeName(e.file)}@${sha7}`, "flake", `test file ${safeName(e.file)} failed and then passed on rerun on commit ${sha7}`, {
+      anchor: "flaky-test",
+      cause: "a test failed once and passed on the merge queue's rerun, so it is flaky",
+      fix: "no action unless it recurs; then follow the runbook",
+    });
+  }
   for (const f of heartbeat?.findings ?? []) {
     const id = /^stalled:(.+)$/.exec(f)?.[1];
     add(f, id ? "stalled" : "queue", `the queue reports: ${f}`, id
@@ -351,7 +368,7 @@ export function gatherInputs(gh = ghJson, config = loadConfig()) {
   });
   const issues = gh(["issue", "list", "--state", "open", "--limit", "1000", "--json", "number,labels,url"]);
   const has = (i, name) => i.labels.some((l) => l.name === name);
-  const runs = gh(["run", "list", "--limit", "100", "--json", "name,headSha,conclusion,updatedAt"]);
+  const runs = gh(["run", "list", "--limit", "100", "--json", "databaseId,name,headSha,conclusion,updatedAt"]);
   return {
     config,
     identity: config.identity,
@@ -364,7 +381,32 @@ export function gatherInputs(gh = ghJson, config = loadConfig()) {
     needsOwner: issues.filter((i) => has(i, "needs-owner")).map((i) => ({ number: i.number, url: i.url })),
     inFlightCount: prs.length + issues.filter((i) => has(i, "lane:running")).length,
     checkRuns: runs.map((r) => ({ name: r.name, sha: r.headSha, conclusion: r.conclusion, at: r.updatedAt })),
+    flakyAnnotations: flakyAnnotations(gh, runs),
   };
+}
+
+const FLAKY_RUN_LIMIT = 30;
+
+// #637: a `lanes-flaky` warning is an annotation on a job of a successful verify run (its message is `<file> :: <test>`).
+// Read through the check-run annotations API; a read that fails is reported on stderr and skipped, never fatal.
+function flakyAnnotations(gh, runs) {
+  const found = [];
+  const verified = runs.filter((r) => r.name === "verify" && r.conclusion === "success" && Number.isInteger(r.databaseId)).slice(0, FLAKY_RUN_LIMIT);
+  for (const r of verified) {
+    try {
+      for (const job of gh(["api", `repos/{owner}/{repo}/actions/runs/${r.databaseId}/jobs`])?.jobs ?? []) {
+        if (!Number.isInteger(job?.id)) continue;
+        const notes = gh(["api", `repos/{owner}/{repo}/check-runs/${job.id}/annotations`]);
+        for (const n of Array.isArray(notes) ? notes : []) {
+          const file = n?.title === "lanes-flaky" && typeof n.message === "string" ? n.message.split(" :: ")[0].trim() : "";
+          if (file) found.push({ file, sha: r.headSha, at: r.updatedAt });
+        }
+      }
+    } catch (e) {
+      console.error(`health: could not read the annotations of run ${r.databaseId}: ${String(e?.message ?? e).split("\n")[0]}`);
+    }
+  }
+  return found;
 }
 
 async function main() {
