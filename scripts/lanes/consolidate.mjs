@@ -81,7 +81,7 @@ export function parseArgs(argv) {
 }
 
 const ghIssues = (label) =>
-  JSON.parse(execFileSync("gh", ["issue", "list", "--state", "open", "--label", label, "--limit", "200", "--json", "number,title,labels,body"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  JSON.parse(execFileSync("gh", ["issue", "list", "--state", "open", "--label", label, "--limit", "200", "--json", "number,title,labels,body"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
 
 export function main(argv = process.argv.slice(2)) {
   let args;

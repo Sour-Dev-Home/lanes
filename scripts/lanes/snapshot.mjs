@@ -397,7 +397,7 @@ export function writeSnapshot(snapshot, file) {
   writeFileSync(file, `${JSON.stringify(snapshot, null, 2)}\n`);
 }
 
-const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 }));
+const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, windowsHide: true }));
 
 // start.softPaths of the lanes.config.json in the working directory; the defaults when there is none or the key is absent.
 function configuredSoftPaths() {
@@ -424,7 +424,7 @@ function configuredIdentity() {
   }
 }
 
-const ghText = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+const ghText = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, windowsHide: true });
 
 function main(argv = process.argv.slice(2)) {
   const out = parseOutArg(argv);

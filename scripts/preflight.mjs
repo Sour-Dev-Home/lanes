@@ -168,7 +168,7 @@ export function checkPr(pr, mainMerged = false) {
 const DIFF_ARGS = ["-c", "core.quotepath=false", "diff", "-U0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"];
 
 function git(args) {
-  return execFileSync("git", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  return execFileSync("git", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, windowsHide: true });
 }
 
 function readPatternsFile(file) {
@@ -182,7 +182,7 @@ function readPatternsFile(file) {
 /** @returns {boolean} whether `origin/main` resolves locally (false before a first push, never throws) */
 function hasOriginMain() {
   try {
-    execFileSync("git", ["rev-parse", "--verify", "-q", "origin/main"], { stdio: ["ignore", "ignore", "ignore"] });
+    execFileSync("git", ["rev-parse", "--verify", "-q", "origin/main"], { stdio: ["ignore", "ignore", "ignore"], windowsHide: true });
     return true;
   } catch {
     return false;
@@ -192,7 +192,7 @@ function hasOriginMain() {
 /** @returns {boolean} whether `origin/main` is an ancestor of HEAD (false when it is not, never throws) */
 function isMainMerged() {
   try {
-    execFileSync("git", ["merge-base", "--is-ancestor", "origin/main", "HEAD"], { stdio: ["ignore", "ignore", "ignore"] });
+    execFileSync("git", ["merge-base", "--is-ancestor", "origin/main", "HEAD"], { stdio: ["ignore", "ignore", "ignore"], windowsHide: true });
     return true;
   } catch {
     return false;
@@ -202,7 +202,7 @@ function isMainMerged() {
 /** @returns {{ pr?: { state: string; mergeable: string }; problem?: string }} only "no pull requests found" means "no PR"; any other gh failure is a problem */
 function prForBranch() {
   try {
-    const json = execFileSync("gh", ["pr", "view", "--json", "state,mergeable"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    const json = execFileSync("gh", ["pr", "view", "--json", "state,mergeable"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     return { pr: JSON.parse(json) };
   } catch (error) {
     const stderr = String(error?.stderr ?? "");

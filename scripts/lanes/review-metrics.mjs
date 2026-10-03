@@ -211,7 +211,7 @@ export function renderMarkdown(report) {
 // ---- GitHub access (not unit-tested: drives `gh`) ----
 
 function gh(args) {
-  return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, windowsHide: true });
 }
 
 // comments(last: 100): verdicts are posted last, after the review rounds.

@@ -47,7 +47,7 @@ const RETRY_BUDGET_MS = 45000;
 const TRANSIENT = new Set([500, 502, 503, 504]);
 
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const runGh = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+const runGh = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 
 /** The call as "GET path" or "POST path", without the query string, so it is safe to show in a status description. */
 const describeCall = (args) => `${args.includes("-f") ? "POST" : "GET"} ${String(args[0]).split("?")[0]}`;

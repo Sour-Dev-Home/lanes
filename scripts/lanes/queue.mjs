@@ -633,7 +633,7 @@ async function stopped(sleep, ms) {
 }
 
 // The main checkout, even when run from a worktree: the parent of the shared .git directory.
-const repoRoot = () => dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
+const repoRoot = () => dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", windowsHide: true }).trim());
 const run = (cmd) => (args, { cwd, env } = {}) => execFileSync(cmd, args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000, windowsHide: true });
 
 // #382: the stall, worktree and marker effects of recovery on this machine. Markers live in the main checkout's
@@ -754,7 +754,7 @@ const DEFAULT_DEPS = {
   // ADR 0026 part 3: one child at a time, sharing this console; a signal-ended child counts as Ctrl+C.
   runChild: (argv, env) =>
     new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...argv], { stdio: "inherit", env });
+      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...argv], { stdio: "inherit", env, windowsHide: true });
       child.on("error", reject);
       child.on("exit", (code) => resolve(code ?? 0));
     }),

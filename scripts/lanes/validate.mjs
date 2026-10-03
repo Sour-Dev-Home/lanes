@@ -25,7 +25,7 @@ const compare = {
   ">=": (a, b) => a >= b,
 };
 
-const readIssue = (n) => JSON.parse(execFileSync("gh", ["issue", "view", String(n), "--json", "body"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })).body;
+const readIssue = (n) => JSON.parse(execFileSync("gh", ["issue", "view", String(n), "--json", "body"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true })).body;
 
 // Characters cmd.exe would interpret even inside double quotes (or that break the quoting); an argument with one is refused.
 const CMD_UNSAFE = /["%^&|<>!\r\n\0]/;
@@ -60,7 +60,7 @@ export function resolveCommand(argv, { platform = process.platform, env = proces
 
 const run = (argv) => {
   const { file, args, verbatim } = resolveCommand(argv);
-  return spawnSync(file, args, { encoding: "utf8", shell: false, windowsVerbatimArguments: verbatim, timeout: TIMEOUT_MS, maxBuffer: MAX_BUFFER });
+  return spawnSync(file, args, { encoding: "utf8", shell: false, windowsVerbatimArguments: verbatim, timeout: TIMEOUT_MS, maxBuffer: MAX_BUFFER, windowsHide: true });
 };
 
 function readLog(file) {

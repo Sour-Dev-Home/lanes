@@ -19,7 +19,7 @@ export function mainCheckoutFrom(from) {
   try {
     // An inherited GIT_DIR, GIT_COMMON_DIR or GIT_WORK_TREE would redirect the answer, so git reads only `from`.
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.toUpperCase().startsWith("GIT_")));
-    const common = execFileSync("git", ["-C", from, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env }).trim();
+    const common = execFileSync("git", ["-C", from, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env, windowsHide: true }).trim();
     if (common !== "" && basename(common) === ".git") return dirname(common);
   } catch {
     // git missing or not a repository: the checkout holding this script is the best answer.
@@ -183,7 +183,7 @@ export function buildVerdictComment(verdict, sha, names = REVIEWERS) {
   return `<!-- lanes:verdict ${verdict.reviewer} ${sha} -->\n\`\`\`json\n${JSON.stringify(verdict, null, 2)}\n\`\`\``;
 }
 
-const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 
 const VALUED_FLAGS = new Set(["--file", "--pr", "--sha"]);
 const SHA_RE = /^[0-9a-f]{40}$/i;

@@ -210,7 +210,7 @@ export function runsErrorMessage(workflow, stderr) {
 // ---- GitHub access (not unit-tested: drives `gh`) ----
 
 function gh(args) {
-  return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, windowsHide: true });
 }
 
 // The extra selections `rich` adds. Personal fields (author, login, message, PR and issue titles) are never selected;

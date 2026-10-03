@@ -143,7 +143,7 @@ function writeLock(source, target, copied, lockPath) {
   writeFileSync(lockPath, `${JSON.stringify({ version, files }, null, 2)}\n`);
 }
 
-const ghRepoView = (target) => execFileSync("gh", ["repo", "view", "--json", "isPrivate"], { cwd: target, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
+const ghRepoView = (target) => execFileSync("gh", ["repo", "view", "--json", "isPrivate"], { cwd: target, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000, windowsHide: true });
 
 /** True only when gh says the target's repository is not private; any failure or odd answer counts as private. */
 export function repoIsPublic(target, run = ghRepoView) {

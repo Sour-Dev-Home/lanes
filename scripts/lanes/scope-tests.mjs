@@ -32,7 +32,7 @@ export function parseArgs(argv) {
 }
 
 const tracked = () =>
-  execFileSync("git", ["ls-files", "-z"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).split("\0").filter(Boolean);
+  execFileSync("git", ["ls-files", "-z"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true }).split("\0").filter(Boolean);
 const readConfig = () => JSON.parse(readFileSync("lanes.config.json", "utf8"));
 const readFile = (f) => readFileSync(f, "utf8");
 

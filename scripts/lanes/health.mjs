@@ -326,7 +326,7 @@ export function ghClient(gh) {
 }
 
 function ghJson(args) {
-  const out = execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 120_000 });
+  const out = execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 120_000, windowsHide: true });
   try {
     return JSON.parse(out);
   } catch {

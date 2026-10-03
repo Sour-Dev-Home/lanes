@@ -161,7 +161,7 @@ export function spawnJscpd(run = execFileSync, platform = process.platform, base
   // Drop any inherited spelling of the setting (npm reads env keys case-insensitively), then set it.
   const env = Object.fromEntries(Object.entries(baseEnv).filter(([k]) => k.toLowerCase() !== "npm_config_ignore_scripts"));
   env.npm_config_ignore_scripts = "true";
-  const opts = { stdio: ["ignore", "ignore", "pipe"], timeout: 300_000, env };
+  const opts = { stdio: ["ignore", "ignore", "pipe"], timeout: 300_000, env, windowsHide: true };
   // npx is a .cmd shim on Windows, which execFile cannot start without a shell. Every argument is a constant
   // above, quoted here, so nothing from outside reaches that shell.
   if (platform === "win32") run(`npx ${JSCPD_ARGS.map((a) => `"${a}"`).join(" ")}`, [], { ...opts, shell: true });
@@ -172,14 +172,14 @@ const realIo = {
   gitLog: (days) => execFileSync("git", [
     "-c", "core.quotePath=false", "log", "--first-parent", "--diff-merges=first-parent", "--no-renames", "--numstat",
     `--since=${days}.days.ago`, `--format=${GIT_LOG_FORMAT}`, "HEAD",
-  ], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }),
+  ], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"], windowsHide: true }),
   // The search narrows to the day; mergedAt then trims to the exact window.
   mergedPrs: (days) => {
     const since = new Date(Date.now() - days * 86_400_000);
     const out = execFileSync("gh", [
       "pr", "list", "--state", "merged", "--search", `merged:>=${since.toISOString().slice(0, 10)}`,
       "--limit", String(PR_LIMIT), "--json", "headRefName,files,mergedAt",
-    ], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+    ], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     return JSON.parse(out).filter((pr) => Date.parse(pr.mergedAt) >= since.getTime());
   },
   modules: () => modulesMain(),

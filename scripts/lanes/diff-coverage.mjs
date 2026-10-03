@@ -151,7 +151,7 @@ const realIo = {
   root: process.cwd(),
   diff: (base) =>
     execFileSync("git", ["-c", "core.quotepath=false", "diff", "--unified=0", "--no-color", "--no-ext-diff", "-M", `${base}...HEAD`, "--"], {
-      encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
     }),
   // The lcov goes to stdout. A failing test still leaves data, so the exit status is not read; a run that could not
   // start, or was killed by the timeout, is an error. NODE_TEST_CONTEXT is dropped so a run started from inside a
@@ -160,7 +160,7 @@ const realIo = {
     const env = { ...process.env };
     delete env.NODE_TEST_CONTEXT;
     const run = spawnSync(process.execPath, ["--test", "--experimental-test-coverage", "--test-reporter=lcov", TEST_GLOB], {
-      encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: RUN_TIMEOUT_MS, env, stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: RUN_TIMEOUT_MS, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
     });
     if (run.error) throw run.error;
     return run.stdout;

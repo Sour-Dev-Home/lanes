@@ -67,7 +67,7 @@ export function buildRuleset(requiredChecks) {
   };
 }
 
-const gh = (args, input) => execFileSync("gh", args, { encoding: "utf8", input, stdio: [input ? "pipe" : "ignore", "pipe", "pipe"] });
+const gh = (args, input) => execFileSync("gh", args, { encoding: "utf8", input, stdio: [input ? "pipe" : "ignore", "pipe", "pipe"], windowsHide: true });
 
 /** The id of an existing ruleset with this name, or null. Never create a second "main (lanes)" ruleset (M6). */
 export function findRulesetId(rulesets, name) {
