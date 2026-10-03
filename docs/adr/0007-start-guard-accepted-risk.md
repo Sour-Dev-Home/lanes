@@ -4,6 +4,8 @@ Status: accepted
 
 *Amended 2026-10-02 by ADR 0025 part 11: lanes act as the App bot (ADR 0019) and not as the owner's account; this ADR's start-guard risk stands.*
 
+*Amended 2026-10-02 by ADR 0030: parts 1 and 2 end, since `start-guard.mjs` and the `start.mjs` grant check are retired. Part 3 stands: `queue.mjs` still refuses inside Claude, and `start.mjs` now refuses the same way. The accepted-risk rule carries over to the deny rules and refusals (ADR 0030 part 5).*
+
 ## Context
 
 `start-guard.mjs` (#51) keeps lanes and schedules from launching lanes: it lets `start.mjs` run only in the turn the

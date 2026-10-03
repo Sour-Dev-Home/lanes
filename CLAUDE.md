@@ -19,11 +19,11 @@ restructure decision in `docs/adr/` or `docs/history/`, written so it can later 
    Sheet Series (ADR 0009). A reused verdict is valid only for byte-identical reviewed code.
 3. **Odd errors are defects.** Lanes ships to other people, so a guard false positive, a silent stop, missing data or a
    stale checkout is reproduced, root-caused with evidence and filed as a Task issue, not worked around.
-4. **Every Task issue's Scope names concrete repository paths**, at every tier; `/start` skips an issue whose Scope
+4. **Every Task issue's Scope names concrete repository paths**, at every tier; the queue skips an issue whose Scope
    names none.
 5. **Consolidate before starting.** Before releasing lane-filed follow-ups or starting a batch, compare Scope paths and
    propose merging issues that share files, keeping security fixes reviewable in size.
-6. **Owner-only stays owner-only.** `/plan-issues`, `/start` and the GitHub review are the owner's; never run, imitate or
+6. **Owner-only stays owner-only.** `/plan-issues`, the queue and the GitHub review are the owner's; never run, imitate or
    work around them from a lane, a schedule or another session. A denial or refusal is reported, never routed
    around.
 7. **One profile, one required setup.** Lanes act as the App bot (ADR 0019); the owner's own token never reaches a

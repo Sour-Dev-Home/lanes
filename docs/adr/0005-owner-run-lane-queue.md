@@ -2,6 +2,8 @@
 
 Status: accepted
 
+*Amended 2026-10-02 by ADR 0030: `/start` and `start-guard.mjs` are retired. The queue is the only launcher, and the guard's rules (no `claude --bg`, no `queue.mjs` or `start.mjs` from a Claude session) are now `permissions.deny` rules and the scripts' own refusals. This ADR's `/start` and guard lines end here; the queue stands.*
+
 ## Context
 
 `/start <N...>` and `/start --auto [--go]` pick and launch lanes once, from inside a Claude session, gated by

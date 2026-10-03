@@ -405,6 +405,23 @@ test("USING.md and SECURITY.md carry no solo profile, /approve or /approvals tex
   }
 });
 
+test("USING.md, SECURITY.md, OPERATIONS.md and README.md carry no /start and no start-guard (ADR 0030)", () => {
+  for (const f of ["docs/USING.md", "docs/SECURITY.md", "docs/OPERATIONS.md", "README.md"]) {
+    const text = readFileSync(f, "utf8").replace(/\(adr\/[^)]*\)/g, "");
+    assert.doesNotMatch(text, /\/start\b|start[- ]guard/i, f);
+  }
+  const using = readFileSync("docs/USING.md", "utf8").replace(/\s+/g, " ");
+  assert.match(using, /the queue \(below\) is the only launcher/);
+  assert.match(using, /remove its `ready` label or press Pause/);
+  assert.match(readFileSync("docs/SECURITY.md", "utf8"), /\[0030\]\(adr\/0030-retire-start-guard-and-start\.md\)/);
+});
+
+test("ADRs 0005, 0007, 0017 and 0025 carry a dated amendment note citing ADR 0030", () => {
+  for (const f of ["0005-owner-run-lane-queue", "0007-start-guard-accepted-risk", "0017-ci-release-softpaths", "0025-retire-solo-profile"]) {
+    assert.match(readFileSync(`docs/adr/${f}.md`, "utf8"), /\*Amended 2026-10-02 by ADR 0030:/, f);
+  }
+});
+
 test("the retire-solo history note records the owner's words, the removals with line counts, what stayed and the setup", () => {
   const text = readFileSync("docs/history/2026-10-01-retire-solo-profile.md", "utf8");
   assert.match(text, /I do not want to maintain it/);
@@ -416,7 +433,9 @@ test("the retire-solo history note records the owner's words, the removals with 
 
 test("CLAUDE.md rules 6 and 7 follow ADR 0025: the owner's GitHub review, the App as the one setup", () => {
   const text = readFileSync("CLAUDE.md", "utf8").replace(/\s+/g, " ");
-  assert.match(text, /`\/plan-issues`, `\/start` and the GitHub review are the owner's/);
+  assert.match(text, /`\/plan-issues`, the queue and the GitHub review are the owner's; never run, imitate or work around them from a lane, a schedule or another session\. A denial or refusal is reported, never routed around\./);
+  assert.match(text, /the queue skips an issue whose Scope names none/);
+  assert.doesNotMatch(text, /`\/start`/);
   assert.match(text, /Lanes act as the App bot \(ADR 0019\)/);
   assert.doesNotMatch(text, /solo|`\/approve`|approve guard|approve-guard/i);
 });
