@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { parseAdr, parseIssueForm, parsePrBody, parseSections, duplicateHeadings, parseVerdictComment } from "./lib.mjs";
+import { parseAdr, parseIssueForm, parsePrBody, parseSections, duplicateHeadings, parseVerdictComment, parseOwnerPatterns } from "./lib.mjs";
 import { buildVerdictComment, validateVerdict } from "./post-review.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -660,9 +660,8 @@ test("edge: lock version must be semver, and version and files are required", ()
   assert.equal(schemaAccepts(lockSchema, null), false);
 });
 
-test("lanes.config.json makes lanes.lock.json an owner path", () => {
-  const owner = JSON.parse(readFileSync("lanes.config.json", "utf8")).paths.owner;
-  assert.ok(owner.includes("^lanes\\.lock\\.json$"));
-  assert.ok(owner.some((p) => new RegExp(p).test("lanes.lock.json")));
-  assert.ok(!owner.some((p) => new RegExp(p).test("sub/lanes.lock.jsonx")));
+test("CODEOWNERS makes lanes.lock.json an owner path", () => {
+  const owner = parseOwnerPatterns(readFileSync(".github/CODEOWNERS", "utf8")).map((p) => p.regex);
+  assert.ok(owner.some((r) => r.test("lanes.lock.json")));
+  assert.ok(!owner.some((r) => r.test("sub/lanes.lock.jsonx")));
 });

@@ -327,9 +327,9 @@ const OWNER_SAMPLES = {
 test("every regex in lanes.config.json paths.owner matches its sample and not its near-miss", () => {
   const raw = JSON.parse(readFileSync("lanes.config.json", "utf8"));
   const real = loadConfig();
-  assert.ok(raw.paths.owner.includes("^docs/adr/"), "docs/adr/ is owner-only");
-  assert.deepEqual([...raw.paths.owner].sort(), Object.keys(OWNER_SAMPLES).sort(), "each owner regex has a sample row");
-  for (const source of raw.paths.owner) {
+  assert.deepEqual(raw.paths.owner, [], "ADR 0031: CODEOWNERS is this repository's only owner list");
+  assert.equal(classifyFiles(["docs/adr/0003-x.md"], real).owner, true, "docs/adr/ is owner-only");
+  for (const source of Object.keys(OWNER_SAMPLES)) {
     const [sample, nearMiss] = OWNER_SAMPLES[source];
     const re = new RegExp(source);
     assert.equal(re.test(sample), true, `${source} should match ${sample}`);
@@ -1838,17 +1838,3 @@ test("edge: loadConfig surfaces a CODEOWNERS parse error with its line", () => {
   });
 });
 
-// ADR 0031 part 5, in the shape this issue needs: what paths.owner makes owner-only today stays owner-only.
-test("every tracked file that is owner under paths.owner is still owner with CODEOWNERS unioned in", () => {
-  const before = compileConfig(JSON.parse(readFileSync("lanes.config.json", "utf8")));
-  const after = loadConfig();
-  const tracked = execFileSync("git", ["ls-files"], { encoding: "utf8", windowsHide: true }).split("\n").filter(Boolean);
-  const samples = [".env.local", "x/.env", "a/auth/x.js", "secret/x", "secrets/x", "deploy/x", "sub/CLAUDE.md", "sub/yarn.lock", "sub/pnpm-lock.yaml", "package-lock.json", "lanes.lock.json"];
-  let owners = 0;
-  for (const f of [...tracked, ...samples]) {
-    if (!classifyFiles([f], before).owner) continue;
-    owners++;
-    assert.equal(classifyFiles([f], after).owner, true, `${f} was owner-only and no longer is`);
-  }
-  assert.ok(owners > 20, "the real config marks some files owner-only");
-});

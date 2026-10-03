@@ -1170,11 +1170,11 @@ export function queueClosure(entry = "scripts/lanes/queue.mjs") {
 }
 
 test("every file in the queue's import and spawn closure is an owner path, with its test (ADR 0026)", () => {
-  const owner = JSON.parse(readFileSync("lanes.config.json", "utf8")).paths.owner.map((s) => new RegExp(s));
+  const owner = realConfig().paths.codeowners;
   const closure = queueClosure();
   for (const f of ["scripts/lanes/queue.mjs", "scripts/lanes/queue.test.mjs", "scripts/lanes/start.mjs", "scripts/lanes/reap.mjs", "scripts/lanes/lib.mjs"]) assert.ok(closure.includes(f), `the closure misses ${f}: the computation is broken`);
   const uncovered = closure.filter((f) => !owner.some((r) => r.test(f)));
-  assert.deepEqual(uncovered, [], `queue.mjs loads these files but paths.owner does not match them: ${uncovered.join(", ")}`);
+  assert.deepEqual(uncovered, [], `queue.mjs loads these files but CODEOWNERS does not match them: ${uncovered.join(", ")}`);
 });
 
 test("edge: queueClosure follows a literal dynamic import, a re-export and a spawned script path, and ignores comments", () => {
@@ -1182,24 +1182,6 @@ test("edge: queueClosure follows a literal dynamic import, a re-export and a spa
   assert.ok(queueClosure().includes("scripts/lanes/lane-cost.mjs"), "start.mjs's re-export");
   assert.ok(queueClosure().includes("scripts/lanes/reap.mjs"), "start.mjs's spawn of reap.mjs");
   assert.ok(!queueClosure().includes("scripts/lanes/gate-decision.mjs"));
-});
-
-// ADR 0019 part 6: CODEOWNERS lists exactly the owner-only paths, so a native code-owner review covers what /approve does (#520).
-test("CODEOWNERS covers exactly the files paths.owner covers", () => {
-  const entries = readFileSync(".github/CODEOWNERS", "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
-  for (const e of entries) assert.match(e, /^\S+ @SourE-dev$/, `CODEOWNERS line not owned by the owner alone: ${e}`);
-  const owners = entries.map((e) => codeownersRegex(e.split(" ")[0]));
-  const owner = JSON.parse(readFileSync("lanes.config.json", "utf8")).paths.owner.map((s) => new RegExp(s));
-  const tracked = execFileSync("git", ["ls-files"], { encoding: "utf8", windowsHide: true }).split("\n").filter(Boolean);
-  const samples = [".env.local", "x/.env", "a/auth/x.js", "secret/x", "secrets/x", "deploy/x", "sub/CLAUDE.md", "sub/yarn.lock", "sub/pnpm-lock.yaml", "package-lock.json", "lanes.lock.json"];
-  for (const f of samples) assert.ok(owner.some((r) => r.test(f)), `sample ${f} is not an owner path; update the samples`);
-  const paths = [...tracked, ...samples];
-  for (const f of paths) {
-    assert.equal(owners.some((r) => r.test(f)), owner.some((r) => r.test(f)), `CODEOWNERS and paths.owner disagree on ${f}`);
-  }
-  // Every entry on both sides is exercised, so a typo in one no path reaches cannot hide: add a sample for a new one.
-  entries.forEach((e, i) => assert.ok(paths.some((f) => owners[i].test(f)), `no tracked file or sample reaches CODEOWNERS entry ${e}; add a sample`));
-  owner.forEach((r) => assert.ok(paths.some((f) => r.test(f)), `no tracked file or sample reaches paths.owner ${r.source}; add a sample`));
 });
 
 // ADR 0031 part 5: a frozen copy of today's owner and sensitive regexes. The floor only grows; shrinking it needs an ADR.
