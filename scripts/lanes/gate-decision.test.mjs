@@ -910,3 +910,11 @@ test("dependabot bump: the same inputs decide the same on every re-decision", ()
   const inputs = { nativeApproval: { approved: true, by: "leo" } };
   assert.deepEqual(bump(inputs), bump({ ...inputs }));
 });
+
+test("dependabot bump: an unusable module map never reaches the narrow path", () => {
+  const modules = { entries: [{ id: "src", paths: ["src/"], imports: [], reviewers: ["no-such-agent-file"] }] };
+  const config = compileConfig({ requiredChecks: ["verify"], paths: { skip: [], contract: [], sensitive: [], ui: [] }, dependabot: { actionBumps: true }, modules });
+  const d = bump({ config, nativeApproval: { approved: true, by: "leo" } });
+  assert.equal(d.state, "failure");
+  assert.match(d.description, /module map unusable|Closes #N/);
+});
