@@ -29,10 +29,45 @@ test("it triggers on issues, status, a push to the default branch and a 5-minute
   assert.match(onBlock, /- cron: "\*\/5 \* \* \* \*"/);
 });
 
+test("#689: it also triggers on a manual button and on the finished verify, lanes-gate and security workflows", () => {
+  assert.match(onBlock, /\n {2}workflow_dispatch:\n/);
+  assert.doesNotMatch(onBlock, /workflow_dispatch:\n {4}inputs/, "the button takes no input");
+  assert.match(onBlock, /\n {2}workflow_run:\n {4}workflows: \[verify, lanes-gate, security\]\n {4}types: \[completed\](?:\n|$)/);
+  assert.match(onBlock, /\n {2}issues:\n {4}types: \[opened, edited, closed, reopened, labeled, unlabeled\]/);
+});
+
+test("#689: the snapshot jobs do not run on workflow_run or workflow_dispatch", () => {
+  for (const job of [buildJob, deployJob]) {
+    assert.match(job, /\n {4}if: github\.event_name != 'workflow_run' && github\.event_name != 'workflow_dispatch'\n/);
+  }
+});
+
+test("#689: the health job runs on the schedule, the button, finished workflows and issues, and reads nothing from the event", () => {
+  assert.match(
+    healthJob,
+    /\n {4}if: github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch' \|\| github\.event_name == 'workflow_run' \|\| github\.event_name == 'issues'\n/,
+  );
+  assert.doesNotMatch(healthJob, /github\.event\.(?!repository\.default_branch)/);
+  assert.doesNotMatch(healthJob, /github\.event_path|github\.head_ref|inputs\./);
+});
+
+test("#689: concurrency is per job, and only the health job's own group can cancel the health job", () => {
+  assert.doesNotMatch(yml, /\nconcurrency:/, "no workflow-level concurrency");
+  for (const job of [buildJob, deployJob]) {
+    assert.match(job, /\n {4}concurrency:\n {6}group: dashboard-publish\n {6}cancel-in-progress: true\n/);
+  }
+  assert.match(healthJob, /\n {4}concurrency:\n {6}group: lanes-health\n {6}cancel-in-progress: false\n/);
+  assert.equal((yml.match(/group: lanes-health/g) ?? []).length, 1);
+  assert.equal((yml.match(/group: dashboard-publish/g) ?? []).length, 2);
+});
+
 test("it has no pull_request, pull_request_target or merge_group trigger, anywhere in the file", () => {
   // #475: github-pages only accepts deploys from main, so a merge group's ref (or a PR's) can never deploy.
   assert.doesNotMatch(yml, /pull_request|merge_group/);
-  assert.deepEqual([...onBlock.matchAll(/\n {2}(\w+):/g)].map((m) => m[1]).sort(), ["issues", "push", "schedule", "status"]);
+  assert.deepEqual(
+    [...onBlock.matchAll(/\n {2}(\w+):/g)].map((m) => m[1]).sort(),
+    ["issues", "push", "schedule", "status", "workflow_dispatch", "workflow_run"],
+  );
 });
 
 test("every checkout is of the default branch's own code", () => {
@@ -47,7 +82,7 @@ test("pages: write and id-token: write appear in the deploy job only", () => {
   assert.equal((yml.match(/pages: write/g) ?? []).length, 1);
   assert.equal((yml.match(/id-token: write/g) ?? []).length, 1);
   assert.match(deployJob, /permissions:\n {6}pages: write\n {6}id-token: write\n/);
-  for (const other of [section(yml, "\npermissions:\n", "\nconcurrency:\n"), buildJob]) {
+  for (const other of [section(yml, "\npermissions:\n", "\njobs:\n"), buildJob]) {
     assert.doesNotMatch(other, /pages: write|id-token: write/);
     assert.doesNotMatch(other, /: write/);
   }
@@ -56,10 +91,6 @@ test("pages: write and id-token: write appear in the deploy job only", () => {
 test("the workflow default and the build job are read-only", () => {
   assert.match(yml, /\npermissions:\n {2}contents: read\n/);
   assert.match(buildJob, /permissions:\n {6}contents: read\n/);
-});
-
-test("concurrency is one group with cancel-in-progress", () => {
-  assert.match(yml, /\nconcurrency:\n {2}group: dashboard-publish\n {2}cancel-in-progress: true\n/);
 });
 
 test("the build runs snapshot.mjs, then the PII check on snapshot.json, then upload-pages-artifact, then deploy-pages deploys", () => {
@@ -90,8 +121,7 @@ test("the health job's only write permission is issues: write, with the reads he
   assert.doesNotMatch(healthJob, /pages: write|id-token: write/);
 });
 
-test("the health job runs health.mjs on schedule only, from the default branch, with the default token and no secret", () => {
-  assert.match(healthJob, /\n {4}if: github\.event_name == 'schedule'\n/);
+test("the health job runs health.mjs from the default branch, with the default token and no secret", () => {
   assert.match(healthJob, /run: node scripts\/lanes\/health\.mjs\n/);
   assert.match(healthJob, /default_branch \}\}\n {10}persist-credentials: false\n/);
   assert.match(healthJob, /GH_TOKEN: \$\{\{ github\.token \}\}/);
