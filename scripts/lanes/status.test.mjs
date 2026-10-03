@@ -1212,13 +1212,13 @@ test("status.mjs prints the team-required line instead of data for a missing con
       rmSync(join(dir, "lanes.config.json"), { force: true });
       if (config !== null) writeFileSync(join(dir, "lanes.config.json"), config);
       for (const flags of [[], ["--json"], ["--waiting"]]) {
-        const stdout = execFileSync(process.execPath, [script, ...flags], { encoding: "utf8", cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
+        const stdout = execFileSync(process.execPath, [script, ...flags], { encoding: "utf8", cwd: dir, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
         assert.ok(stdout.startsWith(TEAM_REQUIRED_MESSAGE), stdout);
         assert.equal(stdout.trim().split("\n").length, 1, "one line, no data");
       }
     }
     writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity: { profile: "solo" } }));
-    assert.match(execFileSync(process.execPath, [script], { encoding: "utf8", cwd: dir }), /profile "solo"/);
+    assert.match(execFileSync(process.execPath, [script], { encoding: "utf8", cwd: dir, windowsHide: true }), /profile "solo"/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

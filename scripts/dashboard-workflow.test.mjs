@@ -178,9 +178,9 @@ function runCheck(snapshot, secret, metrics) {
     writeFileSync(join(dir, "_site", "snapshot.json"), snapshot);
     if (metrics !== undefined) writeFileSync(join(dir, "_site", "lane-metrics.json"), metrics);
     // A bash that cannot see the folder (WSL's, say) or has no GNU grep is "not available", not a pass.
-    const probe = spawnSync("bash", ["-c", "test -s _site/snapshot.json && grep -iF -f /dev/null _site/snapshot.json; test $? -le 1"], { cwd: dir });
+    const probe = spawnSync("bash", ["-c", "test -s _site/snapshot.json && grep -iF -f /dev/null _site/snapshot.json; test $? -le 1"], { cwd: dir, windowsHide: true });
     if (probe.error || probe.status !== 0) return undefined;
-    const result = spawnSync("bash", ["-e", "-s"], { input: piiScript, cwd: dir, env: { ...process.env, PII_PATTERNS: secret }, encoding: "utf8" });
+    const result = spawnSync("bash", ["-e", "-s"], { input: piiScript, cwd: dir, env: { ...process.env, PII_PATTERNS: secret }, encoding: "utf8", windowsHide: true });
     return { status: result.status, out: result.stdout, hits: result.stdout.split("\n").filter((line) => /^snapshot\.json:\d+$/.test(line)) };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -267,7 +267,7 @@ test("edge: the PII step fails closed when snapshot.json is absent or empty", (t
     mkdirSync(join(dir, "_site"));
     for (const setup of [() => {}, () => writeFileSync(join(dir, "_site", "snapshot.json"), "")]) {
       setup();
-      const result = spawnSync("bash", ["-e", "-s"], { input: piiScript, cwd: dir, env: { ...process.env, PII_PATTERNS: "" }, encoding: "utf8" });
+      const result = spawnSync("bash", ["-e", "-s"], { input: piiScript, cwd: dir, env: { ...process.env, PII_PATTERNS: "" }, encoding: "utf8", windowsHide: true });
       assert.equal(result.status, 1);
       assert.match(result.stdout, /missing or empty/);
     }

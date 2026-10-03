@@ -50,7 +50,7 @@ test("plan: a file in the lock but gone from the target is refused, never re-cre
 });
 
 function rmTarget(dir, rel) {
-  execFileSync(process.execPath, ["-e", `require("fs").rmSync(${JSON.stringify(path.join(dir, rel))})`]);
+  execFileSync(process.execPath, ["-e", `require("fs").rmSync(${JSON.stringify(path.join(dir, rel))})`], { windowsHide: true });
 }
 
 test("plan: the dashboard workflow is tracked under its .disabled name when the lock has it", () => {

@@ -268,7 +268,7 @@ test("readFragments lists regular files, flags a symlink without reading it, and
 });
 
 test("the real docs/lessons.d/ passes --check and holds the four general seed fragments from #12", () => {
-  const r = spawnSync(process.execPath, ["scripts/lanes/lessons.mjs", "--check"], { encoding: "utf8" });
+  const r = spawnSync(process.execPath, ["scripts/lanes/lessons.mjs", "--check"], { encoding: "utf8", windowsHide: true });
   assert.equal(r.status, 0, r.stderr);
   const config = JSON.parse(readFileSync("lanes.config.json", "utf8"));
   const { fragments, problems } = checkFragments(readFragments("docs/lessons.d"), config.modules);
@@ -283,7 +283,7 @@ test("the real docs/lessons.d/ passes --check and holds the four general seed fr
 });
 
 test("the CLI --paths prints the seed lessons for any path", () => {
-  const r = spawnSync(process.execPath, ["scripts/lanes/lessons.mjs", "--paths", "scripts/lanes/gate.mjs"], { encoding: "utf8" });
+  const r = spawnSync(process.execPath, ["scripts/lanes/lessons.mjs", "--paths", "scripts/lanes/gate.mjs"], { encoding: "utf8", windowsHide: true });
   assert.equal(r.status, 0, r.stderr);
   // the output is capped, so the printed lines are the highest-count general patterns that fit, not all of them
   const counts = new Map();
@@ -313,7 +313,7 @@ test("the CLI --paths drops the lowest-count patterns and exits 0 when more gene
       writeFileSync(join(dir, "docs", "lessons.d", `general-p${k}-${n + 1}.md`), text({ pattern: `p${k}`, source: `"#${n + 1}"` }, `Lesson for p${k}.`));
     }
   }
-  const r = spawnSync(process.execPath, [join(process.cwd(), "scripts/lanes/lessons.mjs"), "--paths", "a.mjs"], { cwd: dir, encoding: "utf8" });
+  const r = spawnSync(process.execPath, [join(process.cwd(), "scripts/lanes/lessons.mjs"), "--paths", "a.mjs"], { cwd: dir, encoding: "utf8", windowsHide: true });
   assert.equal(r.status, 0, r.stderr);
   const lines = r.stdout.split("\n").filter(Boolean);
   assert.equal(lines.length, MAX_PATTERNS);

@@ -75,8 +75,8 @@ test("edge: a failing file listing exits 2", () => {
 
 test("CLI: exit 2 on bad arguments, exit 0 on a real lookup", () => {
   let err;
-  try { execFileSync("node", ["scripts/lanes/scope-tests.mjs"], { stdio: "pipe" }); } catch (e) { err = e; }
+  try { execFileSync("node", ["scripts/lanes/scope-tests.mjs"], { stdio: "pipe", windowsHide: true }); } catch (e) { err = e; }
   assert.equal(err.status, 2);
-  const out = execFileSync("node", ["scripts/lanes/scope-tests.mjs", "--strings", "plan-issues.md step 5"], { encoding: "utf8" });
+  const out = execFileSync("node", ["scripts/lanes/scope-tests.mjs", "--strings", "plan-issues.md step 5"], { encoding: "utf8", windowsHide: true });
   assert.match(out, /workflow\.test\.mjs/);
 });

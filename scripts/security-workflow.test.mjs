@@ -55,12 +55,12 @@ function runJob(files, secret) {
       mkdirSync(dirname(join(dir, path)), { recursive: true });
       writeFileSync(join(dir, path), `${text}\n`);
     }
-    execFileSync("git", ["init", "-q"], { cwd: dir });
-    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["init", "-q"], { cwd: dir, windowsHide: true });
+    execFileSync("git", ["add", "-A"], { cwd: dir, windowsHide: true });
     const script = run.slice("run: |".length).replace(/^ {10}/gm, "");
-    const probe = spawnSync("bash", ["-c", "git ls-files -z | grep -zc . >/dev/null"], { cwd: dir });
+    const probe = spawnSync("bash", ["-c", "git ls-files -z | grep -zc . >/dev/null"], { cwd: dir, windowsHide: true });
     if (probe.status !== 0) return undefined;
-    const result = spawnSync("bash", ["-e", "-c", script], { cwd: dir, env: { ...process.env, PII_PATTERNS: secret }, encoding: "utf8" });
+    const result = spawnSync("bash", ["-e", "-c", script], { cwd: dir, env: { ...process.env, PII_PATTERNS: secret }, encoding: "utf8", windowsHide: true });
     const hits = result.stdout.split("\n").filter((line) => /^[^:]+:\d+$/.test(line));
     return { status: result.status, hits: hits.sort() };
   } finally {

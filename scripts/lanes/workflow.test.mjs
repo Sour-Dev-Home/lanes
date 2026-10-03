@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { PATH_PATTERNS } from "../preflight.mjs";
 
@@ -1200,7 +1200,7 @@ test("CODEOWNERS covers exactly the files paths.owner covers", () => {
   for (const e of entries) assert.match(e, /^\S+ @SourE-dev$/, `CODEOWNERS line not owned by the owner alone: ${e}`);
   const owners = entries.map((e) => codeownersRegex(e.split(" ")[0]));
   const owner = JSON.parse(readFileSync("lanes.config.json", "utf8")).paths.owner.map((s) => new RegExp(s));
-  const tracked = execFileSync("git", ["ls-files"], { encoding: "utf8" }).split("\n").filter(Boolean);
+  const tracked = execFileSync("git", ["ls-files"], { encoding: "utf8", windowsHide: true }).split("\n").filter(Boolean);
   const samples = [".env.local", "x/.env", "a/auth/x.js", "secret/x", "secrets/x", "deploy/x", "sub/CLAUDE.md", "sub/yarn.lock", "sub/pnpm-lock.yaml", "package-lock.json", "lanes.lock.json"];
   for (const f of samples) assert.ok(owner.some((r) => r.test(f)), `sample ${f} is not an owner path; update the samples`);
   const paths = [...tracked, ...samples];
@@ -1303,4 +1303,81 @@ test("lane.md step 7 merges origin/main and pushes again when a push is refused 
   assert.match(step7, /git merge origin\/main/);
   assert.match(step7, /push again/);
   assert.match(step7, /report the refusal in the PR/);
+});
+
+// #651: a lane has no console, so on Windows a child process started without windowsHide opens (and flashes) a terminal
+// window. Every call to a child_process function a file imports must pass windowsHide: true, directly or through a helper
+// that adds it. Calls on an object (deps.spawn, RegExp.exec) and local functions that share a name are not child_process calls.
+const HIDING_HELPERS = /\b(shOptions|runOptions|gitOptions)\(/;
+const CHILD_PROCESS_FUNCTIONS = ["execFileSync", "spawnSync", "execSync", "execFile", "exec", "spawn"];
+
+function windowsHideViolations(source) {
+  const imported = new Set();
+  for (const m of source.matchAll(/import\s*\{([^}]*)\}\s*from\s*["'](?:node:)?child_process["']/g)) {
+    for (const name of m[1].split(",")) imported.add(name.trim().split(/\s+as\s+/)[0]);
+  }
+  const names = CHILD_PROCESS_FUNCTIONS.filter((n) => imported.has(n));
+  if (!names.length) return [];
+  // Comment lines are blanked, not removed, so the line numbers still match the file.
+  const code = source.split("\n").map((line) => (/^\s*(\/\/|\*|\/\*)/.test(line) ? "" : line)).join("\n");
+  const violations = [];
+  for (const m of code.matchAll(new RegExp(`(?<![.\\w$])(${names.join("|")})\\(`, "g"))) {
+    const lineStart = code.lastIndexOf("\n", m.index) + 1;
+    const before = code.slice(lineStart, m.index);
+    if (/^\s*import\b/.test(before) || /\b(function|async)\s*$/.test(before)) continue;
+    // A call named inside a string literal (a fixture for a scanner) has an odd number of one quote kind before it.
+    if (["'", '"', "`"].some((q) => before.split(q).length % 2 === 0)) continue;
+    let depth = 0;
+    let end = m.index + m[0].length - 1;
+    for (; end < code.length; end++) {
+      if (code[end] === "(") depth++;
+      else if (code[end] === ")" && --depth === 0) break;
+    }
+    const call = code.slice(m.index, end + 1);
+    if (/windowsHide:\s*true/.test(call) || HIDING_HELPERS.test(call)) continue;
+    violations.push({ line: code.slice(0, m.index).split("\n").length, call: call.replace(/\s+/g, " ").slice(0, 80) });
+  }
+  return violations;
+}
+
+test("every child_process call in scripts/ passes windowsHide: true, or a helper that adds it", () => {
+  const files = readdirSync("scripts", { recursive: true }).map((f) => `scripts/${String(f).replaceAll("\\", "/")}`).filter((f) => f.endsWith(".mjs") && !f.includes("node_modules/"));
+  assert.ok(files.length > 20, "expected to scan the scripts");
+  const found = files.flatMap((file) => windowsHideViolations(readFileSync(file, "utf8")).map((v) => `${file}:${v.line}: ${v.call}`));
+  assert.deepEqual(found, [], `child_process calls without windowsHide: true:\n${found.join("\n")}`);
+});
+
+test("edge: the windowsHide scan flags a call without it, in a single- or multi-line form", () => {
+  const head = 'import { execFileSync, spawn } from "node:child_process";\n';
+  assert.equal(windowsHideViolations(`${head}execFileSync("git", ["init"]);`).length, 1);
+  assert.equal(windowsHideViolations(`${head}spawn("node", [], { stdio: "ignore" });`).length, 1);
+  const multi = windowsHideViolations(`${head}\nconst r = execFileSync("git", [\n  "a",\n], {\n  cwd: "x",\n});`);
+  assert.deepEqual(multi.map((v) => v.line), [3]);
+});
+
+test("edge: the windowsHide scan accepts windowsHide: true and the known helpers", () => {
+  const head = 'import { execFileSync, spawnSync } from "node:child_process";\n';
+  assert.deepEqual(windowsHideViolations(`${head}execFileSync("git", [], { windowsHide: true });`), []);
+  assert.deepEqual(windowsHideViolations(`${head}execFileSync("git", [\n"a",\n], {\n  windowsHide: true,\n});`), []);
+  assert.deepEqual(windowsHideViolations(`${head}execFileSync("git", args, shOptions(opts));`), []);
+  assert.deepEqual(windowsHideViolations(`${head}spawnSync("git", args, runOptions(root));`), []);
+  assert.deepEqual(windowsHideViolations(`${head}execFileSync("git", args, gitOptions(cwd));`), []);
+});
+
+test("edge: the windowsHide scan flags windowsHide: false", () => {
+  assert.equal(windowsHideViolations('import { spawnSync } from "node:child_process";\nspawnSync("a", [], { windowsHide: false });').length, 1);
+});
+
+test("edge: the windowsHide scan skips injected fakes, regex exec, comments, strings and files that do not import the function", () => {
+  const head = 'import { execFileSync } from "node:child_process";\n';
+  assert.deepEqual(windowsHideViolations(`${head}deps.spawn("node", []);\nconst m = /a/.exec(s);\nrun.exec(x);`), []);
+  assert.deepEqual(windowsHideViolations(`${head}// execFileSync("git", []);\n * spawn("x")`), []);
+  assert.deepEqual(windowsHideViolations(`${head}const t = 'execFileSync("git", [])';`), []);
+  assert.deepEqual(windowsHideViolations('const exec = (s) => s;\nexec("x");'), []);
+  assert.deepEqual(windowsHideViolations(`${head}exec("x");`), [], "exec is not imported here, so it is a local function");
+});
+
+test("edge: the windowsHide scan reads the import of a renamed or multi-name child_process import", () => {
+  const src = 'import {\n  execFileSync as run,\n  spawnSync,\n} from "node:child_process";\nspawnSync("a", []);';
+  assert.equal(windowsHideViolations(src).length, 1);
 });

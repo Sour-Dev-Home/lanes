@@ -275,7 +275,7 @@ const builtSnapshot = (identity = TEAM_IDENTITY) => {
   try {
     writeFileSync(join(dir, "input.json"), JSON.stringify(snapshotInput));
     writeFileSync(join(dir, "lanes.config.json"), JSON.stringify({ identity }));
-    execFileSync(process.execPath, [resolve("scripts/lanes/snapshot.mjs"), "--from", join(dir, "input.json"), "--out", join(dir, "snapshot.json")], { stdio: "pipe", cwd: dir });
+    execFileSync(process.execPath, [resolve("scripts/lanes/snapshot.mjs"), "--from", join(dir, "input.json"), "--out", join(dir, "snapshot.json")], { stdio: "pipe", cwd: dir, windowsHide: true });
     return JSON.parse(readFileSync(join(dir, "snapshot.json"), "utf8"));
   } finally {
     rmSync(dir, { recursive: true, force: true });

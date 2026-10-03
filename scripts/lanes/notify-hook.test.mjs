@@ -157,7 +157,7 @@ const script = fileURLToPath(new URL("./notify-hook.mjs", import.meta.url));
 
 test("malformed stdin exits 0 with nothing on stdout and logs one line", () => {
   const dir = mkdtempSync(join(tmpdir(), "notify-hook-"));
-  const out = execFileSync(process.execPath, [script], { input: "{not json", encoding: "utf8", env: { ...process.env, LANES_NOTIFY_LOG_DIR: dir } });
+  const out = execFileSync(process.execPath, [script], { input: "{not json", encoding: "utf8", env: { ...process.env, LANES_NOTIFY_LOG_DIR: dir }, windowsHide: true });
   assert.equal(out, "");
   const log = readFileSync(join(dir, "notify-hook.log"), "utf8");
   assert.equal(log.trim().split("\n").length, 1);
@@ -321,6 +321,6 @@ test("runHook: the 5-second budget is shared, so a slow first call leaves the ne
 
 test("the script never writes the log when nothing went wrong", () => {
   const dir = mkdtempSync(join(tmpdir(), "notify-hook-"));
-  execFileSync(process.execPath, [script], { input: JSON.stringify(input({ cwd: "/srv/o/repo" })), encoding: "utf8", env: { ...process.env, LANES_NOTIFY_LOG_DIR: dir } });
+  execFileSync(process.execPath, [script], { input: JSON.stringify(input({ cwd: "/srv/o/repo" })), encoding: "utf8", env: { ...process.env, LANES_NOTIFY_LOG_DIR: dir }, windowsHide: true });
   assert.equal(existsSync(join(dir, "notify-hook.log")), false);
 });

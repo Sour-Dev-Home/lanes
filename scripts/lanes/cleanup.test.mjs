@@ -1759,10 +1759,10 @@ test("argsOutcome: no argument and --dry-run let the cleanup run", () => {
 // The CLI itself: both refusals return before loadCleanupInputs, so no git, gh or claude command runs.
 test("cleanup.mjs --help and an unknown flag run no git, gh or claude command", () => {
   const script = fileURLToPath(new URL("./cleanup.mjs", import.meta.url));
-  const help = spawnSync(process.execPath, [script, "--help"], { encoding: "utf8", env: { ...process.env, PATH: "" } });
+  const help = spawnSync(process.execPath, [script, "--help"], { encoding: "utf8", env: { ...process.env, PATH: "" }, windowsHide: true });
   assert.equal(help.status, 0);
   assert.equal(help.stdout.trim(), USAGE);
-  const bad = spawnSync(process.execPath, [script, "--force"], { encoding: "utf8", env: { ...process.env, PATH: "" } });
+  const bad = spawnSync(process.execPath, [script, "--force"], { encoding: "utf8", env: { ...process.env, PATH: "" }, windowsHide: true });
   assert.equal(bad.status, 2);
   assert.equal(bad.stderr.trim(), `unknown argument: --force\n${USAGE}`);
   assert.equal(bad.stdout, "");
