@@ -107,7 +107,11 @@ default branch, so a PR can't change its own rules.
 | --- | --- | --- |
 | skip (`paths.skip`) | docs, `*.md`, tests | Allowed at `tier:skip`, with no reviewers, only if *every* file is a skip path and none is sensitive. |
 | sensitive (`paths.sensitive`) | `.github/`, `.claude/`, `.githooks/`, `scripts/lanes/`, `lanes.config.json`, package and lock files, `vendor/`, `CLAUDE.md`, auth, secrets, deploy, `.env` | The security-reviewer, at quick and full; not allowed at `tier:skip`. It does not by itself need the owner's review. |
-| owner-only (`paths.owner`) | the gate and trust code and their tests, `install`/`setup-repo`/`new-project`, `.claude/settings.json`, `.github/`, `.githooks/`, `lanes.config.json`, `.claude/agents/`, `.claude/commands/{lane,night}.md`, `docs/adr/`, package and lock files, `vendor/`, `CLAUDE.md`, `.gitattributes`, `scripts/preflight.mjs`, `.env`, auth, secrets, deploy | A code-owner review in GitHub, at every tier, however clean the reviews. Adds no reviewer. |
+| owner-only (`.github/CODEOWNERS`) | the gate and trust code and their tests, `install`/`setup-repo`/`new-project`, `.claude/settings.json`, `.github/`, `.githooks/`, `lanes.config.json`, `.claude/agents/`, `.claude/commands/{lane,night}.md`, `docs/adr/`, package and lock files, `vendor/`, `CLAUDE.md`, `.gitattributes`, `scripts/preflight.mjs`, `.env`, auth, secrets, deploy | A code-owner review in GitHub, at every tier, however clean the reviews. Adds no reviewer. |
+
+Adopters keep owner paths in `.github/CODEOWNERS` and set `risk` in the module map: a module with `risk: "sensitive"`
+adds its paths to the sensitive set, on top of `paths.sensitive` ([ADR 0031](adr/0031-owner-paths-from-codeowners.md)).
+`paths.owner` is deprecated but still honoured as extra owner patterns, so an existing config keeps working.
 
 A PR merges on green checks alone only when it touches no owner-only path, its "Needs the owner" says `nothing`,
 and its tier's rule holds:
