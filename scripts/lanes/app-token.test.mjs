@@ -4,7 +4,8 @@ import { generateKeyPairSync, createVerify } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, statSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mintInstallationToken, writeGhHosts } from "./app-token.mjs";
+import { spawnSync } from "node:child_process";
+import { findInstallationId, mintInstallationToken, runWorkflows, writeGhHosts } from "./app-token.mjs";
 
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const keyPem = privateKey.export({ type: "pkcs8", format: "pem" });
@@ -219,4 +220,90 @@ test("edge: a body that cannot be read fails naming the step", async () => {
     },
   });
   await assert.rejects(mintInstallationToken(args({ fetch })), /app-token: request to GitHub failed/);
+});
+
+test("ownPermissions sends no permissions body so the App's own permissions apply", async () => {
+  const calls = [];
+  await mintInstallationToken(args({ ownPermissions: true, fetch: okFetch(calls) }));
+  assert.deepEqual(JSON.parse(calls[0].init.body), { repositories: ["lanes"] });
+});
+
+function lookupFetch(calls, { lookup = { status: 200, body: { id: 4242 } } } = {}) {
+  return async (url, init) => {
+    calls.push({ url, init });
+    if (url.endsWith("/installation")) return new Response(JSON.stringify(lookup.body), { status: lookup.status });
+    return new Response(JSON.stringify({ token: "ghs_minted123", expires_at: "2026-10-01T10:00:00Z" }), { status: 201 });
+  };
+}
+
+test("looks the installation up from the repository with the JWT when no installationId is given", async () => {
+  const calls = [];
+  const out = await mintInstallationToken(args({ installationId: undefined, repo: "o/lanes", ownPermissions: true, fetch: lookupFetch(calls) }));
+  assert.equal(calls[0].url, "https://api.github.com/repos/o/lanes/installation");
+  assert.match(calls[0].init.headers.Authorization, /^Bearer [\w-]+\.[\w-]+\.[\w-]+$/);
+  assert.equal(calls[1].url, "https://api.github.com/app/installations/4242/access_tokens");
+  assert.equal(out.token, "ghs_minted123");
+});
+
+test("a failed installation lookup names its step and status, never the body", async () => {
+  const calls = [];
+  const fetch = lookupFetch(calls, { lookup: { status: 404, body: { message: "ghs_secretbody" } } });
+  await assert.rejects(mintInstallationToken(args({ installationId: undefined, repo: "o/lanes", fetch })), (e) => {
+    assert.match(e.message, /app-token: installation lookup failed with status 404/);
+    assert.ok(!e.message.includes("secretbody"));
+    return true;
+  });
+  assert.equal(calls.length, 1, "no mint after a failed lookup");
+});
+
+test("a failed mint after a good lookup names the mint step", async () => {
+  const fetch = async (url) =>
+    url.endsWith("/installation") ? new Response('{"id":4242}', { status: 200 }) : new Response("nope", { status: 403 });
+  await assert.rejects(mintInstallationToken(args({ installationId: undefined, repo: "o/lanes", ownPermissions: true, fetch })), /request to GitHub failed with status 403/);
+});
+
+test("workflows mode masks the token before exporting it and names only the step on failure", async () => {
+  const events = [];
+  const fetch = async (url) =>
+    new Response(JSON.stringify(url.endsWith("/installation") ? { id: 9 } : { token: "ghs_abc", expires_at: "2026-10-01T10:00:00Z" }), { status: 200 });
+  const env = { APP_ID: "1", APP_KEY: keyPem, LANES_REPO: "o/lanes", GITHUB_ENV: "env-file" };
+  await runWorkflows(env, { fetch, log: (l) => events.push(["log", l]), appendFile: (f, c) => events.push(["file", f, c]) });
+  assert.deepEqual(events, [["log", "::add-mask::ghs_abc"], ["file", "env-file", "LANES_WORKFLOWS_TOKEN=ghs_abc\n"]]);
+  const bad = async () => new Response("secret ghs_leak", { status: 500 });
+  await assert.rejects(runWorkflows(env, { fetch: bad, log() {}, appendFile() {} }), (e) => /installation lookup failed with status 500/.test(e.message) && !e.message.includes("leak"));
+  await assert.rejects(runWorkflows({ ...env, GITHUB_ENV: "" }, { fetch, log() {}, appendFile() {} }), /no GITHUB_ENV/);
+});
+
+test("edge: workflows mode refuses a token that could inject another env line, and an installation id of 0", async () => {
+  const env = { APP_ID: "1", APP_KEY: keyPem, LANES_REPO: "o/lanes", GITHUB_ENV: "env-file" };
+  const evil = async (url) =>
+    new Response(JSON.stringify(url.endsWith("/installation") ? { id: 9 } : { token: "ghs_a\nPATH=/evil", expires_at: "2026-10-01T10:00:00Z" }), { status: 200 });
+  const events = [];
+  await assert.rejects(runWorkflows(env, { fetch: evil, log: (l) => events.push(l), appendFile: (f, c) => events.push(c) }), /invalid token/);
+  assert.deepEqual(events, []);
+  await assert.rejects(
+    findInstallationId({ appId: 1, keyPem, repo: "o/lanes", fetch: lookupFetch([], { lookup: { status: 200, body: { id: 0 } } }) }),
+    /malformed response/,
+  );
+});
+
+test("edge: the CLI refuses a missing mode and prints only the step when the key is bad", () => {
+  const run = (a, env) => spawnSync(process.execPath, ["scripts/lanes/app-token.mjs", ...a], { env: { PATH: process.env.PATH, ...env }, encoding: "utf8" });
+  assert.equal(run([], {}).status, 2);
+  const bad = run(["workflows"], { APP_ID: "1", APP_KEY: "SECRETKEYTEXT", LANES_REPO: "o/lanes", GITHUB_ENV: "x" });
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /app-token: could not sign the JWT/);
+  assert.ok(!bad.stderr.includes("SECRETKEYTEXT") && !bad.stdout.includes("SECRETKEYTEXT"));
+});
+
+test("edge: a lookup needs owner/name, and a malformed lookup response is refused", async () => {
+  const calls = [];
+  await assert.rejects(mintInstallationToken(args({ installationId: undefined, repo: "lanes", fetch: lookupFetch(calls) })), /app-token:/);
+  assert.equal(calls.length, 0);
+  for (const body of [{}, { id: "x" }, { id: -1 }, null]) {
+    await assert.rejects(
+      findInstallationId({ appId: 1, keyPem, repo: "o/lanes", fetch: lookupFetch([], { lookup: { status: 200, body } }) }),
+      /malformed response/,
+    );
+  }
 });

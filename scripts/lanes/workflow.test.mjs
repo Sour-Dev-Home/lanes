@@ -1174,11 +1174,12 @@ test("lanes-workflow-apply passes comment and PR fields through env: only, never
   assert.match(yml, /APP_KEY: \$\{\{ secrets\.LANES_WORKFLOWS_KEY \}\}/);
 });
 
-test("lanes-workflow-apply runs workflow-apply.mjs filter and apply and masks the minted token before exporting it", () => {
+test("lanes-workflow-apply runs workflow-apply.mjs filter and apply and mints through app-token.mjs, not an inline script", () => {
   const yml = applyYml();
   assert.match(yml, /run: node scripts\/lanes\/workflow-apply\.mjs filter/);
   assert.match(yml, /run: node scripts\/lanes\/workflow-apply\.mjs apply/);
-  assert.ok(yml.indexOf("::add-mask::") > 0 && yml.indexOf("::add-mask::") < yml.indexOf("appendFileSync(process.env.GITHUB_ENV"));
+  assert.match(yml, /run: node scripts\/lanes\/app-token\.mjs workflows\n/);
+  assert.doesNotMatch(yml, /node --input-type|createSign|GITHUB_ENV/);
   assert.match(yml, /vars\.LANES_WORKFLOWS_APP_ID/);
 });
 
