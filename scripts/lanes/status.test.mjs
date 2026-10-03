@@ -1284,3 +1284,10 @@ test("edge: mergeGroupFailures drops a plain http link (only https is kept)", ()
   const f = mergeGroupFailures([{ headBranch: "gh-readonly-queue/main/pr-8-a", workflowName: "verify", url: "http://example.test/1", createdAt: "2026-10-02T02:00:00Z" }]);
   assert.deepEqual([...f], [[8, { name: "verify" }]]);
 });
+
+test("a PR with no Closes #N (a Dependabot bump) is listed by its gate stage and claims no issue", () => {
+  const bump = pr(9, [gate("PENDING", "waiting on owner (/approve)")], { body: "Bumps actions/checkout from 4 to 5.", headRefName: "dependabot/github_actions/actions/checkout-5" });
+  const s = summarize({ prs: [bump], issues: [{ number: 1, title: "t", labels: [{ name: "ready" }, { name: "tier:quick" }], body: "" }], merged: [], mergeQueue: [] });
+  assert.deepEqual([...s.waitingOnOwner, ...s.inFlight].map((i) => i.number), [9]);
+  assert.doesNotThrow(() => render(s));
+});

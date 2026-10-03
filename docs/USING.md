@@ -299,11 +299,16 @@ Free, environments have no required reviewers: skip both steps and keep the copy
   that lists more than 20 blockers. A blocker it cannot link (a PR, a missing issue, `owner/repo#N` in another repository) or
   a failing dependencies API is named in the contract comment; the labels are set either way. `/lane`, `/status` and
   the gate keep reading the field, not the mirror. Existing issues are mirrored the next time they are edited.
-- **Dependabot PRs.** They have no linked task issue and their branch never matches `issue-<N>-*`, so `lanes/gate`
-  always fails them — there is no exemption for `dependabot/` heads, since one would be a way around the branch-to-issue
-  check (I4). Open a matching Task issue instead, let a lane recreate the dependency bump on its own `issue-<N>-<slug>`
-  branch from that issue, and close the original Dependabot PR with a link to the lane's PR. (`lanes` has no
-  dependencies today, so this has not come up yet.)
+- **Dependabot PRs.** With `dependabot.actionBumps` set to `true` in `lanes.config.json` (this repository does; absent
+  or `false` is the old behaviour), `lanes/gate` takes a narrow path for a Dependabot PR that only re-pins GitHub
+  Actions (ADR 0032). It qualifies when the PR author is `dependabot[bot]` and every changed file is a workflow or
+  action manifest whose only changes are `uses:` lines moving from one full commit SHA to another of the same action.
+  The branch name, title and body are never read. The owner still approves: the gate waits for your approval like any
+  other PR, and the PR merges only after it. Nothing is handed over: no task issue, lane or reviewer agent is involved,
+  and there is no `Closes #N`. Every other Dependabot PR (a tag-pinned action, a dependency file, any other changed
+  line) still fails `lanes/gate` as before: open a matching Task issue, let a lane recreate the bump on its own
+  `issue-<N>-<slug>` branch, and close the Dependabot PR with a link to the lane's PR. On the first real bump PR, check
+  that `lanes/gate` posted a status; if it did not, re-run it with the gate workflow's `workflow_dispatch` trigger.
 
 ## Rules and scripts to have in place before the first lane
 
