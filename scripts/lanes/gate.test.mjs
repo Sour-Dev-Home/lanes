@@ -352,6 +352,12 @@ function inCheckout(adrFiles, fn, options = {}) {
     writeFileSync(join(root, "lanes.config.json"), JSON.stringify({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] }, ...(identity === undefined ? {} : { identity }) }));
     mkdirSync(join(root, "docs", "adr"), { recursive: true });
     for (const [name, text] of Object.entries(adrFiles)) writeFileSync(join(root, "docs", "adr", name), text);
+    // ADR 0031: under team a checkout with no owner paths is an error, so it holds a CODEOWNERS unless a test sets one.
+    const codeowners = "codeowners" in options ? options.codeowners : "/owner-only/ @SourE-dev\n";
+    if (codeowners !== undefined) {
+      mkdirSync(join(root, ".github"), { recursive: true });
+      writeFileSync(join(root, ".github", "CODEOWNERS"), codeowners);
+    }
     process.chdir(root);
     return fn();
   } finally {
@@ -360,6 +366,35 @@ function inCheckout(adrFiles, fn, options = {}) {
   }
 }
 const descriptionOf = (post) => post.fields.find((f) => f.startsWith("description=")).slice("description=".length);
+
+// ADR 0031 part 2: a CODEOWNERS the matcher cannot read stops the gate with `error` and the line, never a quiet "no owner paths".
+test("main posts error with the line when CODEOWNERS has a form the matcher rejects, and throws", () => {
+  for (const [text, line] of [["/ok/ @SourE-dev\n/docs/** @SourE-dev\n", "line 2"], ["/ok/ @SourE-dev\n\n/nobody/\n", "line 3"]]) {
+    const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+    assert.throws(() => inCheckout({}, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api), { codeowners: text }), new RegExp(line));
+    assert.equal(posted.length, 1, "one status, on the PR head");
+    assert.equal(posted[0].sha, SHA);
+    assert.ok(posted[0].fields.includes("state=error"), posted[0].fields.join(" "));
+    assert.ok(posted[0].fields.includes("context=lanes/gate"));
+    assert.match(descriptionOf(posted[0]), new RegExp(line));
+    assert.ok(descriptionOf(posted[0]).length <= 140);
+  }
+});
+
+test("edge: main posts error when CODEOWNERS is missing and paths.owner is empty under team", () => {
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  assert.throws(() => inCheckout({}, () => main(PR_EVENT, api), { codeowners: undefined }), /CODEOWNERS/);
+  assert.ok(posted[0].fields.includes("state=error"), posted[0].fields.join(" "));
+  assert.match(descriptionOf(posted[0]), /CODEOWNERS/);
+});
+
+test("edge: a CODEOWNERS owner path makes the gate wait on the owner", () => {
+  const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+  routes["repos/o/r/pulls/5/files"] = "owner-only/a.js\n";
+  const { api, posted } = fakeApi(routes);
+  inCheckout({}, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
+  assert.ok(posted[0].fields.includes("state=pending"), posted[0].fields.join(" "));
+});
 
 test("main loads the default branch's ADRs: a governed file alone no longer waits for the architecture-advisor", () => {
   const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
