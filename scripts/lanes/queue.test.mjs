@@ -2092,6 +2092,20 @@ test("edge: a stop's reason is cut to the finding alphabet and 80 characters, an
   assert.deepEqual(heartbeatFindings({ stop: "" }), ["queue-stopped"]);
 });
 
+test("edge: the 20-finding cap and the 80-character cut hold at the exact boundary", async () => {
+  const { heartbeatFindings } = await import("./queue.mjs");
+  const stalled = (n) => new Map(Array.from({ length: n }, (_, i) => [i + 1, 40]));
+  assert.equal(heartbeatFindings({ stalled: stalled(19) }).length, 19);
+  assert.equal(heartbeatFindings({ stalled: stalled(20) }).length, 20);
+  assert.equal(heartbeatFindings({ stalled: stalled(21) }).length, 20);
+  assert.equal(heartbeatFindings({ stop: "stop", stalled: stalled(20) })[0], "queue-stopped:stop");
+  assert.equal(heartbeatFindings({ stop: "stop", stalled: stalled(20) }).length, 20);
+  const reasonOf = (n) => heartbeatFindings({ stop: "x".repeat(n) })[0].slice("queue-stopped:".length);
+  assert.equal(reasonOf(79).length, 79);
+  assert.equal(reasonOf(80).length, 80);
+  assert.equal(reasonOf(81).length, 80);
+});
+
 // Criterion 1 and 2, through main
 function heartbeatRun(world, { failWith = null, idle, stalledIssues = [], ...options } = {}) {
   const run = fakeRun(world, options);
