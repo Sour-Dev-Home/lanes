@@ -554,6 +554,60 @@ test("edge: lane.md step 4c comments before it removes ready, so the evidence is
   assert.ok(step.indexOf("comments the evidence") < step.indexOf("removes the `ready` label"));
 });
 
+// #666: a lane that stops for the owner says why on its issue (or PR), then takes the issue out of the running pool
+const flatLane = () => laneText().replace(/\r\n/g, "\n");
+const laneStopRule = () => flatLane().match(/\nStop comment \(#666\): [\s\S]*?\n0\. /)[0].replace(/\s+/g, " ");
+const laneNumbered = (from, to) => flatLane().match(new RegExp(`\\n${from}\\. [\\s\\S]*?\\n${to}\\. `))[0].replace(/\s+/g, " ");
+
+test("lane.md stop rule: every owner stop after step 1 comments `Lane stopped: <reason>` on the issue or PR, then swaps the labels", () => {
+  const rule = laneStopRule();
+  assert.match(rule, /comments on its issue \(on its PR when one exists\)/);
+  assert.match(rule, /`Lane stopped: <reason>`/);
+  assert.match(rule, /the cause and the owner's next step/);
+  assert.match(rule, /removes `ready` and `lane:running` and adds `needs-owner`/);
+  assert.match(rule, /`gh label create needs-owner`[^.]*only if it is missing/);
+  assert.match(rule, /"A lane stopped and needs the owner; see its last comment"/);
+});
+
+test("lane.md stop rule: the label swap comes after the comment, so the cause is on record even if the relabel fails", () => {
+  const rule = laneStopRule();
+  assert.ok(rule.indexOf("comments on its issue") < rule.indexOf("removes `ready` and `lane:running`"));
+});
+
+test("lane.md stop rule: the comment holds no absolute path, transcript or personal data", () => {
+  assert.match(laneStopRule(), /no absolute local path, no session transcript and no personal data/);
+});
+
+test("lane.md stop rule: steps 1 and 2 still do nothing on GitHub", () => {
+  const rule = laneStopRule();
+  assert.match(rule, /Steps 0, 1 and 2 do nothing on GitHub/);
+  assert.match(laneNumbered("1", "2"), /Stop and report/);
+});
+
+test("lane.md step 4: a wrong or missing contract files the issue, then comments `Lane stopped: contract` with #N and the owner's steps, without editing the issue", () => {
+  const step = laneNumbered("4", "4b");
+  assert.match(step, /file a new task issue for the contract/);
+  assert.match(step, /comments on its own issue before it stops/);
+  assert.match(step, /`Lane stopped: contract`/);
+  assert.match(step, /the filed issue as `#N`/);
+  assert.match(step, /remove `lane-filed` from `#N`; add `#N` to this issue's "Blocked by"; then remove `needs-owner`/);
+  assert.match(step, /never edits the issue's text/);
+  assert.ok(step.indexOf("file a new task issue") < step.indexOf("comments on its own issue"));
+});
+
+test("lane.md step 5: a file outside Scope needed only because of a file this lane adds stops with `Lane stopped: Scope needs <paths>`, never a separate issue", () => {
+  const step = laneNumbered("5", "6");
+  assert.match(step, /`npm test` needs a file outside Scope only because of a file this lane adds/);
+  assert.match(step, /does not file a separate issue for it/);
+  assert.match(step, /`Lane stopped: Scope needs <paths>`/);
+  assert.match(step, /each path and the check that needs it/);
+  assert.match(step, /the owner extends this issue's Scope/);
+});
+
+test("lane.md step 4c: its needs-owner description matches the label list's", () => {
+  assert.match(laneAlreadyMet(), /A lane stopped and needs the owner; see its last comment/);
+});
+
 test("test-hunter.md adds a case beyond the criteria and listed edge cases, or says in the summary why none apply", () => {
   const hunter = readFileSync(".claude/agents/test-hunter.md", "utf8");
   const flat = hunter.replace(/\s+/g, " ");
