@@ -186,4 +186,5 @@ test("verify.yml runs the affected tests through npm, and the full suite through
   assert.match(workflow, /if \[ -z "\$files" \] \|\| \[ "\$files" = "ALL" \]; then\s+npm test\s+else/);
   assert.equal(pkg.scripts["test:files"], "node --test", "test:files takes the file arguments as given");
   assert.match(pkg.scripts.test, /^node --test /, "npm test still runs the whole suite");
+  assert.match(workflow, /if: github\.event_name != 'pull_request'\n\s+run: node scripts\/lanes\/test-retry\.mjs\n/, "the queue and main run the suite through test-retry (#637)");
 });

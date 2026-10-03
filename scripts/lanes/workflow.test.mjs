@@ -901,7 +901,7 @@ test("verify.yml's test job matrix covers ubuntu-latest on Node 22 and 24, and w
   assert.match(yml, /- os: ubuntu-latest\n\s+node: 22\n/);
   assert.match(yml, /- os: ubuntu-latest\n\s+node: 24\n/);
   assert.match(yml, /- os: windows-latest\n\s+node: 22\n/);
-  assert.match(yml, /- run: npm test/);
+  assert.match(yml, /run: node scripts\/lanes\/test-retry\.mjs/);
 });
 
 // edge: the matrix must hold exactly the three named entries, not grow an unlisted fourth combination
@@ -933,21 +933,23 @@ test("edge: verify.yml treats an empty affected-tests answer as ALL, never as a 
   assert.match(verifyYml(), /\[ -z "\$files" \] \|\| \[ "\$files" = "ALL" \]/);
 });
 
-test("verify.yml runs full npm test on merge_group and push whatever affected-tests.mjs would print", () => {
+test("verify.yml runs the full suite through test-retry.mjs on merge_group and push whatever affected-tests.mjs would print (#637)", () => {
   const yml = verifyYml();
-  assert.match(yml, /- if: github\.event_name != 'pull_request'\n\s+run: npm test\n/);
+  assert.match(yml, /- if: github\.event_name != 'pull_request'\n\s+run: node scripts\/lanes\/test-retry\.mjs\n/);
+  // test-retry.mjs is never the pull_request step
+  assert.equal((yml.match(/test-retry\.mjs/g) ?? []).length, 2);
   // the affected-tests call sits only under the pull_request condition
   assert.equal((yml.match(/affected-tests\.mjs/g) ?? []).length, 1);
   const before = yml.slice(0, yml.indexOf("affected-tests.mjs"));
   assert.match(before.slice(before.lastIndexOf("- if:")), /github\.event_name == 'pull_request'/);
 });
 
-test("verify.yml's macOS job runs npm test on Node 22 on merge_group and push only, and verify treats it as required except when skipped on pull_request", () => {
+test("verify.yml's macOS job runs the full suite through test-retry.mjs on Node 22 on merge_group and push only, and verify treats it as required except when skipped on pull_request", () => {
   const yml = verifyYml();
   assert.match(yml, /\n {2}test-macos:\n {4}if: github\.event_name != 'pull_request'\n {4}runs-on: macos-latest\n/);
   const job = yml.slice(yml.indexOf("  test-macos:"), yml.indexOf("  verify:"));
   assert.match(job, /node-version: 22\n/);
-  assert.match(job, /- run: npm test\n/);
+  assert.match(job, /- run: node scripts\/lanes\/test-retry\.mjs\n/);
   assert.match(yml, /needs\.test-macos\.result != 'success' && \(github\.event_name != 'pull_request' \|\| needs\.test-macos\.result != 'skipped'\)/);
 });
 
