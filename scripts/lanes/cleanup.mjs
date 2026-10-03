@@ -10,7 +10,8 @@ import { recordLaneCost } from "./lane-cost.mjs";
 import { laneIssueOf } from "./lib.mjs";
 const LANE_BRANCH = /^issue-(\d+)-./;
 // A lane's worktree folder: `issue-<N>-<slug>`, or bare `issue-<N>` when the lane skipped the slug (#134).
-const laneNamed = (s) => Boolean(s.issue) && s.name === `lane-${s.issue}`;
+// A `start-lane-<N>` session (the queue's launcher) is a lane's session too (#717).
+const laneNamed = (s) => Boolean(s.issue) && (s.name === `lane-${s.issue}` || s.name === `start-lane-${s.issue}`);
 const PR_LIMIT = 1000;
 
 const normalPath = (p) => {
@@ -55,19 +56,28 @@ export function pidRunning(pid) {
 
 // Whether a lane is merged: `{ pr }` for the merged PR whose head is `head`, else `{ skip }`. An open PR on the lane
 // means it is not done, whatever merged before it.
-function mergedPr(prs, head) {
+// A tip that is not a merged head still counts when `diffs[<merged head>]` says its tree is the same (#717: a lane
+// whose workflow change went through the ADR 0023 hand-over is merged under the owner's commit, not the lane's).
+function mergedPr(prs, head, diffs = {}) {
   if (prs.some((p) => p.state === "OPEN")) return { skip: "not merged" };
   const done = prs.filter((p) => p.state === "MERGED");
   if (done.length === 0) return { skip: "not merged" };
   if (head === undefined) return { pr: done[0].number };
   const exact = done.find((p) => p.headRefOid === head);
-  return exact ? { pr: exact.number } : { skip: "local commits after the merged head" };
+  if (exact) return { pr: exact.number };
+  const same = done.find((p) => diffs[p.headRefOid]?.files === 0);
+  if (same) return { pr: same.number };
+  const results = done.map((p) => diffs[p.headRefOid]);
+  const failed = results.find((r) => typeof r?.error === "string");
+  if (failed) return { skip: `cannot compare with the merged head (${failed.error})` };
+  const files = Math.min(...results.map((r) => r?.files).filter(Number.isInteger));
+  return { skip: Number.isFinite(files) ? `local commits after the merged head (${files} files differ)` : "local commits after the merged head" };
 }
 
 // Whether a lane is done: merged as above, or `{ closed: true }` when its issue is closed and it has no open or
 // merged PR (a closed-unmerged one does not count).
-function laneDone(prs, head, issueClosed) {
-  const merge = mergedPr(prs, head);
+function laneDone(prs, head, issueClosed, diffs) {
+  const merge = mergedPr(prs, head, diffs);
   if (merge.skip !== "not merged" || !issueClosed || prs.some((p) => p.state === "OPEN")) return merge;
   return { closed: true };
 }
@@ -139,7 +149,7 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
     // A running lock held by one of this worktree's own idle sessions is released by stopping that session.
     const holder = lockAlive ? sessionsHere.find((s) => s.pid === pid) : undefined;
     const own = prs.filter((p) => p.headRefName === w.branch);
-    const done = laneDone(own, w.head, closedIssues.has(issue));
+    const done = laneDone(own, w.head, closedIssues.has(issue), w.treeDiffs);
     const other = own.length === 0 && !w.main && !sessionsHere.some(stillWorking) ? otherLanePr(prs, issue, w.branch) : undefined;
     if (other) plan.push({ ...entry, leftover: { folder: folderOf(w), pr: other.number, branch: other.headRefName }, skip: "leftover" });
     else if (done.skip) plan.push({ ...entry, skip: done.skip });
@@ -393,6 +403,38 @@ function unpushedCount(branch, sh) {
   }
 }
 
+// #717: `{ [merged head]: { files } | { error } }` for each merged PR on `branch` whose head is not the branch tip:
+// `files` is how many files differ between that head and the tip (0 for the same tree), `error` the first line of
+// what git said when it could not compare. A head not in the local repository is fetched once (`pull/<N>/head`).
+function treeDiffsFor(branch, tip, prs, sh) {
+  const own = prs.filter((p) => p.headRefName === branch);
+  if (own.some((p) => p.state === "OPEN")) return undefined;
+  const diffs = {};
+  for (const p of own.filter((q) => q.state === "MERGED" && q.headRefOid !== tip)) {
+    const compare = () => {
+      try {
+        sh("git", ["diff", "--quiet", p.headRefOid, tip]);
+        return { files: 0 };
+      } catch (err) {
+        if (err.status !== 1) throw err;
+        return { files: sh("git", ["diff", "--name-only", p.headRefOid, tip]).split(/\r?\n/).filter(Boolean).length };
+      }
+    };
+    try {
+      try {
+        diffs[p.headRefOid] = compare();
+      } catch (err) {
+        if (err.status === 1) throw err;
+        sh("git", ["fetch", "origin", `pull/${p.number}/head`]);
+        diffs[p.headRefOid] = compare();
+      }
+    } catch (err) {
+      diffs[p.headRefOid] = { error: errorText(err, { args: [] }) };
+    }
+  }
+  return Object.keys(diffs).length > 0 ? diffs : undefined;
+}
+
 // #382: why a lane's worktree still holds work only its owner may drop, or null when it is clean and fully pushed.
 // Uses the dirty and unpushed reads loadCleanupInputs uses; a read that fails counts as work left. `run` as in `sh`.
 export function laneWorkLeft(path, branch, run = sh) {
@@ -434,6 +476,11 @@ export function loadCleanupInputs(rootArg, run = sh) {
     if (LANE_BRANCH.test(branch ?? "") && !onBranch.has(branch)) worktrees.push({ path: null, branch, head, dirty: false, main: false, unpushed: unpushedCount(branch, sh) });
   }
   const prs = JSON.parse(sh("gh", ["pr", "list", "--state", "all", "--limit", String(PR_LIMIT), "--json", "number,state,headRefName,headRefOid"]));
+  for (const w of worktrees) {
+    if (!LANE_BRANCH.test(w.branch ?? "") || w.main) continue;
+    const treeDiffs = treeDiffsFor(w.branch, w.head, prs, sh);
+    if (treeDiffs) w.treeDiffs = treeDiffs;
+  }
   const issues = JSON.parse(sh("gh", ["issue", "list", "--state", "all", "--limit", String(PR_LIMIT), "--json", "number,state,labels"]));
   const sessions = sessionsFrom(JSON.parse(sh("claude", ["agents", "--json"])), root).map((s) => (s.pid ? { ...s, alive: pidRunning(s.pid) } : s));
   return { root, worktrees, sessions, prs, issues, orphans: findOrphans(root, trees.map((t) => t.path)) };
@@ -558,10 +605,11 @@ export function sessionsFrom(agents, root) {
     // The root itself counts: a lane that has not entered its worktree yet sits there, with no issue.
     if (cwd !== normalPath(root) && !cwd.startsWith(top)) continue;
     // The `lane-<N>` name wins over the cwd (#341); the cwd is read relative to the root, as its parents are not lanes.
-    const issue = laneIssueOf({ ...a, cwd: cwd.slice(top.length) });
+    const startNamed = typeof a.name === "string" ? Number(/^start-lane-([1-9]\d*)$/.exec(a.name)?.[1]) : NaN;
+    const issue = Number.isSafeInteger(startNamed) ? startNamed : laneIssueOf({ ...a, cwd: cwd.slice(top.length) });
     const readable = typeof a.id === "string" && SESSION_ID.test(a.id);
     const session = { ...(readable ? { id: a.id } : { unreadableId: true }), cwd: a.cwd, issue, status: a.status, state: a.state };
-    if (issue && a.name === `lane-${issue}`) session.name = a.name;
+    if (issue && (a.name === `lane-${issue}` || a.name === `start-lane-${issue}`)) session.name = a.name;
     // The transcript's name and the launch time, kept for lane-cost.mjs.
     if (typeof a.sessionId === "string") session.sessionId = a.sessionId;
     if (Number.isFinite(a.startedAt)) session.startedAt = a.startedAt;

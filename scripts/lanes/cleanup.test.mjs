@@ -1806,3 +1806,117 @@ test("edge: a lane branch checked out in the main worktree is skipped as such, n
   assert.notEqual(entry.skip, "leftover");
   assert.equal(entry.steps, undefined);
 });
+
+// #717: hand-over lanes and orphan sessions.
+const TIP = "b".repeat(40);
+const MERGED_HEAD = "c".repeat(40);
+const handedOver = (branch, diffs) => [wt(branch, { head: TIP, treeDiffs: diffs })];
+const laneRun = (diff) => (cmd, args) => {
+  if (cmd === "gh" && args[0] === "pr") return JSON.stringify([{ number: 9, state: "MERGED", headRefName: "issue-7-x", headRefOid: MERGED_HEAD }]);
+  if (cmd === "gh" || cmd === "claude") return "[]";
+  if (args[0] === "worktree") return `worktree ${ROOT}\nHEAD ${HEAD}\nbranch refs/heads/main\n\nworktree ${ROOT}/.claude/worktrees/issue-7-x\nHEAD ${TIP}\nbranch refs/heads/issue-7-x\n`;
+  if (args[0] === "diff") return diff(args);
+  return "";
+};
+
+test("a hand-over lane whose tip has the merged head's tree is removed (#717)", () => {
+  const [entry] = planCleanup({ worktrees: [main, ...handedOver("issue-7-x", { [MERGED_HEAD]: { files: 0 } })], prs: [merged("issue-7-x", { headRefOid: MERGED_HEAD })] });
+  assert.equal(entry.skip, undefined);
+  assert.equal(entry.pr, 90);
+  assert.ok(cmds(entry).includes("git branch -D issue-7-x"));
+});
+
+test("a lane holding a file the merged head lacks is skipped with the file count (#717, the #631 case)", () => {
+  const [entry] = planCleanup({ worktrees: [main, ...handedOver("issue-7-x", { [MERGED_HEAD]: { files: 1 } })], prs: [merged("issue-7-x", { headRefOid: MERGED_HEAD })] });
+  assert.equal(entry.skip, "local commits after the merged head (1 files differ)");
+  assert.equal(entry.steps, undefined);
+});
+
+test("a git diff error is a skip that names the error, never a removal (#717)", () => {
+  const [entry] = planCleanup({ worktrees: [main, ...handedOver("issue-7-x", { [MERGED_HEAD]: { error: "bad object" } })], prs: [merged("issue-7-x", { headRefOid: MERGED_HEAD })] });
+  assert.equal(entry.skip, "cannot compare with the merged head (bad object)");
+  assert.equal(entry.steps, undefined);
+});
+
+test("edge: a tree-identical lane keeps the dirty-worktree and still-working skips (#717)", () => {
+  const diffs = { [MERGED_HEAD]: { files: 0 } };
+  const prs = [merged("issue-7-x", { headRefOid: MERGED_HEAD })];
+  const [dirty] = planCleanup({ worktrees: [main, wt("issue-7-x", { head: TIP, treeDiffs: diffs, dirty: true })], prs });
+  const [busy] = planCleanup({ worktrees: [main, ...handedOver("issue-7-x", diffs)], sessions: [session("s7", "issue-7-x", { status: "busy" })], prs });
+  assert.equal(dirty.skip, "dirty worktree");
+  assert.equal(busy.skip, "session still working");
+});
+
+test("loadCleanupInputs compares a hand-over lane's tip with the merged head by git diff (#717)", () => {
+  const run = laneRun((args) => {
+    if (args[1] === "--quiet") throw Object.assign(new Error("diff"), { status: 1 });
+    return "a.txt\nb.txt\n";
+  });
+  const lane = loadCleanupInputs(ROOT, run).worktrees.find((w) => w.branch === "issue-7-x");
+  assert.deepEqual(lane.treeDiffs, { [MERGED_HEAD]: { files: 2 } });
+});
+
+test("edge: loadCleanupInputs fetches a merged head it lacks once, and reports an error that persists (#717)", () => {
+  const fetches = [];
+  const inner = laneRun(() => {
+    throw Object.assign(new Error("x"), { status: 128, stderr: "fatal: bad object" });
+  });
+  const run = (cmd, args) => {
+    if (args[0] === "fetch") fetches.push(args);
+    return inner(cmd, args);
+  };
+  const lane = loadCleanupInputs(ROOT, run).worktrees.find((w) => w.branch === "issue-7-x");
+  assert.deepEqual(lane.treeDiffs, { [MERGED_HEAD]: { error: "fatal: bad object" } });
+  assert.equal(fetches.length, 1);
+});
+
+test("edge: a lane whose tip is a merged head gets no tree comparison (#717)", () => {
+  const run = laneRun(() => {
+    throw new Error("diff must not run");
+  });
+  const prs = JSON.stringify([{ number: 9, state: "MERGED", headRefName: "issue-7-x", headRefOid: TIP }]);
+  const lane = loadCleanupInputs(ROOT, (cmd, args) => (cmd === "gh" && args[0] === "pr" ? prs : run(cmd, args))).worktrees.find((w) => w.branch === "issue-7-x");
+  assert.equal(lane.treeDiffs, undefined);
+});
+
+const startSession = (id, extra = {}) => ({ id, cwd: ROOT, issue: 500, state: "blocked", name: "start-lane-500", ...extra });
+
+test("sessionsFrom reads a start-lane-<N> name as the issue (#717)", () => {
+  const [s] = sessionsFrom([{ kind: "background", id: "s1", name: "start-lane-500", cwd: ROOT, status: "idle", state: "blocked" }], ROOT);
+  assert.equal(s.issue, 500);
+  assert.equal(s.name, "start-lane-500");
+});
+
+test("an orphan start-lane session of a closed issue is removed (#717)", () => {
+  const [entry] = planCleanup({ worktrees: [main], sessions: [startSession("s500")], issues: [{ number: 500, state: "CLOSED" }] });
+  assert.equal(entry.skip, undefined);
+  assert.equal(entry.closed, true);
+  assert.deepEqual(cmds(entry), ["claude rm s500"]);
+});
+
+test("an orphan start-lane session is stopped first when its process is alive (#717)", () => {
+  const [entry] = planCleanup({ worktrees: [main], sessions: [startSession("s500", { status: "idle", alive: true })], issues: [{ number: 500, state: "CLOSED" }] });
+  assert.deepEqual(cmds(entry), ["claude stop s500", "claude rm s500"]);
+});
+
+test("an orphan session of an open issue is kept (#717)", () => {
+  const [entry] = planCleanup({ worktrees: [main], sessions: [startSession("s500")], issues: [{ number: 500, state: "OPEN" }] });
+  assert.equal(entry.skip, "not merged");
+  assert.equal(entry.steps, undefined);
+});
+
+test("an orphan session whose issue state cannot be read is kept (#717)", () => {
+  const [entry] = planCleanup({ worktrees: [main], sessions: [startSession("s500")], issues: [] });
+  assert.equal(entry.skip, "not merged");
+  assert.equal(entry.steps, undefined);
+});
+
+test("edge: a closed issue's session that is still working is kept (#717)", () => {
+  const [entry] = planCleanup({ worktrees: [main], sessions: [startSession("s500", { status: "busy" })], issues: [{ number: 500, state: "CLOSED" }] });
+  assert.equal(entry.skip, "session still working");
+});
+
+test("edge: a start-lane session keeps the worktree of its issue from being removed under it (#717)", () => {
+  const [entry] = planCleanup({ worktrees: [main, wt("issue-500-x")], sessions: [startSession("s500", { status: "busy" })], prs: [merged("issue-500-x")] });
+  assert.equal(entry.skip, "session still working");
+});
