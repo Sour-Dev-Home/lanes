@@ -1293,3 +1293,12 @@ test("edge: lanes-workflow-apply reads the key only in the apply job", () => {
   assert.doesNotMatch(jobBlock(yml, "filter"), /LANES_WORKFLOWS/);
   assert.equal([...yml.matchAll(/secrets\.[A-Z_]+/g)].length, 1);
 });
+
+// #694: GitHub can refuse a push for a workflow file the branch does not touch, when main has moved
+test("lane.md step 7 merges origin/main and pushes again when a push is refused for a workflow file the range does not touch, and reports it in the PR", () => {
+  const step7 = laneStep(7);
+  assert.match(step7, /refused for a workflow file the range does not touch/);
+  assert.match(step7, /git merge origin\/main/);
+  assert.match(step7, /push again/);
+  assert.match(step7, /report the refusal in the PR/);
+});
