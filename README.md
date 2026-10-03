@@ -30,8 +30,8 @@ gatekeeper, and unattended nights for low-risk work. The design is in [docs/spec
    draft; approving it creates the Task issues.
 5. **Start.** Keep the queue running (step 7): it launches a lane for every `ready` issue, and each lane opens a PR
    with auto-merge on. To hold an issue back, remove its `ready` label or press Pause.
-6. **Approve.** A PR that touches an owner path waits for you: run `/approvals`, then `/approve <PR>`. Other PRs
-   merge on their own once the gate passes.
+6. **Approve.** A PR that touches an owner path waits for your code-owner review in GitHub; the review notification
+   and the lanes-health issue tell you it is waiting. Other PRs merge on their own once the gate passes.
 7. **The queue.** The queue is the only launcher. From your own terminal (never from inside Claude),
    `node scripts/lanes/queue.mjs` works every ready issue; `/night` does low-risk work on a schedule. `/status` shows what waits on you.
 

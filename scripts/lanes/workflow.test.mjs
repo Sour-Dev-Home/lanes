@@ -398,8 +398,8 @@ test("ADRs 0004 and 0015 are superseded by 0025; 0002, 0007 and 0019 each carry 
   }
 });
 
-test("USING.md and SECURITY.md carry no solo profile, /approve or /approvals text", () => {
-  for (const f of ["docs/USING.md", "docs/SECURITY.md"]) {
+test("USING.md, SECURITY.md and README.md carry no solo profile, /approve or /approvals text", () => {
+  for (const f of ["docs/USING.md", "docs/SECURITY.md", "README.md"]) {
     const text = readFileSync(f, "utf8").replace(/\(adr\/[^)]*\)/g, "");
     assert.doesNotMatch(text, /\bsolo\b|\/approve|\/approvals|approve[- ]guard|review\/owner|one GitHub account|own GitHub account/i, f);
   }
