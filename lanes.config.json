@@ -81,32 +81,6 @@
       "^\\.gitattributes$"
     ],
     "ui": ["^frontend/src/", "^src/ui/", "\\.css$", "^dashboard/"],
-    "owner": [
-      "^scripts/lanes/(gate|lib|post-review|issue-contract)(\\.test)?\\.mjs$",
-      "^scripts/lanes/gate-decision\\.test\\.mjs$",
-      "^scripts/lanes/workflow\\.test\\.mjs$",
-      "^scripts/gate-workflow\\.test\\.mjs$",
-      "^scripts/lanes/contracts\\.test\\.mjs$",
-      "^scripts/lanes/(queue|start|status|app-token|reap|cleanup|lane-cost|modules|paths|pick|blockers|health)(\\.test)?\\.mjs$",
-      "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$",
-      "^\\.claude/settings\\.json$",
-      "^\\.github/",
-      "^\\.githooks/",
-      "^lanes\\.config\\.json$",
-      "^\\.claude/agents/",
-      "^\\.claude/commands/(lane|night)\\.md$",
-      "^docs/adr/",
-      "^package(-lock)?\\.json$",
-      "(^|/)(pnpm-lock\\.yaml|yarn\\.lock)$",
-      "^vendor/",
-      "(^|/)CLAUDE\\.md$",
-      "^\\.gitattributes$",
-      "^lanes\\.lock\\.json$",
-      "^scripts/preflight\\.mjs$",
-      "(^|/)\\.env",
-      "(^|/)auth/",
-      "(^|/)secrets?/",
-      "^deploy/"
-    ]
+    "owner": []
   }
 }

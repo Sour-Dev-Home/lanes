@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { PATH_PATTERNS } from "../preflight.mjs";
-import { codeownersRegex } from "./lib.mjs";
+import { classifyFiles, codeownersRegex, compileConfig, loadConfig } from "./lib.mjs";
 
 test("lanes-gate always runs the default branch's scripts, never the PR's", () => {
   const yml = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
@@ -1170,11 +1170,11 @@ export function queueClosure(entry = "scripts/lanes/queue.mjs") {
 }
 
 test("every file in the queue's import and spawn closure is an owner path, with its test (ADR 0026)", () => {
-  const owner = JSON.parse(readFileSync("lanes.config.json", "utf8")).paths.owner.map((s) => new RegExp(s));
+  const owner = realConfig().paths.codeowners;
   const closure = queueClosure();
   for (const f of ["scripts/lanes/queue.mjs", "scripts/lanes/queue.test.mjs", "scripts/lanes/start.mjs", "scripts/lanes/reap.mjs", "scripts/lanes/lib.mjs"]) assert.ok(closure.includes(f), `the closure misses ${f}: the computation is broken`);
   const uncovered = closure.filter((f) => !owner.some((r) => r.test(f)));
-  assert.deepEqual(uncovered, [], `queue.mjs loads these files but paths.owner does not match them: ${uncovered.join(", ")}`);
+  assert.deepEqual(uncovered, [], `queue.mjs loads these files but CODEOWNERS does not match them: ${uncovered.join(", ")}`);
 });
 
 test("edge: queueClosure follows a literal dynamic import, a re-export and a spawned script path, and ignores comments", () => {
@@ -1184,22 +1184,92 @@ test("edge: queueClosure follows a literal dynamic import, a re-export and a spa
   assert.ok(!queueClosure().includes("scripts/lanes/gate-decision.mjs"));
 });
 
-// ADR 0019 part 6: CODEOWNERS lists exactly the owner-only paths, so a native code-owner review covers what /approve does (#520).
-test("CODEOWNERS covers exactly the files paths.owner covers", () => {
+// ADR 0031 part 5: a frozen copy of today's owner and sensitive regexes. The floor only grows; shrinking it needs an ADR.
+const OWNER_FLOOR = [
+  "^scripts/lanes/(gate|lib|post-review|issue-contract)(\\.test)?\\.mjs$",
+  "^scripts/lanes/gate-decision\\.test\\.mjs$",
+  "^scripts/lanes/workflow\\.test\\.mjs$",
+  "^scripts/gate-workflow\\.test\\.mjs$",
+  "^scripts/lanes/contracts\\.test\\.mjs$",
+  "^scripts/lanes/(queue|start|status|app-token|reap|cleanup|lane-cost|modules|paths|pick|blockers|health)(\\.test)?\\.mjs$",
+  "^scripts/lanes/(install|setup-repo|new-project)(\\.test)?\\.mjs$",
+  "^\\.claude/settings\\.json$",
+  "^\\.github/",
+  "^\\.githooks/",
+  "^lanes\\.config\\.json$",
+  "^\\.claude/agents/",
+  "^\\.claude/commands/(lane|night)\\.md$",
+  "^docs/adr/",
+  "^package(-lock)?\\.json$",
+  "(^|/)(pnpm-lock\\.yaml|yarn\\.lock)$",
+  "^vendor/",
+  "(^|/)CLAUDE\\.md$",
+  "^\\.gitattributes$",
+  "^lanes\\.lock\\.json$",
+  "^scripts/preflight\\.mjs$",
+  "(^|/)\\.env",
+  "(^|/)auth/",
+  "(^|/)secrets?/",
+  "^deploy/",
+].map((s) => new RegExp(s));
+const SENSITIVE_FLOOR = [
+  "^\\.github/",
+  "^\\.claude/",
+  "^\\.githooks/",
+  "^scripts/lanes/",
+  "^scripts/preflight\\.mjs$",
+  "^lanes\\.config\\.json$",
+  "(^|/)auth/",
+  "(^|/)secrets?/",
+  "^deploy/",
+  "^dashboard/",
+  "(^|/)\\.env",
+  "^package(-lock)?\\.json$",
+  "(^|/)(pnpm-lock\\.yaml|yarn\\.lock)$",
+  "^vendor/",
+  "(^|/)CLAUDE\\.md$",
+  "^\\.gitattributes$",
+].map((s) => new RegExp(s));
+
+const FLOOR_SAMPLES = [".env.local", "x/.env", "a/auth/x.js", "secret/x", "secrets/x", "deploy/x", "sub/CLAUDE.md", "sub/yarn.lock", "sub/pnpm-lock.yaml", "package-lock.json", "lanes.lock.json"];
+const floorFiles = () => [...execFileSync("git", ["ls-files"], { encoding: "utf8", windowsHide: true }).split("\n").filter(Boolean), ...FLOOR_SAMPLES];
+const realConfig = () => loadConfig("lanes.config.json");
+
+test("the floors hold today's 25 owner and 16 sensitive regexes", () => {
+  assert.equal(OWNER_FLOOR.length, 25);
+  assert.equal(SENSITIVE_FLOOR.length, 16);
+});
+
+test("no file the owner floor classes as owner stops being owner under the real config and CODEOWNERS", () => {
+  const cfg = realConfig();
+  for (const f of floorFiles()) {
+    if (OWNER_FLOOR.some((r) => r.test(f))) assert.equal(classifyFiles([f], cfg).owner, true, `owner floor lost ${f}`);
+  }
+});
+
+test("no file the sensitive floor classes as sensitive stops being sensitive under the real config", () => {
+  const cfg = realConfig();
+  for (const f of floorFiles()) {
+    if (SENSITIVE_FLOOR.some((r) => r.test(f))) assert.equal(classifyFiles([f], cfg).sensitive, true, `sensitive floor lost ${f}`);
+  }
+});
+
+test("edge: the floor samples are each owner under the floor, and the floor itself catches a loss", () => {
+  for (const f of FLOOR_SAMPLES) assert.ok(OWNER_FLOOR.some((r) => r.test(f)), `sample ${f} is not an owner path under the floor`);
+  const shrunk = compileConfig({ requiredChecks: ["verify"], paths: { skip: [], contract: [], sensitive: [], ui: [], owner: [] } }, "/docs/ @x\n");
+  assert.equal(classifyFiles(["package.json"], shrunk).owner, false);
+  assert.equal(classifyFiles(["package.json"], shrunk).sensitive, false);
+});
+
+// ADR 0031 part 5: every CODEOWNERS entry is reached by a tracked file or sample, so a typo cannot hide.
+test("every CODEOWNERS entry is reached by a tracked file or a sample", () => {
   const entries = readFileSync(".github/CODEOWNERS", "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
   for (const e of entries) assert.match(e, /^\S+ @SourE-dev$/, `CODEOWNERS line not owned by the owner alone: ${e}`);
-  const owners = entries.map((e) => codeownersRegex(e.split(" ")[0]));
-  const owner = JSON.parse(readFileSync("lanes.config.json", "utf8")).paths.owner.map((s) => new RegExp(s));
-  const tracked = execFileSync("git", ["ls-files"], { encoding: "utf8", windowsHide: true }).split("\n").filter(Boolean);
-  const samples = [".env.local", "x/.env", "a/auth/x.js", "secret/x", "secrets/x", "deploy/x", "sub/CLAUDE.md", "sub/yarn.lock", "sub/pnpm-lock.yaml", "package-lock.json", "lanes.lock.json"];
-  for (const f of samples) assert.ok(owner.some((r) => r.test(f)), `sample ${f} is not an owner path; update the samples`);
-  const paths = [...tracked, ...samples];
-  for (const f of paths) {
-    assert.equal(owners.some((r) => r.test(f)), owner.some((r) => r.test(f)), `CODEOWNERS and paths.owner disagree on ${f}`);
+  const paths = floorFiles();
+  for (const e of entries) {
+    const r = codeownersRegex(e.split(" ")[0]);
+    assert.ok(paths.some((f) => r.test(f)), `no tracked file or sample reaches CODEOWNERS entry ${e}; add a sample`);
   }
-  // Every entry on both sides is exercised, so a typo in one no path reaches cannot hide: add a sample for a new one.
-  entries.forEach((e, i) => assert.ok(paths.some((f) => owners[i].test(f)), `no tracked file or sample reaches CODEOWNERS entry ${e}; add a sample`));
-  owner.forEach((r) => assert.ok(paths.some((f) => r.test(f)), `no tracked file or sample reaches paths.owner ${r.source}; add a sample`));
 });
 
 // ADR 0029 part 4: the one-click apply workflow

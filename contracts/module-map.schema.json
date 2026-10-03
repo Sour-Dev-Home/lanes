@@ -34,8 +34,8 @@
           "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$", "not": { "const": "owner" } }
         },
         "contracts": { "description": "Contract path prefixes the module owns. Data only in phase 1.", "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "owner": { "description": "True marks the module's paths as owner-only. Data only in phase 1; paths.owner stays the enforced list.", "type": "boolean" },
-        "risk": { "description": "Data only in phase 1; paths.sensitive stays the enforced list.", "enum": ["normal", "sensitive"] },
+        "owner": { "description": "Ignored. .github/CODEOWNERS is the owner list (ADR 0031); the key stays valid so an existing map does not break.", "type": "boolean" },
+        "risk": { "description": "A module with risk sensitive adds a literal prefix of each of its paths to the sensitive set (ADR 0031). It only widens sensitivity, never narrows what paths.sensitive already holds.", "enum": ["normal", "sensitive"] },
         "test": { "description": "The module's test command. Data only; nothing executes it in phase 1.", "type": "string", "minLength": 1 }
       }
     }
