@@ -638,3 +638,13 @@ test("edge: configuredReviewers reads the checkout holding the script and never 
   assert.ok(names.includes("test-hunter"));
   assert.ok(!names.includes("owner"));
 });
+
+test("a PR with no Closes #N (a Dependabot bump) still takes a positional status, and a verdict file is refused with nothing posted", () => {
+  const prBody = "Bumps actions/checkout from 4 to 5.";
+  const gh = fakeGh({ prBody });
+  main(["ui-reviewer", "skipped", "no visible change"], { run: gh.run, ...quiet });
+  assert.deepEqual(gh.writes.map((w) => w.kind), ["status"]);
+  const refused = fakeGh({ prBody });
+  assert.throws(() => main(["--file", verdictFile()], { run: refused.run, ...quiet }), /no 'Closes #N'/);
+  assert.deepEqual(refused.writes, []);
+});

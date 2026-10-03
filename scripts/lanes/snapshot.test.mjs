@@ -637,3 +637,10 @@ test("edge: buildTrends counts only failure and error statuses, and no flakes fr
   assert.equal(row.gateFailures, 2);
   assert.equal(row.flakes, 0);
 });
+
+test("a PR with no closing issue (a Dependabot bump) is left out and changes no listed issue", () => {
+  const bump = pr(9, { body: "Bumps actions/checkout from 4 to 5.", headRefName: "dependabot/github_actions/actions/checkout-5", closingIssuesReferences: [] });
+  const snap = build({ prs: [bump], issues: [issue(1)] });
+  assert.deepEqual(snap.issues, build({ issues: [issue(1)] }).issues);
+  assert.equal(snap.issues[0].pr, undefined);
+});
