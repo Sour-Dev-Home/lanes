@@ -9,7 +9,6 @@ and `vendor/agent-skills/references/security-checklist.md` differ, the sheet win
 
 | Path | Why it is sensitive | Read |
 |---|---|---|
-| `scripts/lanes/approve-guard.mjs`, `scripts/lanes/start-guard.mjs` | Hooks that parse untrusted command and prompt text to allow or deny `/approve` and `/start` | `sheets/OS_Command_Injection_Defense_Cheat_Sheet.md` (Argument Injection, Defense option 3), `sheets/Input_Validation_Cheat_Sheet.md` (Allowlist vs Denylist, Regular Expressions) |
 | Scripts that run a child process (list below) | `gh`, `git` and `claude` run with arguments built from issue, PR and branch text | `sheets/OS_Command_Injection_Defense_Cheat_Sheet.md` (Primary Defenses), `sheets/Nodejs_Security_Cheat_Sheet.md` (Do not use dangerous functions) |
 | `.github/workflows/lanes-gate.yml` | `pull_request_target`: runs with default-branch secrets on a PR event | `sheets/CI_CD_Security_Cheat_Sheet.md` (Pipeline and Execution Environment, Least Privilege), `sheets/Secrets_Management_Cheat_Sheet.md` (3.1 Hardening your CI/CD pipeline) |
 | `.github/workflows/` (all), `.githooks/pre-push`, `scripts/preflight.mjs` | CI permissions, the `PII_PATTERNS` secret, checks a push must pass | `sheets/CI_CD_Security_Cheat_Sheet.md` (Secure Configuration, Secrets Management), `sheets/Secrets_Management_Cheat_Sheet.md` (3.2.1 As part of your CI/CD tooling) |

@@ -116,12 +116,10 @@ test("issue-contract concurrency group is keyed by issue number to serialize edi
   assert.match(yml, /group: issue-contract-\$\{\{ github\.event\.issue\.number \}\}/);
 });
 
-test("settings: start-guard is wired, approve-guard is gone, the owner's approval is never allowed by a rule; reviewers are allowed; no force push", () => {
+test("settings: no guard hook is wired, the owner's approval is never allowed by a rule; reviewers are allowed; no force push", () => {
   const s = JSON.parse(readFileSync(".claude/settings.json", "utf8"));
-  const hook = (event, matcher) => s.hooks[event].find((h) => h.matcher === matcher)?.hooks.map((x) => x.command).join("\n") ?? "";
-  assert.match(hook("UserPromptSubmit", undefined), /scripts\/lanes\/start-guard\.mjs" user-prompt-submit$/);
-  assert.match(hook("PreToolUse", "Bash"), /scripts\/lanes\/start-guard\.mjs" pre-tool-use$/);
-  assert.doesNotMatch(JSON.stringify(s.hooks), /approve-guard/);
+  assert.doesNotMatch(JSON.stringify(s.hooks), /approve-guard|start-guard/);
+  assert.deepEqual(Object.keys(s.hooks), ["Notification"], "ADR 0030: only the Notification hook stays");
   assert.ok(!(s.permissions.ask ?? []).some((r) => r.includes("post-review.mjs owner")));
   assert.ok(!s.permissions.allow.some((r) => r.includes("post-review.mjs owner") || r.includes("post-review.mjs:")));
   assert.ok(s.permissions.allow.includes("Bash(node scripts/lanes/post-review.mjs --file:*)"));
@@ -129,6 +127,38 @@ test("settings: start-guard is wired, approve-guard is gone, the owner's approva
   assert.ok(s.permissions.deny.includes("Bash(git push --force:*)"));
   // agent-skills is this repo's practice layer; two process frameworks must not compete (owner, 2026-09-26).
   assert.equal(s.enabledPlugins["superpowers@superpowers-marketplace"], false);
+});
+
+// ADR 0030 parts 2 and 4: the deny list holds exact-prefix rules, each in its Bash and PowerShell form.
+const DENY_BASH = [
+  "git push --force:*", "git push -f:*", "git push --force-with-lease:*",
+  "claude --bg:*", "claude --background:*",
+  "node scripts/lanes/queue.mjs:*", "node ./scripts/lanes/queue.mjs:*",
+  "node scripts/lanes/start.mjs:*", "node ./scripts/lanes/start.mjs:*",
+  "git tag:*", "git push --tags:*", "git push --follow-tags:*", "git push origin v*:*",
+];
+const DENY_POWERSHELL_EXTRA = [
+  "node scripts\\lanes\\queue.mjs:*", "node .\\scripts\\lanes\\queue.mjs:*",
+  "node scripts\\lanes\\start.mjs:*", "node .\\scripts\\lanes\\start.mjs:*",
+];
+
+test("settings: permissions.deny lists every ADR 0030 rule in its Bash and PowerShell forms, and no more", () => {
+  const { deny } = JSON.parse(readFileSync(".claude/settings.json", "utf8")).permissions;
+  const want = [
+    ...DENY_BASH.map((r) => `Bash(${r})`),
+    ...[...DENY_BASH.slice(3), ...DENY_POWERSHELL_EXTRA].map((r) => `PowerShell(${r})`),
+  ];
+  assert.deepEqual([...deny].sort(), want.sort());
+  assert.equal(new Set(deny).size, deny.length, "no rule twice");
+});
+
+test("settings: every deny rule ends in a trailing :* and has no wildcard mid-pattern, but the ADR's tag-push prefix v*", () => {
+  const { deny } = JSON.parse(readFileSync(".claude/settings.json", "utf8")).permissions;
+  for (const rule of deny) {
+    const body = rule.replace(/^(Bash|PowerShell)\(/, "").replace(/\)$/, "");
+    assert.ok(body.endsWith(":*"), `${rule} ends in :*`);
+    assert.equal(body.slice(0, -2).replace(/ v\*$/, "").includes("*"), false, `${rule} has a mid-pattern wildcard`);
+  }
 });
 
 // I8: `npm run setup` (the pre-push hook) must be runnable without a permission prompt
@@ -217,18 +247,19 @@ test("the ADR 0004 rule is the same in both briefs", () => {
   assert.equal(acceptedRiskRule("security-reviewer"), acceptedRiskRule("test-hunter"));
 });
 
-// ADR 0007: the same rule for the start guard (start.mjs, queue.mjs, claude --bg)
+// ADR 0030: the same rule for the deny rules and script refusals (start.mjs, queue.mjs, claude --bg, release tags)
 function startGuardRule(name) {
   const text = readFileSync(`.claude/agents/${name}.md`, "utf8").replace(/\r\n/g, "\n");
-  const match = text.match(/^Accepted risk \(ADR 0007\b[^)]*\):[\s\S]*?(?=\n\n|(?![\s\S]))/m);
-  assert.ok(match, `${name}: no "Accepted risk (ADR 0007 ...):" paragraph`);
+  assert.doesNotMatch(text, /ADR 0007/, `${name}: the ADR 0007 paragraph is replaced`);
+  const match = text.match(/^Accepted risk \(ADR 0030\b[^)]*\):[\s\S]*?(?=\n\n|(?![\s\S]))/m);
+  assert.ok(match, `${name}: no "Accepted risk (ADR 0030 ...):" paragraph`);
   return match[0].replace(/\s+/g, " ");
 }
 
 for (const name of ["security-reviewer", "test-hunter"]) {
-  test(`${name} states ADR 0007's accepted-risk rule for the start guard: new bypasses minor with a lane-filed follow-up, regressions critical`, () => {
+  test(`${name} states ADR 0030's accepted-risk rule for the deny rules: new bypasses minor with a lane-filed follow-up, regressions critical`, () => {
     const rule = startGuardRule(name);
-    assert.match(rule, /docs\/adr\/0007-start-guard-accepted-risk\.md/);
+    assert.match(rule, /docs\/adr\/0030-retire-start-guard-and-start\.md/);
     assert.match(rule, /`start\.mjs`/);
     assert.match(rule, /`queue\.mjs`/);
     assert.match(rule, /`claude --bg`/);
@@ -236,7 +267,7 @@ for (const name of ["security-reviewer", "test-hunter"]) {
     assert.match(rule, sentence("newly found way", "`start\\.mjs`(?:[^.]|\\.\\S)*`queue\\.mjs`(?:[^.]|\\.\\S)*`claude --bg`(?:[^.]|\\.\\S)*\\bis `minor`"));
     assert.match(rule, sentence("follow-up issue", "`lane-filed`"));
     assert.match(rule, sentence("regression", "\\bis `critical`"));
-    assert.match(rule, sentence("previously caught", "now passes"));
+    assert.match(rule, sentence("rules or refusals list now passes", ""));
   });
 }
 
@@ -244,12 +275,12 @@ test("the ADR 0007 rule is the same in both briefs", () => {
   assert.equal(startGuardRule("security-reviewer"), startGuardRule("test-hunter"));
 });
 
-test("the ADR 0007 paragraph sits right after ADR 0004's in both briefs", () => {
+test("the ADR 0030 paragraph sits right after ADR 0004's in both briefs", () => {
   for (const name of ["security-reviewer", "test-hunter"]) {
     const text = readFileSync(`.claude/agents/${name}.md`, "utf8").replace(/\r\n/g, "\n");
     const first = text.indexOf("Accepted risk (ADR 0004");
-    const second = text.indexOf("Accepted risk (ADR 0007");
-    assert.ok(first >= 0 && second > first, `${name}: ADR 0007 paragraph must follow ADR 0004's`);
+    const second = text.indexOf("Accepted risk (ADR 0030");
+    assert.ok(first >= 0 && second > first, `${name}: ADR 0030 paragraph must follow ADR 0004's`);
     assert.match(text.slice(first, second), /^[^\n]+(?:\n[^\n]+)*\n\n$/, `${name}: one paragraph between them`);
   }
 });
@@ -661,7 +692,8 @@ test("plan-issues.md step 5 notes the modules an issue touches, lets one issue s
 test("plan-issues.md step 5 sizes issues at roughly 100 to 300 changed lines, guards and gate near 200, and cites the measurement", () => {
   const step = draftStep().replace(/\s+/g, " ");
   assert.match(step, /roughly 100 to 300 changed lines, tests included/);
-  assert.match(step, /guards and the gate \(`scripts\/lanes\/\*-guard\.mjs`, `shell-lex\.mjs`, `gate\.mjs`, `lib\.mjs`'s gate decision\) near 200/);
+  assert.match(step, /changes to the gate \(`gate\.mjs`, `lib\.mjs`'s gate decision\) near 200/);
+  assert.doesNotMatch(step, /-guard\.mjs|shell-lex/);
   assert.match(step, /split anything over 300/);
   assert.match(step, /merge related changes smaller than about 100 lines into one issue/);
   assert.match(step, /unless they need different tiers or one is a contract another issue consumes/);
