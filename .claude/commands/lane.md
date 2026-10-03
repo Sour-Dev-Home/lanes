@@ -160,8 +160,9 @@ nothing on GitHub (the identity may be wrong there).
    - `pass`: done. A passing gate needs no notification.
    Team and workflow files (ADR 0023; solo is unchanged and skips this): the App has no `workflows` permission, so a
    push whose range holds any commit touching `.github/workflows/` is refused. Before step 6 and the push, under team,
-   check `git diff --name-only origin/main...HEAD` for `.github/workflows/`. When there is none, push as above. When
-   there is one: a change that deletes a workflow file stops the lane, which says the owner must delete that file in
+   check `git diff --name-only origin/main...HEAD` for `.github/workflows/`. When there is none, push as above; if that
+   push is still refused for a workflow file the range does not touch (#694: main has moved on a workflow file since the
+   branch was cut), run `git merge origin/main`, push again, and report the refusal in the PR. When there is one: a change that deletes a workflow file stops the lane, which says the owner must delete that file in
    the browser and notifies `lanes #<N>: delete a workflow file in the browser`. Otherwise keep every workflow-file
    change in one final local commit (rewrite unpushed history so no earlier commit touches `.github/workflows/`), run
    the reviewers (step 6) and `npm run preflight` on the full change including that commit, and push only the commit
