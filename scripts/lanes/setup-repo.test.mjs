@@ -31,7 +31,7 @@ test("labels include needs-owner, next to lane-filed, with the description the l
   const names = LABELS.map((l) => l.name);
   const label = LABELS.find((l) => l.name === "needs-owner");
   assert.ok(label, "needs-owner is created");
-  assert.equal(label.description, "A lane found nothing to build; the owner closes or rewrites it");
+  assert.equal(label.description, "A lane stopped and needs the owner; see its last comment");
   assert.equal(names.indexOf("needs-owner"), names.indexOf("lane-filed") + 1);
 });
 
