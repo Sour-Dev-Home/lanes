@@ -457,6 +457,8 @@ export function main(env = process.env, api = ghApi) {
     if (e?.ghCall) postError(env, api, e);
     // ADR 0025: a config that is not team fails closed, with the one refusal message as the reason.
     else if (e?.teamRequired) postError(env, api, e, { state: "failure", description: e.message });
+    // ADR 0031 part 2: owner paths that cannot be read stop the gate with `error` and the line; a status description holds 140 characters.
+    else if (e?.ownerPatterns) postError(env, api, e, { state: "error", description: `gate error: ${e.message}`.slice(0, 140) });
     throw e;
   }
 }

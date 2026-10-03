@@ -3,7 +3,7 @@
 // it can be unit-tested.
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
-import { join, posix } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { reviewersFor } from "./modules.mjs";
 
 export const REVIEWERS = ["test-hunter", "ui-reviewer", "security-reviewer", "architecture-advisor"];
@@ -43,7 +43,62 @@ export function laneIssueOf(session) {
 
 const PATH_KEYS = ["skip", "contract", "sensitive", "ui"];
 
-export function compileConfig(raw) {
+// A refusal the gate reports as `error` with the message (ADR 0031 part 2): the owner paths cannot be read.
+function ownerPatternError(message) {
+  const err = new Error(message);
+  err.ownerPatterns = true;
+  return err;
+}
+
+/** Why a CODEOWNERS pattern is outside the strict subset ADR 0031 part 2 allows, or null when it is allowed. */
+function ownerPatternProblem(pattern) {
+  if (typeof pattern !== "string" || pattern === "") return "empty pattern";
+  for (const [bad, name] of [["**", "`**`"], ["?", "`?`"], ["[", "`[`"], ["]", "`]`"], ["!", "`!`"], ["\\", "a backslash"]]) {
+    if (pattern.includes(bad)) return `${name} is not supported`;
+  }
+  const core = pattern.replace(/^\/|\/$/g, "");
+  if (core === "") return "empty pattern";
+  if (core.includes("/") && core.includes("*")) return "`*` is not supported in a pattern with an inner `/`";
+  return null;
+}
+
+/**
+ * A CODEOWNERS pattern as a regex, for the strict subset of gitignore-style forms ADR 0031 part 2 allows: a leading
+ * `/` anchors it to the root, a trailing `/` matches a directory's contents, `*` stays within one path segment and
+ * is allowed only in a pattern with no inner `/`. A pattern that names a directory also covers everything under it,
+ * and an inner slash anchors it. Anything else throws, so the matcher fails closed.
+ */
+export function codeownersRegex(pattern) {
+  const problem = ownerPatternProblem(pattern);
+  if (problem) throw ownerPatternError(`CODEOWNERS pattern ${JSON.stringify(pattern)}: ${problem}`);
+  const dir = pattern.endsWith("/");
+  const core = pattern.replace(/^\/|\/$/g, "");
+  const anchored = pattern.startsWith("/") || core.includes("/");
+  const body = core.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, "[^/]*");
+  return new RegExp(`${anchored ? "^" : "(^|/)"}${body}${dir ? "/" : "(/|$)"}`);
+}
+
+/**
+ * The patterns of a CODEOWNERS text, each with its 1-based line and compiled regex. Blank and comment lines are
+ * skipped. A line outside the allowed subset, or with a pattern and no owner (which un-owns the path in GitHub),
+ * throws an error naming the line.
+ */
+export function parseOwnerPatterns(text) {
+  const out = [];
+  String(text ?? "").split("\n").forEach((raw, i) => {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) return;
+    const [pattern, ...rest] = line.split(/\s+/);
+    const fail = (why) => ownerPatternError(`CODEOWNERS line ${i + 1}: ${why}: ${line}`);
+    if (rest.length === 0 || rest[0].startsWith("#")) throw fail("no owner");
+    const problem = ownerPatternProblem(pattern);
+    if (problem) throw fail(problem);
+    out.push({ pattern, line: i + 1, regex: codeownersRegex(pattern) });
+  });
+  return out;
+}
+
+export function compileConfig(raw, codeownersText = undefined) {
   const paths = {};
   for (const key of PATH_KEYS) {
     const list = raw?.paths?.[key];
@@ -55,6 +110,8 @@ export function compileConfig(raw) {
   const owner = raw?.paths?.owner === undefined ? [] : raw.paths.owner;
   if (!Array.isArray(owner)) throw new Error("lanes.config.json: paths.owner must be an array of regex strings");
   paths.owner = owner.map((source) => new RegExp(source));
+  // ADR 0031 part 1: the CODEOWNERS patterns, a union with paths.owner. A parse error throws, naming the line.
+  paths.codeowners = parseOwnerPatterns(codeownersText).map((p) => p.regex);
   const requiredChecks = raw?.requiredChecks;
   if (!Array.isArray(requiredChecks) || requiredChecks.length === 0) {
     throw new Error("lanes.config.json: requiredChecks must be a non-empty array");
@@ -162,7 +219,20 @@ export function dependabotActionBump(input) {
 }
 
 export function loadConfig(file = "lanes.config.json") {
-  return compileConfig(JSON.parse(readFileSync(file, "utf8")));
+  const raw = JSON.parse(readFileSync(file, "utf8"));
+  // ADR 0031 part 1: CODEOWNERS from the same checkout as the config, so a PR's own copy is never read by the gate.
+  let codeowners;
+  try {
+    codeowners = readFileSync(join(dirname(file), ".github", "CODEOWNERS"), "utf8");
+  } catch (err) {
+    if (err?.code !== "ENOENT") throw err;
+  }
+  const config = compileConfig(raw, codeowners);
+  // ADR 0031 part 2: under team, no owner paths at all is a misconfiguration, never "nothing is owner-only".
+  if (config.identity?.profile === "team" && config.paths.owner.length === 0 && config.paths.codeowners.length === 0) {
+    throw ownerPatternError(codeowners === undefined ? "no .github/CODEOWNERS and paths.owner is empty: no owner-only paths" : "CODEOWNERS has no patterns and paths.owner is empty: no owner-only paths");
+  }
+  return config;
 }
 
 const matchesAny = (patterns, file) => patterns.some((re) => re.test(file));
@@ -229,7 +299,7 @@ export function classifyFiles(files, config, adrs = [], interfaceContract = "") 
     contract: files.some((f) => matchesAny(paths.contract, f)),
     sensitive: files.some((f) => matchesAny(paths.sensitive, f)),
     ui: files.some((f) => matchesAny(paths.ui, f)),
-    owner: files.some((f) => matchesAny(paths.owner, f)),
+    owner: files.some((f) => matchesAny(paths.owner, f) || matchesAny(paths.codeowners ?? [], f)),
     adr: [...new Set(files.flatMap((f) => adrGoverns(adrs, f)))].sort((a, b) => a - b),
     architecture: files.map(normPath).some((f) => isArchitectureFile(f) || inContract(f)),
   };

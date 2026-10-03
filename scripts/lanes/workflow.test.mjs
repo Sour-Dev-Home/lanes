@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { PATH_PATTERNS } from "../preflight.mjs";
+import { codeownersRegex } from "./lib.mjs";
 
 test("lanes-gate always runs the default branch's scripts, never the PR's", () => {
   const yml = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
@@ -1141,17 +1142,6 @@ for (const agent of ["security-reviewer", "test-hunter"]) {
     const md = readFileSync(`.claude/agents/${agent}.md`, "utf8").replace(/\s+/g, " ");
     assert.ok(md.includes(PROBE_RULE), `${agent}.md lacks the probe-payload rule`);
   });
-}
-
-// A CODEOWNERS pattern as a regex, for the gitignore-style forms .github/CODEOWNERS uses: a leading or inner slash
-// anchors it to the root, a trailing slash matches a directory's contents, `*` stays within one path segment, and a
-// pattern that names a directory also covers everything under it.
-function codeownersRegex(pattern) {
-  const dir = pattern.endsWith("/");
-  const core = pattern.replace(/^\/|\/$/g, "");
-  const anchored = pattern.startsWith("/") || core.includes("/");
-  const body = core.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*");
-  return new RegExp(`${anchored ? "^" : "(^|/)"}${body}${dir ? "/" : "(/|$)"}`);
 }
 
 // ADR 0026 part 1: the queue holds the App key and re-executes what it pulls, so every file it loads is an owner path.

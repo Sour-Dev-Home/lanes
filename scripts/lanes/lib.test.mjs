@@ -5,7 +5,8 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TEAM_REQUIRED_MESSAGE, dependabotActionBump, identityRefusal,adrGoverns, pendingFileHash, parsePending, pendingReuseBlockedBy, pendingHandoverBlockedBy, currentVerdicts, botIssueReleased, readBotIssueRelease, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, issuePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
+import { execFileSync } from "node:child_process";
+import { TEAM_REQUIRED_MESSAGE, codeownersRegex, parseOwnerPatterns, dependabotActionBump, identityRefusal,adrGoverns, pendingFileHash, parsePending, pendingReuseBlockedBy, pendingHandoverBlockedBy, currentVerdicts, botIssueReleased, readBotIssueRelease, nativeCodeOwnerApproval, parseCodeOwnerUsers, REUSABLE_REVIEWERS, REVIEWERS, reusableReviewers, reviewerNames, authorCanWrite, classifyFiles, compileConfig, isLaneBot, parseIdentity, trustedStatuses, diffFingerprint, gateDecision, interfaceContractOf, interfacePaths, issuePaths, laneIssueOf, loadAdrs, loadConfig, moduleMapProblem, parseAdr, parseValidation, parseVerdictComment, requiredReviewers, reviewContext, reviewersReport, testHunterReusable } from "./lib.mjs";
 
 // #635: issuePaths lives here; paths.test.mjs covers it through its re-export
 test("issuePaths reads the contract and Scope's In: part, and drops Out:, absolute and traversal tokens", () => {
@@ -1684,4 +1685,140 @@ test("dependabotActionBump fails on a 3000-file list and never throws on odd inp
   Object.defineProperty(loop, "patch", { get() { throw new Error("boom"); } });
   assert.equal(depBump([loop]).bump, false);
   assert.equal(typeof depBump([depWf("ci", depPatch([]))].concat(depOk())).reason, "string");
+});
+
+// ADR 0031 parts 1 and 2: owner paths from CODEOWNERS, a strict subset of GitHub's syntax that fails closed.
+const OWNER = "@SourE-dev";
+const matchOwner = (pattern, file) => codeownersRegex(pattern).test(file);
+
+test("codeownersRegex: each allowed form matches what it should and nothing near it", () => {
+  const table = [
+    ["/scripts/lanes/lib.mjs", ["scripts/lanes/lib.mjs"], ["x/scripts/lanes/lib.mjs", "scripts/lanes/lib.mjs.bak", "scripts/lanes/lib.mjsx"]], // anchored file
+    ["/docs/adr/", ["docs/adr/0001-x.md", "docs/adr/sub/y.md"], ["docs/adr", "a/docs/adr/x.md", "docs/adrs/x.md"]], // anchored directory
+    ["yarn.lock", ["yarn.lock", "sub/yarn.lock"], ["yarn.lockb", "myyarn.lock", "yarn_lock"]], // unanchored file, nested names
+    ["CLAUDE.md", ["CLAUDE.md", "a/b/CLAUDE.md"], ["CLAUDE.mdx", "NOTCLAUDE.md"]],
+    ["auth/", ["auth/x.js", "a/auth/x.js", "a/b/auth/c/d.js"], ["authz/x.js", "xauth/y.js"]], // unanchored directory
+    [".env*", [".env", ".env.local", "x/.env", "x/.env.prod"], ["env", "x/my.env", "a.env.local"]], // star in one segment
+    ["/lanes.*.json", ["lanes.lock.json", "lanes.x.json"], ["a/lanes.lock.json", "lanes..json.bak"]],
+  ];
+  for (const [pattern, yes, no] of table) {
+    for (const f of yes) assert.ok(matchOwner(pattern, f), `${pattern} should match ${f}`);
+    for (const f of no) assert.ok(!matchOwner(pattern, f), `${pattern} should not match ${f}`);
+  }
+});
+
+test("codeownersRegex escapes regex metacharacters in the pattern", () => {
+  assert.ok(matchOwner("/a+b(c).txt", "a+b(c).txt"));
+  assert.ok(!matchOwner("/a.b", "axb"));
+  assert.ok(!matchOwner("/a$b", "a"));
+});
+
+test("codeownersRegex rejects each form outside the allowed subset", () => {
+  for (const bad of ["**", "/docs/**", "/a/**/b", "/a?b", "/a[b]", "/a[", "a]", "!/a", "/a\\b", "/src/*.js", "src/*/x", "/*/x", "", "/"]) {
+    assert.throws(() => codeownersRegex(bad), /CODEOWNERS pattern/, JSON.stringify(bad));
+  }
+});
+
+test("parseOwnerPatterns reads patterns, skipping blank and comment lines, and compiles each", () => {
+  const text = `# a comment\n\n/scripts/lanes/lib.mjs ${OWNER}\n  .env* ${OWNER} @other  \r\nauth/\t${OWNER} # why\n   # indented comment\n`;
+  const parsed = parseOwnerPatterns(text);
+  assert.deepEqual(parsed.map((p) => p.pattern), ["/scripts/lanes/lib.mjs", ".env*", "auth/"]);
+  assert.deepEqual(parsed.map((p) => p.line), [3, 4, 5]);
+  assert.ok(parsed[1].regex.test("x/.env.local"));
+  assert.deepEqual(parseOwnerPatterns(""), []);
+  assert.deepEqual(parseOwnerPatterns("# only comments\n"), []);
+});
+
+test("parseOwnerPatterns throws naming the line for every rejected form and for a line with no owner", () => {
+  for (const bad of ["/docs/**", "/a?b", "/a[b]", "!/a", "/a\\b", "/src/*.js", "**/x"]) {
+    assert.throws(() => parseOwnerPatterns(`/ok ${OWNER}\n\n${bad} ${OWNER}\n`), (e) => /line 3/.test(e.message) && e.message.includes(bad), bad);
+  }
+  for (const noOwner of ["/docs/", "/docs/   ", "/docs/ # nobody"]) {
+    assert.throws(() => parseOwnerPatterns(`# c\n${noOwner}\n`), (e) => /line 2/.test(e.message) && /no owner/.test(e.message), noOwner);
+  }
+  assert.throws(() => parseOwnerPatterns(`/a ${OWNER}\n/b\n`), /line 2/);
+});
+
+const ownerBase = { requiredChecks: ["verify"], paths: { skip: [], contract: [], sensitive: [], ui: [] } };
+
+test("classifyFiles: owner is the union of the CODEOWNERS patterns and paths.owner", () => {
+  const both = compileConfig({ ...ownerBase, paths: { ...ownerBase.paths, owner: ["^docs/adr/"] } }, `/scripts/lanes/lib.mjs ${OWNER}\n.env* ${OWNER}\n`);
+  assert.equal(classifyFiles(["scripts/lanes/lib.mjs"], both).owner, true, "CODEOWNERS only");
+  assert.equal(classifyFiles(["docs/adr/0001-x.md"], both).owner, true, "paths.owner only");
+  assert.equal(classifyFiles(["x/.env.local"], both).owner, true);
+  assert.equal(classifyFiles(["README.md", "src/a.js"], both).owner, false);
+  assert.equal(classifyFiles(["README.md", "docs/adr/0001-x.md"], both).owner, true);
+  const onlyText = compileConfig(ownerBase, `/a/ ${OWNER}\n`);
+  assert.equal(classifyFiles(["a/b.txt"], onlyText).owner, true);
+  assert.equal(classifyFiles([], onlyText).owner, false);
+  assert.equal(classifyFiles(["a/b.txt"], compileConfig(ownerBase)).owner, false, "no second argument: as before");
+  assert.equal(classifyFiles(["a/b.txt"], compileConfig(ownerBase, "")).owner, false);
+});
+
+test("compileConfig throws the parse error for a bad CODEOWNERS text, flagged for the gate", () => {
+  assert.throws(() => compileConfig(ownerBase, `/a ${OWNER}\n/b/** ${OWNER}\n`), (e) => e.ownerPatterns === true && /line 2/.test(e.message));
+});
+
+function withRepo(files, fn) {
+  const root = mkdtempSync(join(tmpdir(), "lanes-owner-"));
+  try {
+    for (const [name, text] of Object.entries(files)) {
+      mkdirSync(join(root, name, ".."), { recursive: true });
+      writeFileSync(join(root, name), text);
+    }
+    return fn(root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+const OWNER_TEAM = { profile: "team", app: { id: 1, installationId: 2, botLogin: "x[bot]" } };
+
+test("loadConfig reads .github/CODEOWNERS beside the config file", () => {
+  const raw = JSON.stringify({ ...ownerBase, identity: OWNER_TEAM });
+  withRepo({ "lanes.config.json": raw, ".github/CODEOWNERS": `/src/ ${OWNER}\n` }, (root) => {
+    const c = loadConfig(join(root, "lanes.config.json"));
+    assert.equal(classifyFiles(["src/a.js"], c).owner, true);
+    assert.equal(classifyFiles(["lib/a.js"], c).owner, false);
+  });
+});
+
+test("loadConfig: a missing CODEOWNERS is an error under team with an empty paths.owner, and fine otherwise", () => {
+  const team = JSON.stringify({ ...ownerBase, identity: OWNER_TEAM });
+  withRepo({ "lanes.config.json": team }, (root) => {
+    assert.throws(() => loadConfig(join(root, "lanes.config.json")), (e) => e.ownerPatterns === true && /CODEOWNERS/.test(e.message));
+  });
+  const withOwner = JSON.stringify({ ...ownerBase, paths: { ...ownerBase.paths, owner: ["^src/"] }, identity: OWNER_TEAM });
+  withRepo({ "lanes.config.json": withOwner }, (root) => {
+    assert.equal(classifyFiles(["src/a"], loadConfig(join(root, "lanes.config.json"))).owner, true);
+  });
+  withRepo({ "lanes.config.json": JSON.stringify(ownerBase) }, (root) => {
+    assert.equal(classifyFiles(["src/a"], loadConfig(join(root, "lanes.config.json"))).owner, false, "not team: no error");
+  });
+});
+
+test("edge: loadConfig with an empty CODEOWNERS and an empty paths.owner under team is an error too", () => {
+  withRepo({ "lanes.config.json": JSON.stringify({ ...ownerBase, identity: OWNER_TEAM }), ".github/CODEOWNERS": "# nothing\n" }, (root) => {
+    assert.throws(() => loadConfig(join(root, "lanes.config.json")), (e) => e.ownerPatterns === true);
+  });
+});
+
+test("edge: loadConfig surfaces a CODEOWNERS parse error with its line", () => {
+  withRepo({ "lanes.config.json": JSON.stringify({ ...ownerBase, identity: OWNER_TEAM }), ".github/CODEOWNERS": `/a ${OWNER}\n/b/** ${OWNER}\n` }, (root) => {
+    assert.throws(() => loadConfig(join(root, "lanes.config.json")), (e) => e.ownerPatterns === true && /line 2/.test(e.message));
+  });
+});
+
+// ADR 0031 part 5, in the shape this issue needs: what paths.owner makes owner-only today stays owner-only.
+test("every tracked file that is owner under paths.owner is still owner with CODEOWNERS unioned in", () => {
+  const before = compileConfig(JSON.parse(readFileSync("lanes.config.json", "utf8")));
+  const after = loadConfig();
+  const tracked = execFileSync("git", ["ls-files"], { encoding: "utf8", windowsHide: true }).split("\n").filter(Boolean);
+  const samples = [".env.local", "x/.env", "a/auth/x.js", "secret/x", "secrets/x", "deploy/x", "sub/CLAUDE.md", "sub/yarn.lock", "sub/pnpm-lock.yaml", "package-lock.json", "lanes.lock.json"];
+  let owners = 0;
+  for (const f of [...tracked, ...samples]) {
+    if (!classifyFiles([f], before).owner) continue;
+    owners++;
+    assert.equal(classifyFiles([f], after).owner, true, `${f} was owner-only and no longer is`);
+  }
+  assert.ok(owners > 20, "the real config marks some files owner-only");
 });
