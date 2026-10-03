@@ -247,7 +247,7 @@ export function provisionApp({ gh, repo, id, pem }) {
 }
 
 const realGh = (args, input) => {
-  const r = spawnSync("gh", args, { input, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
+  const r = spawnSync("gh", args, { input, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
   return { status: r.status ?? 1, stdout: r.stdout ?? "" };
 };
 

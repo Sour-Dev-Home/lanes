@@ -156,11 +156,11 @@ export function handover(argv, deps) {
 const realDeps = () => ({
   readConfig: () => readFileSync("lanes.config.json", "utf8"),
   git: (args, { raw = false } = {}) => {
-    const out = execFileSync("git", args, { maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+    const out = execFileSync("git", args, { maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     return raw ? out : out.toString("utf8");
   },
-  gh: (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
-  comment: (pr, body) => execFileSync("gh", ["pr", "comment", pr, "--body-file", "-"], { input: body, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }),
+  gh: (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true }),
+  comment: (pr, body) => execFileSync("gh", ["pr", "comment", pr, "--body-file", "-"], { input: body, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], windowsHide: true }),
 });
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

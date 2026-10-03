@@ -166,7 +166,7 @@ export function launchEnv(env, platform, gitExecPath) {
 export function localLaunchEnv() {
   let out = "";
   try {
-    out = execFileSync("git", ["--exec-path"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    out = execFileSync("git", ["--exec-path"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   } catch {}
   return launchEnv(process.env, process.platform, out);
 }
@@ -587,9 +587,9 @@ export function launchLane(n, deps, { tier, models, labels, identity, root, cwd 
   return { id, failed: false, lines: [...notes, `#${n} → ${id}`, ...(reaperFailed ? [reaperFailed] : []), ...(refresherFailed ? [refresherFailed] : []), ...(marked.includes(": label not set: ") ? [marked] : [])] };
 }
 
-const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 // The main checkout, even when run from a worktree: the parent of the shared .git directory.
-const repoRoot = () => dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
+const repoRoot = () => dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", windowsHide: true }).trim());
 // The main checkout's lanes.config.json, parsed; undefined when it does not exist (the defaults apply).
 function readConfig() {
   let text;
@@ -626,6 +626,7 @@ const team = {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 60_000,
+      windowsHide: true,
     });
   },
   // #553: the bot's numeric user id, asked with the lane's freshly minted token only (its own GH_CONFIG_DIR, no
@@ -637,6 +638,7 @@ const team = {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 30_000,
+      windowsHide: true,
     }).trim();
   },
 };

@@ -246,8 +246,8 @@ function launch(argv) {
   // npx is a .cmd shim on Windows, which spawn cannot start without a shell. Every argument passed the SAFE_ARG check.
   const r =
     process.platform === "win32"
-      ? spawnSync(`npx ${args.map((a) => `"${a}"`).join(" ")}`, [], { env, stdio: "inherit", shell: true })
-      : spawnSync("npx", args, { env, stdio: "inherit" });
+      ? spawnSync(`npx ${args.map((a) => `"${a}"`).join(" ")}`, [], { env, stdio: "inherit", shell: true, windowsHide: true })
+      : spawnSync("npx", args, { env, stdio: "inherit", windowsHide: true });
   if (r.error) console.error(`cannot start npx: ${r.error.message}`);
   return r.status === 0 || r.status === 1 || r.status === 2 ? r.status : 2;
 }

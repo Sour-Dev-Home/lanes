@@ -382,7 +382,7 @@ export function parseArgs(argv) {
 // ---- GitHub access (not unit-tested: drives `gh`) ----
 
 function gh(args) {
-  return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, windowsHide: true });
 }
 
 // Verdict comments are posted last, after the review rounds (the same selection review-metrics.mjs makes).

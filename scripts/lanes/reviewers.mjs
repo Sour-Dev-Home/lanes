@@ -13,7 +13,7 @@ const usage = `usage: reviewers.mjs <${TIERS.join("|")}> [issue-number]`;
 if (!TIERS.includes(tier)) throw new Error(usage);
 if (issue !== undefined && !/^[1-9]\d*$/.test(issue)) throw new Error(usage);
 
-const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).split("\0").filter(Boolean);
+const git = (...args) => execFileSync("git", args, { encoding: "utf8", windowsHide: true }).split("\0").filter(Boolean);
 // -z keeps paths unquoted. --name-status -z is STATUS\0path\0, or STATUS\0old\0new\0 for a rename or copy;
 // both names count, like the gate does.
 function namesFromStatus(tokens) {
@@ -36,5 +36,5 @@ if (files.length === 0) {
   process.exit(1);
 }
 const interfaceContract =
-  issue === undefined ? "" : interfaceContractOf(execFileSync("gh", ["issue", "view", issue, "--json", "body", "--jq", ".body"], { encoding: "utf8" }));
+  issue === undefined ? "" : interfaceContractOf(execFileSync("gh", ["issue", "view", issue, "--json", "body", "--jq", ".body"], { encoding: "utf8", windowsHide: true }));
 console.log(reviewersReport(tier, [...new Set(files)], loadConfig(), loadAdrs(), interfaceContract));

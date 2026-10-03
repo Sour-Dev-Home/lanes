@@ -180,15 +180,15 @@ export function shellWord(arg) {
   return arg;
 }
 
-const gh = (args, cwd) => execFileSync("gh", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+const gh = (args, cwd) => execFileSync("gh", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 
 const realEffects = {
   run: (s) =>
     // npm is a .cmd shim on Windows, which execFile cannot start without a shell. Only plain words may reach that
     // shell, so a future step with dynamic arguments fails loudly instead of becoming an injection.
     s.cmd === "npm" && process.platform === "win32"
-      ? execFileSync(`npm ${s.args.map(shellWord).join(" ")}`, { cwd: s.cwd, stdio: "inherit", shell: true })
-      : execFileSync(s.cmd, s.args, { cwd: s.cwd, stdio: "inherit" }),
+      ? execFileSync(`npm ${s.args.map(shellWord).join(" ")}`, { cwd: s.cwd, stdio: "inherit", shell: true, windowsHide: true })
+      : execFileSync(s.cmd, s.args, { cwd: s.cwd, stdio: "inherit", windowsHide: true }),
   install: (s) => install(s.source, s.target, { force: true }),
   write: (s) => {
     const to = path.join(s.target, s.file);

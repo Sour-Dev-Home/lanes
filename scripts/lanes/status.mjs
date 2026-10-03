@@ -223,7 +223,7 @@ export function laneWorktree(cwd, n) {
 
 // #571: whether the worktree has uncommitted changes, read with `git -C <dir> status --porcelain` only. A read failure
 // (or no worktree) is false: it adds nothing and never changes a refusal.
-export function worktreeUnsaved(dir, run = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 })) {
+export function worktreeUnsaved(dir, run = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000, windowsHide: true })) {
   if (!dir) return false;
   try {
     return String(run(["-C", dir, "status", "--porcelain"])).trim() !== "";
@@ -301,7 +301,7 @@ function silentLanes(agents, repoRoot, wanted, { home = homedir(), now = Date.no
   return out;
 }
 
-const runClaudeAgents = () => execFileSync("claude", ["agents", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
+const runClaudeAgents = () => execFileSync("claude", ["agents", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000, windowsHide: true });
 
 // `{ sessions }` from `claude agents --json`, or `{ sessions: empty, sessionsUnavailable: reason }` when it cannot be read.
 export function loadSessions(repoRoot, run = runClaudeAgents, runGit) {
@@ -348,7 +348,7 @@ export function laneBranches({ remote = "", worktrees = "" }) {
   return new Map([...found].sort(([a], [b]) => a - b));
 }
 
-const git = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
+const git = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000, windowsHide: true });
 
 // `{ laneBranches }`, or local worktrees only plus `branchesUnavailable` when origin cannot be read.
 export function loadLaneBranches(run = git) {
@@ -545,7 +545,7 @@ export function startsReport(text, days, now = Date.now()) {
   ];
 }
 
-const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
 
 // `gh pr --json` has no merge queue field and drops status descriptions, so one GraphQL call fetches both.
 // `mergeQueue` without `branch` is the default branch's queue; null when it has none. `pullRequests` matches the
@@ -594,7 +594,7 @@ async function main(argv = process.argv.slice(2)) {
   if (startsIdx >= 0) {
     const days = Number(/^[1-9]\d*$/.test(argv[startsIdx + 1] ?? "") ? argv[startsIdx + 1] : NaN);
     if (!days) throw new Error("--starts takes a number of days, for example 7");
-    const root = dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
+    const root = dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", windowsHide: true }).trim());
     let text = "";
     try {
       text = readFileSync(join(root, ".lanes", "starts.jsonl"), "utf8");
@@ -609,7 +609,7 @@ async function main(argv = process.argv.slice(2)) {
   const hours = Number(/^(\d+)h$/.exec(sinceLabel)?.[1]);
   if (!hours) throw new Error("--since takes hours, for example 12h");
   const since = new Date(Date.now() - hours * 3600_000).toISOString().slice(0, 19);
-  const repoRoot = dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim());
+  const repoRoot = dirname(execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", windowsHide: true }).trim());
   let rawAgents;
   const reply = gh(["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${STATUS_QUERY}`]);
   const config = loadConfig();

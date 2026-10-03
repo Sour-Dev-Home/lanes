@@ -184,7 +184,7 @@ export function mirrorBlockedBy(repo, n, body, run) {
   return notes;
 }
 
-const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 
 export function findExistingComment(repo, issueNumber, marker, run = gh) {
   const existing = run(["api", "--paginate", `repos/${repo}/issues/${issueNumber}/comments`, "--jq", `.[] | select(.body | startswith("${marker}")) | .id`]).trim().split("\n")[0];

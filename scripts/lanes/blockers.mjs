@@ -93,7 +93,7 @@ export function main(argv, run = gh) {
   return { code: 0, message: `#${n}: no open blockers` };
 }
 
-const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+const gh = (args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { code, message } = main(process.argv.slice(2));

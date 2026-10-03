@@ -63,7 +63,7 @@ export function main(argv, io = realIo) {
 
 const realIo = {
   readText: (p) => readFileSync(p, "utf8"),
-  git: (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+  git: (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true }),
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

@@ -68,7 +68,7 @@ const readConfig = () => JSON.parse(readFileSync("lanes.config.json", "utf8"));
 // --no-renames lists a rename's old path too (an old .github/ path must still force ALL); -z gives raw NUL-separated
 // paths, unaffected by core.quotePath.
 const gitDiff = (base) =>
-  execFileSync("git", ["diff", "--name-only", "--no-renames", "-z", `${base}...HEAD`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  execFileSync("git", ["diff", "--name-only", "--no-renames", "-z", `${base}...HEAD`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 
 // Every file in the directories the map's path prefixes live in, where its tests are.
 function candidateFiles(config, list) {
