@@ -280,6 +280,24 @@ export function readNativeApproval(api, repo, pr, config, codeOwnersPath = ".git
 }
 
 /**
+ * ADR 0032 part 4: the extra `pulls/{n}/files` call, made only when the switch is on (read from the default-branch
+ * config) and the PR author is `dependabot[bot]`. Returns `dependabotActionBump`'s input, or `null` ("not a bump")
+ * when no call is due or on any API or parse error.
+ */
+export function readDependabotFiles(api, repo, pr, config) {
+  if (config.dependabot?.actionBumps !== true || pr.user?.login !== "dependabot[bot]") return null;
+  try {
+    const files = api([`repos/${repo}/pulls/${pr.number}/files`, "--paginate", "--jq", ".[] | {filename, status, previous_filename, patch} | @json"])
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    return { author: { login: pr.user.login, type: pr.user.type }, files };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Gathers every input `gateDecision` needs for PR `number` from the API and returns its verdict, without posting
  * anything. Returns `null` for a closed PR. Shared by `evaluatePr` (posts on the PR head) and `carry` (posts on the
  * merge-group commit): the merge queue must re-decide from these same live inputs, never trust a `lanes/gate` status
@@ -336,6 +354,7 @@ export function decideForPr(api, repo, number, config, adrs = []) {
   const inputs = {
     pendingHeadHashes: pendingHeadHashes(api, repo, verdicts, pr.head.sha, reused),
     nativeApproval: readNativeApproval(api, repo, { number, user: pr.user, head: pr.head }, config),
+    dependabotFiles: readDependabotFiles(api, repo, { number, user: pr.user }, config),
     prBody: pr.body,
     issueLabels,
     issueState,

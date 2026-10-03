@@ -1153,8 +1153,16 @@ export function gateDecision(inputs) {
 }
 
 // `outsideScope` (#635) is the PR's changed files its issue's Scope "In" and Interface contract do not cover.
-function decideGate({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, nativeApproval = null, pendingHeadHashes = undefined }) {
+function decideGate({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, nativeApproval = null, pendingHeadHashes = undefined, dependabotFiles = null }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
+  // ADR 0032 part 3: a Dependabot action re-pin skips the issue, template and reviewer checks but never the owner.
+  // After the module-map check and before "Closes #N"; the map check is repeated here so every other order is today's.
+  if (config.dependabot?.actionBumps === true && dependabotFiles && moduleMapProblem(config) === null && dependabotActionBump(dependabotFiles).bump === true) {
+    if (nativeApproval?.approved === true) {
+      return { state: "success", description: `approved by code owner${typeof nativeApproval.by === "string" ? ` @${nativeApproval.by}` : ""} (dependabot action bump)`, stage: "ready" };
+    }
+    return { state: "pending", description: "waiting for a code-owner review in GitHub (dependabot action bump)", stage: "owner" };
+  }
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
   if (pr.closes === null) return fail("PR body must say 'Closes #N' for its task issue");
