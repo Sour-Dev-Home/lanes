@@ -1832,6 +1832,13 @@ test("a lane holding a file the merged head lacks is skipped with the file count
   assert.equal(entry.steps, undefined);
 });
 
+test("edge: with two merged heads the skip reports the smaller file count (#717)", () => {
+  const other = "d".repeat(40);
+  const prs = [merged("issue-7-x", { headRefOid: MERGED_HEAD }), { ...merged("issue-7-x", { headRefOid: other }), number: 99 }];
+  const [entry] = planCleanup({ worktrees: [main, ...handedOver("issue-7-x", { [MERGED_HEAD]: { files: 5 }, [other]: { files: 2 } })], prs });
+  assert.equal(entry.skip, "local commits after the merged head (2 files differ)");
+});
+
 test("a git diff error is a skip that names the error, never a removal (#717)", () => {
   const [entry] = planCleanup({ worktrees: [main, ...handedOver("issue-7-x", { [MERGED_HEAD]: { error: "bad object" } })], prs: [merged("issue-7-x", { headRefOid: MERGED_HEAD })] });
   assert.equal(entry.skip, "cannot compare with the merged head (bad object)");
