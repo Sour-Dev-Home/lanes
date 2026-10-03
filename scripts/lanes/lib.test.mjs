@@ -1838,3 +1838,131 @@ test("edge: loadConfig surfaces a CODEOWNERS parse error with its line", () => {
   });
 });
 
+// --- #645 (ADR 0028): controlState and readControlState. ---
+const CTRL_NOW = Date.parse("2026-10-02T12:00:00Z");
+const CTRL_BOT = { login: "github-actions", __typename: "Bot" };
+const ctrlBody = (o) => `<!-- lanes:control -->\n\`\`\`json\n${JSON.stringify(o)}\n\`\`\`\n`;
+const PAUSE_JSON = { paused: true, since: "2026-10-02T10:00:00.000Z", by: "owner", reason: "maintenance" };
+const ctrlComment = (o = PAUSE_JSON, extra = {}) => ({ body: ctrlBody(o), author: CTRL_BOT, editor: null, ...extra });
+
+test("#645 controlState: no comment is running", async () => {
+  const { controlState } = await import("./lib.mjs");
+  const s = controlState(null, CTRL_NOW);
+  assert.equal(s.paused, false);
+  assert.equal(s.failClosed, false);
+  assert.equal(controlState(undefined, CTRL_NOW).paused, false);
+});
+
+test("#645 controlState: a comment by github-actions[bot] says paused or running", async () => {
+  const { controlState } = await import("./lib.mjs");
+  assert.deepEqual(controlState(ctrlComment(), CTRL_NOW), { ...PAUSE_JSON, failClosed: false });
+  assert.equal(controlState(ctrlComment({ ...PAUSE_JSON, paused: false }), CTRL_NOW).paused, false);
+  // REST names the bot github-actions[bot], with a type; an edit by the same bot is still trusted.
+  assert.equal(controlState(ctrlComment(PAUSE_JSON, { author: { login: "github-actions[bot]", type: "Bot" }, editor: { login: "github-actions[bot]", type: "Bot" } }), CTRL_NOW).paused, true);
+  assert.equal(controlState(ctrlComment({ ...PAUSE_JSON, paused: false }, { editor: CTRL_BOT }), CTRL_NOW).paused, false);
+});
+
+test("#645 controlState: a comment edited by the lane bot is paused, whatever its text says", async () => {
+  const { controlState } = await import("./lib.mjs");
+  const s = controlState(ctrlComment({ ...PAUSE_JSON, paused: false }, { editor: { login: "sour-dev-lanes", __typename: "Bot" } }), CTRL_NOW);
+  assert.equal(s.paused, true);
+  assert.equal(s.failClosed, true);
+  assert.match(s.reason, /last edited by sour-dev-lanes/);
+});
+
+test("#645 controlState: a comment by another author is paused, the reason naming the author", async () => {
+  const { controlState } = await import("./lib.mjs");
+  for (const author of [{ login: "sour-dev-lanes", __typename: "Bot" }, { login: "someone", __typename: "User" }, { login: "github-actions", __typename: "User" }, null]) {
+    const s = controlState(ctrlComment({ ...PAUSE_JSON, paused: false }, { author }), CTRL_NOW);
+    assert.equal(s.paused, true, JSON.stringify(author));
+    assert.match(s.reason, /written by/);
+  }
+  assert.match(controlState(ctrlComment(PAUSE_JSON, { author: { login: "someone", __typename: "User" } }), CTRL_NOW).reason, /someone/);
+});
+
+test("#645 controlState: malformed JSON, a wrong shape or a missing marker is paused", async () => {
+  const { controlState } = await import("./lib.mjs");
+  const bodies = ["<!-- lanes:control -->\n{not json", "<!-- lanes:control -->", "<!-- lanes:control -->\n{}", ctrlBody({ ...PAUSE_JSON, paused: "no" }), ctrlBody({ ...PAUSE_JSON, since: "yesterday" }), ctrlBody({ paused: false }), "no marker\n" + ctrlBody(PAUSE_JSON), ""];
+  for (const body of bodies) {
+    const s = controlState({ body, author: CTRL_BOT, editor: null }, CTRL_NOW);
+    assert.equal(s.paused, true, body);
+    assert.match(s.reason, /malformed/);
+    assert.equal(s.since, new Date(CTRL_NOW).toISOString());
+  }
+});
+
+test("edge: #645 controlState strips control characters from by and reason, and bounds the reason", async () => {
+  const { controlState } = await import("./lib.mjs");
+  const s = controlState(ctrlComment({ ...PAUSE_JSON, by: "own\u001b[31mer", reason: `a\nb‮c${"x".repeat(500)}` }), CTRL_NOW);
+  assert.doesNotMatch(`${s.by}${s.reason}`, /[\u0000-\u001f‮]/);
+  assert.ok(s.reason.length <= 200);
+});
+
+// `api` for readControlState: a fake `gh api` answering the issue list and the comment pages.
+function ctrlApi({ issues = [{ number: 5, state: "OPEN" }], pages = [[]], fail = null, mutate = (r) => r } = {}) {
+  const calls = [];
+  const api = (args) => {
+    calls.push(args);
+    if (fail) throw new Error(fail);
+    const query = args.find((a) => String(a).startsWith("query=")) ?? "";
+    if (query.includes("issues(labels")) return JSON.stringify(mutate({ data: { repository: { issues: { nodes: issues } } } }));
+    const after = args.find((a) => String(a).startsWith("after="))?.slice("after=".length);
+    const index = after ? Number(after) : 0;
+    return JSON.stringify(mutate({ data: { repository: { issue: { comments: { pageInfo: { hasNextPage: index + 1 < pages.length, endCursor: String(index + 1) }, nodes: pages[index] } } } } }));
+  };
+  return { api, calls };
+}
+
+test("#645 readControlState: no health issue, or no control comment, is running", async () => {
+  const { readControlState } = await import("./lib.mjs");
+  assert.equal(readControlState(ctrlApi({ issues: [] }).api, "o/r", CTRL_NOW).paused, false);
+  assert.equal(readControlState(ctrlApi({ pages: [[{ body: "hello", author: CTRL_BOT, editor: null }]] }).api, "o/r", CTRL_NOW).paused, false);
+});
+
+test("#645 readControlState: reads the control comment from the lowest open health issue, across pages", async () => {
+  const { readControlState } = await import("./lib.mjs");
+  const fake = ctrlApi({ issues: [{ number: 9, state: "OPEN" }, { number: 3, state: "CLOSED" }, { number: 7, state: "OPEN" }], pages: [[{ body: "x", author: CTRL_BOT, editor: null }], [ctrlComment()]] });
+  const s = readControlState(fake.api, "o/r", CTRL_NOW);
+  assert.equal(s.paused, true);
+  assert.equal(s.by, "owner");
+  assert.ok(fake.calls.some((c) => c.includes("number=7")), "the lowest open issue");
+  assert.equal(readControlState(ctrlApi({ pages: [[ctrlComment({ ...PAUSE_JSON, paused: false })]] }).api, "o/r", CTRL_NOW).paused, false);
+});
+
+test("#645 readControlState: a forged second control comment pauses even when the real one says running", async () => {
+  const { readControlState } = await import("./lib.mjs");
+  const real = ctrlComment({ ...PAUSE_JSON, paused: false });
+  const forged = ctrlComment({ ...PAUSE_JSON, paused: false }, { author: { login: "sour-dev-lanes", __typename: "Bot" } });
+  const s = readControlState(ctrlApi({ pages: [[real, forged]] }).api, "o/r", CTRL_NOW);
+  assert.equal(s.paused, true);
+  assert.match(s.reason, /written by sour-dev-lanes/);
+});
+
+test("#645 readControlState: each read error is paused, fail closed, naming the cause", async () => {
+  const { readControlState } = await import("./lib.mjs");
+  const cases = [
+    ["gh fails", ctrlApi({ fail: "HTTP 403: rate limit" }).api, /HTTP 403/],
+    ["GraphQL errors", ctrlApi({ mutate: () => ({ errors: [{ message: "boom" }] }) }).api, /GraphQL returned an error/],
+    ["not JSON", () => "<html>", /cannot be read/],
+    ["no data", ctrlApi({ mutate: () => ({}) }).api, /cannot be read/],
+    ["issues not a list", ctrlApi({ mutate: () => ({ data: { repository: { issues: { nodes: null } } } }) }).api, /unexpected reply/],
+    ["comments not a list", ctrlApi({ mutate: (r) => (r.data.repository.issue ? { data: { repository: { issue: { comments: null } } } } : r) }).api, /unexpected reply/],
+  ];
+  for (const [name, api, reason] of cases) {
+    const s = readControlState(api, "o/r", CTRL_NOW);
+    assert.equal(s.paused, true, name);
+    assert.equal(s.failClosed, true, name);
+    assert.match(s.reason, reason, name);
+  }
+  assert.equal(readControlState(ctrlApi().api, "not-a-repo", CTRL_NOW).paused, true);
+  assert.equal(readControlState(ctrlApi().api, undefined, CTRL_NOW).paused, true);
+});
+
+test("edge: #645 readControlState stops at a bounded number of comment pages, paused", async () => {
+  const { readControlState } = await import("./lib.mjs");
+  const pages = Array.from({ length: 60 }, () => []);
+  const s = readControlState(ctrlApi({ pages }).api, "o/r", CTRL_NOW);
+  assert.equal(s.paused, true);
+  assert.match(s.reason, /too many comments/);
+});
+

@@ -231,12 +231,28 @@ Incidents: none recorded in the cited PRs; the rules are `CLAUDE.md` rules 4 and
 - `start.maxLanes` in `lanes.config.json` is reached, or the token budget is used up.
 - You removed `ready` from the issues.
 
-**To pause on purpose.** Stop the queue with Ctrl-C and let the running lanes finish; their PRs still merge. To stop a
-single issue, remove its `ready` label in GitHub.
+**To pause on purpose (ADR 0028).** In GitHub open Actions, then lanes-control, Run workflow, pick `pause`, add a reason
+if you like, and press Run. Only people with write access can run it, and Actions records who did. The queue reads the
+state on every poll: from then on it launches nothing and resumes no dead lane, prints one line
+(`paused since <time> by <who>: <reason>`), and keeps polling. Lanes already running finish and their PRs still merge.
+The health issue shows `Paused since <time> by <who>: <reason>`, a pause raises no alert, and
+[no-progress](#no-progress) stays quiet while it lasts; other alerts still fire. The pause is as live as the poll
+interval: a lane that starts a second before you press the button runs to the end. To stop a single issue, remove its
+`ready` label. Stopping the queue with Ctrl-C also works, but the next queue start launches again.
 
-**To resume.** `git pull --ff-only`, then `node scripts/lanes/queue.mjs` in your own terminal. Lanes that died during
-the pause resume as in [stalled-lane](#stalled-lane). A pause longer than the health thresholds raises
-[no-progress](#no-progress) once the queue is back, and clears when work moves.
+**To resume.** Run lanes-control again with `resume`. The queue prints `resumed` on its next poll, and dead lanes that
+were found during the pause are resumed then, as in [stalled-lane](#stalled-lane). If the queue is not running,
+`git pull --ff-only`, then `node scripts/lanes/queue.mjs` in your own terminal.
+
+**Paused and you did not press the button.** The switch fails closed. The queue's line names the reason:
+- `the pause state cannot be read: ...`: GitHub was unreachable or rate limited. It clears on its own when the read works.
+- `the control comment was written by <login>` or `was last edited by <login>`, or `is malformed`: something other than
+  the lanes-control workflow wrote the comment on the `lanes-health` issue that starts `<!-- lanes:control -->`. Press
+  Resume (or Pause) in lanes-control, which rewrites the comment. If the comment was *written* by another account,
+  delete that comment in GitHub first, since the workflow only edits its own.
+
+**A fresh install, or a deleted health issue, reads as running.** The state lives in a comment on the `lanes-health`
+issue; with no issue or no comment, nothing has been paused. Deleting that issue therefore lifts a pause.
 
 <a id="needs-owner"></a>
 ## needs-owner

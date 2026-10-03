@@ -1308,3 +1308,76 @@ function decideGate({ prBody, issueLabels, issueState, issueAuthorCanWrite, issu
   if (blocker) return waitOwner(blocker);
   return { state: "success", description: `unattended-eligible (tier:${tier}), reviews in${note}`, stage: "ready" };
 }
+
+// ADR 0028: the pause switch. `CONTROL_MARKER` starts the one comment on the lanes-health issue that control.mjs writes.
+export const CONTROL_MARKER = "<!-- lanes:control -->";
+export const HEALTH_ISSUE_LABEL = "lanes-health";
+const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g;
+// Text from the comment is shown on a terminal and in the health issue: one line, no control or format characters.
+export const controlText = (s, max = 200) => String(s ?? "").replace(/\p{Cf}/gu, "").replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim().slice(0, max);
+const isActionsActor = (a) => a?.login === "github-actions[bot]" || (a?.login === "github-actions" && (a?.type ?? a?.__typename) === "Bot");
+const actorName = (a) => controlText(a?.login ?? "unknown", 60) || "unknown";
+
+/**
+ * ADR 0028 part 3: the pause state from the control comment (`{ body, author, editor }`, an actor being `{ login, type? }`
+ * or GraphQL's `{ login, __typename }`; null when there is none), `now` ms. Returns `{ paused, since, by, reason,
+ * failClosed }`. No comment is running. A comment counts only when github-actions[bot] wrote it and, if it was edited,
+ * last edited it; any other author or editor, or a body that is not the expected JSON, is paused with a `reason` saying which.
+ */
+export function controlState(comment, now) {
+  const closed = (reason) => ({ paused: true, since: new Date(now).toISOString(), by: "lanes", reason, failClosed: true });
+  if (comment === null || comment === undefined) return { paused: false, since: null, by: null, reason: "", failClosed: false };
+  if (!isActionsActor(comment.author)) return closed(`the control comment was written by ${actorName(comment.author)}, not github-actions[bot]`);
+  if (comment.editor !== null && comment.editor !== undefined && !isActionsActor(comment.editor)) return closed(`the control comment was last edited by ${actorName(comment.editor)}, not github-actions[bot]`);
+  let data;
+  try {
+    const body = String(comment.body ?? "");
+    if (!body.startsWith(CONTROL_MARKER)) throw new Error("no marker");
+    data = JSON.parse(/\{[\s\S]*\}/.exec(body.slice(CONTROL_MARKER.length))?.[0] ?? "");
+  } catch {
+    return closed("the control comment is malformed");
+  }
+  const since = Date.parse(data?.since);
+  if (typeof data?.paused !== "boolean" || !Number.isFinite(since)) return closed("the control comment is malformed");
+  return { paused: data.paused, since: new Date(since).toISOString(), by: controlText(data.by, 60) || "unknown", reason: controlText(data.reason), failClosed: false };
+}
+
+/**
+ * ADR 0028 part 3: reads the state from the lanes-health issue (the lowest-numbered open one, else the lowest-numbered
+ * in any state, as health.mjs finds it). `api(args)` takes `gh api` arguments and returns the reply text; `repo` is
+ * `owner/name`. No issue or no control comment is running. Every control comment is checked, so a forged second one
+ * pauses too. Any read error is paused, fail closed.
+ */
+export function readControlState(api, repo, now = Date.now()) {
+  try {
+    const [owner, name] = String(repo).split("/");
+    if (!owner || !name) throw new Error("bad repository name");
+    const ask = (query, vars = {}) => {
+      const reply = JSON.parse(api(["graphql", "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `name=${name}`, ...Object.entries(vars).flatMap(([k, v]) => ["-F", `${k}=${v}`])]));
+      if (reply?.errors?.length || !reply?.data) throw new Error("GraphQL returned an error");
+      return reply.data;
+    };
+    const issues = ask(`query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ issues(labels:["${HEALTH_ISSUE_LABEL}"],states:[OPEN,CLOSED],first:50,orderBy:{field:CREATED_AT,direction:ASC}){ nodes { number state } } } }`)?.repository?.issues?.nodes;
+    if (!Array.isArray(issues)) throw new Error("unexpected reply");
+    const found = [...issues].sort((a, b) => a.number - b.number);
+    const issue = found.find((i) => i.state === "OPEN") ?? found[0];
+    if (!issue) return controlState(null, now);
+    const marked = [];
+    let after = null;
+    for (let page = 0; page < 50; page += 1) {
+      const comments = ask(
+        `query($owner:String!,$name:String!,$number:Int!,$after:String){ repository(owner:$owner,name:$name){ issue(number:$number){ comments(first:100,after:$after){ pageInfo { hasNextPage endCursor } nodes { body author { login __typename } editor { login __typename } } } } } }`,
+        { number: issue.number, ...(after ? { after } : {}) },
+      )?.repository?.issue?.comments;
+      if (!Array.isArray(comments?.nodes)) throw new Error("unexpected reply");
+      for (const c of comments.nodes) if (typeof c?.body === "string" && c.body.startsWith(CONTROL_MARKER)) marked.push(c);
+      if (!comments.pageInfo?.hasNextPage) break;
+      after = comments.pageInfo.endCursor;
+      if (page === 49) throw new Error("too many comments to read");
+    }
+    const states = marked.map((c) => controlState(c, now));
+    return states.find((s) => s.failClosed) ?? states[0] ?? controlState(null, now);
+  } catch (err) {
+    return { paused: true, since: new Date(now).toISOString(), by: "lanes", reason: `the pause state cannot be read: ${controlText(err?.message ?? err, 100)}`, failClosed: true };
+  }
+}

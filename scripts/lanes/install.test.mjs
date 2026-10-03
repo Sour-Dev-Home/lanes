@@ -380,3 +380,25 @@ test("edge: a lock with no files written (everything kept) is still valid", () =
   validLock(lock);
   assert.deepEqual(lock.files, {});
 });
+
+test("#645: MANIFEST ships the lanes-control workflow with control.mjs and the lib it imports", () => {
+  for (const f of [".github/workflows/lanes-control.yml", "scripts/lanes/control.mjs", "scripts/lanes/lib.mjs"]) assert.ok(MANIFEST.includes(f), f);
+  assert.equal(new Set(MANIFEST).size, MANIFEST.length, "no file listed twice");
+});
+
+test("edge: #645 install copies the control workflow byte for byte, live even for a private target, and keeps an existing one", () => {
+  const target = mkdtempSync(path.join(tmpdir(), "lanes-install-"));
+  try {
+    const r = install(".", target);
+    assert.ok(r.copied.includes(".github/workflows/lanes-control.yml"));
+    assert.ok(!r.disabled.includes(".github/workflows/lanes-control.yml"));
+    assert.equal(readFileSync(path.join(target, ".github/workflows/lanes-control.yml"), "utf8"), readFileSync(".github/workflows/lanes-control.yml", "utf8"));
+    assert.ok(existsSync(path.join(target, "scripts/lanes/control.mjs")));
+    writeFileSync(path.join(target, ".github/workflows/lanes-control.yml"), "mine");
+    const again = install(".", target);
+    assert.ok(again.skipped.includes(".github/workflows/lanes-control.yml"));
+    assert.equal(readFileSync(path.join(target, ".github/workflows/lanes-control.yml"), "utf8"), "mine");
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+});

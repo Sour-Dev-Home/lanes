@@ -35,7 +35,7 @@
           "scripts/lanes/pick.", "scripts/lanes/status.", "scripts/lanes/paths.", "scripts/lanes/start.",
           "scripts/lanes/queue.", "scripts/lanes/cleanup.", "scripts/lanes/reap.", "scripts/lanes/lifecycle.",
           "scripts/lanes/snapshot.", "scripts/lanes/health.", "scripts/lanes/lane-cost.", "scripts/lanes/consolidate.",
-          "scripts/lanes/app-token.", "scripts/lanes/identity-check.", "scripts/lanes/handover.", "scripts/lanes/test-retry."
+          "scripts/lanes/app-token.", "scripts/lanes/identity-check.", "scripts/lanes/handover.", "scripts/lanes/test-retry.", "scripts/lanes/control."
         ],
         "imports": ["lib", "gate"],
         "contracts": ["contracts/snapshot."],
