@@ -94,6 +94,15 @@ test("busy falls back to state working when there is no status", () => {
   assert.equal(tick({ issueState: "CLOSED", sessions: [lane({ status: undefined, state: "working" })] }).action, "wait");
 });
 
+test("#730: with no status, a done session is removed, a blocked one too, and a working or unknown one waits", () => {
+  for (const state of ["done", "blocked"]) {
+    assert.equal(tick({ issueState: "CLOSED", sessions: [lane({ status: undefined, state })] }).action, "remove", state);
+  }
+  for (const state of ["working", "paused", undefined]) {
+    assert.equal(tick({ issueState: "CLOSED", sessions: [lane({ status: undefined, state })] }).action, "wait", String(state));
+  }
+});
+
 test("an idle status wins over a stale working state (#83)", () => {
   assert.equal(tick({ issueState: "CLOSED", sessions: [lane({ status: "idle", state: "working" })] }).action, "remove");
 });

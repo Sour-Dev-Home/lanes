@@ -245,6 +245,19 @@ test("a merged lane whose session is busy is skipped: session still working", ()
   }
 });
 
+// #730: today's `claude agents --json` sends `state` (working, blocked, done) and no `status`.
+test("#730: a merged lane whose session is done or blocked (no status) is removed; working or unknown is skipped", () => {
+  for (const state of ["done", "blocked"]) {
+    const [entry] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { state })], prs: [merged("issue-7-x")] });
+    assert.equal(entry.skip, undefined, state);
+    assert.equal(cmds(entry)[0], "claude rm s7", state);
+  }
+  for (const state of ["working", "paused", undefined]) {
+    const [entry] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { state })], prs: [merged("issue-7-x")] });
+    assert.equal(entry.skip, "session still working", String(state));
+  }
+});
+
 test("a busy session sharing the worktree with an idle/working one blocks cleanup", () => {
   const [entry] = planCleanup({
     worktrees: [wt("issue-7-x")],
@@ -282,10 +295,10 @@ test("edge: an unknown status falls back to its state rather than being read as 
   assert.equal(plan("done").skip, undefined);
 });
 
-test("edge: a session with neither status nor state is treated as not working, not as still working", () => {
+// #730: reversed from "not working": a session this script cannot read fails safe, so it is never removed over.
+test("edge: a session with neither status nor state is treated as still working (#730 fails safe)", () => {
   const [entry] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { status: undefined, state: undefined })], prs: [merged("issue-7-x")] });
-  assert.equal(entry.skip, undefined);
-  assert.deepEqual(cmds(entry), ["claude rm s7", `git worktree remove ${ROOT}/.claude/worktrees/issue-7-x`, "git branch -D issue-7-x"]);
+  assert.equal(entry.skip, "session still working");
 });
 
 test("sessionsFrom keeps each background session's status and state, marks one with no id unreadable, and drops others", () => {

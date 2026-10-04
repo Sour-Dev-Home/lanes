@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { TEAM_REQUIRED_MESSAGE } from "./lib.mjs";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
-import { prStage, formatAge, gateDescriptions, gateSince, idleLaneSession, laneBranches, laneSessions, laneWorktree, worktreeUnsaved, liveLanes, loadLaneBranches, loadSessions, mergeGroupFailures, mergeQueueEntries, queueRemovals, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, trustedRollups, waitingApprovals } from "./status.mjs";
+import { sessionPhase, prStage, formatAge, gateDescriptions, gateSince, idleLaneSession, laneBranches, laneSessions, laneWorktree, worktreeUnsaved, liveLanes, loadLaneBranches, loadSessions, mergeGroupFailures, mergeQueueEntries, queueRemovals, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, trustedRollups, waitingApprovals } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -1290,4 +1290,28 @@ test("a PR with no Closes #N (a Dependabot bump) is listed by its gate stage and
   const s = summarize({ prs: [bump], issues: [{ number: 1, title: "t", labels: [{ name: "ready" }, { name: "tier:quick" }], body: "" }], merged: [], mergeQueue: [] });
   assert.deepEqual([...s.waitingOnOwner, ...s.inFlight].map((i) => i.number), [9]);
   assert.doesNotThrow(() => render(s));
+});
+
+// --- #730: one reading of a session's phase, from today's `state` and from an older Claude Code's `status`. ---
+
+test("#730: sessionPhase reads today's state field (no status)", () => {
+  assert.equal(sessionPhase({ state: "working" }), "running");
+  assert.equal(sessionPhase({ state: "busy" }), "running");
+  assert.equal(sessionPhase({ state: "blocked" }), "waiting");
+  assert.equal(sessionPhase({ state: "done" }), "stopped");
+  assert.equal(sessionPhase({ state: "idle" }), "stopped");
+});
+
+test("#730: sessionPhase reads an older Claude Code's status field", () => {
+  assert.equal(sessionPhase({ status: "busy" }), "running");
+  assert.equal(sessionPhase({ status: "idle" }), "stopped");
+  assert.equal(sessionPhase({ status: "busy", state: "blocked" }), "running");
+  assert.equal(sessionPhase({ status: "idle", state: "blocked" }), "waiting");
+  assert.equal(sessionPhase({ status: "idle", state: "working" }), "stopped", "a lingering working state (#83) does not keep it running");
+});
+
+test("#730: edge: an unknown or missing value is running, so it is never removed or resumed over", () => {
+  for (const s of [undefined, null, {}, { state: "paused" }, { status: "weird" }, { state: 5 }]) {
+    assert.equal(sessionPhase(s), "running", JSON.stringify(s));
+  }
 });

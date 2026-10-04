@@ -8,7 +8,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mintInstallationToken, writeGhHosts } from "./app-token.mjs";
-import { TIERS, laneIssueOf, parseIdentity } from "./lib.mjs";
+import { TIERS, laneIssueOf, parseIdentity, sessionPhase } from "./lib.mjs";
 
 export const START_DEFAULTS = Object.freeze({
   maxLanes: 8,
@@ -356,7 +356,7 @@ export async function refreshLoop({ session, intervalMs, sessions, remint, sleep
     }
     if (list) {
       const mine = list.find((s) => s?.id === session);
-      if (!mine || (mine.status === "idle" && mine.state !== "blocked")) return "session ended";
+      if (!mine || sessionPhase(mine) === "stopped") return "session ended";
     }
     try {
       await remint();
@@ -454,7 +454,7 @@ function newestLaneSession(sessions, n) {
  */
 export function deadLaneSession(sessions, n) {
   const newest = newestLaneSession(sessions, n);
-  return { dead: !newest || (newest.status === "idle" && newest.state !== "blocked"), session: newest };
+  return { dead: !newest || sessionPhase(newest) === "stopped", session: newest };
 }
 
 /**

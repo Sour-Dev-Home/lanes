@@ -7,7 +7,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync,
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { recordLaneCost } from "./lane-cost.mjs";
-import { laneIssueOf } from "./lib.mjs";
+import { laneIssueOf, sessionPhase } from "./lib.mjs";
 const LANE_BRANCH = /^issue-(\d+)-./;
 // A lane's worktree folder: `issue-<N>-<slug>`, or bare `issue-<N>` when the lane skipped the slug (#134).
 // A `start-lane-<N>` session (the queue's launcher) is a lane's session too (#717).
@@ -89,9 +89,8 @@ const UNREADABLE_SKIP = "session with an unreadable id is in it";
 // A session to remove: stopped first when its process is still alive (only an idle one gets here), then removed.
 const sessionSteps = (s, stop) => [...(stop ? [{ cmd: "claude", args: ["stop", s.id] }] : []), { cmd: "claude", args: ["rm", s.id] }];
 
-// `status` says whether a session is running now; `state` can keep saying "working" after it stopped (#83). A session
-// with no status, or one this script does not know, falls back to its state.
-const stillWorking = (s) => (s.status === "idle" ? false : s.status === "busy" ? true : s.state === "working");
+// A session is still working while sessionPhase (status.mjs, #730) calls it running: an unknown one counts as working.
+const stillWorking = (s) => sessionPhase(s) === "running";
 
 // One entry per `issue-<N>-…` local branch, plus one per session whose worktree and branch are already gone:
 // `{ branch, issue, pr, steps }` to clean, or `{ branch, issue, skip }` with the reason not to.

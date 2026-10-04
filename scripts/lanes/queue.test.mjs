@@ -2324,7 +2324,7 @@ test("#724: a stopped lane with no session is resumed in its worktree, once", as
 
 test("#724: a blocked session is stopped with its log saved, then the lane is resumed", async () => {
   const { main } = await import("./queue.mjs");
-  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { state: "blocked" })] };
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { status: undefined, state: "blocked" })] };
   const run = resumeRun(world);
   assert.equal(await main([], run.deps), 0);
   assert.deepEqual(run.stopped, ["old-7"]);
@@ -2352,6 +2352,39 @@ test("#724: a working session is not touched and the issue stays in flight", asy
     assert.equal(await main([], run.deps), 0);
     assert.deepEqual([run.launched, run.stopped, run.saved], [[], [], []], status);
   }
+});
+
+// --- #730: today's `claude agents --json` has `state` (working, blocked, done) and no `status`. ---
+
+test("#730: the #713 case: a done session (no status) in front of a resumable worktree is stopped and the lane resumed", async () => {
+  const { main } = await import("./queue.mjs");
+  // A done session is one recovery already handled and left (its marker names it); a blocked one is not recovery's.
+  for (const state of ["done", "blocked"]) {
+    const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { status: undefined, state })] };
+    const run = resumeRun(world, state === "done" ? { markers: new Map([[7, { session: "old-7" }]]) } : {});
+    assert.equal(await main([], run.deps), 0);
+    assert.deepEqual(run.stopped, ["old-7"], state);
+    assert.deepEqual(run.launched.map((l) => l.n), [7], state);
+    assert.deepEqual(launchDirs(run), ["/repo/.claude/worktrees/issue-7-work"], state);
+  }
+});
+
+test("#730: a working or unknown-state session (no status) is left alone and the issue stays in flight", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const state of ["working", "paused", undefined]) {
+    const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { status: undefined, state })] };
+    const run = resumeRun(world);
+    assert.equal(await main([], run.deps), 0);
+    assert.deepEqual([run.launched, run.stopped, run.saved], [[], [], []], String(state));
+  }
+});
+
+test("#730: planRecovery names a lane whose session is done (no status) with an open PR waiting on a review, and not a working one", async () => {
+  const { planRecovery } = await import("./queue.mjs");
+  const issues = [issue(7, ["src/a.mjs"]), issue(9, ["src/c.mjs"])];
+  const prs = [gatePr(70, 7, "waiting for review/security-reviewer"), gatePr(90, 9, "waiting for review/test-hunter")];
+  const sessions = [lane(7, { status: undefined, state: "done" }), lane(9, { status: undefined, state: "working" })];
+  assert.deepEqual(planRecovery({ issues, prs, sessions }).map((r) => [r.number, r.resume, r.id]), [[7, true, "old-7"]]);
 });
 
 test("#724: needs-owner still present: nothing is resumed", async () => {
@@ -2389,7 +2422,7 @@ test("#724: edge: an issue with an open PR, or another issue's worktree, is not 
 
 test("#724: edge: a session with an unsafe id is left alone", async () => {
   const { planWorktreeResume } = await import("./queue.mjs");
-  const input = { issues: [issue(7, ["src/a.mjs"])], worktrees: [tree(7)], sessions: [lane(7, { id: "--all", state: "blocked" })] };
+  const input = { issues: [issue(7, ["src/a.mjs"])], worktrees: [tree(7)], sessions: [lane(7, { id: "--all", status: undefined, state: "blocked" })] };
   assert.deepEqual(planWorktreeResume(input), { resume: [], skipped: [] });
 });
 
@@ -2397,7 +2430,7 @@ test("#724: the maxLanes cap counts the lanes still running, and a stopped sessi
   const { planWorktreeResume } = await import("./queue.mjs");
   const issues = [1, 2, 7, 8].map((n) => issue(n, [`src/${n}.mjs`]));
   const worktrees = [tree(7), tree(8)];
-  const sessions = [lane(1), lane(2), lane(7, { state: "blocked" })];
+  const sessions = [lane(1), lane(2), lane(7, { status: undefined, state: "blocked" })];
   const out = planWorktreeResume({ issues, prs: [], sessions, worktrees, maxLanes: 3 });
   assert.deepEqual(out.resume.map((r) => r.number), [7]);
   assert.deepEqual(out.skipped, [{ number: 8, reason: "at maxLanes" }]);
@@ -2412,7 +2445,7 @@ test("#724: edge: an issue planRecovery already handles this tick is left to it"
 
 test("#724: edge: a session that will not stop is left for the owner, nothing launched", async () => {
   const { main } = await import("./queue.mjs");
-  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { state: "blocked" })] };
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { status: undefined, state: "blocked" })] };
   const run = resumeRun(world, { stopWorks: false });
   assert.equal(await main([], run.deps), 0);
   assert.deepEqual(run.launched, []);
@@ -2421,7 +2454,7 @@ test("#724: edge: a session that will not stop is left for the owner, nothing la
 
 test("#724: edge: a stop that throws is reported once and nothing is launched afresh", async () => {
   const { main } = await import("./queue.mjs");
-  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { state: "blocked" })] };
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { status: undefined, state: "blocked" })] };
   const run = resumeRun(world);
   const prior = run.deps.claude;
   run.deps.claude = (args, opts) => {
