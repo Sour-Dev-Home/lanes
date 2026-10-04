@@ -215,9 +215,20 @@ test("shellWord passes plain words through and refuses shell metacharacters", ()
 });
 
 // Criterion 6: docs/USING.md "Adopting it" leads with the one command
-test("USING.md's Adopting section leads with new-project.mjs", () => {
+test("USING.md's Adopting section leads with init.mjs and keeps new-project.mjs under What init runs", () => {
   const doc = readFileSync("docs/USING.md", "utf8");
   const section = doc.slice(doc.indexOf("## Adopting it"));
   const firstCode = /`([^`]+)`/.exec(section.slice(section.indexOf("\n")))[1];
-  assert.match(firstCode, /^node scripts\/lanes\/new-project\.mjs /);
+  assert.match(firstCode, /^node scripts\/lanes\/init\.mjs /);
+  const manual = section.slice(section.indexOf("What init runs"));
+  assert.ok(section.includes("What init runs"));
+  assert.match(manual, /`node scripts\/lanes\/new-project\.mjs <name>/);
+});
+
+test("USING.md's App section opens with init.mjs, and keeps the manual steps under What init runs", () => {
+  const doc = readFileSync("docs/USING.md", "utf8");
+  const start = doc.indexOf("## Setting up the lanes GitHub App");
+  const section = doc.slice(start, doc.indexOf("## Adopting it"));
+  assert.ok(section.indexOf("init.mjs") > -1 && section.indexOf("init.mjs") < section.indexOf("app-setup.mjs"));
+  assert.match(section, /What init runs/);
 });

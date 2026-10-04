@@ -354,7 +354,15 @@ Free, environments have no required reviewers: skip both steps and keep the copy
 
 ## Setting up the lanes GitHub App (once per owner)
 
-Lanes act as a GitHub App, not as you (ADR 0019, 0025). From the repository's root, run:
+Lanes act as a GitHub App, not as you (ADR 0019, 0025). `node scripts/lanes/init.mjs <path-to-your-repo>` runs this
+setup for you, as one step of its ordered checklist, only when the App's `identity` is missing in `lanes.config.json`
+and never when the App already exists. Re-running `init.mjs` is safe: it re-checks each step and runs only the ones
+still missing, and `--dry-run` prints the plan. It asks you to click GitHub's two buttons below (create the App,
+install it), then to commit CODEOWNERS and add the code-owner ruleset from the links it prints.
+
+### What init runs
+
+To run this step alone, from the repository's root:
 
 `node scripts/lanes/app-setup.mjs [--org <org>]`
 
@@ -377,7 +385,27 @@ naming the path.
 
 ## Adopting it in another repository
 
-A new project, in one command (owner), run from this lanes clone:
+One command (owner), run from this lanes clone, for an existing repository or a new project:
+
+`node scripts/lanes/init.mjs <path-to-your-repo>` or `node scripts/lanes/init.mjs --new <name> [--private] [--license mit] [--org <org>] [--dry-run]`
+
+It installs lanes when the project lacks `lanes.lock.json` (creating the repository first with `--new`), then runs each
+missing step in order: the `PII_PATTERNS` secret, the labels and `main` ruleset, the GitHub App, CODEOWNERS and the
+code-owner ruleset, and the `lanes-workflow-apply` environment. It ends with a checklist of what is done and how to fix
+what is not, and exits 0 only when everything is done.
+
+Re-running it is safe: each step is re-checked and skipped when done, so after a stop or a failure run the same command
+again. `--dry-run` prints every step and changes nothing.
+
+What it asks you to do:
+
+- Run `gh secret set PII_PATTERNS -R <owner/repo>` (one fixed string per line) and type `done`.
+- Press the two GitHub buttons of the App setup (create the App, install it).
+- Commit CODEOWNERS and add the code-owner ruleset from the settings links it prints.
+
+### What init runs
+
+The steps, by hand, are below; each is what `init.mjs` runs when its item is missing. A new project:
 
 `node scripts/lanes/new-project.mjs <name> [--private] [--license mit] [--dry-run]`
 
