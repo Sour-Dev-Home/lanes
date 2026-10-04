@@ -2419,6 +2419,20 @@ test("#724: edge: a session that will not stop is left for the owner, nothing la
   assert.equal(run.out.filter((l) => l.includes("#7: could not stop session old-7")).length, 1, run.out.join("\n"));
 });
 
+test("#724: edge: a stop that throws is reported once and nothing is launched afresh", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { state: "blocked" })] };
+  const run = resumeRun(world);
+  const prior = run.deps.claude;
+  run.deps.claude = (args, opts) => {
+    if (args[0] === "stop") throw new Error("stop refused");
+    return prior(args, opts);
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, [], run.out.join("\n"));
+  assert.equal(run.out.filter((l) => l.includes("#7: recovery failed: stop refused")).length, 1, run.out.join("\n"));
+});
+
 test("#724: edge: a worktree listing that throws is reported and nothing is resumed", async () => {
   const { main } = await import("./queue.mjs");
   const run = resumeRun({ issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [] });
@@ -2427,11 +2441,10 @@ test("#724: edge: a worktree listing that throws is reported and nothing is resu
   };
   assert.equal(await main([], run.deps), 0);
   assert.ok(run.out.some((l) => l.includes("worktrees cannot be listed") && l.includes("git broke")), run.out.join("\n"));
-  assert.deepEqual(run.launched.map((l) => l.cwd ?? null).length, run.launched.length);
+  assert.ok(!launchDirs(run).some((dir) => dir.includes("/worktrees/")), "no lane is launched in a worktree");
 });
 
-// Known bug (reported by the test-hunter): resumeStoppedLanes skips an `attempted` issue without adding it to resumes or held,
-// so planTick launches it fresh from the repo root. todo until queue.mjs puts attempted worktree issues in `held`.
+// Found by the test-hunter: an `attempted` issue must be held, or planTick launches it fresh from the repo root.
 test("#724: edge: a resumed lane that vanishes without a PR is not launched afresh from the repo root in the same run", async () => {
   const { main } = await import("./queue.mjs");
   const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [] };
