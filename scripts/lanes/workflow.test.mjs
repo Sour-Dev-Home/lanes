@@ -1101,7 +1101,8 @@ test("lane.md step 3 lists worktrees first and stops for an existing or several 
 test("lane.md step 3b rebases a conflicting PR onto origin/main within Scope and stops when a conflict needs more", () => {
   const text = laneText().replace(/\s+/g, " ");
   const step = text.slice(text.indexOf("3b. Resuming"), text.indexOf("4. Read the issue"));
-  assert.match(step, /conflicts with main[^]*rebases onto `origin\/main`/);
+  assert.match(step, /conflicts with main[^]*merges `origin\/main`/);
+  assert.doesNotMatch(step, /force-with-lease/);
   assert.match(step, /resolves the conflicts within Scope/);
   assert.match(step, /full `npm test`/);
   assert.match(step, /re-runs the reviewers whose files changed/);
