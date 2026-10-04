@@ -52,6 +52,8 @@ test("edge: parseArgs rejects bad usage", () => {
   assert.throws(() => parseArgs(["a", "--new", "b"]), /usage/);
   assert.throws(() => parseArgs(["--new"]), /invalid repository name/);
   assert.throws(() => parseArgs(["--new", ".."]), /invalid repository name/);
+  assert.throws(() => parseArgs(["--new", "--private"]), /invalid repository name/);
+  assert.throws(() => parseArgs(["--new", "-x"]), /invalid repository name/);
   assert.throws(() => parseArgs(["--new", "x", "--license", "gpl"]), /only mit/);
   assert.throws(() => parseArgs(["--new", "x", "--org", "a b"]), /invalid --org/);
   assert.throws(() => parseArgs(["--new", "x", "--bogus"]), /unknown option/);
@@ -183,6 +185,20 @@ test("edge: a runner that throws is a failed step, not a crash", async () => {
   assert.equal(await initMain(["../widgets"], w.deps), 1);
   assert.match(w.text(), /install\.mjs failed/);
   assert.match(w.text(), /ENOENT/);
+});
+
+test("edge: --new with an unreadable owner runs no step", async () => {
+  const w = world({ states: [itemsMissing()], owner: null, exists: () => false });
+  assert.equal(await initMain(["--new", "widgets"], w.deps), 1);
+  assert.equal(w.calls.length, 0);
+  assert.match(w.text(), /owner could not be read/);
+});
+
+test("edge: app-setup finishing without identity.app stops instead of continuing", async () => {
+  const w = world({ states: [itemsMissing("identity", "app-key", "app-installed"), itemsMissing("identity", "app-key", "app-installed")] });
+  assert.equal(await initMain(["../widgets"], w.deps), 1);
+  assert.deepEqual(scripts(w), ["app-setup.mjs"]);
+  assert.match(w.text(), /identity\.app is still missing/);
 });
 
 test("edge: the repository cannot be read", async () => {

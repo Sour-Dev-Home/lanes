@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { formatSetupState, setupState } from "./setup-state.mjs";
 
 const USAGE = "usage: init.mjs <path> | init.mjs --new <name> [--private] [--license mit] [--org <org>] [--dry-run]";
-const NAME_RE = /^[A-Za-z0-9_.-]+$/;
+const NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/; // no leading "-": new-project.mjs would read it as an option
 const OWNER_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
 const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 const SECRET = "PII_PATTERNS";
