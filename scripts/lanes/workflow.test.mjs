@@ -408,6 +408,15 @@ test("ADRs 0004 and 0015 are superseded by 0025; 0002, 0007 and 0019 each carry 
   }
 });
 
+test("README.md's first setup step names init.mjs", () => {
+  const readme = readFileSync("README.md", "utf8");
+  const steps = readme.slice(readme.indexOf("## Quick start"));
+  const setup = steps.slice(steps.indexOf("\n2. "), steps.indexOf("\n3. "));
+  assert.match(setup, /`node scripts\/lanes\/init\.mjs /);
+  assert.match(setup, /--new/);
+  assert.doesNotMatch(steps.slice(0, steps.indexOf("\n3. ")), /install\.mjs|setup-repo\.mjs/);
+});
+
 test("USING.md, SECURITY.md and README.md carry no solo profile, /approve or /approvals text", () => {
   for (const f of ["docs/USING.md", "docs/SECURITY.md", "README.md"]) {
     const text = readFileSync(f, "utf8").replace(/\(adr\/[^)]*\)/g, "");
