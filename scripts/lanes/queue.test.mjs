@@ -2545,3 +2545,11 @@ test("#739: edge: a marker with no readable time or an unparseable removal time 
     assert.deepEqual(run.launched, []);
   }
 });
+
+test("#739: edge: a removal at the very time the marker was written keeps the marker", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = clearedRun("2026-10-04T17:00:00.000Z");
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual([run.stopped, run.removed, run.launched], [[], [], []]);
+  assert.equal(run.markers.get(7).time, "2026-10-04T17:00:00.000Z");
+});
