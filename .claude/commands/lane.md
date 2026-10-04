@@ -137,7 +137,9 @@ nothing on GitHub (the identity may be wrong there).
 7. `npm run preflight`, push, then `gh pr create` with the PR template filled in completely: "Closes #$ARGUMENTS",
    every acceptance criterion mapped under "What changed", "Contract changes" starting with none, additive or
    breaking, "Needs the owner" saying exactly what he must decide, or "nothing", and "Outside Scope" with one line per
-   changed file outside the issue's Scope "In" saying why, or "nothing" (the gate notes the count). Then `gh pr merge <N> --auto`.
+   changed file outside the issue's Scope "In" saying why, or "nothing" (the gate notes the count). Open it with every template section
+   present: when the reviewers' verdicts are not posted yet, `## Reviewer results` says `pending: posting verdicts` and is
+   filled in after posting (`gh pr edit`). A PR body is never published with a section missing. Then `gh pr merge <N> --auto`.
    Wait until the CI checks settle, and only those: `lanes/gate` can wait on the owner indefinitely, so never watch it
    (never give `gh pr checks` a `--watch`). The CI checks are workflow runs and `lanes/gate` is a status, so watch the runs, each
    as its own plain command (a worktree session refuses `gh` inside a loop or `bash -c`): take the head SHA from

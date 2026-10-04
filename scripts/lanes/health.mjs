@@ -8,7 +8,7 @@ import { STATUS_QUERY, formatAge, gateDescriptions, gateSince, mergeGroupFailure
 
 export const HEALTH_LABEL = "lanes-health";
 export const HEARTBEAT_MARKER = "<!-- lanes:heartbeat -->";
-export const HEALTH_DEFAULTS = { approvedStuckMinutes: 30, noProgressMinutes: 30 };
+export const HEALTH_DEFAULTS = { approvedStuckMinutes: 30, noProgressMinutes: 30, gateFailureMinutes: 10 };
 export const FLAKE_DAYS = 7;
 
 const DAY = 86_400_000;
@@ -21,7 +21,7 @@ const FINDING_LIMIT = 20;
 // `config.health` over the defaults; a value that is not a positive number falls back to its default.
 export function healthThresholds(config) {
   const pick = (name) => (Number.isFinite(config?.health?.[name]) && config.health[name] > 0 ? config.health[name] : HEALTH_DEFAULTS[name]);
-  return { approvedStuckMinutes: pick("approvedStuckMinutes"), noProgressMinutes: pick("noProgressMinutes") };
+  return { approvedStuckMinutes: pick("approvedStuckMinutes"), noProgressMinutes: pick("noProgressMinutes"), gateFailureMinutes: pick("gateFailureMinutes") };
 }
 
 // A check name from GitHub is untrusted text that ends up in a key and a comment: keep a plain, bounded alphabet.
@@ -98,7 +98,7 @@ function gateFailure(p, run) {
     pr,
     run: run ?? (pr ? { url: `${pr}/checks` } : null),
     cause: run?.name ? `the merge-group check ${run.name} failed` : `lanes/gate says: ${oneLine(p.gateDescription) || "failing"}`,
-    fix: "open the run, fix what it names, and push",
+    fix: run ? "open the run, fix what it names, and push" : "the lane fixes this; if its session has stopped, the issue shows needs-owner with what to do",
   };
 }
 
@@ -124,7 +124,7 @@ export function renderComment(p, tests, repoUrl) {
  * conclusion, at }], comments }`. `reply` is the STATUS_QUERY reply, `now` ms.
  */
 export function evaluate(inputs, now) {
-  const { approvedStuckMinutes, noProgressMinutes } = healthThresholds(inputs.config);
+  const { approvedStuckMinutes, noProgressMinutes, gateFailureMinutes } =healthThresholds(inputs.config);
   const found = new Map();
   // `extra` is the owner's guidance: `cause`, `fix`, the runbook `anchor`, and for a PR its `pr` link and failed `run`.
   const add = (key, kind, text, extra = {}) => found.set(key, { key, kind, text, ...extra });
@@ -154,7 +154,9 @@ export function evaluate(inputs, now) {
         ...stuckReason(p, queued.includes(p.number)),
       });
     }
-    if (FAILED_GATE.has(p.gateState)) add(`gate-failure:PR ${p.number}`, "gate-failure", `PR ${p.number}: lanes/gate is failing`, gateFailure(p, null));
+    // #732: a lane fixes a briefly failing gate (a missing section) itself, so it alerts only once the failure lasts.
+    const lasting = !Number.isFinite(p.gateSince) || now - p.gateSince >= gateFailureMinutes * 60_000;
+    if (FAILED_GATE.has(p.gateState) && lasting) add(`gate-failure:PR ${p.number}`, "gate-failure", `PR ${p.number}: lanes/gate is failing`, gateFailure(p, null));
   }
   for (const [n, f] of failures) {
     if (open.has(n) && !queued.includes(n)) {

@@ -32,9 +32,28 @@ test("approved-stuck: a green gate older than the threshold, and the threshold c
 
 test("gate-failure: a failing gate, or a merge-group failure on an open PR that is not in the queue", () => {
   const runs = [{ headBranch: "gh-readonly-queue/main/pr-9-abc", workflowName: "verify", createdAt: "2026-10-02T11:00:00Z" }, { headBranch: "gh-readonly-queue/main/pr-8-abc", workflowName: "verify", createdAt: "2026-10-02T11:00:00Z" }];
-  const prs = [{ number: 4, gateState: "FAILURE" }, { number: 9, gateState: "PENDING" }];
+  const prs = [{ number: 4, gateState: "FAILURE", gateSince: NOW - 11 * MIN }, { number: 9, gateState: "PENDING" }];
   assert.deepEqual(keys(base({ prs, mergeGroupRuns: runs })), ["gate-failure:PR 4", "gate-failure:PR 9"]);
   assert.deepEqual(keys(base({ prs: [{ number: 9, gateState: "PENDING" }], reply: replyOf([], [9]), mergeGroupRuns: runs })), []);
+});
+
+test("gate-failure (#732): a lane PR's failing gate alerts only after gateFailureMinutes, with the who-acts fix; a merge-group failure alerts at once", () => {
+  const pr = (ageMin) => ({ number: 4, gateState: "FAILURE", gateDescription: "PR template sections missing: reviewer results", gateSince: NOW - ageMin * MIN });
+  assert.deepEqual(keys(base({ prs: [pr(9)] })), []);
+  assert.deepEqual(keys(base({ prs: [pr(10)] })), ["gate-failure:PR 4"]);
+  assert.deepEqual(keys(base({ prs: [pr(3)], config: { health: { gateFailureMinutes: 2 } } })), ["gate-failure:PR 4"]);
+  assert.deepEqual(keys(base({ prs: [pr(30)], config: { health: { gateFailureMinutes: 60 } } })), []);
+  const [p] = evaluate(base({ prs: [pr(11)] }), NOW);
+  assert.match(p.cause, /lanes\/gate says: PR template sections missing/);
+  assert.equal(p.fix, "the lane fixes this; if its session has stopped, the issue shows needs-owner with what to do");
+  const runs = [{ headBranch: "gh-readonly-queue/main/pr-9-abc", workflowName: "verify", createdAt: "2026-10-02T11:59:00Z" }];
+  const [m] = evaluate(base({ prs: [{ number: 9, gateState: "PENDING", gateSince: NOW - MIN }], mergeGroupRuns: runs }), NOW);
+  assert.equal(m.key, "gate-failure:PR 9");
+  assert.equal(m.fix, "open the run, fix what it names, and push");
+});
+
+test("edge: a failing gate with no known start time still alerts", () => {
+  assert.deepEqual(keys(base({ prs: [{ number: 4, gateState: "FAILURE" }] })), ["gate-failure:PR 4"]);
 });
 
 test("no-progress: ready issues, nothing in flight, heartbeat absent or old", () => {
@@ -126,15 +145,17 @@ test("run: with a closed low number and an open higher one, the open one is used
 });
 
 test("healthThresholds: defaults and invalid values", () => {
-  assert.deepEqual(healthThresholds({}), { approvedStuckMinutes: 30, noProgressMinutes: 30 });
-  assert.deepEqual(healthThresholds({ health: { approvedStuckMinutes: -1, noProgressMinutes: "5" } }), { approvedStuckMinutes: 30, noProgressMinutes: 30 });
-  assert.deepEqual(healthThresholds({ health: { approvedStuckMinutes: 5, noProgressMinutes: 7 } }), { approvedStuckMinutes: 5, noProgressMinutes: 7 });
+  assert.deepEqual(healthThresholds({}), { approvedStuckMinutes: 30, noProgressMinutes: 30, gateFailureMinutes: 10 });
+  assert.deepEqual(healthThresholds({ health: { approvedStuckMinutes: -1, noProgressMinutes: "5", gateFailureMinutes: 0 } }), { approvedStuckMinutes: 30, noProgressMinutes: 30, gateFailureMinutes: 10 });
+  assert.equal(healthThresholds({ health: { gateFailureMinutes: "x" } }).gateFailureMinutes, 10);
+  assert.deepEqual(healthThresholds({ health: { approvedStuckMinutes: 5, noProgressMinutes: 7, gateFailureMinutes: 3 } }), { approvedStuckMinutes: 5, noProgressMinutes: 7, gateFailureMinutes: 3 });
 });
 
 test("lanes.config.json registers the module and sets both thresholds", () => {
   const config = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
   assert.ok(config.modules.entries.some((m) => m.paths.includes("scripts/lanes/health.")));
-  assert.deepEqual(healthThresholds(config), { approvedStuckMinutes: 30, noProgressMinutes: 30 });
+  assert.deepEqual(healthThresholds(config), { approvedStuckMinutes: 30, noProgressMinutes: 30, gateFailureMinutes: 10 });
+  assert.equal(config.health.gateFailureMinutes, 10);
 });
 
 test("readStored trusts the block only when github-actions wrote the body", () => {
