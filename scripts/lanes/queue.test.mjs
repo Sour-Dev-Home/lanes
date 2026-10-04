@@ -2409,3 +2409,38 @@ test("#724: edge: an issue planRecovery already handles this tick is left to it"
   const input = { issues: [issue(7, ["src/a.mjs"])], worktrees: [tree(7)], sessions: [], handled: new Set([7]) };
   assert.deepEqual(planWorktreeResume(input).resume, []);
 });
+
+test("#724: edge: a session that will not stop is left for the owner, nothing launched", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { state: "blocked" })] };
+  const run = resumeRun(world, { stopWorks: false });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+  assert.equal(run.out.filter((l) => l.includes("#7: could not stop session old-7")).length, 1, run.out.join("\n"));
+});
+
+test("#724: edge: a worktree listing that throws is reported and nothing is resumed", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = resumeRun({ issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [] });
+  run.deps.recovery.worktrees = () => {
+    throw new Error("git broke");
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.ok(run.out.some((l) => l.includes("worktrees cannot be listed") && l.includes("git broke")), run.out.join("\n"));
+  assert.deepEqual(run.launched.map((l) => l.cwd ?? null).length, run.launched.length);
+});
+
+// Known bug (reported by the test-hunter): resumeStoppedLanes skips an `attempted` issue without adding it to resumes or held,
+// so planTick launches it fresh from the repo root. todo until queue.mjs puts attempted worktree issues in `held`.
+test("#724: edge: a resumed lane that vanishes without a PR is not launched afresh from the repo root in the same run", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = resumeRun(world);
+  const prior = run.deps.sleep;
+  run.deps.sleep = async (ms) => {
+    if (run.launched.length === 1 && world.sessions.length) world.sessions = [];
+    return prior(ms);
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [7], run.out.join("\n"));
+});

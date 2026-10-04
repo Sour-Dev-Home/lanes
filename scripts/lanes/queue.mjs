@@ -480,7 +480,11 @@ function resumeStoppedLanes(snapshot, { deps, dir, say, attempted, told, handled
     told.add(key);
   }
   for (const r of resume) {
-    if (attempted.has(r.number)) continue;
+    // Already tried this run: held, or planTick would launch a fresh lane that stops at lane.md step 3.
+    if (attempted.has(r.number)) {
+      held.push(r.number);
+      continue;
+    }
     if (r.id) {
       try {
         if (recovery.saveLog) say(`#${r.number}: session log saved to ${recovery.saveLog(r.id, r.number)}`);
