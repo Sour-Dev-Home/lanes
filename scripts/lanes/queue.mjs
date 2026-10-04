@@ -393,6 +393,22 @@ function removalLines(snapshot, deps, told) {
   return lines;
 }
 
+// #739: the recovery marker of issue `n`, or null when the owner removed `needs-owner` after it was written (the owner
+// answered the stop, so the lane may be recovered once more; the next marker is written when it is). A marker with no
+// readable time, an events read that fails and an issue that never had the label all keep the marker.
+function markerAfterOwner(recovery, n, say) {
+  const marker = recovery.marker.read(n);
+  const written = Date.parse(marker?.time);
+  if (!marker || !Number.isFinite(written) || !recovery.ownerClearedAt) return marker;
+  try {
+    const cleared = Date.parse(recovery.ownerClearedAt(n));
+    return cleared > written ? null : marker;
+  } catch (err) {
+    say(`#${n}: needs-owner events cannot be read, marker kept: ${reason(err)}`);
+    return marker;
+  }
+}
+
 // #382: stops each lane planRecovery names and, when its worktree is clean and fully pushed, removes it so the tick's
 // normal launch path relaunches the issue (the removed session leaves `snapshot.sessions`). Unpushed or uncommitted
 // work is left and said. Each issue gets one attempt per run (`attempted`) and a stalled-again line once (`told`);
@@ -411,7 +427,7 @@ function recoverLanes(snapshot, { deps, dir, say, attempted, told, report = {}, 
     say(`stall check failed: ${reason(err)}`);
     return resumes;
   }
-  const planned = planRecovery({ ...snapshot, stalled, marker: recovery.marker.read });
+  const planned = planRecovery({ ...snapshot, stalled, marker: (n) => markerAfterOwner(recovery, n, say) });
   for (const { number: n, id, cwd, branch, reason: why, again, resume } of planned) {
     if (again) {
       if (!told.has(n)) say(`#${n}: stalled again after recovery: ${why}`);
@@ -785,6 +801,11 @@ const DEFAULT_RECOVERY = {
     return tree ? { path: tree.path, branch: tree.branch } : null;
   },
   workLeft: (tree) => laneWorkLeft(tree.path, tree.branch),
+  // #739: when the owner last removed `needs-owner` from the issue (ISO time), or null if it never was. Throws on a failed read.
+  ownerClearedAt: (n) => {
+    const out = run("gh")(["api", `repos/{owner}/{repo}/issues/${n}/events`, "--paginate", "--jq", '.[] | select(.event == "unlabeled" and .label.name == "needs-owner") | .created_at'], { cwd: repoRoot() });
+    return out.split("\n").map((l) => l.trim()).filter(Boolean).sort().pop() ?? null;
+  },
   // `claude agents --json` is asked from the repo root, as readSnapshot asks it.
   waitStopped: (id) => waitForStop(id, { run: (cmd, args) => run(cmd)(cmd === "claude" && args[0] === "agents" ? [...args, "--cwd", repoRoot()] : args), sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }),
   remove: (id, tree) => removeLaneWorktree({ id, ...tree }, (cmd, args) => run(cmd)(args)),
