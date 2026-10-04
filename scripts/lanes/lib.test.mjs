@@ -1966,3 +1966,21 @@ test("edge: #645 readControlState stops at a bounded number of comment pages, pa
   assert.match(s.reason, /too many comments/);
 });
 
+test("edge: #645 readControlState: exactly 50 comment pages are read (running), 51 are paused", async () => {
+  const { readControlState } = await import("./lib.mjs");
+  const at = readControlState(ctrlApi({ pages: Array.from({ length: 50 }, () => []) }).api, "o/r", CTRL_NOW);
+  assert.equal(at.paused, false);
+  const past = readControlState(ctrlApi({ pages: Array.from({ length: 51 }, () => []) }).api, "o/r", CTRL_NOW);
+  assert.equal(past.paused, true);
+});
+
+test("edge: #645 controlState: a look-alike bot (no Bot type, a User named github-actions, a null editor login) is not trusted", async () => {
+  const { controlState, CONTROL_MARKER } = await import("./lib.mjs");
+  const body = `${CONTROL_MARKER}\n{"paused":false,"since":"2026-10-04T00:00:00Z","by":"o","reason":""}`;
+  const now = Date.parse("2026-10-04T01:00:00Z");
+  assert.equal(controlState({ body, author: { login: "github-actions" }, editor: null }, now).paused, true);
+  assert.equal(controlState({ body, author: { login: "github-actions", __typename: "User" }, editor: null }, now).paused, true);
+  assert.equal(controlState({ body, author: { login: "github-actions[bot]", __typename: "Bot" }, editor: { login: null } }, now).paused, true);
+  assert.equal(controlState({ body, author: { login: "github-actions[bot]", __typename: "Bot" }, editor: null }, now).paused, false);
+});
+
