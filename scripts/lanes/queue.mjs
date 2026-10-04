@@ -17,7 +17,7 @@ import { mintInstallationToken } from "./app-token.mjs";
 import { parseBlockedBy } from "./blockers.mjs";
 import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWorktree, waitForStop } from "./cleanup.mjs";
 import { HEARTBEAT_MARKER, findOrCreateHealthIssue, ghClient } from "./health.mjs";
-import { GATE_CONTEXT, TEAM_REQUIRED_MESSAGE, isLaneBot, laneIssueOf, parseIssueForm } from "./lib.mjs";
+import { GATE_CONTEXT, TEAM_REQUIRED_MESSAGE, isLaneBot, laneIssueOf, parseIssueForm, readControlState } from "./lib.mjs";
 import { issuePaths } from "./paths.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
@@ -216,8 +216,8 @@ const FINDING_LIMIT = 20;
 // A finding is echoed by the watchdog, so its text keeps health.mjs's alphabet and length.
 const findingText = (s) => String(s ?? "").replace(/[^A-Za-z0-9 ._/()-]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80).trim();
 
-export function heartbeatBody({ at, commit, findings }) {
-  return `${HEARTBEAT_MARKER}\n\`\`\`json\n${JSON.stringify({ at, commit, findings })}\n\`\`\`\n`;
+export function heartbeatBody({ at, commit, findings, paused }) {
+  return `${HEARTBEAT_MARKER}\n\`\`\`json\n${JSON.stringify({ at, commit, findings, paused: paused === true })}\n\`\`\`\n`;
 }
 
 // The queue's findings for one tick: a stop it is about to make (first, so the cap never drops it), a lane session idle
@@ -486,7 +486,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       }
     }
     try {
-      await writeBeat({ at: new Date(now()).toISOString(), commit: startedAt, findings: heartbeatFindings({ prs: snapshot.prs, idle, ...extra }) });
+      await writeBeat({ at: new Date(now()).toISOString(), commit: startedAt, findings: heartbeatFindings({ prs: snapshot.prs, idle, ...extra }), paused });
       beatSaid = null;
     } catch (err) {
       const line = `heartbeat not written: ${reason(err)}`;
@@ -496,6 +496,9 @@ export async function main(argv, deps = DEFAULT_DEPS) {
   };
   let idleTicks = 0;
   let readFailures = 0;
+  // ADR 0028: the switch. `controlKey` is what was last said, so each change prints one line.
+  let paused = false;
+  let controlKey = "running";
   for (;;) {
     const at = stamp(now());
     // #444: check names and gate text in a line are external, so control characters (ANSI escapes) never reach the terminal.
@@ -504,6 +507,23 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       for (const line of cleanup()) if (line.trim()) say(line);
     } catch (err) {
       say(`cleanup failed: ${reason(err)}`);
+    }
+    // ADR 0028 part 4: the pause state is read first on each poll; a read that throws is paused (fail closed).
+    if (deps.control) {
+      let state;
+      try {
+        state = await deps.control();
+      } catch (err) {
+        state = { paused: true, since: new Date(now()).toISOString(), by: "lanes", reason: `the pause state cannot be read: ${reason(err)}` };
+      }
+      paused = state?.paused !== false;
+      const key = paused ? `${state?.by}|${state?.reason}` : "running";
+      if (key !== controlKey) {
+        const wasPaused = controlKey !== "running";
+        controlKey = key;
+        if (paused) say(`paused since ${new Date(Date.parse(state?.since) || now()).toISOString().slice(0, 16).replace("T", " ")} UTC by ${state?.by ?? "unknown"}: ${state?.reason || "no reason given"}`);
+        else if (wasPaused) say("resumed");
+      }
     }
     let snapshot;
     let dir;
@@ -545,7 +565,8 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       }
     }
     const report = {};
-    const resumes = deps.recovery ? recoverLanes(snapshot, { deps, dir, say, attempted, told, report }) : [];
+    // ADR 0028: while paused no dead lane is recovered or resumed; it is found again after the pause lifts.
+    const resumes = deps.recovery && !paused ? recoverLanes(snapshot, { deps, dir, say, attempted, told, report }) : [];
     await beat(say, snapshot, dir, { stalled: report.stalled });
     // An issue whose launch failed stays open (its blockers and ranking still count) but is no longer a candidate.
     const issues = snapshot.issues.map((i) => (failedLaunches.has(i.number) ? { ...i, labels: labelsOf(i).filter((l) => l !== "ready") } : i));
@@ -567,7 +588,8 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       for (const n of budget.lanesOver) if (!overLane.has(n)) say(`#${n}: over its ${caps.perLaneTokens} token budget, left running`);
       overLane = new Set(budget.lanesOver);
     }
-    const plan = planTick({ ...snapshot, issues, maxLanes, softPaths, budgetOver });
+    const planned = planTick({ ...snapshot, issues, maxLanes, softPaths, budgetOver });
+    const plan = paused ? { ...planned, launch: [] } : planned;
     // #383: the waiting PRs print as one block, only in a tick where a PR started or stopped waiting or its reason changed.
     const current = new Map(plan.waiting.map((w) => [w.number, w.reason]));
     for (const line of plan.lines) if (!WAIT_LINE.test(line)) say(line);
@@ -720,8 +742,16 @@ function appHeartbeat({ identity }) {
   }, identity);
 }
 
+// ADR 0028: the pause state, read with the owner's gh (the queue's own reads); a repository name that cannot be read is a thrown error, so paused.
+let repoName = null;
+function pauseState() {
+  repoName ??= run("gh")(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], { cwd: repoRoot() }).trim();
+  return readControlState((args) => run("gh")(["api", ...args], { cwd: repoRoot() }), repoName);
+}
+
 const DEFAULT_DEPS = {
   env: process.env,
+  control: pauseState,
   heartbeat: appHeartbeat,
   idle: (agents, root) => idleLanes(agents, root),
   file: import.meta.url,

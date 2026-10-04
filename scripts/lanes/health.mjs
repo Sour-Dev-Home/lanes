@@ -3,7 +3,7 @@
 // Usage: node scripts/lanes/health.mjs   (reads and writes GitHub through gh; meant for the scheduled workflow)
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { isLaneBot, loadConfig } from "./lib.mjs";
+import { isLaneBot, loadConfig, readControlState } from "./lib.mjs";
 import { STATUS_QUERY, formatAge, gateDescriptions, gateSince, mergeGroupFailures, mergeQueueEntries, queueRemovals } from "./status.mjs";
 
 export const HEALTH_LABEL = "lanes-health";
@@ -42,7 +42,8 @@ export function readHeartbeat(comments, identity) {
     const at = Date.parse(data?.at) || Date.parse(c.updatedAt);
     if (!Number.isFinite(at)) continue;
     const findings = (Array.isArray(data?.findings) ? data.findings : []).filter((f) => typeof f === "string" && FINDING.test(f)).slice(0, FINDING_LIMIT);
-    if (!best || at > best.at) best = { at, findings };
+    // ADR 0028: a heartbeat without `paused` reads as not paused.
+    if (!best || at > best.at) best = { at, findings, paused: data?.paused === true };
   }
   return best;
 }
@@ -171,7 +172,9 @@ export function evaluate(inputs, now) {
     });
   }
   const heartbeat = readHeartbeat(inputs.comments, inputs.identity);
-  if (inputs.readyCount > 0 && inputs.inFlightCount === 0 && (!heartbeat || now - heartbeat.at >= noProgressMinutes * 60_000)) {
+  // ADR 0028 part 6: while paused on purpose, nothing launching is expected, so `no-progress` stays quiet (other alerts fire).
+  const switchedOff = inputs.control?.paused === true || heartbeat?.paused === true;
+  if (!switchedOff && inputs.readyCount > 0 && inputs.inFlightCount === 0 && (!heartbeat || now - heartbeat.at >= noProgressMinutes * 60_000)) {
     const paused = inputs.queuePaused === true;
     add("no-progress", "no-progress", `issues are ready, nothing is in flight and the queue has not reported in ${noProgressMinutes} minutes`, {
       anchor: paused ? "paused" : "no-progress",
@@ -251,9 +254,11 @@ export function reconcile(stored, active, now) {
   return { open, added, recovered: stored.length > 0 && active.length === 0 };
 }
 
-export function renderBody(open, active, heartbeat) {
+export function renderBody(open, active, heartbeat, control = null) {
   const text = new Map(active.map((p) => [p.key, p.text]));
   const lines = [`<!-- lanes:health ${JSON.stringify({ open })} -->`, "", `**Status:** ${open.length ? `${open.length} problem${open.length === 1 ? "" : "s"}` : "healthy"}`, ""];
+  // ADR 0028 part 6: the pause, from the control comment (text already one line, but bounded again here).
+  if (control?.paused === true) lines.push(`Paused since ${new Date(control.since).toISOString().slice(0, 16).replace("T", " ")} UTC by ${oneLine(control.by, 60)}: ${oneLine(control.reason, 200) || "no reason given"}`, "");
   for (const o of open) lines.push(`- ${text.get(o.key) ?? o.key} (since ${new Date(o.at).toISOString().slice(0, 16).replace("T", " ")} UTC)`);
   if (open.length) lines.push("");
   lines.push(`Last queue heartbeat: ${heartbeat ? `${new Date(heartbeat.at).toISOString().slice(0, 16).replace("T", " ")} UTC` : "none"}`);
@@ -287,7 +292,7 @@ export async function run({ client, inputs, now = Date.now() }) {
   const active = evaluate({ ...inputs, comments }, now);
   const { open, added, recovered } = reconcile(readStored(issue), active, now);
   if (issue.state !== "OPEN" && active.length > 0) await client.reopen(n);
-  const body = renderBody(open, active, readHeartbeat(comments, inputs.identity));
+  const body = renderBody(open, active, readHeartbeat(comments, inputs.identity), inputs.control);
   if (body !== issue.body) await client.editBody(n, body);
   for (const p of added) {
     let tests;
@@ -369,10 +374,15 @@ export function gatherInputs(gh = ghJson, config = loadConfig()) {
   const issues = gh(["issue", "list", "--state", "open", "--limit", "1000", "--json", "number,labels,url"]);
   const has = (i, name) => i.labels.some((l) => l.name === name);
   const runs = gh(["run", "list", "--limit", "100", "--json", "databaseId,name,headSha,conclusion,updatedAt"]);
+  const repoInfo = gh(["repo", "view", "--json", "url,nameWithOwner"]);
   return {
     config,
     identity: config.identity,
-    repoUrl: gh(["repo", "view", "--json", "url"])?.url,
+    repoUrl: repoInfo?.url,
+    control: readControlState((args) => {
+      const reply = gh(["api", ...args]);
+      return typeof reply === "string" ? reply : JSON.stringify(reply);
+    }, repoInfo?.nameWithOwner),
     readLog: (id) => gh(["run", "view", String(Number(id)), "--log-failed"]),
     reply,
     prs,

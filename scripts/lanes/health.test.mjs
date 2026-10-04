@@ -74,7 +74,7 @@ test("readHeartbeat: lane bot only, marker first, newest wins, solo profile trus
   assert.equal(readHeartbeat(undefined, identity), null);
   assert.equal(readHeartbeat([heartbeat(NOW - 9 * MIN), heartbeat(NOW - 2 * MIN)], identity).at, NOW - 2 * MIN);
   const broken = { body: `${HEARTBEAT_MARKER}\n{not json}`, author: BOT, updatedAt: new Date(NOW - MIN).toISOString() };
-  assert.deepEqual(readHeartbeat([broken], identity), { at: NOW - MIN, findings: [] });
+  assert.deepEqual(readHeartbeat([broken], identity), { at: NOW - MIN, findings: [], paused: false });
 });
 
 test("flake: a lanes-flaky annotation on a verify check run is a flake keyed by file and sha, cleared after 7 days (#637)", () => {
@@ -607,4 +607,74 @@ test("needs-owner: gatherInputs lists open issues only and keeps those labelled 
   const r = gatherInputs(gh, { identity });
   assert.deepEqual(r.needsOwner, [{ number: 4, url: "https://github.com/o/r/issues/4" }]);
   assert.ok(seen[0].includes("open") && seen[0].includes("number,labels,url"));
+});
+
+// --- #645 (ADR 0028): the pause in the health issue. ---
+const PAUSE = { paused: true, since: "2026-10-02T10:30:00.000Z", by: "owner", reason: "maintenance", failClosed: false };
+const pausedBeat = (at, paused) => ({ ...heartbeat(at), body: `${HEARTBEAT_MARKER}\n\`\`\`json\n${JSON.stringify({ at: new Date(at).toISOString(), findings: [], ...(paused === undefined ? {} : { paused }) })}\n\`\`\`` });
+
+test("#645: the body shows `Paused since <time> by <who>: <reason>`, and nothing when running", () => {
+  assert.match(renderBody([], [], null, PAUSE), /^Paused since 2026-10-02 10:30 UTC by owner: maintenance$/m);
+  assert.doesNotMatch(renderBody([], [], null, { ...PAUSE, paused: false }), /Paused/);
+  assert.doesNotMatch(renderBody([], [], null), /Paused/);
+  assert.match(renderBody([], [], null, { ...PAUSE, reason: "" }), /by owner: no reason given$/m);
+});
+
+test("edge: #645 the paused line carries no mention, link or control character", () => {
+  const line = /^Paused since .*$/m.exec(renderBody([], [], null, { ...PAUSE, by: "o@wner", reason: "see #9\u001b[31m [x](http://e.com)" }))[0];
+  assert.doesNotMatch(line, /[@#\u001b[\]]|:\/\//);
+});
+
+test("#645: while paused no-progress is suppressed, from the control comment or from the heartbeat", () => {
+  const ready = { readyCount: 2, inFlightCount: 0 };
+  assert.deepEqual(keys(base({ ...ready, control: PAUSE })), []);
+  assert.deepEqual(keys(base({ ...ready, comments: [pausedBeat(NOW - 40 * MIN, true)] })), []);
+  assert.deepEqual(keys(base({ ...ready, control: { ...PAUSE, paused: false } })), ["no-progress"]);
+});
+
+test("#645: other alerts still fire while paused", () => {
+  assert.deepEqual(keys(base({ control: PAUSE, prs: [{ number: 4, gateState: "FAILURE" }] })), ["gate-failure:PR 4"]);
+});
+
+test("#645: a heartbeat without paused reads as not paused, and paused must be literally true", () => {
+  assert.equal(readHeartbeat([pausedBeat(NOW, undefined)], identity).paused, false);
+  assert.equal(readHeartbeat([pausedBeat(NOW, "yes")], identity).paused, false);
+  assert.equal(readHeartbeat([pausedBeat(NOW, true)], identity).paused, true);
+  assert.deepEqual(keys(base({ readyCount: 2, inFlightCount: 0, comments: [pausedBeat(NOW - 40 * MIN, undefined)] })), ["no-progress"]);
+});
+
+test("#645: a pause posts no alert comment, and the body is written with the pause line", async () => {
+  const f = fake({});
+  await run({ client: f.client, inputs: base({ control: PAUSE }), now: NOW });
+  assert.deepEqual(names(f.calls).filter((n) => n === "comment"), []);
+  assert.match(f.store.get(900).body, /Paused since 2026-10-02 10:30 UTC by owner: maintenance/);
+});
+
+test("#645: gatherInputs carries the pause state, paused when it cannot be read", async () => {
+  const { gatherInputs } = await import("./health.mjs");
+  const gh = (args) => {
+    if (args[0] === "repo") return { url: "https://github.com/o/r", nameWithOwner: "o/r" };
+    if (args.some((a) => String(a).includes("lanes-control.yml"))) throw new Error("HTTP 502");
+    if (args[0] === "api") return {};
+    if (args[0] === "issue") return [];
+    if (args[0] === "pr") return [];
+    if (args[0] === "run") return [];
+    return {};
+  };
+  const r = gatherInputs(gh, { identity });
+  assert.equal(r.control.paused, true);
+  assert.match(r.control.reason, /cannot be read: HTTP 502/);
+});
+
+test("#645: gatherInputs reads the lanes-control run history, so a successful pause run shows in the inputs", async () => {
+  const { gatherInputs } = await import("./health.mjs");
+  const runs = { workflow_runs: [{ conclusion: "success", event: "workflow_dispatch", head_branch: "main", display_title: "pause: maintenance", triggering_actor: { login: "owner" }, run_started_at: "2026-10-04T09:00:00Z", created_at: "2026-10-04T09:00:00Z" }] };
+  const gh = (args) => {
+    if (args[0] === "repo") return { url: "https://github.com/o/r", nameWithOwner: "o/r" };
+    if (args[0] === "api" && String(args[1]).includes("/actions/workflows/lanes-control.yml/runs")) return runs;
+    if (args[0] === "api") return {};
+    return [];
+  };
+  const r = gatherInputs(gh, { identity });
+  assert.deepEqual([r.control.paused, r.control.by, r.control.reason], [true, "owner", "maintenance"]);
 });

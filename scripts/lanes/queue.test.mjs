@@ -1982,7 +1982,7 @@ function fakeHealthClient({ comments = [], issues = [{ number: 900, state: "OPEN
     },
   };
 }
-const beatPayload = (findings = [], at = "2026-09-28T09:00:00.000Z") => ({ at, commit: "abc1234", findings });
+const beatPayload = (findings = [], at = "2026-09-28T09:00:00.000Z") => ({ at, commit: "abc1234", findings, paused: false });
 const blockOf = (text) => JSON.parse(/\{[\s\S]*\}/.exec(text.slice(text.indexOf("-->") + 3))[0]);
 
 // Criterion 1
@@ -2070,7 +2070,7 @@ test("the heartbeat block is what health.mjs readHeartbeat reads from the lane b
   const { readHeartbeat } = await import("./health.mjs");
   const body = heartbeatBody(beatPayload(["idle-lane:issue 5", "queue-stopped:cannot restart dirty"]));
   const got = readHeartbeat([{ body, author: BOT, updatedAt: "2026-09-28T09:00:00Z" }], QUEUE_TEAM);
-  assert.deepEqual(got, { at: Date.parse("2026-09-28T09:00:00.000Z"), findings: ["idle-lane:issue 5", "queue-stopped:cannot restart dirty"] });
+  assert.deepEqual(got, { at: Date.parse("2026-09-28T09:00:00.000Z"), findings: ["idle-lane:issue 5", "queue-stopped:cannot restart dirty"], paused: false });
 });
 
 // Criterion 1: each finding
@@ -2129,7 +2129,7 @@ test("main: every tick writes one heartbeat with the time and the script commit"
   await assert.rejects(main([], { ...run.deps, git: git.git }), /never stopped/);
   assert.deepEqual(run.beats[0].identity, QUEUE_TEAM);
   assert.equal(run.written().length, 4);
-  assert.deepEqual(run.written()[0], { at: "2026-09-28T09:00:00.000Z", commit: "abc1234def", findings: [] });
+  assert.deepEqual(run.written()[0], { at: "2026-09-28T09:00:00.000Z", commit: "abc1234def", findings: [], paused: false });
   assert.equal(run.written()[1].at, "2026-09-28T09:03:00.000Z");
 });
 
@@ -2200,4 +2200,100 @@ test("main: the heartbeat touches no other issue: the queue's own gh calls are u
   await main([], withBeat.deps);
   await main([], without.deps);
   assert.deepEqual(withBeat.calls, without.calls);
+});
+
+// --- #645 (ADR 0028): the pause switch. ---
+const PAUSED_STATE = { paused: true, since: "2026-10-02T08:30:00.000Z", by: "owner", reason: "maintenance" };
+const pausedLine = (out) => out.filter((l) => / paused since /.test(l));
+
+test("#645: while paused nothing launches, one line is printed, and the queue keeps polling; it resumes with one line", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 4 && (world.issues = []) });
+  run.deps.control = () => (run.ticks() < 3 ? PAUSED_STATE : { paused: false });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => [l.n, l.tick]), [[1, 3]]);
+  assert.equal(pausedLine(run.out).length, 1, run.out.join("\n"));
+  assert.match(pausedLine(run.out)[0], / paused since 2026-10-02 08:30 UTC by owner: maintenance$/);
+  assert.equal(run.out.filter((l) => / resumed$/.test(l)).length, 1);
+  assert.ok(run.ticks() >= 3, "kept polling");
+});
+
+test("#645: a queue that starts running prints neither paused nor resumed", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 1 && (world.issues = []) });
+  run.deps.control = () => ({ paused: false });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [1]);
+  assert.ok(!run.out.some((l) => /paused|resumed/.test(l)));
+});
+
+test("#645: a dead lane is not resumed while paused, and is resumed after the pause lifts", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/security-reviewer")], sessions: [idleLane(7)] };
+  const run = recoveryRun(world);
+  run.deps.control = () => (run.ticks() < 2 ? PAUSED_STATE : { paused: false });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => [l.n, l.tick]), [[7, 2]]);
+  assert.deepEqual(run.removed, []);
+  assert.equal(run.markers.get(7).outcome, "resume");
+});
+
+test("#645: a stalled lane is not stopped or removed while paused", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7)] };
+  const run = recoveryRun(world, { stalledIssues: [7] });
+  run.deps.control = () => PAUSED_STATE;
+  const stop = async () => {
+    throw Object.assign(new Error("stop"), { code: "QUEUE_STOP" });
+  };
+  assert.equal(await main([], { ...run.deps, sleep: stop }), 0);
+  assert.deepEqual([run.stopped, run.removed, run.launched], [[], [], []]);
+});
+
+test("#645: a control read that throws is paused, fail closed, with the reason named", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 2 && (world.issues = []) });
+  run.deps.control = async () => {
+    throw new Error("HTTP 403: rate limit exceeded\nmore");
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+  assert.match(pausedLine(run.out)[0], / by lanes: the pause state cannot be read: HTTP 403: rate limit exceeded$/);
+});
+
+test("edge: #645 a control state with an odd shape is paused, and a changed reason prints a new line", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(1, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = fakeRun(world, { onSleep: (t) => t === 2 && (world.issues = []) });
+  run.deps.control = () => (run.ticks() < 1 ? undefined : { ...PAUSED_STATE, reason: "second reason", since: "not a date" });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+  assert.equal(pausedLine(run.out).length, 2, run.out.join("\n"));
+  assert.match(pausedLine(run.out)[1], / by owner: second reason$/);
+});
+
+test("#645: the queue reads the pause state with its default gh login, never the App token (the App has no actions permission)", () => {
+  const src = readFileSync(new URL("./queue.mjs", import.meta.url), "utf8");
+  const body = /function pauseState\(\) \{[\s\S]*?\n\}/.exec(src)[0];
+  assert.match(body, /readControlState/);
+  assert.doesNotMatch(body, /GH_TOKEN|GITHUB_TOKEN|tokenNow|mintInstallationToken|appHeartbeat/);
+});
+
+test("#645: the self-restart still happens while paused", async () => {
+  const { main, RESTART_CODE } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] });
+  run.deps.control = () => PAUSED_STATE;
+  const git = fakeGit({ head: "aaaaaaa1111", remote: "bbbbbbb2222", changed: ["scripts/lanes/queue.mjs"] });
+  assert.equal(await main([], { ...run.deps, git: git.git }), RESTART_CODE);
+});
+
+test("#645: the heartbeat carries paused, true while paused and false after", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = heartbeatRun({ issues: [], prs: [], sessions: [] }, { idleContinues: true, maxTicks: 3 });
+  run.deps.control = () => (run.ticks() < 2 ? PAUSED_STATE : { paused: false });
+  await assert.rejects(main([], { ...run.deps, git: fakeGit({ head: "abc1234def", remote: "abc1234def" }).git }), /never stopped/);
+  assert.deepEqual(run.written().map((b) => b.paused), [true, true, false, false]);
 });

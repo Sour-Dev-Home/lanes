@@ -1463,3 +1463,56 @@ test("edge: the windowsHide scan refuses an aliased, namespace, default or requi
   ]) assert.equal(windowsHideViolations(`\n${src}\n`).length, 1, src);
   assert.deepEqual(windowsHideViolations('import { join } from "node:path";\nconst c = require("node:fs");'), []);
 });
+
+// #645 (ADR 0028): the Pause and Resume buttons.
+const control = () => readFileSync(".github/workflows/lanes-control.yml", "utf8");
+
+test("#645 lanes-control runs only on workflow_dispatch, with no other trigger", () => {
+  const on = /\non:\n((?:  .*\n|\n)+?)(?=\S)/.exec(control())[1];
+  assert.match(on, /^  workflow_dispatch:$/m);
+  assert.deepEqual(on.match(/^  [a-z_]+:/gm), ["  workflow_dispatch:"]);
+});
+
+test("#645 lanes-control inputs: action is a choice of pause and resume, reason an optional string", () => {
+  const yml = control();
+  const action = /      action:\n((?:        .*\n)+)/.exec(yml)[1];
+  assert.match(action, /type: choice/);
+  assert.match(action, /required: true/);
+  assert.deepEqual([...action.matchAll(/^          - (\S+)$/gm)].map((m) => m[1]), ["pause", "resume"]);
+  const reason = /      reason:\n((?:        .*\n)+)/.exec(yml)[1];
+  assert.match(reason, /type: string/);
+  assert.match(reason, /required: false/);
+  assert.match(reason, /200 characters/);
+});
+
+test("#645 lanes-control has contents: read and nothing else, and no token is handed to the script", () => {
+  const yml = control();
+  assert.match(yml, /\npermissions:\n  contents: read\nconcurrency:/);
+  assert.doesNotMatch(yml, /: write/);
+  assert.equal(yml.match(/^\s+permissions:/gm), null, "no job-level override widens it");
+  assert.doesNotMatch(yml, /GH_TOKEN|GITHUB_TOKEN|github\.token|secrets\./);
+});
+
+test("#645 lanes-control's run-name is `<action>: <reason>`, the title the queue and the health job parse", () => {
+  const yml = control();
+  assert.match(yml, /^run-name: "\$\{\{ inputs\.action \}\}: \$\{\{ inputs\.reason \}\}"$/m);
+});
+
+test("#645 lanes-control job runs only on refs/heads/main and checks out the default branch", () => {
+  const yml = control();
+  assert.match(yml, /\n    if: github\.ref == 'refs\/heads\/main'\n/);
+  assert.match(yml, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
+  assert.match(yml, /persist-credentials: false/);
+});
+
+test("#645 lanes-control passes the action, reason and actor through env, never into the run line", () => {
+  const yml = control();
+  const runs = [...yml.matchAll(/^\s+- run: (.*)$/gm)].map((m) => m[1]);
+  assert.deepEqual(runs, ["node scripts/lanes/control.mjs"]);
+  assert.doesNotMatch(runs.join("\n"), /\$\{\{/);
+  assert.match(yml, /LANES_ACTION: \$\{\{ inputs\.action \}\}/);
+  assert.match(yml, /LANES_REASON: \$\{\{ inputs\.reason \}\}/);
+  assert.match(yml, /LANES_ACTOR: \$\{\{ github\.triggering_actor \}\}/);
+  // every expression in the file sits on an `env:`, `with:` or `if:`/group line, none after `run:`
+  for (const line of yml.split("\n")) if (/^\s+(- )?run:/.test(line)) assert.doesNotMatch(line, /\$\{\{/);
+});

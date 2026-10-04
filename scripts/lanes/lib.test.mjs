@@ -1838,3 +1838,132 @@ test("edge: loadConfig surfaces a CODEOWNERS parse error with its line", () => {
   });
 });
 
+// --- #645 (ADR 0028): controlState and readControlState read the lanes-control run history. ---
+const CTRL_NOW = Date.parse("2026-10-04T12:00:00Z");
+// A run as the Actions API lists it; `at` orders runs (created_at), the rest overrides.
+const ctrlRun = (title, at, extra = {}) => ({ conclusion: "success", event: "workflow_dispatch", head_branch: "main", display_title: title, triggering_actor: { login: "owner" }, run_started_at: at, created_at: at, ...extra });
+const T1 = "2026-10-04T09:00:00Z";
+const T2 = "2026-10-04T10:00:00Z";
+const T3 = "2026-10-04T11:00:00Z";
+
+test("#645 controlState: no runs, or no successful run, is running", async () => {
+  const { controlState } = await import("./lib.mjs");
+  for (const runs of [[], [ctrlRun("pause: x", T1, { conclusion: "failure" })], [ctrlRun("pause: x", T1, { conclusion: null })]]) {
+    const s = controlState(runs, CTRL_NOW);
+    assert.deepEqual([s.paused, s.failClosed], [false, false]);
+  }
+});
+
+test("#645 controlState: the newest successful run decides, giving action, reason, who and since", async () => {
+  const { controlState } = await import("./lib.mjs");
+  assert.deepEqual(controlState([ctrlRun("pause: maintenance", T2)], CTRL_NOW), { paused: true, since: "2026-10-04T10:00:00.000Z", by: "owner", reason: "maintenance", failClosed: false });
+  const resumed = controlState([ctrlRun("pause: a", T1), ctrlRun("resume: done", T2, { triggering_actor: { login: "dev2" } })], CTRL_NOW);
+  assert.deepEqual([resumed.paused, resumed.by, resumed.reason], [false, "dev2", "done"]);
+  // The API lists newest first, but the order is taken from created_at, not from the array.
+  assert.equal(controlState([ctrlRun("resume: new", T3), ctrlRun("pause: old", T1)], CTRL_NOW).paused, false);
+  assert.equal(controlState([ctrlRun("pause: old", T1), ctrlRun("resume: new", T3)], CTRL_NOW).paused, false);
+});
+
+test("#645 controlState: a failed, cancelled or in-progress newest run is skipped; the previous successful one counts", async () => {
+  const { controlState } = await import("./lib.mjs");
+  for (const conclusion of ["failure", "cancelled", "skipped", "timed_out", null, undefined]) {
+    const s = controlState([ctrlRun("resume: bad", T3, { conclusion }), ctrlRun("pause: kept", T1)], CTRL_NOW);
+    assert.deepEqual([s.paused, s.reason], [true, "kept"], String(conclusion));
+  }
+});
+
+test("#645 controlState: a title without a reason parses, an unparseable one is paused", async () => {
+  const { controlState } = await import("./lib.mjs");
+  assert.deepEqual([controlState([ctrlRun("pause:", T1)], CTRL_NOW).paused, controlState([ctrlRun("pause: ", T1)], CTRL_NOW).reason], [true, ""]);
+  assert.equal(controlState([ctrlRun("resume:", T1)], CTRL_NOW).paused, false);
+  for (const display_title of ["Pause and resume", "stop: x", "pause x", "pause", "", undefined, null, 5, "PAUSE: x", " pause: x", "lanes-control"]) {
+    const s = controlState([ctrlRun("pause: older", T1), ctrlRun(display_title, T2)], CTRL_NOW);
+    assert.equal(s.paused, true, String(display_title));
+    assert.equal(s.failClosed, true, String(display_title));
+    assert.match(s.reason, /does not parse/);
+  }
+});
+
+test("#645 controlState: a newest successful run from another event or branch is paused, naming which", async () => {
+  const { controlState } = await import("./lib.mjs");
+  for (const event of ["push", "schedule", "pull_request", undefined]) {
+    const s = controlState([ctrlRun("resume: x", T2, { event }), ctrlRun("pause: y", T1)], CTRL_NOW);
+    assert.equal(s.paused, true, String(event));
+    assert.match(s.reason, /not workflow_dispatch/);
+  }
+  for (const head_branch of ["feature", "main2", "refs/heads/main", "Main", undefined]) {
+    const s = controlState([ctrlRun("resume: x", T2, { head_branch })], CTRL_NOW);
+    assert.equal(s.paused, true, String(head_branch));
+    assert.match(s.reason, /not main/);
+  }
+});
+
+test("#645 controlState: a malformed list or start time is paused", async () => {
+  const { controlState } = await import("./lib.mjs");
+  for (const runs of [null, undefined, {}, "x"]) assert.match(controlState(runs, CTRL_NOW).reason, /not a list/);
+  const s = controlState([ctrlRun("pause: x", "not a date", { run_started_at: "nope" })], CTRL_NOW);
+  assert.deepEqual([s.paused, s.failClosed, s.since], [true, true, new Date(CTRL_NOW).toISOString()]);
+  assert.equal(controlState([null, 7, "x", ctrlRun("pause: ok", T1)], CTRL_NOW).paused, true);
+});
+
+test("edge: #645 controlState strips control characters and bounds the reason, and a hostile actor reads as unknown", async () => {
+  const { controlState } = await import("./lib.mjs");
+  const s = controlState([ctrlRun(`pause: a\nb\u001b[31mc‮d${"x".repeat(500)}`, T1, { triggering_actor: { login: "evil\nname" } })], CTRL_NOW);
+  assert.doesNotMatch(s.reason, /[\u0000-\u001f‮]/);
+  assert.ok(s.reason.length <= 200);
+  assert.equal(s.by, "unknown");
+  assert.equal(controlState([ctrlRun("pause: x", T1, { triggering_actor: { login: "dependabot[bot]" } })], CTRL_NOW).by, "dependabot[bot]");
+  assert.equal(controlState([ctrlRun("pause: x", T1, { triggering_actor: null })], CTRL_NOW).by, "unknown");
+});
+
+// `api` for readControlState: a fake `gh api` answering with the given reply.
+const ctrlApi = (reply, seen = []) => (args) => {
+  seen.push(args);
+  if (reply instanceof Error) throw reply;
+  return typeof reply === "string" ? reply : JSON.stringify(reply);
+};
+
+test("#645 readControlState: reads the runs of lanes-control.yml and applies controlState", async () => {
+  const { readControlState } = await import("./lib.mjs");
+  const seen = [];
+  const s = readControlState(ctrlApi({ workflow_runs: [ctrlRun("pause: maintenance", T2)] }, seen), "o/r", CTRL_NOW);
+  assert.deepEqual([s.paused, s.by, s.reason], [true, "owner", "maintenance"]);
+  assert.equal(seen.length, 1);
+  assert.match(seen[0][0], /^repos\/o\/r\/actions\/workflows\/lanes-control\.yml\/runs\?/);
+  assert.equal(readControlState(ctrlApi({ workflow_runs: [] }), "o/r", CTRL_NOW).paused, false);
+});
+
+test("#645 readControlState: each read error is paused, fail closed, naming the cause", async () => {
+  const { readControlState } = await import("./lib.mjs");
+  const cases = [
+    ["gh fails", ctrlApi(Object.assign(new Error("gh failed"), { stderr: "HTTP 403: rate limit exceeded\nmore" })), /cannot be read: HTTP 403: rate limit exceeded$/],
+    ["not found", ctrlApi(Object.assign(new Error("x"), { stderr: "HTTP 404: Not Found" })), /HTTP 404/],
+    ["not JSON", ctrlApi("<html>"), /cannot be read/],
+    ["no runs field", ctrlApi({}), /unexpected reply/],
+    ["runs not a list", ctrlApi({ workflow_runs: "x" }), /unexpected reply/],
+    ["null reply", ctrlApi("null"), /unexpected reply/],
+  ];
+  for (const [name, api, reason] of cases) {
+    const s = readControlState(api, "o/r", CTRL_NOW);
+    assert.deepEqual([s.paused, s.failClosed], [true, true], name);
+    assert.match(s.reason, reason, name);
+  }
+});
+
+test("edge: #645 readControlState refuses a bad repository name before any call", async () => {
+  const { readControlState } = await import("./lib.mjs");
+  const seen = [];
+  for (const repo of ["not-a-repo", undefined, "", "a/b/c", "o/r?x=1", "o/../r", "o/..", "../r", "./r", "o/."]) {
+    const s = readControlState(ctrlApi({ workflow_runs: [] }, seen), repo, CTRL_NOW);
+    assert.equal(s.paused, true, String(repo));
+    assert.match(s.reason, /bad repository name/);
+  }
+  assert.deepEqual(seen, []);
+});
+
+test("edge: #645 readControlState strips control characters from a read error shown to the owner", async () => {
+  const { readControlState } = await import("./lib.mjs");
+  const s = readControlState(ctrlApi(Object.assign(new Error("x"), { stderr: `HTTP 500\u001b[31m boom ${"y".repeat(300)}` })), "o/r", CTRL_NOW);
+  assert.doesNotMatch(s.reason, /\u001b/);
+  assert.ok(s.reason.length < 160);
+});

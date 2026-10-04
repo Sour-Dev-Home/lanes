@@ -231,12 +231,38 @@ Incidents: none recorded in the cited PRs; the rules are `CLAUDE.md` rules 4 and
 - `start.maxLanes` in `lanes.config.json` is reached, or the token budget is used up.
 - You removed `ready` from the issues.
 
-**To pause on purpose.** Stop the queue with Ctrl-C and let the running lanes finish; their PRs still merge. To stop a
-single issue, remove its `ready` label in GitHub.
+**To pause on purpose (ADR 0028).** In GitHub open Actions, then lanes-control, Run workflow, pick `pause`, add a reason
+if you like, and press Run. Only people with write access can run it, and Actions records who did. The queue reads the
+state on every poll: from then on it launches nothing and resumes no dead lane, prints one line
+(`paused since <time> by <who>: <reason>`), and keeps polling. Lanes already running finish and their PRs still merge.
+The health issue shows `Paused since <time> by <who>: <reason>`, a pause raises no alert, and
+[no-progress](#no-progress) stays quiet while it lasts; other alerts still fire. The pause is as live as the poll
+interval: a lane that starts a second before you press the button runs to the end. To stop a single issue, remove its
+`ready` label. Stopping the queue with Ctrl-C also works, but the next queue start launches again.
 
-**To resume.** `git pull --ff-only`, then `node scripts/lanes/queue.mjs` in your own terminal. Lanes that died during
-the pause resume as in [stalled-lane](#stalled-lane). A pause longer than the health thresholds raises
-[no-progress](#no-progress) once the queue is back, and clears when work moves.
+**To resume.** Run lanes-control again with `resume`. The queue prints `resumed` on its next poll, and dead lanes that
+were found during the pause are resumed then, as in [stalled-lane](#stalled-lane). If the queue is not running,
+`git pull --ff-only`, then `node scripts/lanes/queue.mjs` in your own terminal.
+
+**Paused and you did not press the button.** The switch fails closed. The queue's line names the reason:
+- `the pause state cannot be read: ...`: GitHub was unreachable or rate limited. It clears on its own when the read works.
+  A `HTTP 404` here means `.github/workflows/lanes-control.yml` is not on the default branch yet (a fresh install that
+  has not committed the workflow): commit it, and the pause clears.
+- `the newest successful lanes-control run came from <event>, not workflow_dispatch` or `was on <branch>, not main`, or
+  `has a title or start time that does not parse`: the newest successful run is not a press of the button on `main`.
+  Run lanes-control again from `main` with `pause` or `resume`; that run becomes the newest and decides.
+
+**How the state is kept.** The state is the history of lanes-control runs, so no comment or issue holds it. The
+newest *successful* run decides: its title (`<action>: <reason>`) gives the action and reason, GitHub's
+`triggering_actor` gives who pressed it, and its start time gives since. A press with a bad action or a reason over 200
+characters, or with a control character in it, fails the run and never counts. The queue reads it with your own `gh`
+login, since the lanes App has no `actions` permission, so a lane can neither press the button nor read or change the
+state; the watchdog reads it with its `actions: read` token. Closing or deleting the `lanes-health` issue changes
+nothing.
+
+**A fresh install, or no run at all, reads as running.** With no successful run, nothing has been paused. Deleting runs
+needs `actions: write`, which only people with write access have, so it is yours to do: if you delete every
+lanes-control run (or the run that said `pause`), lanes read as running again.
 
 <a id="needs-owner"></a>
 ## needs-owner
