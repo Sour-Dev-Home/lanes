@@ -81,7 +81,7 @@ function fakeGh(permission) {
   const calls = [];
   const run = (args) => {
     calls.push(args);
-    if (args[0] === "api" && args[1] === "repos/o/r/collaborators/leo/permission") {
+    if (args[0] === "api" && args[1] === "repos/o/r/collaborators/maintainer/permission") {
       if (permission instanceof Error) throw permission;
       return JSON.stringify({ permission });
     }
@@ -89,7 +89,7 @@ function fakeGh(permission) {
   };
   return { run, calls };
 }
-const env = { REPO: "o/r", ISSUE_NUMBER: "9", ISSUE_BODY: body, ISSUE_LABELS_JSON: "[]", ISSUE_AUTHOR: "leo" };
+const env = { REPO: "o/r", ISSUE_NUMBER: "9", ISSUE_BODY: body, ISSUE_LABELS_JSON: "[]", ISSUE_AUTHOR: "maintainer" };
 const labelEdit = (calls) => calls.find((a) => a[0] === "issue" && a[1] === "edit");
 
 test("main adds ready when the issue author has write, maintain or admin permission", () => {
@@ -120,12 +120,12 @@ test("main fails closed when the author's permission cannot be read", () => {
 // #580 (ADR 0022 part 2): under team (the repository's own config), a released lane-filed bot issue is trusted.
 const BOT = JSON.parse(readFileSync("lanes.config.json", "utf8")).identity.app.botLogin;
 const labeledBy = (login, id, event = "labeled") => ({ id, event, created_at: `2026-10-01T1${id}:00:00Z`, label: { name: "lane-filed" }, actor: { login } });
-function fakeBotIssue({ labels = [], events = [labeledBy(BOT, 1), labeledBy("leo", 2, "unlabeled")], edit = { lastEditedAt: null, editor: null }, fail = false } = {}) {
+function fakeBotIssue({ labels = [], events = [labeledBy(BOT, 1), labeledBy("maintainer", 2, "unlabeled")], edit = { lastEditedAt: null, editor: null }, fail = false } = {}) {
   const calls = [];
   const run = (args) => {
     calls.push(args);
     const path = args.find((a) => a.startsWith("repos/")) ?? "";
-    if (path === "repos/o/r/collaborators/leo/permission") return JSON.stringify({ permission: "admin" });
+    if (path === "repos/o/r/collaborators/maintainer/permission") return JSON.stringify({ permission: "admin" });
     if (path.startsWith("repos/o/r/collaborators/")) throw ghError("gh: Not Found (HTTP 404)\n");
     if (fail && path === "repos/o/r/issues/9/events") throw ghError("gh: HTTP 502\n");
     if (path === "repos/o/r/issues/9") return JSON.stringify({ user: { login: BOT, type: "Bot" }, labels: labels.map((name) => ({ name })) });
@@ -208,7 +208,7 @@ function fakeMirror({ deps = [], issues = {}, fail = {}, permission = "admin" } 
     calls.push(args);
     const path = args.find((a) => a.startsWith("repos/")) ?? "";
     const method = args.includes("-X") ? args[args.indexOf("-X") + 1] : "GET";
-    if (path === "repos/o/r/collaborators/leo/permission") return JSON.stringify({ permission });
+    if (path === "repos/o/r/collaborators/maintainer/permission") return JSON.stringify({ permission });
     if (path === "repos/o/r/issues/9/dependencies/blocked_by" && method === "GET") {
       if (fail.deps) throw fail.deps;
       return deps.map((d) => JSON.stringify({ id: d.id, number: d.number, repo: `https://api.github.com/repos/${d.repo ?? "o/r"}` })).join("\n");

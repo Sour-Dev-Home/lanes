@@ -12,9 +12,9 @@ const SHA = "a".repeat(40);
 const issueBody = "### Goal\n\ng\n\n### Blocked by\n\nnone\n";
 const body = "Closes #7\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\nnothing\n## Not done\nnothing";
 
-// "leo" has write access unless a test overrides the route; any other login has no route, so its lookup throws.
+// "maintainer" has write access unless a test overrides the route; any other login has no route, so its lookup throws.
 function fakeApi(testRoutes) {
-  const routes = { "repos/o/r/collaborators/leo/permission": { permission: "admin" }, ...testRoutes };
+  const routes = { "repos/o/r/collaborators/maintainer/permission": { permission: "admin" }, ...testRoutes };
   const posted = [];
   const api = (args) => {
     if (args[0].endsWith(`/statuses/${args[0].split("/").pop()}`) && args.includes("-f")) {
@@ -54,9 +54,9 @@ const writeAccessRoutes = (login, permission) => ({
 
 // #635: the gate notes the PR's files its issue's Scope "In" and Interface contract do not cover
 const scopedRoutes = (files, scopeForm) => ({
-  ...writeAccessRoutes("leo"),
+  ...writeAccessRoutes("maintainer"),
   "repos/o/r/pulls/5/files": files,
-  "repos/o/r/issues/7": { ...readyIssue("leo"), body: `### Goal\n\ng\n\n### Interface contract\n\nnone\n\n### Scope\n\n${scopeForm}\n\n### Blocked by\n\nnone\n` },
+  "repos/o/r/issues/7": { ...readyIssue("maintainer"), body: `### Goal\n\ng\n\n### Interface contract\n\nnone\n\n### Scope\n\n${scopeForm}\n\n### Blocked by\n\nnone\n` },
 });
 
 test("evaluatePr notes files outside Scope without changing the state", () => {
@@ -75,7 +75,7 @@ test("evaluatePr notes files outside Scope without changing the state", () => {
 test("evaluatePr counts a file the Interface contract names as inside Scope", () => {
   const api = fakeApi({
     ...scopedRoutes("lib/c.mjs\ndocs/a.md\n", "In: docs/a.md."),
-    "repos/o/r/issues/7": { ...readyIssue("leo"), body: "### Goal\n\ng\n\n### Interface contract\n\n`lib/c.mjs` exports f\n\n### Scope\n\nIn: docs/a.md.\n\n### Blocked by\n\nnone\n" },
+    "repos/o/r/issues/7": { ...readyIssue("maintainer"), body: "### Goal\n\ng\n\n### Interface contract\n\n`lib/c.mjs` exports f\n\n### Scope\n\nIn: docs/a.md.\n\n### Blocked by\n\nnone\n" },
   }).api;
   const d = evaluatePr(api, "o/r", 5, config);
   assert.doesNotMatch(d.description, /outside Scope/);
@@ -116,7 +116,7 @@ test("evaluatePr wires the linked issue's state and author's write access, and t
   const { api, posted } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "maintainer" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   const d = evaluatePr(api, "o/r", 5, config);
@@ -152,7 +152,7 @@ test("evaluatePr rejects a linked issue number that is actually a pull request",
   const { api } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }], pull_request: { url: "https://api.github.com/repos/o/r/pulls/7" } },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "maintainer" }, labels: [{ name: "tier:skip" }, { name: "ready" }], pull_request: { url: "https://api.github.com/repos/o/r/pulls/7" } },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   const d = evaluatePr(api, "o/r", 5, config);
@@ -171,7 +171,7 @@ test("main accepts pull_request_target, not just pull_request", () => {
   const { api, posted } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body, head: { sha: SHA, ref: "issue-7-x" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "maintainer" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api);
@@ -191,7 +191,7 @@ test("carry re-decides for the queued PR and posts success on the merge-group co
   const { api, posted } = fakeApi({
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "docs/a.md\n",
-    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "maintainer" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   });
   const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, group, config);
@@ -205,7 +205,7 @@ test("carry posts failure in the queue when the re-decision is not success, even
     // tier:quick on a non-skip file with no review posted: the real decision is "pending", never success.
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": "src/a.ts\n",
-    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:quick" }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "maintainer" }, labels: [{ name: "tier:quick" }, { name: "ready" }] },
     // a forged lanes/gate success is present on the head; carry must not read or trust it.
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [{ context: "lanes/gate", state: "success", created_at: "2026-09-26T10:00:00Z" }],
   });
@@ -221,17 +221,17 @@ const verdictComment = (login, reviewer, sha = SHA) => ({
 });
 // The gh --jq filter emits one @json line per comment.
 const commentsOut = (comments) => comments.map((c) => JSON.stringify(c)).join("\n") + "\n";
-const reviewStatus = { context: "review/test-hunter", state: "success", description: "ok", created_at: "2026-09-26T10:00:00Z", creator: { type: "User", login: "leo" } };
+const reviewStatus = { context: "review/test-hunter", state: "success", description: "ok", created_at: "2026-09-26T10:00:00Z", creator: { type: "User", login: "maintainer" } };
 const fullRoutes = (comments) => ({
   "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" } },
   "repos/o/r/pulls/5/files": "src/a.ts\n",
-  "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:full" }, { name: "ready" }] },
+  "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "maintainer" }, labels: [{ name: "tier:full" }, { name: "ready" }] },
   [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [reviewStatus],
   "repos/o/r/issues/5/comments": commentsOut(comments),
 });
 
 test("evaluatePr passes a clean full PR on a trusted verdict comment for its head", () => {
-  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
   const d = evaluatePr(api, "o/r", 5, config);
   assert.equal(d.state, "success");
   assert.equal(d.description, "unattended-eligible (tier:full), reviews in");
@@ -250,18 +250,18 @@ test("evaluatePr ignores a verdict comment from a bot login (fails closed withou
 });
 
 test("evaluatePr ignores a verdict comment for an older SHA, and an old-format one without a SHA", () => {
-  const oldFormat = { login: "leo", body: verdictComment("leo", "test-hunter").body.replace(` ${SHA} -->`, " -->") };
-  for (const c of [verdictComment("leo", "test-hunter", "d".repeat(40)), oldFormat]) {
+  const oldFormat = { login: "maintainer", body: verdictComment("maintainer", "test-hunter").body.replace(` ${SHA} -->`, " -->") };
+  for (const c of [verdictComment("maintainer", "test-hunter", "d".repeat(40)), oldFormat]) {
     const { api } = fakeApi(fullRoutes([c]));
     assert.equal(evaluatePr(api, "o/r", 5, config).description, "waiting for a code-owner review in GitHub (no verdict for head from test-hunter)");
   }
 });
 
 test("evaluatePr looks up each comment author's permission once", () => {
-  const { api } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter"), verdictComment("leo", "ui-reviewer"), verdictComment("leo", "test-hunter")]));
+  const { api } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter"), verdictComment("maintainer", "ui-reviewer"), verdictComment("maintainer", "test-hunter")]));
   let lookups = 0;
   const counting = (args) => {
-    if (args[0] === "repos/o/r/collaborators/leo/permission") lookups++;
+    if (args[0] === "repos/o/r/collaborators/maintainer/permission") lookups++;
     return api(args);
   };
   assert.equal(evaluatePr(counting, "o/r", 5, config).state, "success");
@@ -269,7 +269,7 @@ test("evaluatePr looks up each comment author's permission once", () => {
 });
 
 test("evaluatePr fetches comments with pagination and a filter that emits one JSON line per comment", () => {
-  const { api } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
   let args;
   const spy = (a) => {
     if (a[0] === "repos/o/r/issues/5/comments") args = a;
@@ -289,7 +289,7 @@ test("evaluatePr waits on the owner when the comments cannot be read", () => {
 
 test("carry passes a clean full PR in the merge queue", () => {
   const group = "b".repeat(40);
-  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
   const d = carry(api, "o/r", `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`, group, config);
   assert.equal(d.state, "success");
   assert.equal(posted[0].sha, group);
@@ -322,13 +322,13 @@ const WAIT_ADVISOR = "waiting for review/architecture-advisor";
 // #241: a file an accepted ADR governs no longer requires the advisor on its own; a change under docs/adr/ does.
 test("evaluatePr and carry need no architecture-advisor for a file an accepted ADR only governs", () => {
   const adrs = [parseAdr(adrMd(3, "src/"))];
-  const { api } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
   assert.equal(evaluatePr(api, "o/r", 5, config, adrs).state, "success");
 });
 
 test("evaluatePr and carry require the architecture-advisor for an ADR change", () => {
   const adrs = [parseAdr(adrMd(3, "src/"))];
-  const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+  const routes = fullRoutes([verdictComment("maintainer", "test-hunter")]);
   routes["repos/o/r/pulls/5/files"] = "docs/adr/0003-src.md\nsrc/a.ts\n";
   const { api, posted } = fakeApi(routes);
   assert.equal(evaluatePr(api, "o/r", 5, config, adrs).description, WAIT_ADVISOR);
@@ -338,7 +338,7 @@ test("evaluatePr and carry require the architecture-advisor for an ADR change", 
 });
 
 test("edge: evaluatePr without adrs decides as before", () => {
-  const { api } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
   assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
 });
 
@@ -370,7 +370,7 @@ const descriptionOf = (post) => post.fields.find((f) => f.startsWith("descriptio
 // ADR 0031 part 2: a CODEOWNERS the matcher cannot read stops the gate with `error` and the line, never a quiet "no owner paths".
 test("main posts error with the line when CODEOWNERS has a form the matcher rejects, and throws", () => {
   for (const [text, line] of [["/ok/ @SourE-dev\n/docs/** @SourE-dev\n", "line 2"], ["/ok/ @SourE-dev\n\n/nobody/\n", "line 3"]]) {
-    const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+    const { api, posted } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
     assert.throws(() => inCheckout({}, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api), { codeowners: text }), new RegExp(line));
     assert.equal(posted.length, 1, "one status, on the PR head");
     assert.equal(posted[0].sha, SHA);
@@ -382,14 +382,14 @@ test("main posts error with the line when CODEOWNERS has a form the matcher reje
 });
 
 test("edge: main posts error when CODEOWNERS is missing and paths.owner is empty under team", () => {
-  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
   assert.throws(() => inCheckout({}, () => main(PR_EVENT, api), { codeowners: undefined }), /CODEOWNERS/);
   assert.ok(posted[0].fields.includes("state=error"), posted[0].fields.join(" "));
   assert.match(descriptionOf(posted[0]), /CODEOWNERS/);
 });
 
 test("edge: a CODEOWNERS owner path makes the gate wait on the owner", () => {
-  const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+  const routes = fullRoutes([verdictComment("maintainer", "test-hunter")]);
   routes["repos/o/r/pulls/5/files"] = "owner-only/a.js\n";
   const { api, posted } = fakeApi(routes);
   inCheckout({}, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
@@ -397,13 +397,13 @@ test("edge: a CODEOWNERS owner path makes the gate wait on the owner", () => {
 });
 
 test("main loads the default branch's ADRs: a governed file alone no longer waits for the architecture-advisor", () => {
-  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
   inCheckout({ "0003-src.md": adrMd(3, "src/") }, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
   assert.equal(descriptionOf(posted[0]), "unattended-eligible (tier:full), reviews in");
 });
 
 test("main requires the advisor for an ADR the PR itself adds, though it is not on the default branch yet", () => {
-  const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+  const routes = fullRoutes([verdictComment("maintainer", "test-hunter")]);
   routes["repos/o/r/pulls/5/files"] = "docs/adr/0003-src.md\nsrc/a.ts\n";
   const { api, posted } = fakeApi(routes);
   inCheckout({}, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
@@ -415,7 +415,7 @@ const PR_EVENT = { REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5
 
 test("main fails closed on a missing identity, solo or an unknown profile: posts the one message as a failure and throws", () => {
   for (const [identity, found] of [[undefined, "no identity profile"], [{ profile: "solo" }, 'profile "solo"'], [{ profile: "other" }, 'profile "other"'], [{}, "no identity profile"]]) {
-    const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+    const { api, posted } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
     assert.throws(() => inCheckout({}, () => main(PR_EVENT, api), { identity }), (e) => e.message.startsWith(TEAM_REQUIRED_MESSAGE), JSON.stringify(identity));
     assert.equal(posted.length, 1, "one status, on the PR head");
     assert.equal(posted[0].sha, SHA);
@@ -428,7 +428,7 @@ test("main fails closed on a missing identity, solo or an unknown profile: posts
 });
 
 test("edge: main reads nothing from GitHub but the PR head before refusing a config that is not team", () => {
-  const { api: inner } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api: inner } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
   const calls = [];
   const api = (args) => (calls.push(args[0]), inner(args));
   assert.throws(() => inCheckout({}, () => main(PR_EVENT, api), { identity: { profile: "solo" } }));
@@ -445,7 +445,7 @@ test("edge: main refuses a config that is not team on a merge_group event too, p
 });
 
 test("a valid team config passes the gate's identity check, and this repository's own config does", () => {
-  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
   inCheckout({}, () => main(PR_EVENT, api));
   assert.ok(!descriptionOf(posted[0]).startsWith(TEAM_REQUIRED_MESSAGE));
   assert.doesNotThrow(() => parseIdentity(JSON.parse(readFileSync("lanes.config.json", "utf8")).identity));
@@ -453,7 +453,7 @@ test("a valid team config passes the gate's identity check, and this repository'
 
 // #241 (from #250): the gate passes the linked issue's Interface contract to the reviewer rule.
 const withContract = (contract) => {
-  const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+  const routes = fullRoutes([verdictComment("maintainer", "test-hunter")]);
   routes["repos/o/r/issues/7"] = { ...routes["repos/o/r/issues/7"], body: `### Goal\n\ng\n\n### Interface contract\n\n${contract}\n\n### Blocked by\n\nnone\n` };
   return routes;
 };
@@ -482,7 +482,7 @@ test("edge: carry re-decides with the Interface contract too", () => {
 
 test("edge: an issue body that is missing or not a string names no path (the blocker check still fails it closed)", () => {
   for (const body of [null, undefined, 42]) {
-    const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+    const routes = fullRoutes([verdictComment("maintainer", "test-hunter")]);
     routes["repos/o/r/issues/7"] = { ...routes["repos/o/r/issues/7"], body };
     const d = evaluatePr(fakeApi(routes).api, "o/r", 5, config);
     assert.notEqual(d.description, WAIT_ADVISOR, String(body));
@@ -502,9 +502,9 @@ const WAIT_HUNTER = "waiting for review/test-hunter";
 // A full PR at head SHA whose test-hunter reviewed OLD; since then main was merged in, moving the diff's line numbers.
 function reuseRoutes({ tier = "full", headDiff = ownDiff("2222222", "-40,1 +41,1"), oldStatuses = [{ ...reviewStatus }], commits = [FIRST, OLD, SHA], comments } = {}) {
   const routes = {
-    ...fullRoutes(comments ?? [verdictComment("leo", "test-hunter", OLD)]),
+    ...fullRoutes(comments ?? [verdictComment("maintainer", "test-hunter", OLD)]),
     "repos/o/r/pulls/5": { state: "open", body: readyBody, head: { sha: SHA, ref: "issue-7-add-thing" }, base: { ref: "main", sha: "0".repeat(40) } },
-    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: `tier:${tier}` }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "maintainer" }, labels: [{ name: `tier:${tier}` }, { name: "ready" }] },
     "repos/o/r/pulls/5/commits": commits.join("\n") + "\n",
     [statusesRoute(SHA)]: [],
     [statusesRoute(OLD)]: oldStatuses,
@@ -593,14 +593,14 @@ test("carry passes the merge queue on a reused test-hunter verdict", () => {
 test("evaluatePr reuses only review/test-hunter, never another reviewer or the owner", () => {
   const ui = compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: ["^src/"] } });
   const others = [{ ...reviewStatus }, { ...reviewStatus, context: "review/ui-reviewer" }, { ...reviewStatus, context: "review/owner" }];
-  const { api } = fakeApi(reuseRoutes({ oldStatuses: others, comments: [verdictComment("leo", "test-hunter", OLD), verdictComment("leo", "ui-reviewer", OLD)] }));
+  const { api } = fakeApi(reuseRoutes({ oldStatuses: others, comments: [verdictComment("maintainer", "test-hunter", OLD), verdictComment("maintainer", "ui-reviewer", OLD)] }));
   assert.equal(evaluatePr(api, "o/r", 5, ui).description, "waiting for review/ui-reviewer");
   const { api: api2 } = fakeApi(reuseRoutes({ oldStatuses: others }));
   assert.equal(evaluatePr(api2, "o/r", 5, config).description, REUSED); // the old review/owner is not an approval
 });
 
 test("edge: a reused full-tier status still needs the test-hunter's verdict comment bound to the reused commit", () => {
-  const { api } = fakeApi(reuseRoutes({ comments: [verdictComment("leo", "test-hunter", FIRST)] }));
+  const { api } = fakeApi(reuseRoutes({ comments: [verdictComment("maintainer", "test-hunter", FIRST)] }));
   const d = evaluatePr(api, "o/r", 5, config);
   assert.equal(d.state, "pending");
   assert.match(d.description, /no verdict for head from test-hunter/);
@@ -665,7 +665,7 @@ function threeRoutes(reusedNames, over = {}) {
   const onHead = THREE.filter((n) => !reusedNames.includes(n));
   const routes = reuseRoutes({
     oldStatuses: at(OLD, THREE),
-    comments: [...THREE.map((n) => verdictComment("leo", n, OLD)), ...onHead.map((n) => verdictComment("leo", n, SHA))],
+    comments: [...THREE.map((n) => verdictComment("maintainer", n, OLD)), ...onHead.map((n) => verdictComment("maintainer", n, SHA))],
     ...over,
   });
   routes[statusesRoute(SHA)] = at(SHA, onHead);
@@ -729,10 +729,10 @@ test("evaluatePr never reuses a security-reviewer or architecture-advisor failur
 });
 
 test("edge: a failure verdict comment on the reused commit still waits on the owner", () => {
-  const failed = verdictComment("leo", "security-reviewer", OLD);
+  const failed = verdictComment("maintainer", "security-reviewer", OLD);
   failed.body = failed.body.replace('"verdict": "success"', '"verdict": "failure"');
   assert.match(failed.body, /"verdict": "failure"/);
-  const routes = threeRoutes(["security-reviewer"], { comments: [failed, ...["test-hunter", "architecture-advisor"].map((n) => verdictComment("leo", n, SHA))] });
+  const routes = threeRoutes(["security-reviewer"], { comments: [failed, ...["test-hunter", "architecture-advisor"].map((n) => verdictComment("maintainer", n, SHA))] });
   const d = decide(routes);
   assert.equal(d.state, "pending");
   assert.match(d.description, /^waiting for a code-owner review in GitHub \(verdict from security-reviewer is not success\), reused security-reviewer from eeeeeee$/);
@@ -812,9 +812,9 @@ test("edge: no reuse when both own diffs are empty, or the base ref is missing o
 });
 
 // #36: the gate waits while the linked issue's "Blocked by" names an open issue.
-const blockedIssue = (blockedBy) => ({ ...readyIssue("leo"), body: `### Goal\n\ng\n\n### Blocked by\n\n${blockedBy}\n` });
+const blockedIssue = (blockedBy) => ({ ...readyIssue("maintainer"), body: `### Goal\n\ng\n\n### Blocked by\n\n${blockedBy}\n` });
 const blockerRoutes = (blockedBy, states) => ({
-  ...writeAccessRoutes("leo"),
+  ...writeAccessRoutes("maintainer"),
   "repos/o/r/issues/7": blockedIssue(blockedBy),
   ...Object.fromEntries(Object.entries(states).map(([n, state]) => [`repos/o/r/issues/${n}`, { state }])),
 });
@@ -871,7 +871,7 @@ test("edge: a blocker with an unexpected state counts as unreadable", () => {
 
 test("edge: an issue without a readable Blocked by field fails closed", () => {
   for (const issueBody of [undefined, "### Goal\n\ng\n", "### Blocked by\n\nsoon\n"]) {
-    const { api } = fakeApi({ ...writeAccessRoutes("leo"), "repos/o/r/issues/7": { ...readyIssue("leo"), body: issueBody } });
+    const { api } = fakeApi({ ...writeAccessRoutes("maintainer"), "repos/o/r/issues/7": { ...readyIssue("maintainer"), body: issueBody } });
     const d = evaluatePr(api, "o/r", 5, config);
     assert.equal(d.state, "failure", String(issueBody));
     assert.match(d.description, /^cannot check blockers of #7: blocked by|^cannot check blockers of #7: missing: blocked by/, String(issueBody));
@@ -898,7 +898,7 @@ test("edge: blockers are not read for an untrusted linked issue", () => {
     { ...blockedIssue(many(50)), pull_request: { url: "x" } },
   ];
   for (const issue of untrusted) {
-    const { api } = fakeApi({ ...writeAccessRoutes("leo"), "repos/o/r/issues/7": issue });
+    const { api } = fakeApi({ ...writeAccessRoutes("maintainer"), "repos/o/r/issues/7": issue });
     const calls = [];
     const d = evaluatePr((args) => (calls.push(args[0]), api(args)), "o/r", 5, config);
     assert.equal(d.state, "failure", JSON.stringify(issue.labels));
@@ -907,7 +907,7 @@ test("edge: blockers are not read for an untrusted linked issue", () => {
 });
 
 test("edge: more blockers than the cap fail closed without reading any", () => {
-  const { api } = fakeApi({ ...writeAccessRoutes("leo"), "repos/o/r/issues/7": blockedIssue(many(21)) });
+  const { api } = fakeApi({ ...writeAccessRoutes("maintainer"), "repos/o/r/issues/7": blockedIssue(many(21)) });
   const calls = [];
   const d = evaluatePr((args) => (calls.push(args[0]), api(args)), "o/r", 5, config);
   assert.deepEqual(d, { state: "failure", description: "cannot check blockers of #7: more than 20 blockers", stage: "blocked" });
@@ -936,7 +936,7 @@ const prLine = (number, closes) => JSON.stringify({ number, body: `Closes #${clo
 test("main on an issues event re-evaluates only the PRs whose issue lists the closed one", () => {
   const sha = (c) => c.repeat(40);
   const prRoute = (n, closes, c) => ({ state: "open", body: okBody.replace("#7", `#${closes}`), head: { sha: sha(c), ref: `issue-${closes}-x` } });
-  const issue = (blockedBy) => ({ ...readyIssue("leo"), body: `### Blocked by\n\n${blockedBy}\n` });
+  const issue = (blockedBy) => ({ ...readyIssue("maintainer"), body: `### Blocked by\n\n${blockedBy}\n` });
   const { api, posted } = fakeApi({
     [OPEN_PRS]: [prLine(5, 7), prLine(6, 8), prLine(10, 11), JSON.stringify({ number: 12, body: "no closes line" })].join("\n") + "\n",
     "repos/o/r/issues/7": issue("#3"),
@@ -989,7 +989,7 @@ test("edge: an issues event skips a PR whose issue's Blocked by field is malform
   const calls = [];
   const { api, posted } = fakeApi({
     [OPEN_PRS]: [prLine(5, 7)].join("\n") + "\n",
-    "repos/o/r/issues/7": { ...readyIssue("leo"), body: "### Goal\n\ng\n" }, // no "Blocked by" heading at all
+    "repos/o/r/issues/7": { ...readyIssue("maintainer"), body: "### Goal\n\ng\n" }, // no "Blocked by" heading at all
   });
   main({ REPO: "o/r", EVENT_NAME: "issues", ISSUE_NUMBER: "3" }, (args) => (calls.push(args[0]), api(args)));
   assert.equal(posted.length, 0);
@@ -1217,7 +1217,7 @@ const baseConfigText = JSON.stringify({ paths: { owner: ["^a$"] } }, null, 2) + 
 const appendedConfigText = JSON.stringify({ paths: { owner: ["^a$", "^b$"] } }, null, 2) + "\n";
 const contentsRoute = (file, sha) => `repos/o/r/contents/${file}?ref=${sha}`;
 function ownerDiffRoutes(files, contents) {
-  const routes = fullRoutes([verdictComment("leo", "test-hunter"), verdictComment("leo", "architecture-advisor")]);
+  const routes = fullRoutes([verdictComment("maintainer", "test-hunter"), verdictComment("maintainer", "architecture-advisor")]);
   routes["repos/o/r/pulls/5"] = { ...routes["repos/o/r/pulls/5"], base: { ref: "main", sha: BASE } };
   routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`] = [reviewStatus, { ...reviewStatus, context: "review/architecture-advisor" }];
   routes["repos/o/r/pulls/5/files"] = files.join("\n") + "\n";
@@ -1265,7 +1265,7 @@ test("edge: a workflow.test.mjs append, a renamed-in owner file and a malformed 
 });
 
 test("edge: a PR with no owner-only files fetches no file contents and passes", () => {
-  const { api, calls } = recording(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api, calls } = recording(fullRoutes([verdictComment("maintainer", "test-hunter")]));
   assert.equal(evaluatePr(api, "o/r", 5, config).state, "success");
   assert.deepEqual(contentCalls(calls), []);
 });
@@ -1293,13 +1293,13 @@ function withAgents(names, fn) {
 const extraRoutes = (comments, statuses) => ({ ...fullRoutes(comments), [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: statuses });
 
 test("evaluatePr reads a configured reviewer's verdict comment", () => withAgents(["extra-reviewer"], () => {
-  const { api } = fakeApi(extraRoutes([verdictComment("leo", "test-hunter"), verdictComment("leo", "extra-reviewer")], [reviewStatus, extraStatus]));
+  const { api } = fakeApi(extraRoutes([verdictComment("maintainer", "test-hunter"), verdictComment("maintainer", "extra-reviewer")], [reviewStatus, extraStatus]));
   const d = evaluatePr(api, "o/r", 5, extraConfig(extraMap));
   assert.equal(d.description, "unattended-eligible (tier:full), reviews in");
 }));
 
 test("a required configured reviewer with no verdict leaves the gate pending on waiting for review/<name>", () => withAgents(["extra-reviewer"], () => {
-  const { api, posted } = fakeApi(extraRoutes([verdictComment("leo", "test-hunter")], [reviewStatus]));
+  const { api, posted } = fakeApi(extraRoutes([verdictComment("maintainer", "test-hunter")], [reviewStatus]));
   const d = evaluatePr(api, "o/r", 5, extraConfig(extraMap));
   assert.equal(d.state, "pending");
   assert.equal(d.description, "waiting for review/extra-reviewer");
@@ -1307,7 +1307,7 @@ test("a required configured reviewer with no verdict leaves the gate pending on 
 }));
 
 test("a malformed module map posts a lanes/gate failure naming the reason, not a crash", () => withAgents([], () => {
-  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
   const d = evaluatePr(api, "o/r", 5, extraConfig({ entries: "nope" }));
   assert.equal(d.state, "failure");
   assert.match(d.description, /^module map unusable: lanes\.config\.json: modules\.entries must be an array/);
@@ -1315,7 +1315,7 @@ test("a malformed module map posts a lanes/gate failure naming the reason, not a
 }));
 
 test("a configured reviewer with no agent file posts a lanes/gate failure naming it", () => withAgents([], () => {
-  const { api, posted } = fakeApi(fullRoutes([verdictComment("leo", "test-hunter")]));
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
   const d = evaluatePr(api, "o/r", 5, extraConfig(extraMap));
   assert.equal(d.state, "failure");
   assert.match(d.description, /"extra-reviewer" has no \.claude\/agents\/extra-reviewer\.md/);
@@ -1338,7 +1338,7 @@ test("team: a lane-bot verdict comment counts and needs no permission lookup", (
 });
 
 test("team: a lane-bot review/<reviewer> status counts", () => {
-  const routes = fullRoutes([verdictComment("leo", "test-hunter")]);
+  const routes = fullRoutes([verdictComment("maintainer", "test-hunter")]);
   routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`] = [botStatus("review/test-hunter")];
   const { api } = fakeApi(routes);
   assert.equal(evaluatePr(api, "o/r", 5, laneConfig("team")).state, "success");
@@ -1396,7 +1396,7 @@ const review = (login, state = "APPROVED", commit_id = SHA, type = "User") => ({
 const teamRoutes = (reviews, over = {}) => ({
   "repos/o/r/pulls/5": { state: "open", body: needsOwnerBody, user: { login: "author" }, head: { sha: SHA, ref: "issue-7-add-thing" } },
   "repos/o/r/pulls/5/files": "docs/a.md\n",
-  "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
+  "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "maintainer" }, labels: [{ name: "tier:skip" }, { name: "ready" }] },
   [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
   ...(reviews === null ? {} : { "repos/o/r/pulls/5/reviews": commentsOut(reviews) }),
   ...over,
@@ -1473,7 +1473,7 @@ test("team: CODEOWNERS comes from the checkout, never fetched from the PR", () =
 
 test("team: a lane bot review never counts, and an earlier review/owner status is ignored", () => {
   const routes = teamRoutes([review(BOT, "APPROVED", SHA, "Bot")]);
-  routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`] = [{ context: "review/owner", state: "success", created_at: "2026-09-26T10:00:00Z", creator: { type: "User", login: "leo" } }];
+  routes[`repos/o/r/commits/${SHA}/statuses?per_page=100`] = [{ context: "review/owner", state: "success", created_at: "2026-09-26T10:00:00Z", creator: { type: "User", login: "maintainer" } }];
   const { api } = fakeApi(routes);
   const d = teamCheckout(`* @${BOT} @code-owner\n`, () => evaluatePr(api, "o/r", 5, laneConfig("team")));
   assert.equal(d.state, "pending");
@@ -1575,9 +1575,9 @@ function liveRoutes(c, approvedBy, over = {}) {
   return {
     "repos/o/r/pulls/5": { state: "open", body: prBody, user: { login: "author" }, head: { sha: SHA, ref: "issue-7-add-thing" } },
     "repos/o/r/pulls/5/files": c.files.join("\n") + "\n",
-    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "leo" }, labels: [{ name: `tier:${c.tier}` }, { name: "ready" }] },
+    "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: "maintainer" }, labels: [{ name: `tier:${c.tier}` }, { name: "ready" }] },
     [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: required.map((n) => ({ ...reviewStatus, context: `review/${n}` })),
-    "repos/o/r/issues/5/comments": commentsOut(c.verdicts ? required.map((n) => verdictComment("leo", n)) : []),
+    "repos/o/r/issues/5/comments": commentsOut(c.verdicts ? required.map((n) => verdictComment("maintainer", n)) : []),
     "repos/o/r/pulls/5/reviews": commentsOut(approvedBy === null ? [] : [review(approvedBy)]),
     "repos/o/r/pulls?state=open&per_page=100": "5\n",
     ...over,
@@ -1647,7 +1647,7 @@ const botIssueRoutes = ({ labels = ["tier:skip", "ready"], events, edit = { last
   "repos/o/r/issues/7": { state: "open", body: issueBody, user: { login: BOT, type: "Bot" }, labels: labels.map((name) => ({ name })) },
   "repos/o/r/issues/7/events": (events ?? [
     { id: 1, event: "labeled", created_at: "2026-10-01T10:00:00Z", label: { name: "lane-filed" }, actor: { login: BOT } },
-    { id: 2, event: "unlabeled", created_at: "2026-10-01T11:00:00Z", label: { name: "lane-filed" }, actor: { login: "leo" } },
+    { id: 2, event: "unlabeled", created_at: "2026-10-01T11:00:00Z", label: { name: "lane-filed" }, actor: { login: "maintainer" } },
   ]).map((e) => JSON.stringify(e)).join("\n"),
   graphql: { data: { repository: { issue: edit } } },
 });
@@ -1691,13 +1691,13 @@ test("edge: a body edit by a non-writer after the release withdraws it", () => {
 });
 
 test("edge: a body edit by a writer after the release keeps it", () => {
-  const edit = { lastEditedAt: "2026-10-01T12:00:00Z", editor: { login: "leo" } };
+  const edit = { lastEditedAt: "2026-10-01T12:00:00Z", editor: { login: "maintainer" } };
   assert.equal(botIssueState(botIssueRoutes({ edit })).state, "success");
 });
 
 test("solo: a released bot issue is not trusted, and an owner-authored issue is unchanged", () => {
   assert.equal(botIssueState(botIssueRoutes(), laneConfig("solo")).state, "failure");
-  assert.equal(botIssueState(writeAccessRoutes("leo", undefined)).state, "success");
+  assert.equal(botIssueState(writeAccessRoutes("maintainer", undefined)).state, "success");
 });
 
 // ADR 0023 part 3 (#594): reuse a review across the owner's commit of a pending workflow file.
@@ -1705,7 +1705,7 @@ const WF = ".github/workflows/ci.yml";
 const WF_TEXT = "name: ci\non: push\n";
 const wfDiff = `diff --git a/${WF} b/${WF}\nnew file mode 100644\nindex 0000000..3333333\n--- /dev/null\n+++ b/${WF}\n@@ -0,0 +1,2 @@\n+name: ci\n+on: push\n`;
 const pendingVerdict = (pending) => ({
-  login: "leo",
+  login: "maintainer",
   body: `<!-- lanes:verdict test-hunter ${OLD} -->\n\`\`\`json\n${JSON.stringify({ reviewer: "test-hunter", verdict: "success", summary: "s", criteria: [], findings: [], pending }, null, 2)}\n\`\`\``,
 });
 const hashOfWf = pendingFileHash(WF_TEXT);
@@ -1802,7 +1802,7 @@ test("pending: a verdict without pending is handled as before", () => {
 
 // #684: a pending workflow file must be at the head even when the verdict is for the head itself (the #662 case).
 const headPending = (pending) => ({
-  login: "leo",
+  login: "maintainer",
   body: `<!-- lanes:verdict test-hunter ${SHA} -->\n\`\`\`json\n${JSON.stringify({ reviewer: "test-hunter", verdict: "success", summary: "s", criteria: [], findings: [], pending }, null, 2)}\n\`\`\``,
 });
 const HANDOVER = (what) => `waiting for the workflow hand-over: ${what}`;
@@ -1899,7 +1899,7 @@ test("dependabot: the switch off makes no extra call and fails as today", () => 
 });
 
 test("dependabot: a non-Dependabot PR never makes the extra call", () => {
-  const { api, patchCalls } = bumpApi({ login: "leo", type: "User" }, patchLines(bumpPatchText));
+  const { api, patchCalls } = bumpApi({ login: "maintainer", type: "User" }, patchLines(bumpPatchText));
   assert.equal(evalBump(api, bumpCfg(true)).state, "failure");
   assert.equal(patchCalls.length, 0);
 });

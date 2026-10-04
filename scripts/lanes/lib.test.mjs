@@ -58,22 +58,22 @@ test("laneIssueOf takes the folder directly under the last .claude/worktrees, no
 test("authorCanWrite trusts write, maintain and admin, read from the collaborator permission endpoint", () => {
   for (const [permission, role_name] of [["admin", "admin"], ["write", "maintain"], ["write", "write"]]) {
     const { api, calls } = permissionApi({ permission, role_name });
-    assert.equal(authorCanWrite(api, "o/r", "leo"), true, role_name);
-    assert.deepEqual(calls, [["repos/o/r/collaborators/leo/permission"]]);
+    assert.equal(authorCanWrite(api, "o/r", "maintainer"), true, role_name);
+    assert.deepEqual(calls, [["repos/o/r/collaborators/maintainer/permission"]]);
   }
 });
 
 test("authorCanWrite never trusts read, triage or no permission", () => {
   for (const [permission, role_name] of [["read", "triage"], ["read", "read"], ["none", undefined], [undefined, "write"]]) {
-    assert.equal(authorCanWrite(permissionApi({ permission, role_name }).api, "o/r", "leo"), false, String(role_name));
+    assert.equal(authorCanWrite(permissionApi({ permission, role_name }).api, "o/r", "maintainer"), false, String(role_name));
   }
 });
 
 test("authorCanWrite fails closed when the permission cannot be read", () => {
-  assert.equal(authorCanWrite(permissionApi(new Error("HTTP 404")).api, "o/r", "leo"), false);
-  assert.equal(authorCanWrite(permissionApi(new Error("HTTP 403")).api, "o/r", "leo"), false);
-  assert.equal(authorCanWrite(permissionApi("not json").api, "o/r", "leo"), false);
-  assert.equal(authorCanWrite(permissionApi("null").api, "o/r", "leo"), false);
+  assert.equal(authorCanWrite(permissionApi(new Error("HTTP 404")).api, "o/r", "maintainer"), false);
+  assert.equal(authorCanWrite(permissionApi(new Error("HTTP 403")).api, "o/r", "maintainer"), false);
+  assert.equal(authorCanWrite(permissionApi("not json").api, "o/r", "maintainer"), false);
+  assert.equal(authorCanWrite(permissionApi("null").api, "o/r", "maintainer"), false);
 });
 
 // ADR 0022 part 1 and 6: a bot-authored issue is trusted once a write-access actor removed lane-filed. Block-scoped so its
@@ -216,7 +216,7 @@ test("edge: readBotIssueRelease fails closed on an API error, bad JSON, a missin
 }
 
 test("authorCanWrite refuses a missing or malformed login without calling the API", () => {
-  for (const login of [undefined, null, "", "../../x", "a/b", "dependabot[bot]", "-leo", "a".repeat(40)]) {
+  for (const login of [undefined, null, "", "../../x", "a/b", "dependabot[bot]", "-maintainer", "a".repeat(40)]) {
     const { api, calls } = permissionApi({ permission: "admin" });
     assert.equal(authorCanWrite(api, "o/r", login), false, String(login));
     assert.equal(calls.length, 0, String(login));
@@ -833,7 +833,7 @@ test("edge: diffFingerprint treats a CRLF added line as different from an LF one
   assert.notEqual(diffFingerprint(fileB("0000000")), diffFingerprint(fileB("0000000").replace("+y\n", "+y\r\n")));
 });
 
-const human = { type: "User", login: "leo" };
+const human = { type: "User", login: "maintainer" };
 const hunterOk = { context: "review/test-hunter", state: "success", description: "ok", created_at: "2026-09-26T10:00:00Z", creator: human };
 
 test("testHunterReusable only when the tier requires the test-hunter and the head has no trusted status for it", () => {
@@ -903,12 +903,12 @@ test("gateDecision no longer reads a review/owner status or an owner carry: only
     assert.equal(d.state, "pending");
     assert.equal(d.description, TEAM_WAIT("needs the owner"));
   }
-  const approved = gateDecision({ ...needsOwnerPr, nativeApproval: { approved: true, by: "leo" } });
-  assert.deepEqual(approved, { state: "success", description: "approved by code owner @leo", stage: "ready" });
+  const approved = gateDecision({ ...needsOwnerPr, nativeApproval: { approved: true, by: "maintainer" } });
+  assert.deepEqual(approved, { state: "success", description: "approved by code owner @maintainer", stage: "ready" });
 });
 
 test("gateDecision never lets the native approval skip a reviewer the head still owes", () => {
-  const d = gateDecision({ ...needsOwnerPr, statuses: [], nativeApproval: { approved: true, by: "leo" } });
+  const d = gateDecision({ ...needsOwnerPr, statuses: [], nativeApproval: { approved: true, by: "maintainer" } });
   assert.equal(d.description, "waiting for review/test-hunter");
 });
 
@@ -1285,47 +1285,47 @@ test("gateDecision reuse takes a lane-bot status under team and refuses it other
 // #558, ADR 0021: the team profile's owner stage is a native code-owner review.
 const HEAD = "d".repeat(40);
 const review = (login, state = "APPROVED", commit_id = HEAD, type = "User") => ({ user: { login, type }, state, commit_id });
-const OWNERS = ["leo", "Mia"];
+const OWNERS = ["maintainer", "Mia"];
 
 test("nativeCodeOwnerApproval approves a code owner's APPROVED review on the head", () => {
-  assert.deepEqual(nativeCodeOwnerApproval([review("leo")], "lane-author", HEAD, OWNERS, TEAM_ID), { approved: true, by: "leo" });
+  assert.deepEqual(nativeCodeOwnerApproval([review("maintainer")], "lane-author", HEAD, OWNERS, TEAM_ID), { approved: true, by: "maintainer" });
 });
 
 test("nativeCodeOwnerApproval never approves an older SHA, the author, the lane bot or a non-owner", () => {
   const no = { approved: false, by: null };
-  assert.deepEqual(nativeCodeOwnerApproval([review("leo", "APPROVED", "e".repeat(40))], "x", HEAD, OWNERS, TEAM_ID), no);
-  assert.deepEqual(nativeCodeOwnerApproval([review("leo")], "leo", HEAD, OWNERS, TEAM_ID), no);
+  assert.deepEqual(nativeCodeOwnerApproval([review("maintainer", "APPROVED", "e".repeat(40))], "x", HEAD, OWNERS, TEAM_ID), no);
+  assert.deepEqual(nativeCodeOwnerApproval([review("maintainer")], "maintainer", HEAD, OWNERS, TEAM_ID), no);
   assert.deepEqual(nativeCodeOwnerApproval([review(BOT, "APPROVED", HEAD, "Bot")], "x", HEAD, [BOT], TEAM_ID), no);
   assert.deepEqual(nativeCodeOwnerApproval([review("eve")], "x", HEAD, OWNERS, TEAM_ID), no);
 });
 
 test("nativeCodeOwnerApproval lets a later CHANGES_REQUESTED or DISMISSED supersede, and a later approval win", () => {
   for (const state of ["CHANGES_REQUESTED", "DISMISSED"]) {
-    assert.equal(nativeCodeOwnerApproval([review("leo"), review("leo", state)], "x", HEAD, OWNERS, TEAM_ID).approved, false, state);
+    assert.equal(nativeCodeOwnerApproval([review("maintainer"), review("maintainer", state)], "x", HEAD, OWNERS, TEAM_ID).approved, false, state);
   }
-  assert.equal(nativeCodeOwnerApproval([review("leo", "CHANGES_REQUESTED"), review("leo")], "x", HEAD, OWNERS, TEAM_ID).approved, true);
+  assert.equal(nativeCodeOwnerApproval([review("maintainer", "CHANGES_REQUESTED"), review("maintainer")], "x", HEAD, OWNERS, TEAM_ID).approved, true);
   // Another owner's later rejection does not undo this owner's approval.
-  assert.deepEqual(nativeCodeOwnerApproval([review("leo"), review("Mia", "CHANGES_REQUESTED")], "x", HEAD, OWNERS, TEAM_ID), { approved: true, by: "leo" });
+  assert.deepEqual(nativeCodeOwnerApproval([review("maintainer"), review("Mia", "CHANGES_REQUESTED")], "x", HEAD, OWNERS, TEAM_ID), { approved: true, by: "maintainer" });
 });
 
 test("nativeCodeOwnerApproval: approve-then-comment stays approved, approve-then-changes-requested does not", () => {
   for (const state of ["COMMENTED", "PENDING"]) {
-    assert.deepEqual(nativeCodeOwnerApproval([review("leo"), review("leo", state)], "x", HEAD, OWNERS, TEAM_ID), { approved: true, by: "leo" }, state);
+    assert.deepEqual(nativeCodeOwnerApproval([review("maintainer"), review("maintainer", state)], "x", HEAD, OWNERS, TEAM_ID), { approved: true, by: "maintainer" }, state);
   }
-  assert.equal(nativeCodeOwnerApproval([review("leo"), review("leo", "COMMENTED"), review("leo", "CHANGES_REQUESTED")], "x", HEAD, OWNERS, TEAM_ID).approved, false);
+  assert.equal(nativeCodeOwnerApproval([review("maintainer"), review("maintainer", "COMMENTED"), review("maintainer", "CHANGES_REQUESTED")], "x", HEAD, OWNERS, TEAM_ID).approved, false);
   // edge: a comment alone is no approval
-  assert.equal(nativeCodeOwnerApproval([review("leo", "COMMENTED")], "x", HEAD, OWNERS, TEAM_ID).approved, false);
+  assert.equal(nativeCodeOwnerApproval([review("maintainer", "COMMENTED")], "x", HEAD, OWNERS, TEAM_ID).approved, false);
 });
 
 test("edge: nativeCodeOwnerApproval matches owners exactly and fails closed on empty or malformed input", () => {
   const no = { approved: false, by: null };
-  assert.deepEqual(nativeCodeOwnerApproval([review("LEO")], "x", HEAD, OWNERS, TEAM_ID), no);
-  assert.deepEqual(nativeCodeOwnerApproval([review("leo")], "x", HEAD, [], TEAM_ID), no);
+  assert.deepEqual(nativeCodeOwnerApproval([review("MAINTAINER")], "x", HEAD, OWNERS, TEAM_ID), no);
+  assert.deepEqual(nativeCodeOwnerApproval([review("maintainer")], "x", HEAD, [], TEAM_ID), no);
   for (const reviews of [null, undefined, "x", [], [null], [{}], [{ user: null, state: "APPROVED", commit_id: HEAD }]]) {
     assert.deepEqual(nativeCodeOwnerApproval(reviews, "x", HEAD, OWNERS, TEAM_ID), no, JSON.stringify(reviews));
   }
-  assert.deepEqual(nativeCodeOwnerApproval([review("leo")], "x", undefined, OWNERS, TEAM_ID), no);
-  assert.deepEqual(nativeCodeOwnerApproval([review("leo")], "x", HEAD, null, TEAM_ID), no);
+  assert.deepEqual(nativeCodeOwnerApproval([review("maintainer")], "x", undefined, OWNERS, TEAM_ID), no);
+  assert.deepEqual(nativeCodeOwnerApproval([review("maintainer")], "x", HEAD, null, TEAM_ID), no);
 });
 
 test("edge: nativeCodeOwnerApproval treats a login that equals the bot as the bot only under team", () => {
@@ -1335,19 +1335,19 @@ test("edge: nativeCodeOwnerApproval treats a login that equals the bot as the bo
 });
 
 test("parseCodeOwnerUsers returns user owners and ignores teams, emails and comments", () => {
-  const text = ["# owners", "* @leo @Mia # trailing comment @ghost", "/docs/ @acme/docs-team a@b.co", "", "  # @indented", "*.md @leo @new-user\r", "/x @org/t @solo-1"].join("\n");
-  assert.deepEqual(parseCodeOwnerUsers(text), ["leo", "Mia", "new-user", "solo-1"]);
+  const text = ["# owners", "* @maintainer @Mia # trailing comment @ghost", "/docs/ @acme/docs-team a@b.co", "", "  # @indented", "*.md @maintainer @new-user\r", "/x @org/t @solo-1"].join("\n");
+  assert.deepEqual(parseCodeOwnerUsers(text), ["maintainer", "Mia", "new-user", "solo-1"]);
 });
 
 test("edge: parseCodeOwnerUsers yields nothing for empty, comment-only, team-only or non-string input", () => {
-  for (const t of ["", "# only a comment\n", "* @org/team\n", "@leo\n", null, undefined, 5]) {
+  for (const t of ["", "# only a comment\n", "* @org/team\n", "@maintainer\n", null, undefined, 5]) {
     assert.deepEqual(parseCodeOwnerUsers(t), [], String(t));
   }
 });
 
 const teamCfg = { ...ownerCfg, identity: TEAM_ID };
 const teamPr = (over = {}) => pinPr({ config: teamCfg, files: ["src/a.ts"], ...over });
-const approvedBy = { approved: true, by: "leo" };
+const approvedBy = { approved: true, by: "maintainer" };
 const needsPr = (over = {}) => teamPr({ prBody: quickPr.prBody.replace("## Needs the owner\nnothing", "## Needs the owner\ndecide x"), ...over });
 const teamWait = (reason) => `waiting for a code-owner review in GitHub (${reason})`;
 
@@ -1358,7 +1358,7 @@ test("team gateDecision waits for a native review for each of the four owner rea
     "breaking contract change": teamPr({ prBody: quickPr.prBody.replace("## Contract changes\nnone", "## Contract changes\nbreaking"), files: ["contracts/x.ts"], issueLabels: ["tier:full", "ready", "contract:breaking"] }),
   };
   for (const [reason, input] of Object.entries(cases)) {
-    for (const nativeApproval of [{ approved: false, by: null }, { approved: "yes", by: "leo" }, {}]) {
+    for (const nativeApproval of [{ approved: false, by: null }, { approved: "yes", by: "maintainer" }, {}]) {
       const d = gateDecision({ ...input, nativeApproval });
       assert.deepEqual([d.state, d.stage, d.description], ["pending", "owner", teamWait(reason)], `${reason} ${JSON.stringify(nativeApproval)}`);
     }
