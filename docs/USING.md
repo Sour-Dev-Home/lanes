@@ -214,17 +214,20 @@ comment for a problem that is still active, once. With several open `lanes-healt
 
 To stop new lanes from starting, open Actions in GitHub, pick **lanes-control**, press Run workflow, choose `pause` (or
 `resume`), add an optional reason of up to 200 characters, and press Run. GitHub decides who may: only people with write
-access can run the workflow, and the Actions history records who did. A lane cannot, because the lanes App has no
-`actions: write`. The workflow runs only from `main`.
+access can run the workflow, and the Actions history records who did. A lane cannot press it, or read the state, because the lanes App has no
+`actions` permission. The workflow runs only from `main`.
 
 - **What stops:** the queue launches no new lane and resumes no dead lane, prints `paused since <time> by <who>:
   <reason>` once, and keeps polling. **What keeps running:** lanes already in flight finish and their PRs merge, the
   queue still restarts itself when the lanes scripts change (ADR 0026), and the watchdog and the heartbeat keep
   writing. The health issue shows `Paused since <time> by <who>: <reason>`, and `no-progress` is not raised while paused.
 - **Resuming:** run lanes-control with `resume`. The queue prints `resumed` on its next poll and picks up dead lanes then.
-- **Fail closed:** if the state cannot be read, or the control comment on the `lanes-health` issue was written or edited
-  by anything other than `github-actions[bot]`, or is malformed, lanes read as paused and the queue's line says why. Run
-  lanes-control to rewrite the comment. A repository with no `lanes-health` issue, or no control comment, reads as running.
+- **Where the state lives:** in the run history of lanes-control itself. The newest successful run decides, through its
+  title (`<action>: <reason>`), GitHub's record of who pressed it, and its start time. A press with a bad action or an
+  over-long or control-character reason fails the run and never counts. Nothing is written to an issue.
+- **Fail closed:** if the run history cannot be read, or the newest successful run did not come from `workflow_dispatch`
+  on `main` or has a title that does not parse, lanes read as paused and the queue's line says why. Run lanes-control
+  from `main` to settle it. A repository with no successful run reads as running.
 - **Adopters:** `install.mjs` copies the workflow and `scripts/lanes/control.mjs`.
 
 The runbook is [OPERATIONS.md#paused](OPERATIONS.md#paused).

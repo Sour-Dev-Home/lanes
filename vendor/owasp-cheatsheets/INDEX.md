@@ -25,7 +25,6 @@ Scripts that import `node:child_process` (each call site runs `gh`, `git`, `clau
 - `scripts/lanes/blockers.mjs`
 - `scripts/lanes/cleanup.mjs`
 - `scripts/lanes/consolidate.mjs`
-- `scripts/lanes/control.mjs` (runs fixed `gh api` calls; the action, reason and actor arrive through environment variables and are validated, never put on a command line as text)
 - `scripts/lanes/delivery-metrics.mjs`
 - `scripts/lanes/diff-coverage.mjs`
 - `scripts/lanes/gate.mjs`

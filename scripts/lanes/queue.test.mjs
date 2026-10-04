@@ -2275,6 +2275,13 @@ test("edge: #645 a control state with an odd shape is paused, and a changed reas
   assert.match(pausedLine(run.out)[1], / by owner: second reason$/);
 });
 
+test("#645: the queue reads the pause state with its default gh login, never the App token (the App has no actions permission)", () => {
+  const src = readFileSync(new URL("./queue.mjs", import.meta.url), "utf8");
+  const body = /function pauseState\(\) \{[\s\S]*?\n\}/.exec(src)[0];
+  assert.match(body, /readControlState/);
+  assert.doesNotMatch(body, /GH_TOKEN|GITHUB_TOKEN|tokenNow|mintInstallationToken|appHeartbeat/);
+});
+
 test("#645: the self-restart still happens while paused", async () => {
   const { main, RESTART_CODE } = await import("./queue.mjs");
   const run = fakeRun({ issues: [], prs: [], sessions: [] });

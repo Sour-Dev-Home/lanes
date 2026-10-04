@@ -654,7 +654,7 @@ test("#645: gatherInputs carries the pause state, paused when it cannot be read"
   const { gatherInputs } = await import("./health.mjs");
   const gh = (args) => {
     if (args[0] === "repo") return { url: "https://github.com/o/r", nameWithOwner: "o/r" };
-    if (args.some((a) => String(a).includes("lanes-health"))) throw new Error("HTTP 502");
+    if (args.some((a) => String(a).includes("lanes-control.yml"))) throw new Error("HTTP 502");
     if (args[0] === "api") return {};
     if (args[0] === "issue") return [];
     if (args[0] === "pr") return [];
@@ -664,4 +664,17 @@ test("#645: gatherInputs carries the pause state, paused when it cannot be read"
   const r = gatherInputs(gh, { identity });
   assert.equal(r.control.paused, true);
   assert.match(r.control.reason, /cannot be read: HTTP 502/);
+});
+
+test("#645: gatherInputs reads the lanes-control run history, so a successful pause run shows in the inputs", async () => {
+  const { gatherInputs } = await import("./health.mjs");
+  const runs = { workflow_runs: [{ conclusion: "success", event: "workflow_dispatch", head_branch: "main", display_title: "pause: maintenance", triggering_actor: { login: "owner" }, run_started_at: "2026-10-04T09:00:00Z", created_at: "2026-10-04T09:00:00Z" }] };
+  const gh = (args) => {
+    if (args[0] === "repo") return { url: "https://github.com/o/r", nameWithOwner: "o/r" };
+    if (args[0] === "api" && String(args[1]).includes("/actions/workflows/lanes-control.yml/runs")) return runs;
+    if (args[0] === "api") return {};
+    return [];
+  };
+  const r = gatherInputs(gh, { identity });
+  assert.deepEqual([r.control.paused, r.control.by, r.control.reason], [true, "owner", "maintenance"]);
 });

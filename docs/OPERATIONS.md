@@ -246,20 +246,23 @@ were found during the pause are resumed then, as in [stalled-lane](#stalled-lane
 
 **Paused and you did not press the button.** The switch fails closed. The queue's line names the reason:
 - `the pause state cannot be read: ...`: GitHub was unreachable or rate limited. It clears on its own when the read works.
-- `the control comment was written by <login>` or `was last edited by <login>`, or `is malformed`: something other than
-  the lanes-control workflow wrote the comment on the `lanes-health` issue that starts `<!-- lanes:control -->`. Press
-  Resume (or Pause) in lanes-control, which rewrites the comment. If the comment was *written* by another account,
-  delete that comment in GitHub first, since the workflow only edits its own.
+  A `HTTP 404` here means `.github/workflows/lanes-control.yml` is not on the default branch yet (a fresh install that
+  has not committed the workflow): commit it, and the pause clears.
+- `the newest successful lanes-control run came from <event>, not workflow_dispatch` or `was on <branch>, not main`, or
+  `has a title or start time that does not parse`: the newest successful run is not a press of the button on `main`.
+  Run lanes-control again from `main` with `pause` or `resume`; that run becomes the newest and decides.
 
-**A fresh install, or a deleted health issue, reads as running.** The state lives in a comment on the `lanes-health`
-issue; with no issue or no comment, nothing has been paused. Deleting that issue therefore lifts a pause.
+**How the state is kept.** The state is the history of lanes-control runs, so no comment or issue holds it. The
+newest *successful* run decides: its title (`<action>: <reason>`) gives the action and reason, GitHub's
+`triggering_actor` gives who pressed it, and its start time gives since. A press with a bad action or a reason over 200
+characters, or with a control character in it, fails the run and never counts. The queue reads it with your own `gh`
+login, since the lanes App has no `actions` permission, so a lane can neither press the button nor read or change the
+state; the watchdog reads it with its `actions: read` token. Closing or deleting the `lanes-health` issue changes
+nothing.
 
-**Residual risk.** The authorization of the buttons is GitHub's, but the state is a comment, and the lanes App has
-`issues: write`. A lane could lift a pause by deleting the control comment, by removing the `lanes-health` label, or by
-opening a new `lanes-health` issue while the old one is closed (the lowest open issue is read). It cannot forge a
-resume, since an edit or a foreign author reads as paused. The ADR 0028 design accepts this because every lane is bound
-by `CLAUDE.md` rule 6 and the App's actions are visible in the issue's history; if you want it closed, the state needs a
-store a lane cannot write (a repository variable or a file on `main`), which is a new decision.
+**A fresh install, or no run at all, reads as running.** With no successful run, nothing has been paused. Deleting runs
+needs `actions: write`, which only people with write access have, so it is yours to do: if you delete every
+lanes-control run (or the run that said `pause`), lanes read as running again.
 
 <a id="needs-owner"></a>
 ## needs-owner

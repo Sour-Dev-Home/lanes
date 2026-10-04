@@ -1485,11 +1485,17 @@ test("#645 lanes-control inputs: action is a choice of pause and resume, reason 
   assert.match(reason, /200 characters/);
 });
 
-test("#645 lanes-control has exactly contents: read and issues: write", () => {
+test("#645 lanes-control has contents: read and nothing else, and no token is handed to the script", () => {
   const yml = control();
-  assert.match(yml, /\npermissions:\n  contents: read\n  issues: write\n/);
-  assert.doesNotMatch(yml, /actions: write|pull-requests: write|contents: write/);
+  assert.match(yml, /\npermissions:\n  contents: read\nconcurrency:/);
+  assert.doesNotMatch(yml, /: write/);
   assert.equal(yml.match(/^\s+permissions:/gm), null, "no job-level override widens it");
+  assert.doesNotMatch(yml, /GH_TOKEN|GITHUB_TOKEN|github\.token|secrets\./);
+});
+
+test("#645 lanes-control's run-name is `<action>: <reason>`, the title the queue and the health job parse", () => {
+  const yml = control();
+  assert.match(yml, /^run-name: "\$\{\{ inputs\.action \}\}: \$\{\{ inputs\.reason \}\}"$/m);
 });
 
 test("#645 lanes-control job runs only on refs/heads/main and checks out the default branch", () => {

@@ -19,8 +19,10 @@ Facts this decision relies on:
 - Only users with write access to the repository can run a `workflow_dispatch` workflow, and GitHub records who ran it
   and when in the Actions history. Triggering one through the API needs `actions: write`, which the lanes App does not
   have (ADR 0019), so a lane cannot press the buttons.
-- The App can edit any comment on an issue (it has `issues: write`), so a comment's author alone does not prove who set
-  its content; GraphQL reports both the `author` and the last `editor` of a comment.
+- The App has no `actions` permission (ADR 0019): it can neither trigger, re-run nor delete a workflow run. A workflow's
+  run history, with each run's title, triggering actor and conclusion, is therefore a record no lane can change. The App
+  does have `issues: write`, so any state kept in an issue or comment could be deleted or replaced by a lane (found by the
+  security review of PR #726, which first kept the state in a comment).
 - A `workflow_dispatch` run uses the workflow file from the branch the person picks. The App cannot push workflow files
   (ADR 0023), and a person with write access can already change any branch, so the job runs only on the default branch.
 
@@ -28,22 +30,21 @@ Facts this decision relies on:
 
 1. **The buttons.** A new workflow, `.github/workflows/lanes-control.yml`, runs on `workflow_dispatch` with inputs
    `action` (`pause` or `resume`) and an optional `reason` (at most 200 characters). The owner opens Actions,
-   lanes-control, Run workflow, picks the action and presses Run. Its permissions are `contents: read` and
-   `issues: write`. Its job runs only when `github.ref` is `refs/heads/main`, checks out the default branch, and runs
+   lanes-control, Run workflow, picks the action and presses Run. Its `run-name` is `<action>: <reason>`. Its only
+   permission is `contents: read`. Its job runs only when `github.ref` is `refs/heads/main`, checks out the default branch, and runs
    `node scripts/lanes/control.mjs`, passing the action, the reason and `github.triggering_actor` as environment
    variables, never interpolated into a `run:` line.
-2. **The state.** `scripts/lanes/control.mjs` creates or edits one comment on the lanes-health issue that starts
-   `<!-- lanes:control -->` and holds `{ paused, since, by, reason }` as JSON, with control characters stripped from the
-   reason. It touches no other issue or comment. The comment is not the issue body, which the ADR 0027 watchdog
-   rewrites, so the two never race.
-3. **The rule** is one pure helper, `controlState(comment, now)` in `scripts/lanes/lib.mjs`, with a reader,
-   `readControlState(api, repo)`, that finds the lanes-health issue as `health.mjs` does:
-   - No control comment means running: nothing has been paused.
-   - A control comment counts only when `github-actions[bot]` wrote it and, if it was edited, `github-actions[bot]` was
-     the last editor. Then its `paused` value is the state.
-   - Any other author or last editor (the lane bot included), malformed JSON, or any read error means paused, fail
-     closed, with a `reason` naming which. A tampered comment therefore pauses lanes until the owner presses Resume,
-     which rewrites it.
+2. **The state is the run history.** `scripts/lanes/control.mjs` only validates the action and the reason (at most 200
+   characters, no control character) and fails the run on anything else, so an invalid press never counts. The newest
+   successful `lanes-control` run is the state: its title gives the action and reason, GitHub's `triggering_actor` gives
+   who, and its start time gives since. Nothing is written to an issue or a comment.
+3. **The rule** is one pure helper, `controlState(runs)` in `scripts/lanes/lib.mjs`, with a reader,
+   `readControlState(api, repo)`, that lists the workflow's runs through the Actions API, newest first:
+   - Failed, cancelled and unfinished runs are skipped.
+   - No successful run means running: nothing has been paused.
+   - The newest successful run decides, when it is a `workflow_dispatch` run on `main` with a title that parses.
+   - A read error, a title that does not parse, or a newest successful run from another event or branch means paused,
+     fail closed, with a `reason` naming which.
 4. **The queue** (`scripts/lanes/queue.mjs`) reads the state first on each poll. While paused it launches nothing and
    resumes no dead lane (#444), prints one line on each change (`paused since <time> by <who>: <reason>`, and
    `resumed`), and keeps polling. Lanes in flight are untouched and finish. The ADR 0026 self-restart still happens,
@@ -62,22 +63,23 @@ Facts this decision relies on:
 
 Decided by the owner on 2026-10-02 in /plan-issues and on review of the first draft: a pause switch used from GitHub,
 as Pause and Resume buttons in a workflow rather than a label; in-flight lanes finish; the pause shown in the health
-issue. Approved with this plan: the heartbeat reports `paused`; `no-progress` is suppressed while paused; the state is a
-comment trusted only when `github-actions[bot]` wrote and last edited it; a fresh install reads as running. Amended on
-2026-10-02 with the approval of ADR 0030's plan: `/start` is retired, so it no longer refuses while paused (part 5).
+issue. Approved with this plan: the heartbeat reports `paused`; `no-progress` is suppressed while paused; a fresh install reads as
+running. Amended on 2026-10-02 with the approval of ADR 0030's plan: `/start` is retired, so it no longer refuses while
+paused (part 5). Amended on 2026-10-04 by the owner, on the security review of PR #726: the state is the lanes-control
+run history, not a comment the lanes App could delete or replace (parts 1 to 3).
 
 ## Consequences
 
 - The owner pauses all new launches with one button, and GitHub enforces and records who pressed it. No new account,
   credential or App permission is needed, and a lane can neither press the button nor lift a pause.
 - Lanes no longer need their own check of who changed a label: the authorization is GitHub's.
-- Fail closed means a GitHub outage, a rate limit or a tampered comment pauses lanes. That is safe but can look like a
+- Fail closed means a GitHub outage, a rate limit or an unreadable run history pauses lanes. That is safe but can look like a
   hang, so the one-line message names the reason.
 - The queue makes one more API read per poll, and the pause is only as live as the poll
   interval: a lane that starts a second before the button is pressed finishes.
-- The workflow is a new file with `issues: write`, limited in `control.mjs` to the one comment and run only from the
-  default branch.
-- If the lanes-health issue is deleted, its control comment goes with it and lanes read as running;
+- The workflow is a new file with no write permission, run only from the default branch.
+- The state survives the lanes-health issue being closed or deleted. Deleting the workflow's runs needs `actions: write`,
+  which only people with write access have; if every run were deleted, lanes would read as running, and
   `docs/OPERATIONS.md` says so.
 
 ## Governs

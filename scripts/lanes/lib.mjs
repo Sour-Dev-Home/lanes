@@ -1309,75 +1309,50 @@ function decideGate({ prBody, issueLabels, issueState, issueAuthorCanWrite, issu
   return { state: "success", description: `unattended-eligible (tier:${tier}), reviews in${note}`, stage: "ready" };
 }
 
-// ADR 0028: the pause switch. `CONTROL_MARKER` starts the one comment on the lanes-health issue that control.mjs writes.
-export const CONTROL_MARKER = "<!-- lanes:control -->";
-export const HEALTH_ISSUE_LABEL = "lanes-health";
+// ADR 0028: the pause switch. The state is the history of the lanes-control workflow's runs; nothing is written to an issue.
+export const CONTROL_WORKFLOW = "lanes-control.yml";
+export const CONTROL_REASON_LIMIT = 200;
 const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g;
-// Text from the comment is shown on a terminal and in the health issue: one line, no control or format characters.
-export const controlText = (s, max = 200) => String(s ?? "").replace(/\p{Cf}/gu, "").replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim().slice(0, max);
-const isActionsActor = (a) => a?.login === "github-actions[bot]" || (a?.login === "github-actions" && (a?.type ?? a?.__typename) === "Bot");
-const actorName = (a) => controlText(a?.login ?? "unknown", 60) || "unknown";
+// Text from a run is shown on a terminal and in the health issue: one line, no control or format characters.
+export const controlText = (s, max = CONTROL_REASON_LIMIT) => String(s ?? "").replace(/\p{Cf}/gu, "").replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim().slice(0, max);
+const CONTROL_TITLE = /^(pause|resume):(?: ([\s\S]*))?$/;
+const CONTROL_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}|[A-Za-z0-9-]*\[bot\])$/;
 
 /**
- * ADR 0028 part 3: the pause state from the control comment (`{ body, author, editor }`, an actor being `{ login, type? }`
- * or GraphQL's `{ login, __typename }`; null when there is none), `now` ms. Returns `{ paused, since, by, reason,
- * failClosed }`. No comment is running. A comment counts only when github-actions[bot] wrote it and, if it was edited,
- * last edited it; any other author or editor, or a body that is not the expected JSON, is paused with a `reason` saying which.
+ * ADR 0028 part 3: the pause state from the runs of lanes-control.yml (the Actions API's `workflow_runs`, each with
+ * `conclusion`, `event`, `head_branch`, `display_title`, `triggering_actor.login`, `run_started_at`, `created_at`),
+ * `now` ms for a fail-closed `since`. Returns `{ paused, since, by, reason, failClosed }`. Failed, cancelled and unfinished
+ * runs are skipped. No successful run is running. The newest successful run decides when it is a workflow_dispatch run
+ * on main with a title `pause: <reason>` or `resume: <reason>`; any other event or branch, or a title that does not
+ * parse, is paused (fail closed) with a `reason` saying which.
  */
-export function controlState(comment, now) {
+export function controlState(runs, now = Date.now()) {
   const closed = (reason) => ({ paused: true, since: new Date(now).toISOString(), by: "lanes", reason, failClosed: true });
-  if (comment === null || comment === undefined) return { paused: false, since: null, by: null, reason: "", failClosed: false };
-  if (!isActionsActor(comment.author)) return closed(`the control comment was written by ${actorName(comment.author)}, not github-actions[bot]`);
-  if (comment.editor !== null && comment.editor !== undefined && !isActionsActor(comment.editor)) return closed(`the control comment was last edited by ${actorName(comment.editor)}, not github-actions[bot]`);
-  let data;
-  try {
-    const body = String(comment.body ?? "");
-    if (!body.startsWith(CONTROL_MARKER)) throw new Error("no marker");
-    data = JSON.parse(/\{[\s\S]*\}/.exec(body.slice(CONTROL_MARKER.length))?.[0] ?? "");
-  } catch {
-    return closed("the control comment is malformed");
-  }
-  const since = Date.parse(data?.since);
-  if (typeof data?.paused !== "boolean" || !Number.isFinite(since)) return closed("the control comment is malformed");
-  return { paused: data.paused, since: new Date(since).toISOString(), by: controlText(data.by, 60) || "unknown", reason: controlText(data.reason), failClosed: false };
+  if (!Array.isArray(runs)) return closed("the lanes-control run history is not a list");
+  const created = (r) => Date.parse(r?.created_at);
+  const newest = runs.filter((r) => r?.conclusion === "success").sort((a, b) => (created(b) || 0) - (created(a) || 0))[0];
+  if (!newest) return { paused: false, since: null, by: null, reason: "", failClosed: false };
+  if (newest.event !== "workflow_dispatch") return closed(`the newest successful lanes-control run came from ${controlText(newest.event, 40) || "an unknown event"}, not workflow_dispatch`);
+  if (newest.head_branch !== "main") return closed(`the newest successful lanes-control run was on ${controlText(newest.head_branch, 60) || "an unknown branch"}, not main`);
+  const title = CONTROL_TITLE.exec(typeof newest.display_title === "string" ? newest.display_title : "");
+  const since = Date.parse(newest.run_started_at ?? newest.created_at);
+  if (!title || !Number.isFinite(since)) return closed("the newest successful lanes-control run has a title or start time that does not parse");
+  const login = newest.triggering_actor?.login;
+  return { paused: title[1] === "pause", since: new Date(since).toISOString(), by: typeof login === "string" && CONTROL_LOGIN.test(login) ? login : "unknown", reason: controlText(title[2]), failClosed: false };
 }
 
 /**
- * ADR 0028 part 3: reads the state from the lanes-health issue (the lowest-numbered open one, else the lowest-numbered
- * in any state, as health.mjs finds it). `api(args)` takes `gh api` arguments and returns the reply text; `repo` is
- * `owner/name`. No issue or no control comment is running. Every control comment is checked, so a forged second one
- * pauses too. Any read error is paused, fail closed.
+ * ADR 0028 part 3: reads the lanes-control runs, newest first (`actions/workflows/lanes-control.yml/runs`). `api(args)`
+ * takes `gh api` arguments and returns the reply text; `repo` is `owner/name`. Any read error is paused, fail closed.
  */
 export function readControlState(api, repo, now = Date.now()) {
   try {
-    const [owner, name] = String(repo).split("/");
-    if (!owner || !name) throw new Error("bad repository name");
-    const ask = (query, vars = {}) => {
-      const reply = JSON.parse(api(["graphql", "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `name=${name}`, ...Object.entries(vars).flatMap(([k, v]) => ["-F", `${k}=${v}`])]));
-      if (reply?.errors?.length || !reply?.data) throw new Error("GraphQL returned an error");
-      return reply.data;
-    };
-    const issues = ask(`query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ issues(labels:["${HEALTH_ISSUE_LABEL}"],states:[OPEN,CLOSED],first:50,orderBy:{field:CREATED_AT,direction:ASC}){ nodes { number state } } } }`)?.repository?.issues?.nodes;
-    if (!Array.isArray(issues)) throw new Error("unexpected reply");
-    const found = [...issues].sort((a, b) => a.number - b.number);
-    const issue = found.find((i) => i.state === "OPEN") ?? found[0];
-    if (!issue) return controlState(null, now);
-    const marked = [];
-    let after = null;
-    for (let page = 0; page < 50; page += 1) {
-      const comments = ask(
-        `query($owner:String!,$name:String!,$number:Int!,$after:String){ repository(owner:$owner,name:$name){ issue(number:$number){ comments(first:100,after:$after){ pageInfo { hasNextPage endCursor } nodes { body author { login __typename } editor { login __typename } } } } } }`,
-        { number: issue.number, ...(after ? { after } : {}) },
-      )?.repository?.issue?.comments;
-      if (!Array.isArray(comments?.nodes)) throw new Error("unexpected reply");
-      for (const c of comments.nodes) if (typeof c?.body === "string" && c.body.startsWith(CONTROL_MARKER)) marked.push(c);
-      if (!comments.pageInfo?.hasNextPage) break;
-      after = comments.pageInfo.endCursor;
-      if (page === 49) throw new Error("too many comments to read");
-    }
-    const states = marked.map((c) => controlState(c, now));
-    return states.find((s) => s.failClosed) ?? states[0] ?? controlState(null, now);
+    if (!/^[\w.-]+\/[\w.-]+$/.test(String(repo)) || /(^|\/)\.\.?$|^\.\.?\//.test(String(repo))) throw new Error("bad repository name");
+    const reply = JSON.parse(api([`repos/${repo}/actions/workflows/${CONTROL_WORKFLOW}/runs?status=success&per_page=50`]));
+    if (!Array.isArray(reply?.workflow_runs)) throw new Error("unexpected reply");
+    return controlState(reply.workflow_runs, now);
   } catch (err) {
-    return { paused: true, since: new Date(now).toISOString(), by: "lanes", reason: `the pause state cannot be read: ${controlText(err?.message ?? err, 100)}`, failClosed: true };
+    const why = String(err?.stderr || err?.message || err).trim().split("\n")[0];
+    return { paused: true, since: new Date(now).toISOString(), by: "lanes", reason: `the pause state cannot be read: ${controlText(why, 100)}`, failClosed: true };
   }
 }
