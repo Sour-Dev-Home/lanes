@@ -2,7 +2,7 @@
   "requiredChecks": ["verify", "security", "lanes/gate"],
   "metrics": { "mainWorkflow": "verify.yml", "fragmentsDir": null },
   "dependabot": { "actionBumps": true },
-  "health": { "approvedStuckMinutes": 30, "noProgressMinutes": 30 },
+  "health": { "approvedStuckMinutes": 30, "noProgressMinutes": 30, "gateFailureMinutes": 10 },
   "budget": { "perNightTokens": 300000000, "perLaneTokens": 15000000 },
   "identity": { "profile": "team", "app": { "id": 5140388, "installationId": 166641484, "botLogin": "sour-dev-lanes[bot]" } },
   "start": {

@@ -5,6 +5,15 @@ import { execFileSync } from "node:child_process";
 import { PATH_PATTERNS } from "../preflight.mjs";
 import { classifyFiles, codeownersRegex, compileConfig, loadConfig } from "./lib.mjs";
 
+test("lane.md opens the PR with every template section, `## Reviewer results` as pending until the verdicts are posted (#732)", () => {
+  const md = readFileSync(".claude/commands/lane.md", "utf8").replace(/\s+/g, " ");
+  assert.match(md, /every template section/);
+  assert.match(md, /`## Reviewer results` says `pending: posting verdicts`/);
+  assert.match(md, /never published with a section missing/);
+  const template = readFileSync(".github/pull_request_template.md", "utf8");
+  assert.ok(template.includes("## Reviewer results"));
+});
+
 test("lanes-gate always runs the default branch's scripts, never the PR's", () => {
   const yml = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
   assert.match(yml, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
