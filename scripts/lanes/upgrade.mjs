@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { MANIFEST } from "./install.mjs";
+import { MANIFEST, starterConfig } from "./install.mjs";
 
 const LOCK = "lanes.lock.json";
 const CONFIG = "lanes.config.json";
@@ -96,8 +96,10 @@ function missingConfigKeys(source, target) {
       return undefined;
     }
   };
-  const [src, mine] = [read(source), read(target)];
-  if (!src || !mine) return { mine, added: {} };
+  const [full, mine] = [read(source), read(target)];
+  if (!full || !mine) return { mine, added: {} };
+  // #747: only the starter's keys; identity, modules, metrics and the rest are lanes' own or the project's choice.
+  const src = Object.fromEntries(Object.entries(starterConfig(full)).filter(([, v]) => v !== undefined));
   return { mine, added: Object.fromEntries(Object.entries(src).filter(([k]) => !Object.hasOwn(mine, k))) };
 }
 
