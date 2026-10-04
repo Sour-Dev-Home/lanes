@@ -1202,6 +1202,16 @@ test("edge: waitForStop stops waiting when the agents list fails or is unparseab
   assert.equal(waitForStop("s7", { run: stopped, sleep: noSleep }), true);
 });
 
+test("#730: waitForStop reads today's state field (no status): working keeps waiting, done and blocked end the wait", () => {
+  const seen = ["working", "done"];
+  const run = () => JSON.stringify([{ id: "s7", state: seen.shift() }]);
+  assert.equal(waitForStop("s7", { run, sleep: () => {} }), true);
+  assert.equal(waitForStop("s7", { run: () => JSON.stringify([{ id: "s7", state: "blocked" }]), sleep: () => assert.fail("must not sleep") }), true);
+  let sleeps = 0;
+  assert.equal(waitForStop("s7", { run: () => JSON.stringify([{ id: "s7", state: "working" }]), sleep: () => sleeps++ }), false);
+  assert.equal(sleeps, 10);
+});
+
 test("cleanupMerged waits for the stop and retries rm through its default deps", () => {
   const log = [];
   let rmTries = 0;

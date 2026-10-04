@@ -658,8 +658,8 @@ export function waitForStop(id, { run, sleep }) {
       return false;
     }
     if (!Array.isArray(agents)) return false;
-    const status = agents.find((a) => a?.id === id)?.status;
-    if (status !== "busy" && status !== "running") return true;
+    const listed = agents.find((a) => a?.id === id);
+    if (!listed || (listed.status !== "running" && sessionPhase(listed) !== "running")) return true;
     if (check >= STOP_CHECKS) return false;
     sleep(STOP_CHECK_MS);
   }
