@@ -2087,7 +2087,7 @@ test("the heartbeat block is what health.mjs readHeartbeat reads from the lane b
   const { readHeartbeat } = await import("./health.mjs");
   const body = heartbeatBody(beatPayload(["idle-lane:issue 5", "queue-stopped:cannot restart dirty"]));
   const got = readHeartbeat([{ body, author: BOT, updatedAt: "2026-09-28T09:00:00Z" }], QUEUE_TEAM);
-  assert.deepEqual(got, { at: Date.parse("2026-09-28T09:00:00.000Z"), findings: ["idle-lane:issue 5", "queue-stopped:cannot restart dirty"], paused: false });
+  assert.deepEqual(got, { at: Date.parse("2026-09-28T09:00:00.000Z"), findings: ["idle-lane:issue 5", "queue-stopped:cannot restart dirty"], paused: false, live: [] });
 });
 
 // Criterion 1: each finding
@@ -2146,7 +2146,7 @@ test("main: every tick writes one heartbeat with the time and the script commit"
   await assert.rejects(main([], { ...run.deps, git: git.git }), /never stopped/);
   assert.deepEqual(run.beats[0].identity, QUEUE_TEAM);
   assert.equal(run.written().length, 4);
-  assert.deepEqual(run.written()[0], { at: "2026-09-28T09:00:00.000Z", commit: "abc1234def", findings: [], paused: false });
+  assert.deepEqual(run.written()[0], { at: "2026-09-28T09:00:00.000Z", commit: "abc1234def", findings: [], paused: false, live: [] });
   assert.equal(run.written()[1].at, "2026-09-28T09:03:00.000Z");
 });
 
@@ -2569,4 +2569,23 @@ test("#739: edge: a removal at the very time the marker was written keeps the ma
   assert.equal(await main([], run.deps), 0);
   assert.deepEqual([run.stopped, run.removed, run.launched], [[], [], []]);
   assert.equal(run.markers.get(7).time, "2026-10-04T17:00:00.000Z");
+});
+
+// #745: the heartbeat's `live` list.
+test("#745: heartbeatLive lists the issues whose lane session is running or waiting, sorted and deduplicated", async () => {
+  const { heartbeatLive, heartbeatBody } = await import("./queue.mjs");
+  const lane = (n, extra) => ({ kind: "background", name: `lane-${n}`, ...extra });
+  const sessions = [lane(9, { status: "busy" }), lane(3, { state: "blocked" }), lane(3, { status: "busy" }), lane(5, { status: "idle" }), lane(6, { state: "done" }), { kind: "background", name: "owner", status: "busy" }, null, { kind: "interactive", name: "lane-8", status: "busy" }];
+  assert.deepEqual(heartbeatLive(sessions), [3, 9]);
+  assert.deepEqual(heartbeatLive(), []);
+  const body = heartbeatBody({ ...beatPayload(), live: [3, 9] });
+  assert.deepEqual(JSON.parse(/\{[\s\S]*\}/.exec(body)[0]), { ...beatPayload(), live: [3, 9] });
+});
+
+test("#745: edge: heartbeatLive keeps 20 issues at most", async () => {
+  const { heartbeatLive } = await import("./queue.mjs");
+  const sessions = Array.from({ length: 30 }, (_, i) => ({ kind: "background", name: `lane-${30 - i}`, status: "busy" }));
+  const live = heartbeatLive(sessions);
+  assert.equal(live.length, 20);
+  assert.deepEqual(live, Array.from({ length: 20 }, (_, i) => i + 1));
 });

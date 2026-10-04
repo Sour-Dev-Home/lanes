@@ -93,7 +93,7 @@ test("readHeartbeat: lane bot only, marker first, newest wins, solo profile trus
   assert.equal(readHeartbeat(undefined, identity), null);
   assert.equal(readHeartbeat([heartbeat(NOW - 9 * MIN), heartbeat(NOW - 2 * MIN)], identity).at, NOW - 2 * MIN);
   const broken = { body: `${HEARTBEAT_MARKER}\n{not json}`, author: BOT, updatedAt: new Date(NOW - MIN).toISOString() };
-  assert.deepEqual(readHeartbeat([broken], identity), { at: NOW - MIN, findings: [], paused: false });
+  assert.deepEqual(readHeartbeat([broken], identity), { at: NOW - MIN, findings: [], paused: false, live: [] });
 });
 
 test("flake: a lanes-flaky annotation on a verify check run is a flake keyed by file and sha, cleared after 7 days (#637)", () => {
@@ -144,18 +144,86 @@ test("run: with a closed low number and an open higher one, the open one is used
   assert.equal((await run({ client: f.client, inputs: withProblem(), now: NOW })).number, 20);
 });
 
+// #745: stuck-pr.
+const beatLive = (at, live = []) => ({ body: `${HEARTBEAT_MARKER}\n\`\`\`json\n${JSON.stringify({ at: new Date(at).toISOString(), findings: [], live })}\n\`\`\``, author: BOT, updatedAt: new Date(at).toISOString() });
+const gateOk = { context: "lanes/gate", state: "PENDING", description: "waiting on owner (/approve)" };
+const laneVerify = { name: "verify", conclusion: "SUCCESS" };
+const lanePr = (extra = {}) => ({ number: 738, headRefName: "issue-700-thing", mergeable: "CONFLICTING", statusCheckRollup: [laneVerify, gateOk], commits: [{ committedDate: new Date(NOW - 45 * MIN).toISOString() }], ...extra });
+const stuck = (prs, extra = {}) => base({ prs, comments: [beatLive(NOW - 2 * MIN)], ...extra });
+
+test("stuck-pr: a conflicting PR with no live lane and an old commit is a problem, with the owner's text and fix", () => {
+  const [p] = evaluate(stuck([lanePr({ url: "https://github.com/o/r/pull/738" })]), NOW);
+  assert.equal(p.key, "stuck-pr:PR 738");
+  assert.equal(p.kind, "stuck-pr");
+  assert.equal(p.text, "PR 738 (#700) is conflict and no lane is working on it");
+  assert.equal(p.anchor, "stuck-pr");
+  assert.equal(p.pr, "https://github.com/o/r/pull/738");
+  assert.equal(p.fix, "the queue should resume it; if it has not, check the issue's last comment");
+});
+
+test("stuck-pr: a failing PR and a starting PR are problems", () => {
+  const failing = lanePr({ number: 1, headRefName: "issue-1-a", mergeable: "MERGEABLE", statusCheckRollup: [{ name: "verify", conclusion: "FAILURE" }, gateOk] });
+  const starting = lanePr({ number: 2, headRefName: "issue-2-b", mergeable: "MERGEABLE", statusCheckRollup: [laneVerify] });
+  assert.deepEqual(keys(stuck([failing, starting])), ["stuck-pr:PR 1", "stuck-pr:PR 2"]);
+  assert.match(evaluate(stuck([failing]), NOW)[0].text, /is failing and/);
+  assert.match(evaluate(stuck([starting]), NOW)[0].text, /is starting and/);
+});
+
+test("stuck-pr: none when the issue is in live, the commit is recent, or the heartbeat is missing or stale", () => {
+  assert.deepEqual(keys(base({ prs: [lanePr()], comments: [beatLive(NOW - 2 * MIN, [3, 700])] })), []);
+  assert.deepEqual(keys(stuck([lanePr({ commits: [{ committedDate: new Date(NOW - 29 * MIN).toISOString() }] })])), []);
+  assert.deepEqual(keys(base({ prs: [lanePr()], comments: [beatLive(NOW - 31 * MIN)] })), [], "stale heartbeat");
+  assert.deepEqual(keys(base({ prs: [lanePr()] })), [], "no heartbeat");
+});
+
+test("stuck-pr: none for a PR in the merge queue, waiting on the owner, or not on an issue branch", () => {
+  assert.deepEqual(keys(stuck([lanePr()], { reply: replyOf([], [738]) })), [], "in the merge queue");
+  assert.deepEqual(keys(stuck([lanePr({ mergeable: "MERGEABLE" })])), [], "waiting on the owner");
+  assert.deepEqual(keys(stuck([lanePr({ headRefName: "feature-x" })])), []);
+  assert.deepEqual(keys(stuck([lanePr({ headRefName: undefined })])), []);
+});
+
+test("stuck-pr: recovers on a new commit and on merge", () => {
+  const key = (inputs) => keys(inputs).filter((k) => k.startsWith("stuck-pr"));
+  assert.deepEqual(key(stuck([lanePr()])), ["stuck-pr:PR 738"]);
+  const pushed = lanePr({ commits: [...lanePr().commits, { committedDate: new Date(NOW - MIN).toISOString() }] });
+  assert.deepEqual(key(stuck([pushed])), []);
+  assert.deepEqual(key(stuck([])), [], "merged or closed: no longer open");
+});
+
+test("stuck-pr: edge: a PR with no commits, or an unreadable commit date, raises nothing; the threshold comes from the config", () => {
+  assert.deepEqual(keys(stuck([lanePr({ commits: [] })])), []);
+  assert.deepEqual(keys(stuck([lanePr({ commits: undefined })])), []);
+  assert.deepEqual(keys(stuck([lanePr({ commits: [{ committedDate: "nonsense" }] })])), []);
+  const recent = lanePr({ commits: [{ committedDate: new Date(NOW - 10 * MIN).toISOString() }] });
+  assert.deepEqual(keys(stuck([recent])), []);
+  assert.deepEqual(keys(stuck([recent], { config: { health: { stuckPrMinutes: 5 } } })), ["stuck-pr:PR 738"]);
+});
+
+test("readHeartbeat: live keeps positive integers only, at most 20, and defaults to none", () => {
+  const block = (live) => ({ body: `${HEARTBEAT_MARKER}\n\`\`\`json\n${JSON.stringify({ at: new Date(NOW).toISOString(), findings: [], live })}\n\`\`\``, author: BOT, updatedAt: new Date(NOW).toISOString() });
+  assert.deepEqual(readHeartbeat([block([4, "5", 0, -1, 1.5, null, 9])], identity).live, [4, 9]);
+  assert.deepEqual(readHeartbeat([block("x")], identity).live, []);
+  assert.equal(readHeartbeat([block(Array.from({ length: 30 }, (_, i) => i + 1))], identity).live.length, 20);
+  assert.deepEqual(readHeartbeat([heartbeat(NOW)], identity).live, []);
+});
+
 test("healthThresholds: defaults and invalid values", () => {
-  assert.deepEqual(healthThresholds({}), { approvedStuckMinutes: 30, noProgressMinutes: 30, gateFailureMinutes: 10 });
-  assert.deepEqual(healthThresholds({ health: { approvedStuckMinutes: -1, noProgressMinutes: "5", gateFailureMinutes: 0 } }), { approvedStuckMinutes: 30, noProgressMinutes: 30, gateFailureMinutes: 10 });
+  assert.deepEqual(healthThresholds({}), { approvedStuckMinutes: 30, noProgressMinutes: 30, gateFailureMinutes: 10, stuckPrMinutes: 30 });
+  assert.deepEqual(healthThresholds({ health: { approvedStuckMinutes: -1, noProgressMinutes: "5", gateFailureMinutes: 0, stuckPrMinutes: -3 } }), { approvedStuckMinutes: 30, noProgressMinutes: 30, gateFailureMinutes: 10, stuckPrMinutes: 30 });
   assert.equal(healthThresholds({ health: { gateFailureMinutes: "x" } }).gateFailureMinutes, 10);
-  assert.deepEqual(healthThresholds({ health: { approvedStuckMinutes: 5, noProgressMinutes: 7, gateFailureMinutes: 3 } }), { approvedStuckMinutes: 5, noProgressMinutes: 7, gateFailureMinutes: 3 });
+  assert.equal(healthThresholds({ health: { stuckPrMinutes: "x" } }).stuckPrMinutes, 30);
+  assert.equal(healthThresholds({ health: { stuckPrMinutes: 0 } }).stuckPrMinutes, 30);
+  assert.equal(healthThresholds({ health: { stuckPrMinutes: 12 } }).stuckPrMinutes, 12);
+  assert.deepEqual(healthThresholds({ health: { approvedStuckMinutes: 5, noProgressMinutes: 7, gateFailureMinutes: 3, stuckPrMinutes: 9 } }), { approvedStuckMinutes: 5, noProgressMinutes: 7, gateFailureMinutes: 3, stuckPrMinutes: 9 });
 });
 
 test("lanes.config.json registers the module and sets both thresholds", () => {
   const config = JSON.parse(readFileSync(new URL("../../lanes.config.json", import.meta.url), "utf8"));
   assert.ok(config.modules.entries.some((m) => m.paths.includes("scripts/lanes/health.")));
-  assert.deepEqual(healthThresholds(config), { approvedStuckMinutes: 30, noProgressMinutes: 30, gateFailureMinutes: 10 });
+  assert.deepEqual(healthThresholds(config), { approvedStuckMinutes: 30, noProgressMinutes: 30, gateFailureMinutes: 10, stuckPrMinutes: 30 });
   assert.equal(config.health.gateFailureMinutes, 10);
+  assert.equal(config.health.stuckPrMinutes, 30);
 });
 
 test("readStored trusts the block only when github-actions wrote the body", () => {
@@ -366,13 +434,13 @@ test("gatherInputs shapes the gh replies into evaluate's inputs", async () => {
   const reply = { data: { repository: { pullRequests: { nodes: [node, { number: 6 }] } } } };
   const gh = (args) => {
     if (args[0] === "api") return reply;
-    if (args[0] === "pr") return [{ number: 5, url: "https://github.com/o/r/pull/5", headRefOid: "new", latestReviews: [{ state: "APPROVED", commit: { oid: "old" } }] }];
+    if (args[0] === "pr") return [{ number: 5, url: "https://github.com/o/r/pull/5", headRefOid: "new", headRefName: "issue-5-x", mergeable: "CONFLICTING", statusCheckRollup: [], autoMergeRequest: null, commits: [{ committedDate: "2026-10-02T09:00:00Z" }], latestReviews: [{ state: "APPROVED", commit: { oid: "old" } }] }];
     if (args[0] === "repo") return { url: "https://github.com/o/r" };
     if (args[0] === "issue") return [{ number: 1, labels: [{ name: "ready" }] }, { number: 2, labels: [{ name: "ready" }, { name: "lane:running" }] }, { number: 3, labels: [{ name: "lane:running" }] }];
     return args.includes("merge_group") ? [] : [{ name: "verify", headSha: "ab", conclusion: "success", updatedAt: "t" }];
   };
   const r = gatherInputs(gh, { identity });
-  assert.deepEqual(r.prs, [{ number: 5, gateState: "SUCCESS", gateSince: Date.parse("2026-10-02T10:00:00Z"), gateDescription: undefined, url: "https://github.com/o/r/pull/5", approved: true, approvalStale: true }, { number: 6, gateState: null, gateSince: undefined, gateDescription: undefined }]);
+  assert.deepEqual(r.prs, [{ number: 5, gateState: "SUCCESS", gateSince: Date.parse("2026-10-02T10:00:00Z"), gateDescription: undefined, url: "https://github.com/o/r/pull/5", headRefName: "issue-5-x", mergeable: "CONFLICTING", statusCheckRollup: [], autoMergeRequest: null, commits: [{ committedDate: "2026-10-02T09:00:00Z" }], approved: true, approvalStale: true }, { number: 6, gateState: null, gateSince: undefined, gateDescription: undefined }]);
   assert.equal(r.repoUrl, "https://github.com/o/r");
   assert.equal(r.readyCount, 1);
   assert.equal(r.inFlightCount, 4);

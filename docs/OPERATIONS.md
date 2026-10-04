@@ -15,6 +15,7 @@ The incident numbers cited below are issues and pull requests in this repository
 - [gate-failure](#gate-failure)
 - [no-progress](#no-progress)
 - [stalled-lane](#stalled-lane)
+- [stuck-pr](#stuck-pr)
 - [flaky-test](#flaky-test)
 - [workflow-hand-over](#workflow-hand-over)
 - [chain-deadlock](#chain-deadlock)
@@ -131,6 +132,31 @@ lists it as a local finding on the health issue.
 4. A lane that keeps failing the same way: comment on the issue, remove `lane:running` and file the cause.
 
 Incidents: none recorded in the cited PRs; the detection rule is [ADR 0027](adr/0027-health-inbox-and-watchdog.md).
+
+<a id="stuck-pr"></a>
+## stuck-pr
+
+**What you see.** A comment on the `lanes-health` issue: `PR <n> (#<N>) is <stage> and no lane is working on it`, where
+the stage is `failing`, `conflict` or `starting` (no `lanes/gate` status yet). The PR has had no commit for
+`health.stuckPrMinutes` (30 by default), and the queue's last heartbeat lists no running or waiting lane session for
+issue `<N>`. It clears when the PR gets a commit, merges or closes.
+
+**Likely causes.**
+- The queue should resume such a PR but has not: the lane stopped with `needs-owner` (the queue skips the issue until
+  you remove it), or the queue is busy at its lane limit or backing off.
+- The lane's session died and the queue could not resume it (a dirty worktree, a missing worktree).
+- The conflict needs a file outside the issue's Scope, so the lane stopped.
+
+**Fix.**
+1. Read the issue's last comment: a lane that stops comments why, and `needs-owner` marks it.
+2. Check that the queue is running (the heartbeat time on the health issue).
+3. A stop you can resolve: do what the comment asks, then remove `needs-owner` so the queue resumes the lane.
+4. A lane that keeps failing the same way: comment on the issue, remove `lane:running` and file the cause.
+
+A missing or stale heartbeat raises no `stuck-pr`; the [no-progress](#no-progress) alert covers a stopped queue.
+
+Incidents: #738 sat conflicted for an hour while the health issue read healthy. The rule is
+[ADR 0027](adr/0027-health-inbox-and-watchdog.md).
 
 <a id="flaky-test"></a>
 ## flaky-test

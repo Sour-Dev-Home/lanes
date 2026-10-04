@@ -4,11 +4,11 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isLaneBot, loadConfig, readControlState } from "./lib.mjs";
-import { STATUS_QUERY, formatAge, gateDescriptions, gateSince, mergeGroupFailures, mergeQueueEntries, queueRemovals } from "./status.mjs";
+import { STATUS_QUERY, formatAge, gateDescriptions, gateSince, mergeGroupFailures, mergeQueueEntries, prStage, queueRemovals, trustedRollups } from "./status.mjs";
 
 export const HEALTH_LABEL = "lanes-health";
 export const HEARTBEAT_MARKER = "<!-- lanes:heartbeat -->";
-export const HEALTH_DEFAULTS = { approvedStuckMinutes: 30, noProgressMinutes: 30, gateFailureMinutes: 10 };
+export const HEALTH_DEFAULTS = { approvedStuckMinutes: 30, noProgressMinutes: 30, gateFailureMinutes: 10, stuckPrMinutes: 30 };
 export const FLAKE_DAYS = 7;
 
 const DAY = 86_400_000;
@@ -21,7 +21,7 @@ const FINDING_LIMIT = 20;
 // `config.health` over the defaults; a value that is not a positive number falls back to its default.
 export function healthThresholds(config) {
   const pick = (name) => (Number.isFinite(config?.health?.[name]) && config.health[name] > 0 ? config.health[name] : HEALTH_DEFAULTS[name]);
-  return { approvedStuckMinutes: pick("approvedStuckMinutes"), noProgressMinutes: pick("noProgressMinutes"), gateFailureMinutes: pick("gateFailureMinutes") };
+  return { approvedStuckMinutes: pick("approvedStuckMinutes"), noProgressMinutes: pick("noProgressMinutes"), gateFailureMinutes: pick("gateFailureMinutes"), stuckPrMinutes: pick("stuckPrMinutes") };
 }
 
 // A check name from GitHub is untrusted text that ends up in a key and a comment: keep a plain, bounded alphabet.
@@ -43,7 +43,9 @@ export function readHeartbeat(comments, identity) {
     if (!Number.isFinite(at)) continue;
     const findings = (Array.isArray(data?.findings) ? data.findings : []).filter((f) => typeof f === "string" && FINDING.test(f)).slice(0, FINDING_LIMIT);
     // ADR 0028: a heartbeat without `paused` reads as not paused.
-    if (!best || at > best.at) best = { at, findings, paused: data?.paused === true };
+    // #745: the issues with a running or waiting lane session; a heartbeat without `live` lists none.
+    const live = (Array.isArray(data?.live) ? data.live : []).filter((n) => Number.isSafeInteger(n) && n > 0).slice(0, FINDING_LIMIT);
+    if (!best || at > best.at) best = { at, findings, paused: data?.paused === true, live };
   }
   return best;
 }
@@ -124,7 +126,7 @@ export function renderComment(p, tests, repoUrl) {
  * conclusion, at }], comments }`. `reply` is the STATUS_QUERY reply, `now` ms.
  */
 export function evaluate(inputs, now) {
-  const { approvedStuckMinutes, noProgressMinutes, gateFailureMinutes } =healthThresholds(inputs.config);
+  const { approvedStuckMinutes, noProgressMinutes, gateFailureMinutes, stuckPrMinutes } = healthThresholds(inputs.config);
   const found = new Map();
   // `extra` is the owner's guidance: `cause`, `fix`, the runbook `anchor`, and for a PR its `pr` link and failed `run`.
   const add = (key, kind, text, extra = {}) => found.set(key, { key, kind, text, ...extra });
@@ -174,6 +176,25 @@ export function evaluate(inputs, now) {
     });
   }
   const heartbeat = readHeartbeat(inputs.comments, inputs.identity);
+  // #745: an open lane PR that is failing, conflicting or not yet gated, with no lane working on it and no commit for
+  // `stuckPrMinutes`. A missing or stale heartbeat raises nothing here: `no-progress` covers a stopped queue.
+  if (heartbeat && now - heartbeat.at < noProgressMinutes * 60_000) {
+    const position = new Map(mergeQueueEntries(inputs.reply).map((e) => [e.number, e.position]));
+    for (const p of trustedRollups(prs, inputs.reply, inputs.config)) {
+      const n = Number(/^issue-(\d+)-/.exec(p.headRefName ?? "")?.[1]);
+      if (!Number.isSafeInteger(n) || heartbeat.live.includes(n)) continue;
+      const { stage } = prStage(p, position.get(p.number), p.gateDescription);
+      if (!["failing", "conflict", "starting"].includes(stage)) continue;
+      const newest = Math.max(...(Array.isArray(p.commits) ? p.commits : []).map((c) => Date.parse(c?.committedDate)).filter(Number.isFinite));
+      if (!Number.isFinite(newest) || now - newest < stuckPrMinutes * 60_000) continue;
+      add(`stuck-pr:PR ${p.number}`, "stuck-pr", `PR ${p.number} (#${n}) is ${stage} and no lane is working on it`, {
+        anchor: "stuck-pr",
+        pr: prLink(p.number),
+        cause: `its newest commit is ${formatAge(newest, now)} old and the queue's heartbeat lists no lane session for it`,
+        fix: "the queue should resume it; if it has not, check the issue's last comment",
+      });
+    }
+  }
   // ADR 0028 part 6: while paused on purpose, nothing launching is expected, so `no-progress` stays quiet (other alerts fire).
   const switchedOff = inputs.control?.paused === true || heartbeat?.paused === true;
   if (!switchedOff && inputs.readyCount > 0 && inputs.inFlightCount === 0 && (!heartbeat || now - heartbeat.at >= noProgressMinutes * 60_000)) {
@@ -365,9 +386,9 @@ export function gatherInputs(gh = ghJson, config = loadConfig()) {
   const descriptions = gateDescriptions(reply);
   // An approval is stale when one exists but none is on the PR's current head.
   const details = new Map();
-  for (const d of gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,url,headRefOid,latestReviews"]) ?? []) {
+  for (const d of gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,url,headRefOid,latestReviews,headRefName,mergeable,statusCheckRollup,autoMergeRequest,commits"]) ?? []) {
     const approved = (d.latestReviews ?? []).filter((r) => r?.state === "APPROVED").map((r) => r?.commit?.oid);
-    details.set(d.number, { url: d.url, approved: approved.length > 0, approvalStale: approved.length > 0 && !approved.includes(d.headRefOid) });
+    details.set(d.number, { url: d.url, headRefName: d.headRefName, mergeable: d.mergeable, statusCheckRollup: d.statusCheckRollup, autoMergeRequest: d.autoMergeRequest, commits: d.commits, approved: approved.length > 0, approvalStale: approved.length > 0 && !approved.includes(d.headRefOid) });
   }
   const prs = (reply?.data?.repository?.pullRequests?.nodes ?? []).map((node) => {
     const status = node.commits?.nodes?.[0]?.commit?.status;
