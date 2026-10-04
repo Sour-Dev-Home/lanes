@@ -45,6 +45,8 @@
 /scripts/lanes/setup-repo.test.mjs @SourE-dev
 /scripts/lanes/setup-state.mjs @SourE-dev
 /scripts/lanes/setup-state.test.mjs @SourE-dev
+/scripts/lanes/init.mjs @SourE-dev
+/scripts/lanes/init.test.mjs @SourE-dev
 /scripts/lanes/new-project.mjs @SourE-dev
 /scripts/lanes/new-project.test.mjs @SourE-dev
 /.claude/settings.json @SourE-dev

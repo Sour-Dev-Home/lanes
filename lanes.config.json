@@ -51,7 +51,7 @@
       },
       {
         "id": "install",
-        "paths": ["scripts/lanes/install.", "scripts/lanes/upgrade.", "scripts/lanes/new-project.", "scripts/lanes/setup-repo.", "scripts/lanes/notify-hook.", "scripts/lanes/release.", "scripts/lanes/adopter-smoke.", "scripts/lanes/app-setup.", "scripts/lanes/setup-state."],
+        "paths": ["scripts/lanes/install.", "scripts/lanes/upgrade.", "scripts/lanes/new-project.", "scripts/lanes/setup-repo.", "scripts/lanes/notify-hook.", "scripts/lanes/release.", "scripts/lanes/adopter-smoke.", "scripts/lanes/app-setup.", "scripts/lanes/setup-state.", "scripts/lanes/init."],
         "imports": ["lib", "preflight", "queue"],
         "contracts": ["contracts/lanes-lock."],
         "risk": "sensitive"
