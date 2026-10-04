@@ -3,7 +3,11 @@
 # permission to run workflows, so a lane cannot press it. A dispatch runs the workflow file of the branch the person picks, so the
 # job runs only on main, and it checks out the default branch. The inputs and the actor reach the script through `env:`,
 # never through shell interpolation.
+# The state is the run history (ADR 0028 part 2): the run's title, `<action>: <reason>`, is what the queue and the health
+# job read, so a successful run is a counted press; control.mjs fails the run on a bad action or reason. No write
+# permission is needed, and nothing is written to an issue.
 name: lanes-control
+run-name: "${{ inputs.action }}: ${{ inputs.reason }}"
 on:
   workflow_dispatch:
     inputs:
@@ -21,7 +25,6 @@ on:
         default: ""
 permissions:
   contents: read
-  issues: write
 concurrency:
   group: lanes-control
   cancel-in-progress: false
@@ -42,5 +45,3 @@ jobs:
           LANES_ACTION: ${{ inputs.action }}
           LANES_REASON: ${{ inputs.reason }}
           LANES_ACTOR: ${{ github.triggering_actor }}
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
