@@ -51,7 +51,7 @@ test("install then upgrade keeps an adopter's edits", () => {
     const editedBytes = readFileSync(editedPath);
     const configPath = path.join(dir, "lanes.config.json");
     const config = JSON.parse(readFileSync(configPath, "utf8"));
-    config.start.maxLanes = 3;
+    config.start = { maxLanes: 3 }; // #747: the starter config has no `start` of its own
     writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
     const configBytes = readFileSync(configPath);
 

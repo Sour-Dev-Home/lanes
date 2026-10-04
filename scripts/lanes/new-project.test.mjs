@@ -2,13 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { MANIFEST } from "./install.mjs";
+import { MANIFEST, starterConfig } from "./install.mjs";
 import {
   parseArgs,
   privateBlockers,
   licenseHolder,
   mitLicense,
-  starterConfig,
   starterPackageJson,
   hasVerifyTriggers,
   planProject,
@@ -75,7 +74,8 @@ test("the plan writes a starter lanes.config.json, verify.yml and package.json w
   const writes = Object.fromEntries(plan().filter((s) => s.kind === "write").map((s) => [s.file, s.content]));
   const config = JSON.parse(writes["lanes.config.json"]);
   assert.deepEqual(config.requiredChecks, ["verify", "security", "lanes/gate"]);
-  assert.equal(config.metrics.mainWorkflow, "verify.yml");
+  assert.deepEqual(config, starterConfig(files.lanesConfig)); // #747: the starter now lives in install.mjs
+  assert.ok(!("identity" in config) && !("modules" in config));
   assert.ok(hasVerifyTriggers(writes[".github/workflows/verify.yml"]));
   const pkg = JSON.parse(writes["package.json"]);
   assert.equal(pkg.name, "demo");
@@ -86,7 +86,6 @@ test("the plan writes a starter lanes.config.json, verify.yml and package.json w
 test("starterConfig keeps the gate's checks and paths; starterPackageJson is private ESM", () => {
   const c = starterConfig(files.lanesConfig);
   assert.deepEqual(c.paths, files.lanesConfig.paths);
-  assert.equal(c.metrics.fragmentsDir, null);
   const pkg = starterPackageJson("demo");
   assert.equal(pkg.type, "module");
   assert.equal(pkg.private, true);

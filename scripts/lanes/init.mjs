@@ -6,7 +6,7 @@
 // Exit 0: every item is done. 1: something is left or a step failed. 2: bad usage.
 // Run from the lanes clone. The setup scripts (install, new-project, setup-repo, app-setup) are run, not changed.
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -60,6 +60,38 @@ export function dryRunPlan({ isNew, name, flags = [] }) {
   ];
 }
 
+/** The owner-only paths a starter CODEOWNERS covers: ADR 0031's strict subset (leading and trailing `/` only, no wildcards). */
+const OWNED_PATHS = ["/.github/", "/.claude/", "/scripts/lanes/", "/lanes.config.json", "/lanes.lock.json", "/CLAUDE.md", "/package.json", "/package-lock.json", "/pnpm-lock.yaml", "/yarn.lock"];
+const NPM_SCRIPTS = { setup: "git config core.hooksPath .githooks", preflight: "node scripts/preflight.mjs" };
+
+export const starterCodeowners = (login) =>
+  `# Owner-only paths: a change to any of them waits for ${login}'s review (ADR 0031). Review this file, then commit it.\n${OWNED_PATHS.map((p) => `${p} @${login}`).join("\n")}\n`;
+
+const parseJson = (text) => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+};
+
+/** True when the target's lanes.config.json is lanes' own: an earlier install copied it, so it names the source's App. */
+export function copiedLanesConfig(targetText, sourceText) {
+  const id = (text) => parseJson(text)?.identity?.app?.id;
+  return id(targetText) !== undefined && id(targetText) === id(sourceText);
+}
+
+/** `scripts` merged into a package.json text, missing keys only; `undefined` when nothing is missing or the text is no object. */
+export function withNpmScripts(text, scripts = NPM_SCRIPTS) {
+  const pkg = parseJson(text);
+  if (pkg === null || typeof pkg !== "object" || Array.isArray(pkg)) return undefined;
+  const have = pkg.scripts !== null && typeof pkg.scripts === "object" ? pkg.scripts : {};
+  const missing = Object.entries(scripts).filter(([k]) => !Object.hasOwn(have, k));
+  if (missing.length === 0) return undefined;
+  const indent = /^([ \t]+)"/m.exec(text)?.[1] ?? 2;
+  return `${JSON.stringify({ ...pkg, scripts: { ...have, ...Object.fromEntries(missing) } }, null, indent)}\n`;
+}
+
 const byName = (items) => Object.fromEntries(items.map((i) => [i.name, i]));
 const fixLines = (i) => [i.fix?.link && `  open ${i.fix.link}`, i.fix?.command && `  run: ${i.fix.command}`].filter(Boolean);
 
@@ -70,7 +102,7 @@ const fixLines = (i) => [i.fix?.link && `  open ${i.fix.link}`, i.fix?.command &
  * @returns {Promise<number>} the exit code
  */
 export async function initMain(argv, deps = {}) {
-  const { lanesRoot = defaults.lanesRoot, run = defaults.run, state = defaults.state, repoOf = defaults.repoOf, ownerOf = defaults.ownerOf, ask = defaults.ask, exists = existsSync, print = console.log } = deps;
+  const { lanesRoot = defaults.lanesRoot, run = defaults.run, state = defaults.state, repoOf = defaults.repoOf, ownerOf = defaults.ownerOf, loginOf = defaults.loginOf, ask = defaults.ask, exists = existsSync, readFile = defaults.readFile, writeFile = defaults.writeFile, print = console.log } = deps;
   let opts;
   try {
     opts = parseArgs(argv);
@@ -101,6 +133,13 @@ export async function initMain(argv, deps = {}) {
     repo = `${opts.org ?? owner}/${opts.name}`;
   } else {
     target = path.resolve(opts.path);
+    // #747: an earlier run copied lanes' own config; stop before any GitHub step and change nothing.
+    const configFile = path.join(target, "lanes.config.json");
+    const targetConfig = readFile(configFile);
+    if (targetConfig !== undefined && copiedLanesConfig(targetConfig, readFile(path.join(lanesRoot, "lanes.config.json")))) {
+      print(`init stopped: lanes.config.json in the target is a copy of the lanes repository's own (it names lanes' GitHub App). Delete it and run init again, so install writes a starter config for this repository. Nothing was changed.`);
+      return 1;
+    }
     repo = repoOf(target);
     if (!REPO_RE.test(repo ?? "")) {
       print("the repository could not be read: run gh auth login and check the path is a GitHub repository");
@@ -134,6 +173,35 @@ export async function initMain(argv, deps = {}) {
     if (code !== undefined) return code;
     items = read();
   }
+
+  // 1b. #747: a starter CODEOWNERS and the npm scripts lanes needs, before setup-repo; the owner commits both
+  const toCommit = [];
+  if (!isNew) {
+    const ownersFile = path.join(target, ".github", "CODEOWNERS");
+    if (readFile(ownersFile) === undefined) {
+      const login = loginOf(target);
+      if (!OWNER_RE.test(login ?? "")) {
+        print("init stopped: the GitHub user could not be read (gh api user): run gh auth login, then run init again.");
+        return 1;
+      }
+      writeFile(ownersFile, starterCodeowners(login));
+      toCommit.push(".github/CODEOWNERS");
+      print(`init: wrote .github/CODEOWNERS owned by @${login}. The owner should review and commit it.`);
+    }
+    const pkgFile = path.join(target, "package.json");
+    const pkgText = readFile(pkgFile);
+    if (pkgText === undefined || parseJson(pkgText) === undefined) {
+      print("init: package.json is missing or unreadable, so the `setup` and `preflight` npm scripts were not added. Add them by hand.");
+    } else {
+      const next = withNpmScripts(pkgText);
+      if (next !== undefined) {
+        writeFile(pkgFile, next);
+        toCommit.push("package.json");
+        print("init: added the missing `setup` and `preflight` npm scripts to package.json.");
+      }
+    }
+  }
+  const commitNote = toCommit.length ? `\n\ncommit these files:\n${toCommit.map((f) => `  ${f}`).join("\n")}` : "";
 
   // 2. the PII_PATTERNS secret
   if (!items.secret.done) {
@@ -187,10 +255,10 @@ export async function initMain(argv, deps = {}) {
   items = state(target, repo);
   const left = items.filter((i) => !i.done);
   if (!left.length) {
-    print(`\n${formatSetupState(items)}\n\nAll done: every first-run item is in place.`);
+    print(`\n${formatSetupState(items)}\n\nAll done: every first-run item is in place.${commitNote}`);
     return 0;
   }
-  print(`\nWhat is left (${left.length}):\n${formatSetupState(left)}\n\nWhen you have done these, run init again; finished steps are skipped.`);
+  print(`\nWhat is left (${left.length}):\n${formatSetupState(left)}${commitNote}\n\nWhen you have done these, run init again; finished steps are skipped.`);
   return 1;
 }
 
@@ -219,6 +287,19 @@ const defaults = {
   state: (target, repo) => setupState({ run: gitRun, exists: existsSync, home: homedir(), target, repo }),
   repoOf: (target) => ghView(target, { json: "nameWithOwner", expr: ".nameWithOwner" }),
   ownerOf: (cwd) => ghView(cwd, { json: "owner", expr: ".owner.login" }),
+  loginOf: (cwd) => {
+    try {
+      const r = gitRun("gh", ["api", "user", "--jq", ".login"], { cwd });
+      return r.status === 0 ? r.stdout.trim() : undefined;
+    } catch {
+      return undefined;
+    }
+  },
+  readFile: (file) => (existsSync(file) ? readFileSync(file, "utf8") : undefined),
+  writeFile: (file, content) => {
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, content);
+  },
   ask: async (question) => {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     try {
