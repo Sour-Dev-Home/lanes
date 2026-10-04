@@ -76,6 +76,11 @@ nothing on GitHub (the identity may be wrong there).
     for anything already committed and go straight to what the PR still lacks: read `lanes/gate` as step 7 does, run
     only the reviewers it waits for or whose verdict failed, post them with `post-review.mjs`, fix a failing CI check,
     and finish with step 7's report. Never open a second PR.
+    A resumed PR that conflicts with main (#741; the queue resumes it) is brought up to date first: the lane
+    merges `origin/main` (`git merge origin/main`; settings deny every force push, so a rebase could not be pushed),
+    resolves the conflicts within Scope, runs the full `npm test`, re-runs the reviewers whose files changed (step 6),
+    and pushes normally. If a conflict needs a file outside Scope, it stops with the
+    stop rule: comment `Lane stopped: conflict needs <paths>`, then `needs-owner`.
 4. Read the issue's Interface contract and Scope. Touch nothing out of scope. If the contract is wrong or missing,
    stop and file a new task issue for the contract instead of inventing one. After filing it, the lane comments on its
    own issue before it stops: one line starting `Lane stopped: contract`, the cause in one or two sentences, the filed
