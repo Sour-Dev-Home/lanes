@@ -200,6 +200,14 @@ test("stuck-pr: edge: a PR with no commits, or an unreadable commit date, raises
   assert.deepEqual(keys(stuck([recent], { config: { health: { stuckPrMinutes: 5 } } })), ["stuck-pr:PR 738"]);
 });
 
+test("stuck-pr: edge: boundary, a commit exactly stuckPrMinutes old raises, one ms younger does not; heartbeat exactly noProgressMinutes old raises none", () => {
+  const at = (ms) => lanePr({ commits: [{ committedDate: new Date(NOW - ms).toISOString() }] });
+  assert.deepEqual(keys(stuck([at(30 * MIN)])), ["stuck-pr:PR 738"]);
+  assert.deepEqual(keys(stuck([at(30 * MIN - 1)])), []);
+  assert.deepEqual(keys(base({ prs: [lanePr()], comments: [beatLive(NOW - 30 * MIN)] })), []);
+  assert.deepEqual(keys(base({ prs: [lanePr()], comments: [beatLive(NOW - 30 * MIN + 1)] })), ["stuck-pr:PR 738"]);
+});
+
 test("readHeartbeat: live keeps positive integers only, at most 20, and defaults to none", () => {
   const block = (live) => ({ body: `${HEARTBEAT_MARKER}\n\`\`\`json\n${JSON.stringify({ at: new Date(NOW).toISOString(), findings: [], live })}\n\`\`\``, author: BOT, updatedAt: new Date(NOW).toISOString() });
   assert.deepEqual(readHeartbeat([block([4, "5", 0, -1, 1.5, null, 9])], identity).live, [4, 9]);
