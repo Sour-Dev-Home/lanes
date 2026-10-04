@@ -2490,3 +2490,66 @@ test("#724: edge: a resumed lane that vanishes without a PR is not launched afre
   assert.equal(await main([], run.deps), 0);
   assert.deepEqual(run.launched.map((l) => l.n), [7], run.out.join("\n"));
 });
+
+// #739: a marker is cleared when the owner removed `needs-owner` after it was written, so a lane that stopped a second
+// time is resumed again; a marker never cleared by an events error, an older removal or a label never set.
+function clearedRun(cleared) {
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { status: "idle" })] };
+  const markers = new Map([[7, { issue: 7, session: "old-7", reason: "session ended with no open PR", time: "2026-10-04T17:00:00.000Z" }]]);
+  const run = recoveryRun(world, { markers });
+  run.deps.recovery.ownerClearedAt = typeof cleared === "function" ? cleared : () => cleared;
+  return run;
+}
+
+test("#739: a marker older than the latest needs-owner removal is cleared and the lane recovered again", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = clearedRun("2026-10-04T17:16:00.000Z");
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.stopped, ["old-7"]);
+  assert.equal(run.launched.length, 1, run.out.join("\n"));
+  assert.notEqual(run.markers.get(7).time, "2026-10-04T17:00:00.000Z");
+});
+
+test("#739: a marker newer than the needs-owner removal is kept and the session skipped", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = clearedRun("2026-10-04T16:00:00.000Z");
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual([run.stopped, run.removed, run.launched], [[], [], []]);
+  assert.equal(run.markers.get(7).time, "2026-10-04T17:00:00.000Z");
+});
+
+test("#739: edge: an issue that never had needs-owner keeps its marker", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = clearedRun(null);
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual([run.stopped, run.removed, run.launched], [[], [], []]);
+});
+
+test("#739: edge: an events read error keeps the marker and says nothing is resumed", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = clearedRun(() => {
+    throw new Error("API rate limit");
+  });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual([run.stopped, run.removed, run.launched], [[], [], []]);
+  assert.equal(run.markers.get(7).time, "2026-10-04T17:00:00.000Z");
+});
+
+test("#739: edge: a marker with no readable time or an unparseable removal time is kept", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const [time, cleared] of [[undefined, "2026-10-04T17:16:00.000Z"], ["2026-10-04T17:00:00.000Z", "not a date"]]) {
+    const run = clearedRun("2026-10-04T17:16:00.000Z");
+    run.markers.set(7, { issue: 7, session: "old-7", reason: "x", time });
+    run.deps.recovery.ownerClearedAt = () => cleared;
+    assert.equal(await main([], run.deps), 0);
+    assert.deepEqual(run.launched, []);
+  }
+});
+
+test("#739: edge: a removal at the very time the marker was written keeps the marker", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = clearedRun("2026-10-04T17:00:00.000Z");
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual([run.stopped, run.removed, run.launched], [[], [], []]);
+  assert.equal(run.markers.get(7).time, "2026-10-04T17:00:00.000Z");
+});
