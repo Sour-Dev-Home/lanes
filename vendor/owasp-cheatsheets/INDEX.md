@@ -44,6 +44,7 @@ Scripts that import `node:child_process` (each call site runs `gh`, `git`, `clau
 - `scripts/lanes/reviewers.mjs`
 - `scripts/lanes/scope-tests.mjs` (runs `git ls-files -z` through an argument array, no shell; its arguments are only compared against file names and file text)
 - `scripts/lanes/setup-repo.mjs`
+- `scripts/lanes/setup-state.mjs` (runs only read-only `gh` calls through an argument array, never a shell; prints no secret, key or token)
 - `scripts/lanes/snapshot.mjs`
 - `scripts/lanes/start.mjs`
 - `scripts/lanes/status.mjs`
