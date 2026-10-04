@@ -226,3 +226,15 @@ test("setupStateMain with no repo gh can read exits 1 with a reason, not a crash
   assert.equal(code, 1);
   assert.match(lines.join("\n"), /repository/);
 });
+
+test("edge: an empty reviewer list, a lone non-main policy and an empty policy list are not done", () => {
+  const env = "api repos/acme/widgets/environments/lanes-workflow-apply";
+  const cases = {
+    "empty reviewers": { [env]: ok({ protection_rules: [{ type: "required_reviewers", reviewers: [] }], deployment_branch_policy: { custom_branch_policies: true } }) },
+    "only dev": { [`${env}/deployment-branch-policies`]: ok({ branch_policies: [{ name: "dev" }] }) },
+    "no policies": { [`${env}/deployment-branch-policies`]: ok({ branch_policies: [] }) },
+  };
+  for (const [label, routes] of Object.entries(cases)) {
+    assert.equal(byName(setupState(world({ routes }).deps))["workflows-environment"].done, false, label);
+  }
+});
