@@ -1,0 +1,46 @@
+# ADR 0028: the Pause and Resume buttons. Open Actions, lanes-control, Run workflow, pick pause or resume, press Run.
+# Only people with write access can run a workflow_dispatch workflow, and GitHub records who did; the lanes App has no
+# permission to run workflows, so a lane cannot press it. A dispatch runs the workflow file of the branch the person picks, so the
+# job runs only on main, and it checks out the default branch. The inputs and the actor reach the script through `env:`,
+# never through shell interpolation.
+name: lanes-control
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Pause or resume new lane launches
+        type: choice
+        required: true
+        options:
+          - pause
+          - resume
+      reason:
+        description: Why (optional, at most 200 characters)
+        type: string
+        required: false
+        default: ""
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: lanes-control
+  cancel-in-progress: false
+jobs:
+  control:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - run: node scripts/lanes/control.mjs
+        env:
+          LANES_ACTION: ${{ inputs.action }}
+          LANES_REASON: ${{ inputs.reason }}
+          LANES_ACTOR: ${{ github.triggering_actor }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
