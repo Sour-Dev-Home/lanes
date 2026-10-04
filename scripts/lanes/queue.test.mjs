@@ -2297,3 +2297,163 @@ test("#645: the heartbeat carries paused, true while paused and false after", as
   await assert.rejects(main([], { ...run.deps, git: fakeGit({ head: "abc1234def", remote: "abc1234def" }).git }), /never stopped/);
   assert.deepEqual(run.written().map((b) => b.paused), [true, true, false, false]);
 });
+
+// --- #724: a lane that stopped before its PR is resumed in its worktree once needs-owner is removed. ---
+
+const tree = (n, slug = "work") => ({ path: `/repo/.claude/worktrees/issue-${n}-${slug}`, branch: `issue-${n}-${slug}` });
+
+// recoveryRun plus the worktree list and a log saver; `saved` records the sessions whose log was saved.
+function resumeRun(world, { trees = [tree(7)], ...options } = {}) {
+  const run = recoveryRun(world, options);
+  const saved = [];
+  run.deps.recovery.worktrees = () => trees;
+  run.deps.recovery.saveLog = (id, n) => (saved.push(id), `.lanes/logs/issue-${n}-${id}.txt`);
+  return { ...run, saved };
+}
+
+test("#724: a stopped lane with no session is resumed in its worktree, once", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = resumeRun(world);
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [7]);
+  assert.deepEqual(launchDirs(run), ["/repo/.claude/worktrees/issue-7-work"]);
+  assert.deepEqual([run.stopped, run.removed], [[], []]);
+  assert.equal(run.out.filter((l) => l.endsWith(" #7: resumed in its worktree (no PR yet)")).length, 1, run.out.join("\n"));
+});
+
+test("#724: a blocked session is stopped with its log saved, then the lane is resumed", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { state: "blocked" })] };
+  const run = resumeRun(world);
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.stopped, ["old-7"]);
+  assert.deepEqual(run.saved, ["old-7"]);
+  assert.deepEqual(run.removed, []);
+  assert.deepEqual(run.launched.map((l) => l.n), [7]);
+  assert.deepEqual(launchDirs(run), ["/repo/.claude/worktrees/issue-7-work"]);
+  assert.ok(run.out.some((l) => l.includes("session log saved to .lanes/logs/issue-7-old-7.txt")), run.out.join("\n"));
+});
+
+test("#724: an idle session recovery already handled and left is stopped, then resumed", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [idleLane(7)] };
+  const run = resumeRun(world, { markers: new Map([[7, { session: "old-7" }]]) });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.stopped, ["old-7"]);
+  assert.deepEqual(run.launched.map((l) => l.n), [7]);
+});
+
+test("#724: a working session is not touched and the issue stays in flight", async () => {
+  const { main } = await import("./queue.mjs");
+  for (const status of ["working", "busy"]) {
+    const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { status })] };
+    const run = resumeRun(world);
+    assert.equal(await main([], run.deps), 0);
+    assert.deepEqual([run.launched, run.stopped, run.saved], [[], [], []], status);
+  }
+});
+
+test("#724: needs-owner still present: nothing is resumed", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"], { labels: ["ready", "tier:quick", "needs-owner"] })], prs: [], sessions: [] };
+  const run = resumeRun(world);
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+});
+
+test("#724: two worktrees for the issue: skipped with a reason, nothing launched", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = resumeRun(world, { trees: [tree(7), tree(7, "again")] });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+  assert.equal(run.out.filter((l) => l.endsWith(" #7: skipped: several worktrees")).length, 1, run.out.join("\n"));
+});
+
+test("#724: edge: a dirty worktree is still resumed, lane.md step 3b reports it", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = resumeRun(world, { workLeft: "uncommitted changes" });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [7]);
+});
+
+test("#724: edge: an issue with an open PR, or another issue's worktree, is not resumed by this path", async () => {
+  const { planWorktreeResume } = await import("./queue.mjs");
+  const base = { issues: [issue(7, ["src/a.mjs"])], worktrees: [tree(7)] };
+  assert.deepEqual(planWorktreeResume({ ...base, prs: [gatePr(70, 7, "waiting for review/security-reviewer")] }).resume, []);
+  assert.deepEqual(planWorktreeResume({ ...base, worktrees: [tree(8)] }).resume, []);
+  assert.deepEqual(planWorktreeResume({ ...base, worktrees: [{ path: "/repo/x", branch: "worktree-issue-7-x" }] }).resume, []);
+});
+
+test("#724: edge: a session with an unsafe id is left alone", async () => {
+  const { planWorktreeResume } = await import("./queue.mjs");
+  const input = { issues: [issue(7, ["src/a.mjs"])], worktrees: [tree(7)], sessions: [lane(7, { id: "--all", state: "blocked" })] };
+  assert.deepEqual(planWorktreeResume(input), { resume: [], skipped: [] });
+});
+
+test("#724: the maxLanes cap counts the lanes still running, and a stopped session does not count", async () => {
+  const { planWorktreeResume } = await import("./queue.mjs");
+  const issues = [1, 2, 7, 8].map((n) => issue(n, [`src/${n}.mjs`]));
+  const worktrees = [tree(7), tree(8)];
+  const sessions = [lane(1), lane(2), lane(7, { state: "blocked" })];
+  const out = planWorktreeResume({ issues, prs: [], sessions, worktrees, maxLanes: 3 });
+  assert.deepEqual(out.resume.map((r) => r.number), [7]);
+  assert.deepEqual(out.skipped, [{ number: 8, reason: "at maxLanes" }]);
+  assert.deepEqual(planWorktreeResume({ issues, prs: [], sessions, worktrees, maxLanes: 2 }).resume, []);
+});
+
+test("#724: edge: an issue planRecovery already handles this tick is left to it", async () => {
+  const { planWorktreeResume } = await import("./queue.mjs");
+  const input = { issues: [issue(7, ["src/a.mjs"])], worktrees: [tree(7)], sessions: [], handled: new Set([7]) };
+  assert.deepEqual(planWorktreeResume(input).resume, []);
+});
+
+test("#724: edge: a session that will not stop is left for the owner, nothing launched", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { state: "blocked" })] };
+  const run = resumeRun(world, { stopWorks: false });
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, []);
+  assert.equal(run.out.filter((l) => l.includes("#7: could not stop session old-7")).length, 1, run.out.join("\n"));
+});
+
+test("#724: edge: a stop that throws is reported once and nothing is launched afresh", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [lane(7, { state: "blocked" })] };
+  const run = resumeRun(world);
+  const prior = run.deps.claude;
+  run.deps.claude = (args, opts) => {
+    if (args[0] === "stop") throw new Error("stop refused");
+    return prior(args, opts);
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched, [], run.out.join("\n"));
+  assert.equal(run.out.filter((l) => l.includes("#7: recovery failed: stop refused")).length, 1, run.out.join("\n"));
+});
+
+test("#724: edge: a worktree listing that throws is reported and nothing is resumed", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = resumeRun({ issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [] });
+  run.deps.recovery.worktrees = () => {
+    throw new Error("git broke");
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.ok(run.out.some((l) => l.includes("worktrees cannot be listed") && l.includes("git broke")), run.out.join("\n"));
+  assert.ok(!launchDirs(run).some((dir) => dir.includes("/worktrees/")), "no lane is launched in a worktree");
+});
+
+// Found by the test-hunter: an `attempted` issue must be held, or planTick launches it fresh from the repo root.
+test("#724: edge: a resumed lane that vanishes without a PR is not launched afresh from the repo root in the same run", async () => {
+  const { main } = await import("./queue.mjs");
+  const world = { issues: [issue(7, ["src/a.mjs"])], prs: [], sessions: [] };
+  const run = resumeRun(world);
+  const prior = run.deps.sleep;
+  run.deps.sleep = async (ms) => {
+    if (run.launched.length === 1 && world.sessions.length) world.sessions = [];
+    return prior(ms);
+  };
+  assert.equal(await main([], run.deps), 0);
+  assert.deepEqual(run.launched.map((l) => l.n), [7], run.out.join("\n"));
+});

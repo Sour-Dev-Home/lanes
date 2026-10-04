@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mintInstallationToken } from "./app-token.mjs";
 import { parseBlockedBy } from "./blockers.mjs";
-import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWorktree, waitForStop } from "./cleanup.mjs";
+import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWorktree, saveSessionLog, waitForStop } from "./cleanup.mjs";
 import { HEARTBEAT_MARKER, findOrCreateHealthIssue, ghClient } from "./health.mjs";
 import { GATE_CONTEXT, TEAM_REQUIRED_MESSAGE, isLaneBot, laneIssueOf, parseIssueForm, readControlState } from "./lib.mjs";
 import { issuePaths } from "./paths.mjs";
@@ -70,7 +70,7 @@ function refusal(issue, openNumbers) {
  * @returns {{ launch: number[], waiting: { number: number, reason: string }[], idle: boolean, lines: string[], skipped: { number: number, reason: string }[] }}
  *   `launch` in priority order; `waiting` by PR number, for lane PRs only
  */
-export function planTick({ issues = [], prs = [], sessions = [], maxLanes = START_DEFAULTS.maxLanes, softPaths = START_DEFAULTS.softPaths, budgetOver = false }) {
+export function planTick({ issues = [], prs = [], sessions = [], maxLanes = START_DEFAULTS.maxLanes, softPaths = START_DEFAULTS.softPaths, budgetOver = false, resuming = [], held = [] }) {
   const openIssues = issues.filter(isOpen);
   const openNumbers = new Set(openIssues.map((i) => i.number));
   const lanePrs = prs.filter((pr) => Number.isInteger(branchIssue(pr)));
@@ -78,12 +78,13 @@ export function planTick({ issues = [], prs = [], sessions = [], maxLanes = STAR
   const withPr = new Set(lanePrs.map(branchIssue));
   const finished = sessions.map(laneIssueOf).filter((n) => Number.isInteger(n) && !openNumbers.has(n) && !withPr.has(n));
   const inFlight = inFlightIssues({ prs, sessions, finished });
-  const busy = new Set(inFlight);
+  const busy = new Set([...inFlight, ...resuming]);
 
   const skipped = [];
   const candidates = [];
   for (const issue of openIssues) {
-    if (!labelsOf(issue).includes("ready") || busy.has(issue.number)) continue;
+    // #724: `held` issues have a worktree the queue will not resume this tick; a fresh lane would stop at its step 3.
+    if (!labelsOf(issue).includes("ready") || busy.has(issue.number) || held.includes(issue.number)) continue;
     // #136: a lane found nothing to build; the owner closes or rewrites the issue before it can run again.
     const why = labelsOf(issue).includes("needs-owner") ? "needs-owner" : refusal(issue, openNumbers);
     if (why) skipped.push({ number: issue.number, reason: why });
@@ -186,6 +187,66 @@ export function planRecovery({ issues = [], prs = [], sessions = [], stalled = n
     out.push({ number: n, id: session?.id ?? null, cwd: session?.cwd, branch: pr.headRefName, reason: `dead lane with open PR #${pr.number} (${note})`, again: Boolean(marked), resume: true });
   }
   return out.sort((a, b) => a.number - b.number);
+}
+
+/**
+ * #724: which stopped lanes to resume in their worktree. Pure. A ready, open issue without `needs-owner` (nor any other
+ * refusal), with no open PR and exactly one `issue-<N>-*` worktree, whose newest lane session is gone, idle or blocked
+ * (a lane that stopped). A session that is neither (working, busy) keeps the issue in flight and is left alone. Two or
+ * more worktrees skip the issue. Picks fit under `maxLanes` with the lanes still running. `handled` holds the issues
+ * planRecovery already acts on this tick. Dirty worktrees are picked too: lane.md step 3b reports unsaved work.
+ * @param {{ issues: object[], prs: object[], sessions: object[], worktrees: { path: string, branch?: string }[], handled?: Set<number>, maxLanes?: number }} input
+ * @returns {{ resume: { number: number, id: string | null, cwd: string, reason: string, line: string }[], skipped: { number: number, reason: string }[] }}
+ */
+export function planWorktreeResume({ issues = [], prs = [], sessions = [], worktrees = [], handled = new Set(), maxLanes = START_DEFAULTS.maxLanes }) {
+  const openIssues = issues.filter(isOpen);
+  const openNumbers = new Set(openIssues.map((i) => i.number));
+  const withPr = new Set(prs.map(branchIssue));
+  const finished = sessions.map(laneIssueOf).filter((n) => Number.isInteger(n) && !openNumbers.has(n) && !withPr.has(n));
+  const running = new Set(inFlightIssues({ prs, sessions, finished }));
+  const trees = new Map();
+  for (const t of worktrees) {
+    const n = Number(/^issue-(\d+)-./.exec(t.branch ?? "")?.[1]);
+    if (Number.isInteger(n)) trees.set(n, [...(trees.get(n) ?? []), t]);
+  }
+  const skipped = [];
+  const found = [];
+  for (const issue of openIssues.sort((a, b) => a.number - b.number)) {
+    const n = issue.number;
+    if (!labelsOf(issue).includes("ready") || withPr.has(n) || handled.has(n) || !trees.has(n)) continue;
+    if (labelsOf(issue).includes("needs-owner") || refusal(issue, openNumbers)) continue;
+    if (trees.get(n).length > 1) {
+      skipped.push({ number: n, reason: "several worktrees" });
+      continue;
+    }
+    // A session with no readable id could not be stopped, so the issue stays as it is.
+    const session = newestSession(sessions, n);
+    const stoppable = session && (session.status === "idle" || session.state === "blocked");
+    if (session && !stoppable) continue;
+    if (session && (typeof session.id !== "string" || !SESSION_ID.test(session.id))) continue;
+    found.push({ number: n, id: session?.id ?? null, cwd: trees.get(n)[0].path, stoppable: Boolean(stoppable) });
+  }
+  // A lane about to be stopped no longer counts as running.
+  for (const f of found) if (f.stoppable) running.delete(f.number);
+  const resume = [];
+  for (const { stoppable, ...f } of found) {
+    if (running.size + resume.length >= maxLanes) {
+      skipped.push({ number: f.number, reason: "at maxLanes" });
+      continue;
+    }
+    resume.push({ ...f, reason: "stopped lane with no PR", line: `#${f.number}: resumed in its worktree (no PR yet)` });
+  }
+  return { resume, skipped };
+}
+
+// The newest session of issue `n`'s lane, or null.
+function newestSession(sessions, n) {
+  let newest = null;
+  for (const s of sessions) {
+    if (s?.kind !== "background" || laneIssueOf(s) !== n || (newest && (newest.startedAt ?? 0) > (s.startedAt ?? 0))) continue;
+    newest = s;
+  }
+  return newest;
 }
 
 export const TICK_MS = 3 * 60 * 1000;
@@ -338,9 +399,10 @@ function removalLines(snapshot, deps, told) {
 // a marker is written before anything is removed, so a crash cannot allow a second relaunch.
 // #444: a dead lane with an open PR is not removed: it is returned as `{ number, cwd, id, reason }` to be relaunched in
 // its own worktree, unless that worktree holds work that is not pushed, which is left and said.
-function recoverLanes(snapshot, { deps, dir, say, attempted, told, report = {} }) {
+function recoverLanes(snapshot, { deps, dir, say, attempted, told, report = {}, maxLanes }) {
   const { recovery, claude } = deps;
   const resumes = [];
+  report.held = [];
   let stalled;
   try {
     stalled = recovery.stalled(snapshot.sessions, dir);
@@ -349,7 +411,8 @@ function recoverLanes(snapshot, { deps, dir, say, attempted, told, report = {} }
     say(`stall check failed: ${reason(err)}`);
     return resumes;
   }
-  for (const { number: n, id, cwd, branch, reason: why, again, resume } of planRecovery({ ...snapshot, stalled, marker: recovery.marker.read })) {
+  const planned = planRecovery({ ...snapshot, stalled, marker: recovery.marker.read });
+  for (const { number: n, id, cwd, branch, reason: why, again, resume } of planned) {
     if (again) {
       if (!told.has(n)) say(`#${n}: stalled again after recovery: ${why}`);
       told.add(n);
@@ -392,7 +455,54 @@ function recoverLanes(snapshot, { deps, dir, say, attempted, told, report = {} }
       say(`#${n}: recovery failed: ${reason(err)}`);
     }
   }
+  resumeStoppedLanes(snapshot, { deps, dir, say, attempted, told, handled: new Set(planned.map((p) => p.number)), maxLanes, resumes, held: report.held });
   return resumes;
+}
+
+// #724: a lane that stopped before opening a PR (its issue is `ready` again, `needs-owner` removed) is resumed in its
+// worktree. A session that is idle or blocked is stopped first, its log saved as cleanup does. The resume joins `resumes`,
+// which the launch loop writes a marker for and launches once per run.
+function resumeStoppedLanes(snapshot, { deps, dir, say, attempted, told, handled, maxLanes, resumes, held }) {
+  const { recovery, claude } = deps;
+  if (!recovery.worktrees) return;
+  let worktrees;
+  try {
+    worktrees = recovery.worktrees();
+  } catch (err) {
+    say(`worktrees cannot be listed, no stopped lane resumed: ${reason(err)}`);
+    return;
+  }
+  const { resume, skipped } = planWorktreeResume({ ...snapshot, worktrees, handled, maxLanes });
+  for (const s of skipped) {
+    held.push(s.number);
+    const key = `${s.number}:${s.reason}`;
+    if (!told.has(key)) say(`#${s.number}: skipped: ${s.reason}`);
+    told.add(key);
+  }
+  for (const r of resume) {
+    // Already tried this run: held, or planTick would launch a fresh lane that stops at lane.md step 3.
+    if (attempted.has(r.number)) {
+      held.push(r.number);
+      continue;
+    }
+    if (r.id) {
+      try {
+        if (recovery.saveLog) say(`#${r.number}: session log saved to ${recovery.saveLog(r.id, r.number)}`);
+        claude(["stop", r.id], { cwd: dir });
+        if (!recovery.waitStopped(r.id)) {
+          attempted.add(r.number);
+          say(`#${r.number}: could not stop session ${r.id}, left for the owner`);
+          continue;
+        }
+      } catch (err) {
+        attempted.add(r.number);
+        say(`#${r.number}: recovery failed: ${reason(err)}`);
+        continue;
+      }
+      snapshot.sessions = snapshot.sessions.filter((s) => s.id !== r.id);
+    }
+    resumes.push({ number: r.number, cwd: r.cwd, id: r.id, reason: r.reason, line: r.line });
+  }
 }
 
 /**
@@ -566,7 +676,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     }
     const report = {};
     // ADR 0028: while paused no dead lane is recovered or resumed; it is found again after the pause lifts.
-    const resumes = deps.recovery && !paused ? recoverLanes(snapshot, { deps, dir, say, attempted, told, report }) : [];
+    const resumes = deps.recovery && !paused ? recoverLanes(snapshot, { deps, dir, say, attempted, told, report, maxLanes }) : [];
     await beat(say, snapshot, dir, { stalled: report.stalled });
     // An issue whose launch failed stays open (its blockers and ranking still count) but is no longer a candidate.
     const issues = snapshot.issues.map((i) => (failedLaunches.has(i.number) ? { ...i, labels: labelsOf(i).filter((l) => l !== "ready") } : i));
@@ -588,7 +698,8 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       for (const n of budget.lanesOver) if (!overLane.has(n)) say(`#${n}: over its ${caps.perLaneTokens} token budget, left running`);
       overLane = new Set(budget.lanesOver);
     }
-    const planned = planTick({ ...snapshot, issues, maxLanes, softPaths, budgetOver });
+    // #724: a resumed PR-less lane is in flight too, or planTick would launch its issue a second time.
+    const planned = planTick({ ...snapshot, issues, maxLanes, softPaths, budgetOver, resuming: resumes.map((r) => r.number), held: report.held ?? [] });
     const plan = paused ? { ...planned, launch: [] } : planned;
     // #383: the waiting PRs print as one block, only in a tick where a PR started or stopped waiting or its reason changed.
     const current = new Map(plan.waiting.map((w) => [w.number, w.reason]));
@@ -628,7 +739,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
           say(`#${n}: recovery failed: ${reason(err)}`);
           continue;
         }
-        say(`#${n}: ${resume.reason}; resuming once`);
+        say(resume.line ?? `#${n}: ${resume.reason}; resuming once`);
       }
       // #556: start.mjs's one-lane launcher: one attempt, then the reaper (ADR 0010) and the running label (ADR 0014); under
       // team (ADR 0019) the App-only environment, --settings, strict MCP and the token refresher, or no launch at all.
@@ -665,6 +776,9 @@ const DEFAULT_RECOVERY = {
   stalled: (agents, root) => stalledLanes(agents, root),
   // The lane's own worktree: the one at the session's cwd, on an issue-N-* branch. Anything else is not found.
   // #444: a dead lane's session may be gone, so its PR's branch names the worktree too.
+  // #724: every lane worktree (issue-<N>-* branch); planWorktreeResume picks the issue's own.
+  worktrees: () => parseWorktrees(run("git")(["worktree", "list", "--porcelain"])).filter((t) => !t.main).map((t) => ({ path: t.path, branch: t.branch })),
+  saveLog: (id, n) => saveSessionLog(id, n, { run: (cmd, args) => run(cmd)(args), root: repoRoot() }),
   worktree: (n, cwd, branch) => {
     const same = (a, b) => String(a).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() === String(b).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
     const tree = parseWorktrees(run("git")(["worktree", "list", "--porcelain"])).find((t) => !t.main && ((cwd && same(t.path, cwd)) || (branch && t.branch === branch)) && Number(/^issue-(\d+)-./.exec(t.branch ?? "")?.[1]) === n);
