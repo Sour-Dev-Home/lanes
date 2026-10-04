@@ -277,8 +277,19 @@ const FINDING_LIMIT = 20;
 // A finding is echoed by the watchdog, so its text keeps health.mjs's alphabet and length.
 const findingText = (s) => String(s ?? "").replace(/[^A-Za-z0-9 ._/()-]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80).trim();
 
-export function heartbeatBody({ at, commit, findings, paused }) {
-  return `${HEARTBEAT_MARKER}\n\`\`\`json\n${JSON.stringify({ at, commit, findings, paused: paused === true })}\n\`\`\`\n`;
+export function heartbeatBody({ at, commit, findings, paused, live }) {
+  return `${HEARTBEAT_MARKER}\n\`\`\`json\n${JSON.stringify({ at, commit, findings, paused: paused === true, live })}\n\`\`\`\n`;
+}
+
+// #745: the sorted issue numbers with a lane session that is running or waiting (sessionPhase, #730), so the watchdog
+// can tell a PR no lane is working on. Capped like the findings.
+export function heartbeatLive(sessions = []) {
+  const live = new Set();
+  for (const s of sessions) {
+    const n = laneIssueOf(s);
+    if (Number.isInteger(n) && n > 0 && sessionPhase(s) !== "stopped") live.add(n);
+  }
+  return [...live].sort((a, b) => a - b).slice(0, FINDING_LIMIT);
 }
 
 // The queue's findings for one tick: a stop it is about to make (first, so the cap never drops it), a lane session idle
@@ -612,7 +623,7 @@ export async function main(argv, deps = DEFAULT_DEPS) {
       }
     }
     try {
-      await writeBeat({ at: new Date(now()).toISOString(), commit: startedAt, findings: heartbeatFindings({ prs: snapshot.prs, idle, ...extra }), paused });
+      await writeBeat({ at: new Date(now()).toISOString(), commit: startedAt, findings: heartbeatFindings({ prs: snapshot.prs, idle, ...extra }), paused, live: heartbeatLive(snapshot.sessions) });
       beatSaid = null;
     } catch (err) {
       const line = `heartbeat not written: ${reason(err)}`;

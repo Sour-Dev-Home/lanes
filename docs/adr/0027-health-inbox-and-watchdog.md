@@ -39,6 +39,8 @@ Forces:
    comment whose author is the lane bot (`isLaneBot`, ADR 0020); any other comment with the marker is ignored. Rejected
    alternatives: a repository variable needs a new App permission and is not visible in the inbox; a commit status
    belongs to a SHA, not to a standing fact.
+
+   *Amendment (2026-10-04, stuck-PR backstop):* the heartbeat JSON also carries `live`, the sorted issue numbers whose lane session `sessionPhase` reports as running or waiting, so the watchdog can tell a PR no lane is working on.
 3. **Watchdog: new `scripts/lanes/health.mjs`.** A pure `evaluate(inputs, now)` returns the active problem set; a thin
    `run` reads GitHub and applies it, as a step of a separate job in the dashboard workflow. Problems:
    - `queue-removed`: a PR removed from the merge queue and not re-queued (`queueRemovals`).
@@ -51,6 +53,8 @@ Forces:
    *Amendment, 2026-10-02 (#637):* the merge queue and main run the full suite through `scripts/lanes/test-retry.mjs`,
    which reruns a failing test file once and prints a `::warning title=lanes-flaky::<file> :: <test>` annotation for each
    test that then passed. `flake` also counts that annotation on a successful `verify` run, keyed `flake:<file>@<sha7>`.
+
+   *Amendment (2026-10-04, stuck-PR backstop):* a `stuck-pr` problem is raised for an open lane PR whose stage is `failing`, `conflict` or `starting`, whose issue is not in a fresh heartbeat's `live`, and whose newest commit is older than `health.stuckPrMinutes` (default 30). It recovers when the PR gets a commit, merges or closes. Found when PR #738 sat conflicted for an hour while the health issue read healthy.
 
    The two thresholds (30 minutes each by default) live in `lanes.config.json`.
 4. **Keying, so each problem is commented once and recovery once.** A problem key is its kind plus its subject
