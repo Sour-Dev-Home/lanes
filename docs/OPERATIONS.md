@@ -254,6 +254,13 @@ were found during the pause are resumed then, as in [stalled-lane](#stalled-lane
 **A fresh install, or a deleted health issue, reads as running.** The state lives in a comment on the `lanes-health`
 issue; with no issue or no comment, nothing has been paused. Deleting that issue therefore lifts a pause.
 
+**Residual risk.** The authorization of the buttons is GitHub's, but the state is a comment, and the lanes App has
+`issues: write`. A lane could lift a pause by deleting the control comment, by removing the `lanes-health` label, or by
+opening a new `lanes-health` issue while the old one is closed (the lowest open issue is read). It cannot forge a
+resume, since an edit or a foreign author reads as paused. The ADR 0028 design accepts this because every lane is bound
+by `CLAUDE.md` rule 6 and the App's actions are visible in the issue's history; if you want it closed, the state needs a
+store a lane cannot write (a repository variable or a file on `main`), which is a new decision.
+
 <a id="needs-owner"></a>
 ## needs-owner
 
