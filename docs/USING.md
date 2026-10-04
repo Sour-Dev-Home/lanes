@@ -354,7 +354,16 @@ Free, environments have no required reviewers: skip both steps and keep the copy
 
 ## Setting up the lanes GitHub App (once per owner)
 
-Lanes act as a GitHub App, not as you (ADR 0019, 0025). From the repository's root, run:
+Lanes act as a GitHub App, not as you (ADR 0019, 0025). `node scripts/lanes/init.mjs <path-to-your-repo>` creates it as
+one of its steps, so start there. Re-running init is safe: it runs only the steps `setup-state` reports missing, never
+repeats a finished one, and never creates a second App when `lanes.config.json` already has an `identity`. It asks you
+to do four things: set the `PII_PATTERNS` secret in another terminal and type `done`, press **Continue to GitHub**
+and then the two GitHub buttons below, and add CODEOWNERS and the code-owner ruleset in GitHub's UI (it prints the
+links). Run it again afterwards to see the checklist clear.
+
+### What init runs
+
+From the repository's root, the App step is:
 
 `node scripts/lanes/app-setup.mjs [--org <org>]`
 
@@ -376,6 +385,15 @@ variable is needed. Setting `LANES_APP_KEY_FILE` still overrides it. A missing k
 naming the path.
 
 ## Adopting it in another repository
+
+Run `node scripts/lanes/init.mjs <path-to-your-repo>` from this lanes clone, or
+`node scripts/lanes/init.mjs --new <name> [--private] [--license mit] [--org <org>] [--dry-run]` for a new project. It
+installs the template, waits while you set the `PII_PATTERNS` secret (type `done`), creates the labels and the `main`
+ruleset, creates the App, and ends with a checklist. Re-run it any time: finished steps are skipped, so it is safe
+after a stop or a fix. It asks you to click only in GitHub (the App's two buttons, CODEOWNERS and the code-owner
+ruleset) and prints each link.
+
+### What init runs
 
 A new project, in one command (owner), run from this lanes clone:
 

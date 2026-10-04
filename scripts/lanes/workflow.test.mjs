@@ -415,6 +415,21 @@ test("USING.md, SECURITY.md and README.md carry no solo profile, /approve or /ap
   }
 });
 
+test("README.md's first setup step, after getting lanes, runs init.mjs (#715)", () => {
+  const readme = readFileSync("README.md", "utf8");
+  const quick = readme.split(/^## Quick start.*$/m)[1]?.split(/^## /m)[0] ?? "";
+  const steps = [...quick.matchAll(/^(\d+)\. (.*(?:\n {2,}.*)*)/gm)].map((m) => m[2]);
+  assert.match(steps[0], /Get lanes/);
+  assert.match(steps[1], /node scripts\/lanes\/init\.mjs/);
+  assert.match(steps[1], /--new/);
+  const using = readFileSync("docs/USING.md", "utf8");
+  for (const heading of ["Setting up the lanes GitHub App", "Adopting it in another repository"]) {
+    const body = using.split(new RegExp(`^## ${heading}.*$`, "m"))[1]?.split(/^## /m)[0] ?? "";
+    assert.match(body.slice(0, 600), /init\.mjs/, heading);
+    assert.match(body, /^### What init runs/m, heading);
+  }
+});
+
 test("USING.md, SECURITY.md, OPERATIONS.md and README.md carry no /start and no start-guard (ADR 0030)", () => {
   for (const f of ["docs/USING.md", "docs/SECURITY.md", "docs/OPERATIONS.md", "README.md"]) {
     const text = readFileSync(f, "utf8").replace(/\(adr\/[^)]*\)/g, "");

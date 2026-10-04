@@ -15,24 +15,23 @@ gatekeeper, and unattended nights for low-risk work. The design is in [docs/spec
 - A GitHub repository owned by an **organisation** (the merge queue needs one), public, or private with GitHub
   Advanced Security. Your own `verify` workflow's job must be named `verify`.
 - Permission to set repository secrets and rulesets.
+- A machine that stays on while the queue runs.
 
 ## Quick start: zero to a first merged lane
 
 1. **Get lanes.** Clone this repository next to your project.
-2. **Install it into your project**, from the lanes clone:
-   `node scripts/lanes/install.mjs <path-to-your-repo>`. Then edit your project's `lanes.config.json` paths for its
-   layout, add `setup` and `preflight` npm scripts and a `verify` workflow, and push to `main`. (For a brand-new
-   project, `node scripts/lanes/new-project.mjs <name>` does all of this.)
-3. **Set the secret and the rules**, as the owner:
-   `gh secret set PII_PATTERNS -R <owner/repo>` (one fixed string per line: your name, email, local paths), then
-   `node scripts/lanes/setup-repo.mjs <owner/repo>` to create the labels and the `main` ruleset.
-4. **Plan.** In a Claude Code session in your project, run `/plan-issues "<your idea in 1-4 sentences>"`. Review the
+2. **Run init**, from the lanes clone: `node scripts/lanes/init.mjs <path-to-your-repo>`, or
+   `node scripts/lanes/init.mjs --new <name>` for a brand-new project. It runs each first-run step that is still
+   missing (install, the `PII_PATTERNS` secret, labels and the `main` ruleset, the GitHub App), skips what is done, and
+   ends with a checklist of what is left. Run it again after you do those. Then edit your project's `lanes.config.json`
+   paths for its layout.
+3. **Plan.** In a Claude Code session in your project, run `/plan-issues "<your idea in 1-4 sentences>"`. Review the
    draft; approving it creates the Task issues.
-5. **Start.** Keep the queue running (step 7): it launches a lane for every `ready` issue, and each lane opens a PR
+4. **Start.** Keep the queue running (step 6): it launches a lane for every `ready` issue, and each lane opens a PR
    with auto-merge on. To hold an issue back, remove its `ready` label or press Pause.
-6. **Approve.** A PR that touches an owner path waits for your code-owner review in GitHub; the review notification
+5. **Review in GitHub.** A PR that touches an owner path waits for your code-owner review in GitHub; the review notification
    and the lanes-health issue tell you it is waiting. Other PRs merge on their own once the gate passes.
-7. **The queue.** The queue is the only launcher. From your own terminal (never from inside Claude),
+6. **The queue.** The queue is the only launcher. From your own terminal (never from inside Claude),
    `node scripts/lanes/queue.mjs` works every ready issue; `/night` does low-risk work on a schedule. `/status` shows what waits on you.
 
 The full detail, including the private-repository and dashboard notes, is in [docs/USING.md](docs/USING.md).
