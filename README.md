@@ -33,7 +33,8 @@ gatekeeper, and unattended nights for low-risk work. The design is in [docs/spec
 6. **Approve.** A PR that touches an owner path waits for your code-owner review in GitHub; the review notification
    and the lanes-health issue tell you it is waiting. Other PRs merge on their own once the gate passes.
 7. **The queue.** The queue is the only launcher. From your own terminal (never from inside Claude),
-   `node scripts/lanes/queue.mjs` works every ready issue; `/night` does low-risk work on a schedule. `/status` shows what waits on you.
+   `node scripts/lanes/queue.mjs` works every ready issue. Install copies the queue into your project, so run it from
+   your own repository's folder (not from the lanes clone), where it works on that repository; `/night` does low-risk work on a schedule. `/status` shows what waits on you.
 
 The full detail, including the private-repository and dashboard notes, is in [docs/USING.md](docs/USING.md).
 

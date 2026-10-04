@@ -407,6 +407,11 @@ An existing repository: `node scripts/lanes/install.mjs <target>` (it also copie
 `preflight` npm scripts and a `verify` workflow for the project's own tests (with the push-to-main trigger above), push
 to `main`, then (owner) set the `PII_PATTERNS` secret and run `node scripts/lanes/setup-repo.mjs <owner/repo>`.
 
+The queue runs from the adopter's own repository: `install.mjs` copies `queue.mjs` and every script it loads
+(`start.mjs`, `reap.mjs`, `app-token.mjs` and the rest of its import and spawn closure), so in that folder
+`node scripts/lanes/queue.mjs` launches lanes for that repository. It finds its repository from the folder it runs in;
+run it from your project's terminal, not from the lanes clone.
+
 ### The dashboard workflow and private repositories
 
 A GitHub Pages site is public even when its repository is private, and the dashboard publishes the PR and issue
