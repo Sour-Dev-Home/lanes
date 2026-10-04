@@ -41,9 +41,29 @@ test("the manifest carries exactly ADR 0019's permissions, is private, has no we
   assert.deepEqual(PERMISSIONS, m.default_permissions);
   assert.equal("workflows" in m.default_permissions, false);
   assert.equal(m.public, false);
-  assert.deepEqual(m.hook_attributes, { active: false });
+  assert.deepEqual(m.hook_attributes, { url: "https://github.com", active: false });
   assert.equal(m.redirect_url, "http://127.0.0.1:4000/redirect");
   assert.equal(m.setup_url, "http://127.0.0.1:4000/setup");
+});
+
+// GitHub's manifest reference lists these as required, and `hook_attributes.url` as required whenever
+// `hook_attributes` is present (a manifest without it is rejected: "Error "url" wasn't supplied"):
+// https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest
+test("the manifest has the fields GitHub's reference requires, in both modes", () => {
+  for (const permissions of [undefined, WORKFLOWS_PERMISSIONS]) {
+    const m = buildManifest({ port: 4000, name: "n", permissions });
+    assert.equal(typeof m.url, "string");
+    assert.ok(m.url.length > 0);
+    if ("hook_attributes" in m) {
+      assert.equal(typeof m.hook_attributes.url, "string");
+      assert.ok(m.hook_attributes.url.length > 0);
+      assert.equal(m.hook_attributes.active, false);
+    }
+    assert.equal(typeof m.redirect_url, "string");
+    assert.ok(m.redirect_url.length > 0);
+    assert.equal(typeof m.default_permissions, "object");
+    assert.ok(Object.keys(m.default_permissions).length > 0);
+  }
 });
 
 test("the form posts the manifest and the state to GitHub's new-App page, or the org's", () => {
@@ -185,7 +205,7 @@ test("the workflows manifest has exactly contents write, workflows write and met
   const m = buildManifest({ port: 4000, name: "n", permissions: WORKFLOWS_PERMISSIONS });
   assert.deepEqual(m.default_permissions, { contents: "write", workflows: "write", metadata: "read" });
   assert.equal(m.public, false);
-  assert.deepEqual(m.hook_attributes, { active: false });
+  assert.deepEqual(m.hook_attributes, { url: "https://github.com", active: false });
   assert.equal(m.redirect_url, "http://127.0.0.1:4000/redirect");
   assert.equal(m.setup_url, "http://127.0.0.1:4000/setup");
   assert.equal(buildManifest({ port: 1, name: "n" }).default_permissions.workflows, undefined);
