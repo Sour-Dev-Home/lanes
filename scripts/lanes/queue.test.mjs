@@ -1428,6 +1428,23 @@ test("#444: planRecovery also names a dead lane whose PR has a failing check, an
   assert.deepEqual(out.map((r) => [r.number, r.id, r.branch]), [[7, "old-7", "issue-7-work"], [8, null, "issue-8-work"]]);
 });
 
+test("#741: planRecovery names a dead lane whose open PR conflicts with main, and leaves a live one alone", async () => {
+  const { planRecovery } = await import("./queue.mjs");
+  const conflicted = (number, n) => ({ ...pr(number, n, [`src/${n}.mjs`], [{ name: "verify", conclusion: "FAILURE" }]), mergeable: "CONFLICTING" });
+  const issues = [issue(7, ["src/7.mjs"]), issue(8, ["src/8.mjs"])];
+  const out = planRecovery({ issues, prs: [conflicted(70, 7), conflicted(80, 8)], sessions: [idleLane(7), lane(8)] });
+  assert.deepEqual(out.map((r) => [r.number, r.resume, r.id, r.branch]), [[7, true, "old-7", "issue-7-work"]]);
+  assert.match(out[0].reason, /dead lane with open PR #70 \(conflict/);
+  const again = planRecovery({ issues, prs: [conflicted(70, 7)], sessions: [idleLane(7)], marker: () => ({ session: "old-7" }) });
+  assert.deepEqual(again, []);
+});
+
+test("#741: edge: an UNKNOWN mergeable state is not resumed as a conflict", async () => {
+  const { planRecovery } = await import("./queue.mjs");
+  const unknown = { ...pr(70, 7, ["src/7.mjs"], [gate("SUCCESS")]), mergeable: "UNKNOWN" };
+  assert.deepEqual(planRecovery({ issues: [issue(7, ["src/7.mjs"])], prs: [unknown], sessions: [idleLane(7)] }), []);
+});
+
 test("#444: planRecovery leaves an issue with a marker for this session alone and reports another as again", async () => {
   const { planRecovery } = await import("./queue.mjs");
   const input = { issues: [issue(7, ["src/a.mjs"])], prs: [gatePr(70, 7, "waiting for review/test-hunter")], sessions: [idleLane(7)] };

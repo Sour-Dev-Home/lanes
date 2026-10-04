@@ -1097,6 +1097,17 @@ test("lane.md step 3 lists worktrees first and stops for an existing or several 
   assert.match(laneText().replace(/\s+/g, " "), /3b\. Resuming \(#444, #476\)[^]*Never open a second PR/);
 });
 
+// #741: the queue resumes a lane whose PR conflicts with main; step 3b says what that lane does.
+test("lane.md step 3b rebases a conflicting PR onto origin/main within Scope and stops when a conflict needs more", () => {
+  const text = laneText().replace(/\s+/g, " ");
+  const step = text.slice(text.indexOf("3b. Resuming"), text.indexOf("4. Read the issue"));
+  assert.match(step, /conflicts with main[^]*rebases onto `origin\/main`/);
+  assert.match(step, /resolves the conflicts within Scope/);
+  assert.match(step, /full `npm test`/);
+  assert.match(step, /re-runs the reviewers whose files changed/);
+  assert.match(step, /`Lane stopped: conflict needs <paths>`[^]*`needs-owner`/);
+});
+
 test("lane.md step 3 runs npm run setup, then the POSIX tools check, in the worktree", () => {
   const step3 = laneStep(3);
   const setup = step3.indexOf("npm run setup");

@@ -28,8 +28,8 @@ import { QUEUE_EVENTS, formatAge, gateDescriptions, gateSince, idleLanes, liveLa
 // waiting on owner.
 const WAITING_STAGES = new Set(["failing", "contract", "owner", "conflict"]);
 // #444: the stages in which a lane owes the PR something, so a dead lane is worth resuming: a failing check, no
-// lanes/gate yet, or a gate waiting for a reviewer's status.
-const RESUMABLE_STAGES = new Set(["failing", "starting", "gate"]);
+// lanes/gate yet, a gate waiting for a reviewer's status, or (#741) a merge conflict with main to rebase.
+const RESUMABLE_STAGES = new Set(["failing", "starting", "gate", "conflict"]);
 const labelsOf = (issue) => (issue.labels ?? []).map((l) => (typeof l === "string" ? l : l?.name));
 const isOpen = (issue) => (issue.state ?? "OPEN") === "OPEN";
 const branchIssue = (pr) => Number(String(pr.headRefName ?? "").match(/^issue-(\d+)-/)?.[1] ?? NaN);
