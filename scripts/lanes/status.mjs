@@ -5,7 +5,7 @@ import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GATE_CONTEXT, identityRefusal, laneIssueOf, loadConfig, nativeCodeOwnerApproval, parseCodeOwnerUsers, parseIssueForm, parsePrBody, reviewContext, reviewerNames, trustedStatuses } from "./lib.mjs";
+import { GATE_CONTEXT, identityRefusal, laneIssueOf, loadConfig, nativeCodeOwnerApproval, parseCodeOwnerUsers, parseIssueForm, parsePrBody, reviewContext, reviewerNames, sessionPhase, trustedStatuses } from "./lib.mjs";
 import { issuePaths, pathsOverlap } from "./paths.mjs";
 import { BUDGET_DEFAULTS, budgetConfig, loadBudget, projectFolder } from "./lane-cost.mjs";
 import { claimedPaths } from "./pick.mjs";
@@ -202,6 +202,10 @@ const normalPath = (p) => {
   const slashed = p.replace(/\\/g, "/").replace(/\/+$/, "");
   return /^[a-z]:\//i.test(slashed) ? slashed.toLowerCase() : slashed;
 };
+
+// #730: sessionPhase lives in lib.mjs (cleanup.mjs cannot import this file: it would form a cycle with the lazy
+// import of cleanup.mjs below); re-exported here.
+export { sessionPhase };
 
 // #571: the one test for "this lane session has stopped": idle (any `state`, `blocked` included) and not on a permission
 // prompt. /status and the queue both decide through it, so they cannot disagree about the same session.

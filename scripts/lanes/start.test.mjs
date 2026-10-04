@@ -212,6 +212,15 @@ test("deadLaneSession: no session, or an idle one that is not blocked, is dead; 
   assert.equal(deadLaneSession([{ ...idle, name: "lane-7" }], 6).dead, true, "another issue's session is not this lane's");
 });
 
+test("#730: deadLaneSession reads today's state field (no status): done is dead, working and blocked are alive", () => {
+  const session = (state, startedAt = 1) => ({ kind: "background", name: "lane-6", state, startedAt });
+  assert.equal(deadLaneSession([session("done")], 6).dead, true);
+  assert.equal(deadLaneSession([session("working")], 6).dead, false);
+  assert.equal(deadLaneSession([session("blocked")], 6).dead, false);
+  assert.equal(deadLaneSession([session("paused")], 6).dead, false, "an unknown state fails safe: alive");
+  assert.equal(deadLaneSession([session("working", 1), session("done", 2)], 6).dead, true, "the newest decides");
+});
+
 // Exact launch arguments.
 // #195: every lane is named lane-<N>, so `claude agents` shows which issue a session works.
 const NAMED = (n) => ["--bg", "--name", `lane-${n}`];

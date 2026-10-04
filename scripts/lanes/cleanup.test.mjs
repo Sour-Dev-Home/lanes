@@ -245,6 +245,19 @@ test("a merged lane whose session is busy is skipped: session still working", ()
   }
 });
 
+// #730: today's `claude agents --json` sends `state` (working, blocked, done) and no `status`.
+test("#730: a merged lane whose session is done or blocked (no status) is removed; working or unknown is skipped", () => {
+  for (const state of ["done", "blocked"]) {
+    const [entry] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { state })], prs: [merged("issue-7-x")] });
+    assert.equal(entry.skip, undefined, state);
+    assert.equal(cmds(entry)[0], "claude rm s7", state);
+  }
+  for (const state of ["working", "paused", undefined]) {
+    const [entry] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { state })], prs: [merged("issue-7-x")] });
+    assert.equal(entry.skip, "session still working", String(state));
+  }
+});
+
 test("a busy session sharing the worktree with an idle/working one blocks cleanup", () => {
   const [entry] = planCleanup({
     worktrees: [wt("issue-7-x")],
@@ -282,10 +295,10 @@ test("edge: an unknown status falls back to its state rather than being read as 
   assert.equal(plan("done").skip, undefined);
 });
 
-test("edge: a session with neither status nor state is treated as not working, not as still working", () => {
+// #730: reversed from "not working": a session this script cannot read fails safe, so it is never removed over.
+test("edge: a session with neither status nor state is treated as still working (#730 fails safe)", () => {
   const [entry] = planCleanup({ worktrees: [wt("issue-7-x")], sessions: [session("s7", "issue-7-x", { status: undefined, state: undefined })], prs: [merged("issue-7-x")] });
-  assert.equal(entry.skip, undefined);
-  assert.deepEqual(cmds(entry), ["claude rm s7", `git worktree remove ${ROOT}/.claude/worktrees/issue-7-x`, "git branch -D issue-7-x"]);
+  assert.equal(entry.skip, "session still working");
 });
 
 test("sessionsFrom keeps each background session's status and state, marks one with no id unreadable, and drops others", () => {
@@ -1187,6 +1200,16 @@ test("edge: waitForStop stops waiting when the agents list fails or is unparseab
   assert.equal(waitForStop("s7", { run: () => JSON.stringify({ not: "a list" }), sleep: noSleep }), false);
   const stopped = () => JSON.stringify([{ id: "s7", status: "idle", state: "working" }, { id: "other", status: "busy" }]);
   assert.equal(waitForStop("s7", { run: stopped, sleep: noSleep }), true);
+});
+
+test("#730: waitForStop reads today's state field (no status): working keeps waiting, done and blocked end the wait", () => {
+  const seen = ["working", "done"];
+  const run = () => JSON.stringify([{ id: "s7", state: seen.shift() }]);
+  assert.equal(waitForStop("s7", { run, sleep: () => {} }), true);
+  assert.equal(waitForStop("s7", { run: () => JSON.stringify([{ id: "s7", state: "blocked" }]), sleep: () => assert.fail("must not sleep") }), true);
+  let sleeps = 0;
+  assert.equal(waitForStop("s7", { run: () => JSON.stringify([{ id: "s7", state: "working" }]), sleep: () => sleeps++ }), false);
+  assert.equal(sleeps, 10);
 });
 
 test("cleanupMerged waits for the stop and retries rm through its default deps", () => {

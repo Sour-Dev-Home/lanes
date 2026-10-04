@@ -17,7 +17,7 @@ import { mintInstallationToken } from "./app-token.mjs";
 import { parseBlockedBy } from "./blockers.mjs";
 import { cleanupMerged, laneWorkLeft, SESSION_ID, parseWorktrees, removeLaneWorktree, saveSessionLog, waitForStop } from "./cleanup.mjs";
 import { HEARTBEAT_MARKER, findOrCreateHealthIssue, ghClient } from "./health.mjs";
-import { GATE_CONTEXT, TEAM_REQUIRED_MESSAGE, isLaneBot, laneIssueOf, parseIssueForm, readControlState } from "./lib.mjs";
+import { GATE_CONTEXT, TEAM_REQUIRED_MESSAGE, isLaneBot, laneIssueOf, parseIssueForm, readControlState, sessionPhase } from "./lib.mjs";
 import { issuePaths } from "./paths.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
@@ -165,7 +165,7 @@ export function planRecovery({ issues = [], prs = [], sessions = [], stalled = n
     if (!ready.has(n) || withPr.has(n)) continue;
     let reason = null;
     if (stalled.has(n)) reason = `stalled for ${stalled.get(n)} minutes`;
-    else if (s.status === "idle" && s.state !== "blocked") reason = "session ended with no open PR";
+    else if (sessionPhase(s) === "stopped") reason = "session ended with no open PR";
     if (!reason) continue;
     const marked = marker(n);
     if (marked?.session === s.id) continue;
@@ -221,7 +221,7 @@ export function planWorktreeResume({ issues = [], prs = [], sessions = [], workt
     }
     // A session with no readable id could not be stopped, so the issue stays as it is.
     const session = newestSession(sessions, n);
-    const stoppable = session && (session.status === "idle" || session.state === "blocked");
+    const stoppable = session && sessionPhase(session) !== "running";
     if (session && !stoppable) continue;
     if (session && (typeof session.id !== "string" || !SESSION_ID.test(session.id))) continue;
     found.push({ number: n, id: session?.id ?? null, cwd: trees.get(n)[0].path, stoppable: Boolean(stoppable) });

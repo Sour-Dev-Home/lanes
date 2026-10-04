@@ -11,7 +11,7 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SESSION_ID, cleanupMerged, loadCleanupInputs, pidRunning, sessionsFrom } from "./cleanup.mjs";
-import { laneIssueOf } from "./lib.mjs";
+import { laneIssueOf, sessionPhase } from "./lib.mjs";
 
 // The ADR's defaults, which the owner may tune without another ADR.
 export const GIVE_UP_MS = 48 * 60 * 60 * 1000;
@@ -26,9 +26,8 @@ export const STARTUP_GRACE_MS = 30 * 60 * 1000;
 // The same patterns as cleanup.mjs: a lane's branch is `issue-<N>-<slug>`, its worktree folder `issue-<N>[-<slug>]`.
 const LANE_BRANCH = /^issue-(\d+)-./;
 
-// As in cleanup.mjs: `status` says whether a session is running now; `state` can keep saying "working" after it
-// stopped (#83), so it only counts when there is no status this script knows.
-const stillWorking = (s) => (s.status === "idle" ? false : s.status === "busy" ? true : s.state === "working");
+// As in cleanup.mjs: a session is still working while sessionPhase (status.mjs, #730) calls it running.
+const stillWorking = (s) => sessionPhase(s) === "running";
 
 const time = (v, name) => {
   const ms = v instanceof Date ? v.getTime() : v;

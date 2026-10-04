@@ -41,6 +41,20 @@ export function laneIssueOf(session) {
   return at >= 0 ? lane(segs[at + 1]) : (segs.map(lane).find(Boolean) ?? null);
 }
 
+// #730: the one reading of a `claude agents --json` entry: `running`, `waiting` (on a prompt) or `stopped`. Today's
+// Claude Code sends `state` (`working`, `blocked`, `done`) and no `status`; an older one sends `status` (`busy`,
+// `idle`), which wins over a `state` that lingers on "working" after a stop (#83). Anything unknown or missing is
+// `running`, so a session this script cannot read is never removed or resumed over.
+export function sessionPhase(session) {
+  const status = session?.status;
+  const state = session?.state;
+  if (status === "busy") return "running";
+  if (state === "blocked") return "waiting";
+  if (status === "idle") return "stopped";
+  if (state === "done" || state === "idle") return "stopped";
+  return "running";
+}
+
 const PATH_KEYS = ["skip", "contract", "sensitive", "ui"];
 
 // A refusal the gate reports as `error` with the message (ADR 0031 part 2): the owner paths cannot be read.
