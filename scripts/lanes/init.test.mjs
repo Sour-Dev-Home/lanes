@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join, relative, resolve } from "node:path";
 import { parseOwnerPatterns } from "./lib.mjs";
-import { initMain, parseArgs } from "./init.mjs";
+import { copiedLanesConfig, initMain, parseArgs, starterCodeowners, withNpmScripts } from "./init.mjs";
 
 const NAMES = ["installed", "secret", "labels", "main-ruleset", "identity", "app-key", "app-installed", "codeowners", "code-owner-ruleset", "workflows-environment", "verify-job"];
 const FIX = { link: "https://github.com/acme/widgets/settings" };
@@ -346,4 +346,23 @@ test("--dry-run prints every step and calls no runner, state, repo lookup or pro
   assert.match(w.text(), /7\. a final setup-state checklist/);
   assert.equal(await initMain(["--new", "widgets", "--private", "--dry-run"], w.deps), 0);
   assert.match(w.text(), /new-project\.mjs widgets --private/);
+});
+
+test("edge #747: withNpmScripts keeps an existing empty script, tolerates null scripts, and adds nothing when both exist", () => {
+  assert.deepEqual(JSON.parse(withNpmScripts('{"scripts":{"setup":""}}')).scripts, { setup: "", preflight: "node scripts/preflight.mjs" });
+  assert.deepEqual(Object.keys(JSON.parse(withNpmScripts('{"scripts":null}')).scripts), ["setup", "preflight"]);
+  assert.equal(withNpmScripts('{"scripts":{"setup":"a","preflight":"b"}}'), undefined);
+  assert.equal(withNpmScripts("[]"), undefined);
+  assert.equal(withNpmScripts("{nope"), undefined);
+  assert.match(withNpmScripts('{\n\t"name":"x"\n}'), /^\{\n\t"name"/);
+});
+
+test("edge #747: copiedLanesConfig is false for unparseable text, a different App id or no id; starterCodeowners stays in the strict subset", () => {
+  const cfg = (id) => JSON.stringify({ identity: { app: { id } } });
+  assert.equal(copiedLanesConfig("{nope", cfg(1)), false);
+  assert.equal(copiedLanesConfig(cfg(2), cfg(1)), false);
+  assert.equal(copiedLanesConfig("{}", "{}"), false);
+  assert.equal(copiedLanesConfig(cfg(1), cfg(1)), true);
+  const patterns = parseOwnerPatterns(starterCodeowners("acme"));
+  assert.ok(patterns.length >= 10);
 });
