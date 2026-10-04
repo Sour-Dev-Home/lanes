@@ -36,7 +36,8 @@ export function buildManifest({ port, name, permissions = PERMISSIONS }) {
     redirect_url: `${local}/redirect`,
     setup_url: `${local}/setup`,
     public: false,
-    hook_attributes: { active: false },
+    // GitHub requires a url whenever hook_attributes is present; it is never called while active is false.
+    hook_attributes: { url: "https://github.com", active: false },
     default_permissions: { ...permissions },
   };
 }
