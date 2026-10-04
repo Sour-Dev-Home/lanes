@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -133,6 +134,55 @@ function localImports(file, text) {
   const specs = [...text.matchAll(/\bfrom\s+"(\.{1,2}\/[^"]+)"|\bimport\(\s*"(\.{1,2}\/[^"]+)"\s*\)/g)];
   return specs.map((m) => path.posix.join(path.posix.dirname(file), m[1] ?? m[2]));
 }
+
+// The files `entry` loads: what it imports (statically, dynamically or re-exported) and the scripts it spawns by a
+// path.join("scripts", "lanes", "x.mjs") shape, transitively, test files excluded. Mirrors queueClosure() in
+// workflow.test.mjs, which cannot be imported without re-running that file's tests.
+function queueClosure(entry = "scripts/lanes/queue.mjs", read = (f) => readFileSync(f, "utf8"), exists = existsSync) {
+  const seen = new Set();
+  const todo = [entry];
+  while (todo.length) {
+    const file = todo.pop();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const text = read(file).replace(/^\s*\/\/.*$/gm, "");
+    const spawned = [...text.matchAll(/"scripts",\s*"lanes",\s*"([\w.-]+\.mjs)"/g)].map((m) => `scripts/lanes/${m[1]}`);
+    for (const next of [...localImports(file, text), ...spawned]) if (exists(next)) todo.push(next);
+  }
+  return [...seen].filter((f) => !f.endsWith(".test.mjs")).sort();
+}
+
+test("#736: MANIFEST ships every file in the queue's import and spawn closure", () => {
+  const closure = queueClosure();
+  for (const f of ["scripts/lanes/queue.mjs", "scripts/lanes/start.mjs", "scripts/lanes/reap.mjs", "scripts/lanes/app-token.mjs"])
+    assert.ok(closure.includes(f), `the closure misses ${f}: the computation is broken`);
+  const missing = closure.filter((f) => !MANIFEST.includes(f)).map((f) => `${f} is in the queue's closure but not in MANIFEST`);
+  assert.deepEqual(missing, []);
+});
+
+test("edge: queueClosure follows imports, re-exports, dynamic imports and spawned paths, skips comments and tests", () => {
+  const files = {
+    "scripts/lanes/a.mjs": 'import { x } from "./b.mjs";\n// import "./nope.mjs";\nspawn(path.join("scripts", "lanes", "c.mjs"));',
+    "scripts/lanes/b.mjs": 'export { y } from "./d.mjs";\nawait import("./a.mjs");',
+    "scripts/lanes/c.mjs": 'import "./a.test.mjs";',
+    "scripts/lanes/d.mjs": "",
+    "scripts/lanes/a.test.mjs": "",
+  };
+  const got = queueClosure("scripts/lanes/a.mjs", (f) => files[f], (f) => f in files);
+  assert.deepEqual(got, ["scripts/lanes/a.mjs", "scripts/lanes/b.mjs", "scripts/lanes/c.mjs", "scripts/lanes/d.mjs"]);
+});
+
+test("#736: a fresh install into a git repository gives a queue and a refresh-token that run to their own usage errors", () => {
+  const target = mkdtempSync(path.join(tmpdir(), "lanes-"));
+  execFileSync("git", ["init", "-q"], { cwd: target, windowsHide: true });
+  install(".", target, {});
+  for (const args of [["scripts/lanes/queue.mjs", "--help"], ["scripts/lanes/start.mjs", "--refresh-token"]]) {
+    const r = spawnSync(process.execPath, args, { cwd: target, encoding: "utf8", windowsHide: true });
+    assert.doesNotMatch(r.stderr, /ERR_MODULE_NOT_FOUND|Cannot find module/, `${args.join(" ")}: ${r.stderr}`);
+    assert.equal(r.status, 2, `${args.join(" ")} should exit with its usage code: ${r.stdout}${r.stderr}`);
+  }
+  rmSync(target, { recursive: true, force: true });
+});
 
 test("MANIFEST ships the dashboard page's three files", () => {
   for (const f of ["index.html", "app.js", "style.css"]) assert.ok(MANIFEST.includes(`dashboard/${f}`), f);
