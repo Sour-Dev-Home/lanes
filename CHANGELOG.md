@@ -27,7 +27,7 @@ terminal commands. The full account is in `docs/history/2026-10-04-lanes-v0.2.0.
 - The queue sustains itself: it pulls and restarts when lanes' own scripts change, polls while idle and backs off on
   read errors (ADR 0026, #535, #632), and posts a heartbeat (#630).
 - A queue resumes a stopped lane in its worktree once `needs-owner` is removed (#724, #739), a lane whose PR conflicts
-  with main (#741), and a lane that died before its PR (#444, #476).
+  with main (#741), and a lane that died before its PR (#476).
 - The queue skips an issue the owner has claimed by assigning it (#522) and honours `model:opus` (#577).
 - A lane that stops for the owner comments why on its issue (#666).
 
@@ -52,7 +52,7 @@ terminal commands. The full account is in `docs/history/2026-10-04-lanes-v0.2.0.
 - The gate notes PR files outside the issue's Scope and lanes explain them (#635).
 - Owner paths come from `.github/CODEOWNERS`, unioned with the deprecated `paths.owner`; module risk widens sensitivity
   (ADR 0031, #701 to #703).
-- `issue-contract` refuses tier `skip` when the Scope names a path that is not skip-safe.
+- `issue-contract` refuses tier `skip` when the Scope names a path that is not skip-safe (#457).
 
 ### Adopters
 
