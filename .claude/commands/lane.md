@@ -85,7 +85,8 @@ nothing on GitHub (the identity may be wrong there).
    (`docs/adr/0033-bounded-scope-extensions.md`): a pinned test: a `*.test.mjs` whose failing assertion reads text or a
    file that the issue's Scope changes, which is updated to pin the new value and never weakened (no deleted or skipped
    test, no loosened matcher, no removed case); and a registration line: one new entry for the lane's own new file in
-   an existing registry, which edits no other entry. Every other out-of-Scope file, code included, stops the lane with
+   an existing registry, which edits no other entry, sets or lowers no `risk`, touches no `paths.sensitive` list, and
+   uses no glob or prefix that matches any file other than the lane's new one. Every other out-of-Scope file, code included, stops the lane with
    `Lane stopped: Scope needs <paths>`. If the contract is wrong or missing,
    stop and file a new task issue for the contract instead of inventing one. After filing it, the lane comments on its
    own issue before it stops: one line starting `Lane stopped: contract`, the cause in one or two sentences, the filed

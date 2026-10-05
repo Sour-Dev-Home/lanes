@@ -652,7 +652,7 @@ test("lane.md step 4: only pinned tests and registration lines may change outsid
   assert.match(step, /a pinned test: a `\*\.test\.mjs` whose failing assertion reads text or a file that the issue's Scope changes/);
   assert.match(step, /updated to pin the new value and never weakened \(no deleted or skipped test, no loosened matcher, no removed case\)/);
   assert.match(step, /a registration line: one new entry for the lane's own new file in an existing registry/);
-  assert.match(step, /edits no other entry/);
+  assert.match(step, /edits no other entry, sets or lowers no `risk`, touches no `paths\.sensitive` list, and uses no glob or prefix that matches any file other than the lane's new one/);
 });
 
 test("lane.md step 4: every other out-of-Scope file, code included, still stops with `Lane stopped: Scope needs <paths>`", () => {
