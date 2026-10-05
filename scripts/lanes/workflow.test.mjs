@@ -633,13 +633,37 @@ test("lane.md step 4: a wrong or missing contract files the issue, then comments
   assert.ok(step.indexOf("file a new task issue") < step.indexOf("comments on its own issue"));
 });
 
-test("lane.md step 5: a file outside Scope needed only because of a file this lane adds stops with `Lane stopped: Scope needs <paths>`, never a separate issue", () => {
+test("lane.md step 5: a registration line for the lane's own new file is allowed; anything else needed only because of a file this lane adds stops with `Lane stopped: Scope needs <paths>`, never a separate issue", () => {
   const step = laneNumbered("5", "6");
-  assert.match(step, /`npm test` needs a file outside Scope only because of a file this lane adds/);
+  assert.match(step, /`npm test` needs a registration line for a file this lane adds/);
+  assert.match(step, /is an allowed extension \(step 4, ADR 0033\)/);
   assert.match(step, /does not file a separate issue for it/);
+  assert.match(step, /needs anything else outside Scope only because of a file this lane adds, it stops/);
   assert.match(step, /`Lane stopped: Scope needs <paths>`/);
   assert.match(step, /each path and the check that needs it/);
   assert.match(step, /the owner extends this issue's Scope/);
+});
+
+// ADR 0033: bounded Scope extensions
+test("lane.md step 4: only pinned tests and registration lines may change outside Scope, with ADR 0033's limits", () => {
+  const step = laneNumbered("4", "4b");
+  assert.doesNotMatch(step, /Touch nothing out of scope\. If the contract/);
+  assert.match(step, /Touch nothing out of scope except the two kinds in ADR 0033 \(`docs\/adr\/0033-bounded-scope-extensions\.md`\)/);
+  assert.match(step, /a pinned test: a `\*\.test\.mjs` whose failing assertion reads text or a file that the issue's Scope changes/);
+  assert.match(step, /updated to pin the new value and never weakened \(no deleted or skipped test, no loosened matcher, no removed case\)/);
+  assert.match(step, /a registration line: one new entry for the lane's own new file in an existing registry/);
+  assert.match(step, /edits no other entry, sets or lowers no `risk`, touches no `paths\.sensitive` list, and uses no glob or prefix that matches any file other than the lane's new one/);
+});
+
+test("lane.md step 4: every other out-of-Scope file, code included, still stops with `Lane stopped: Scope needs <paths>`", () => {
+  const step = laneNumbered("4", "4b");
+  assert.match(step, /Every other out-of-Scope file, code included, stops the lane with `Lane stopped: Scope needs <paths>`/);
+  assert.ok(step.indexOf("two kinds in ADR 0033") < step.indexOf("Every other out-of-Scope file"));
+});
+
+test("lane.md step 7: each extension's Outside Scope line names its kind and what it follows", () => {
+  const step7 = laneStep(7);
+  assert.match(step7, /for a pinned test or registration extension \(ADR 0033\) the line names the kind \(`pinned test` or `registration`\) and the Scope file or new file it follows/);
 });
 
 test("lane.md step 4c: its needs-owner description matches the label list's", () => {
