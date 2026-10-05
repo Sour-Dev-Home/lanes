@@ -24,7 +24,7 @@ function fixture({ lockFiles, manifest = ["a.txt", "b.txt", "c.txt", "new.txt", 
   const source = tmp();
   const target = tmp();
   put(source, "package.json", JSON.stringify({ version: "0.2.0" }));
-  put(source, "lanes.config.json", JSON.stringify({ keep: 1, added: { x: 2 }, extra: "d" }));
+  put(source, "lanes.config.json", JSON.stringify({ keep: 1, requiredChecks: ["ci"], paths: { sensitive: ["a"] }, identity: { app: { id: 1 } }, modules: [{ name: "m" }], metrics: {}, start: { maxLanes: 2 } }));
   for (const f of manifest) if (f !== "lanes.config.json") put(source, f, `source ${f}`);
   put(target, "lanes.config.json", JSON.stringify({ keep: "mine" }));
   const files = lockFiles ?? { "a.txt": sha("old a"), "b.txt": sha("old b"), "gone.txt": sha("old gone") };
@@ -111,21 +111,35 @@ test("--apply performs the plan, keeps refused and retired files, and rewrites t
   assert.deepEqual(lock.files, { "a.txt": sha("source a.txt"), "b.txt": sha("old b"), "new.txt": sha("source new.txt") });
 });
 
-test("--apply adds only the missing top-level config keys, each reported, none touched", () => {
+test("--apply adds only the starter's missing top-level keys, each reported, none touched", () => {
   const { source, target } = fixture();
   const o = out();
   main([target, "--apply"], {}, { source, manifest: ["lanes.config.json"], print: o.print });
-  assert.deepEqual(JSON.parse(get(target, "lanes.config.json")), { keep: "mine", added: { x: 2 }, extra: "d" });
-  assert.ok(o.lines.includes("config added"));
-  assert.ok(o.lines.includes("config extra"));
+  assert.deepEqual(JSON.parse(get(target, "lanes.config.json")), { keep: "mine", requiredChecks: ["ci"], paths: { sensitive: ["a"] } });
+  assert.ok(o.lines.includes("config requiredChecks"));
+  assert.ok(o.lines.includes("config paths"));
   assert.ok(!o.lines.includes("config keep"));
+});
+
+test("--apply on a starter config adds no identity, modules, metrics, health, budget, start or dependabot", () => {
+  const { source, target } = fixture();
+  put(target, "lanes.config.json", JSON.stringify({ requiredChecks: ["mine"], paths: {} }));
+  main([target, "--apply"], {}, { source, manifest: [], print: () => {} });
+  assert.deepEqual(JSON.parse(get(target, "lanes.config.json")), { requiredChecks: ["mine"], paths: {} });
+});
+
+test("--apply keeps a target's own identity and never adds the source's other keys", () => {
+  const { source, target } = fixture();
+  put(target, "lanes.config.json", JSON.stringify({ identity: { app: { id: 99 } } }));
+  main([target, "--apply"], {}, { source, manifest: [], print: () => {} });
+  assert.deepEqual(JSON.parse(get(target, "lanes.config.json")), { identity: { app: { id: 99 } }, requiredChecks: ["ci"], paths: { sensitive: ["a"] } });
 });
 
 test("--apply with no missing config key leaves lanes.config.json byte for byte", () => {
   const { source, target } = fixture();
-  put(target, "lanes.config.json", '{"keep":1,  "added":1,"extra":2}');
+  put(target, "lanes.config.json", '{"keep":1,  "requiredChecks":1,"paths":2}');
   main([target, "--apply"], {}, { source, manifest: [], print: () => {} });
-  assert.equal(get(target, "lanes.config.json"), '{"keep":1,  "added":1,"extra":2}');
+  assert.equal(get(target, "lanes.config.json"), '{"keep":1,  "requiredChecks":1,"paths":2}');
 });
 
 test("edge: --apply with a target without lanes.config.json creates nothing and does not crash", () => {
@@ -215,13 +229,14 @@ test("edge: a directory at a managed path exits 2 with one line, not a stack tra
   assert.match(o.lines[0], /^upgrade failed/);
 });
 
-test("edge: a source config key named like an inherited property is still added", () => {
+test("edge: a source key named like an inherited property is not a starter key, so it is not added", () => {
   const { source, target } = fixture();
-  put(source, "lanes.config.json", '{"toString":1,"constructor":2}');
+  put(source, "lanes.config.json", '{"toString":1,"constructor":2,"paths":{}}');
   main([target, "--apply"], {}, { source, manifest: [], print: () => {} });
   const cfg = JSON.parse(get(target, "lanes.config.json"));
-  assert.equal(Object.hasOwn(cfg, "toString"), true);
-  assert.equal(Object.hasOwn(cfg, "constructor"), true);
+  assert.equal(Object.hasOwn(cfg, "toString"), false);
+  assert.equal(Object.hasOwn(cfg, "constructor"), false);
+  assert.equal(Object.hasOwn(cfg, "paths"), true);
 });
 
 test("a managed file that is itself a link to a file outside the target is never written through", (t) => {
@@ -240,9 +255,9 @@ test("a managed file that is itself a link to a file outside the target is never
 
 test("edge: a config key the source has and the target has as null is not re-added", () => {
   const { source, target } = fixture();
-  put(target, "lanes.config.json", '{"keep":null,"added":null,"extra":null}');
+  put(target, "lanes.config.json", '{"keep":null,"requiredChecks":null,"paths":null}');
   main([target, "--apply"], {}, { source, manifest: [], print: () => {} });
-  assert.equal(get(target, "lanes.config.json"), '{"keep":null,"added":null,"extra":null}');
+  assert.equal(get(target, "lanes.config.json"), '{"keep":null,"requiredChecks":null,"paths":null}');
 });
 
 test("readLock returns the parsed lock for a valid file", () => {

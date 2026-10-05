@@ -1,6 +1,35 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildRuleset, findRulesetId, LABELS } from "./setup-repo.mjs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { buildRuleset, findRulesetId, LABELS, readRequiredChecks } from "./setup-repo.mjs";
+
+// #747: setup-repo runs before CODEOWNERS exists, so it reads requiredChecks without loadConfig's owner-path check.
+function withConfig(text, fn) {
+  const dir = mkdtempSync(path.join(tmpdir(), "lanes-sr-"));
+  try {
+    const file = path.join(dir, "lanes.config.json");
+    if (text !== undefined) writeFileSync(file, text);
+    return fn(file);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const DEFAULT_CHECKS = ["verify", "security", "lanes/gate"];
+
+test("#747: readRequiredChecks reads a team config with no CODEOWNERS and no owner paths", () => {
+  const cfg = JSON.stringify({ requiredChecks: ["verify", "x"], identity: { profile: "team" }, paths: { owner: [] } });
+  assert.deepEqual(withConfig(cfg, readRequiredChecks), ["verify", "x"]);
+});
+
+test("edge: readRequiredChecks falls back to the defaults for a missing file, bad JSON or a missing/invalid list", () => {
+  assert.deepEqual(withConfig(undefined, readRequiredChecks), DEFAULT_CHECKS);
+  assert.deepEqual(withConfig("{nope", readRequiredChecks), DEFAULT_CHECKS);
+  assert.deepEqual(withConfig("{}", readRequiredChecks), DEFAULT_CHECKS);
+  assert.deepEqual(withConfig('{"requiredChecks":[]}', readRequiredChecks), DEFAULT_CHECKS);
+  assert.deepEqual(withConfig('{"requiredChecks":[1]}', readRequiredChecks), DEFAULT_CHECKS);
+});
 
 test("the ruleset requires the checks, a merge queue and CodeQL, with no bypass", () => {
   const r = buildRuleset(["verify", "security", "lanes/gate"]);

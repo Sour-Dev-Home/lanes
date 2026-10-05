@@ -2,8 +2,24 @@
 // OWNER ONLY. Configures a GitHub repo for lanes: merge settings, labels, CodeQL default setup, and the main ruleset.
 // Usage: node scripts/lanes/setup-repo.mjs <owner/repo>
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "./lib.mjs";
+
+const DEFAULT_REQUIRED_CHECKS = ["verify", "security", "lanes/gate"];
+
+/**
+ * #747: a raw read of requiredChecks. loadConfig also refuses a team config with no CODEOWNERS (ADR 0031), but in init's
+ * order CODEOWNERS is committed after this script runs, and the ruleset only needs the check names.
+ */
+export function readRequiredChecks(file = "lanes.config.json") {
+  try {
+    const list = JSON.parse(readFileSync(file, "utf8"))?.requiredChecks;
+    if (Array.isArray(list) && list.length > 0 && list.every((c) => typeof c === "string" && c !== "")) return list;
+  } catch {
+    // a missing or unreadable file means the defaults
+  }
+  return DEFAULT_REQUIRED_CHECKS;
+}
 
 export const LABELS = [
   { name: "tier:skip", color: "c5def5", description: "Docs, config or tests only" },
@@ -80,7 +96,7 @@ function main(repo = process.argv[2]) {
   gh(["repo", "edit", repo, "--enable-auto-merge", "--delete-branch-on-merge", "--enable-squash-merge", "--enable-merge-commit=false", "--enable-rebase-merge=false"]);
   for (const l of LABELS) gh(["label", "create", l.name, "-R", repo, "--color", l.color, "--description", l.description, "--force"]);
   gh(["api", `repos/${repo}/code-scanning/default-setup`, "-X", "PATCH", "-f", "state=configured"]);
-  const ruleset = buildRuleset(loadConfig().requiredChecks);
+  const ruleset = buildRuleset(readRequiredChecks());
   const existing = JSON.parse(gh(["api", `repos/${repo}/rulesets`]));
   const id = findRulesetId(existing, ruleset.name);
   if (id) gh(["api", `repos/${repo}/rulesets/${id}`, "-X", "PUT", "--input", "-"], JSON.stringify(ruleset));

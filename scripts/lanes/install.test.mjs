@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { install, MANIFEST, publicFromArgs, repoIsPublic } from "./install.mjs";
+import { install, MANIFEST, publicFromArgs, repoIsPublic, starterConfig } from "./install.mjs";
 
 test("every manifest file exists in this repo", () => {
   for (const f of MANIFEST) assert.ok(existsSync(f), f);
@@ -280,7 +280,62 @@ test("install copies the manifest and never overwrites without force", () => {
   assert.ok(r.skipped.includes("lanes.config.json"));
   assert.equal(readFileSync(path.join(target, "lanes.config.json"), "utf8"), "{}");
   assert.ok(existsSync(path.join(target, "scripts/lanes/gate.mjs")));
-  assert.equal(install(".", target, { force: true }).skipped.length, 0);
+  assert.deepEqual(install(".", target, { force: true }).skipped, ["lanes.config.json"]); // #747: never overwritten, --force included
+});
+
+// #747: install writes a starter config for the target, never lanes' own.
+const tmpTarget = () => mkdtempSync(path.join(tmpdir(), "lanes-747-"));
+
+test("#747: install writes starterConfig for a target with no config, not lanes' own", () => {
+  const target = tmpTarget();
+  try {
+    const r = install(".", target, {});
+    assert.ok(r.copied.includes("lanes.config.json"));
+    const written = JSON.parse(readFileSync(path.join(target, "lanes.config.json"), "utf8"));
+    const source = JSON.parse(readFileSync("lanes.config.json", "utf8"));
+    assert.deepEqual(written, starterConfig(source));
+    assert.deepEqual(written.requiredChecks, source.requiredChecks);
+    assert.deepEqual(written.paths, source.paths);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test("#747: the starter has no modules, identity, metrics or repository-specific thresholds", () => {
+  const c = starterConfig(JSON.parse(readFileSync("lanes.config.json", "utf8")));
+  for (const k of ["modules", "identity", "metrics", "health", "budget", "start", "dependabot"]) assert.ok(!(k in c), k);
+});
+
+test("edge: starterConfig does not share state with its input", () => {
+  const source = { requiredChecks: ["verify"], paths: { skip: ["a"] }, identity: { x: 1 } };
+  const c = starterConfig(source);
+  c.paths.skip.push("b");
+  assert.deepEqual(source.paths.skip, ["a"]);
+});
+
+test("#747: an existing lanes.config.json is never overwritten, --force included", () => {
+  const target = tmpTarget();
+  try {
+    writeFileSync(path.join(target, "lanes.config.json"), '{"mine":1}');
+    for (const force of [false, true]) {
+      const r = install(".", target, { force });
+      assert.ok(r.skipped.includes("lanes.config.json"));
+      assert.ok(!r.copied.includes("lanes.config.json"));
+      assert.equal(readFileSync(path.join(target, "lanes.config.json"), "utf8"), '{"mine":1}');
+    }
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test("edge: the lock never lists lanes.config.json after a starter write", () => {
+  const target = tmpTarget();
+  try {
+    install(".", target, {});
+    assert.ok(!("lanes.config.json" in JSON.parse(readFileSync(path.join(target, "lanes.lock.json"), "utf8")).files));
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
 });
 
 // #278 (ADR 0012): the dashboard's script, schema and workflow ship; the workflow stays off unless the repo is public.

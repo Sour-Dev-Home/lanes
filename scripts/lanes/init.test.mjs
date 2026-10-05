@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { join } from "node:path";
-import { initMain, parseArgs } from "./init.mjs";
+import { join, relative, resolve } from "node:path";
+import { parseOwnerPatterns } from "./lib.mjs";
+import { copiedLanesConfig, initMain, parseArgs, starterCodeowners, withNpmScripts } from "./init.mjs";
 
 const NAMES = ["installed", "secret", "labels", "main-ruleset", "identity", "app-key", "app-installed", "codeowners", "code-owner-ruleset", "workflows-environment", "verify-job"];
 const FIX = { link: "https://github.com/acme/widgets/settings" };
@@ -13,16 +14,47 @@ const itemsMissing = (...missing) => NAMES.map((name) => (missing.includes(name)
  * A fake world. `states` is the list of states the successive `state()` calls return (the last repeats);
  * `onRun` may return a result for a command, or a function to mutate what comes next.
  */
-function world({ states, runResults = {}, answers = ["done"], owner = "acme", repo = "acme/widgets", exists = () => true } = {}) {
+const SOURCE_APP_ID = 5140388;
+const LANES_CONFIG = JSON.stringify({ requiredChecks: ["verify"], identity: { profile: "team", app: { id: SOURCE_APP_ID } } });
+const SET_UP_PACKAGE = JSON.stringify({ name: "widgets", scripts: { test: "x", setup: "mine", preflight: "mine" } });
+
+const TARGET = resolve("../widgets");
+
+/** An in-memory disk: initial target files by repo-relative path, plus the lanes clone's config (a set-up repository unless `fs` says otherwise). */
+function memoryFiles(initial) {
+  const map = new Map([[join("root", "lanes.config.json"), LANES_CONFIG], ...Object.entries(initial).map(([rel, text]) => [join(TARGET, rel), text])]);
+  const writes = [];
+  return {
+    map,
+    writes,
+    read: (abs) => map.get(abs),
+    write: (abs, content) => {
+      writes.push(relative(TARGET, abs).replaceAll("\\", "/"));
+      map.set(abs, content);
+    },
+  };
+}
+const targetFile = (w, rel) => w.files.map.get(join(TARGET, rel));
+const SET_UP_FILES = { ".github/CODEOWNERS": "/CLAUDE.md @acme\n", "package.json": SET_UP_PACKAGE, "lanes.config.json": '{"requiredChecks":["verify"]}' };
+
+function world({ states, runResults = {}, answers = ["done"], owner = "acme", repo = "acme/widgets", exists = () => true, fs = SET_UP_FILES, login = "acme" } = {}) {
   const calls = [];
   const out = [];
   let n = 0;
   const asked = [];
+  const files = memoryFiles(fs);
+  let repoReads = 0;
   const deps = {
     lanesRoot: "root",
     exists,
+    readFile: files.read,
+    writeFile: files.write,
+    loginOf: () => login,
     print: (s) => out.push(s),
-    repoOf: () => repo,
+    repoOf: () => {
+      repoReads++;
+      return repo;
+    },
     ownerOf: () => owner,
     state: () => states[Math.min(n++, states.length - 1)],
     run: (cmd, args, { cwd }) => {
@@ -35,7 +67,7 @@ function world({ states, runResults = {}, answers = ["done"], owner = "acme", re
       return answers.shift() ?? "";
     },
   };
-  return { deps, calls, out, asked, text: () => out.join("\n") };
+  return { deps, calls, out, asked, files, repoReads: () => repoReads, text: () => out.join("\n") };
 }
 
 const scripts = (w) => w.calls.map((c) => c.script + (c.args.includes("--workflows") ? " --workflows" : ""));
@@ -88,6 +120,105 @@ test("a fresh existing repository runs every step in order and ends with the che
   assert.match(w.text(), /codeowners: codeowners is missing/);
   assert.match(w.text(), /What is left \(2\)/);
   assert.match(w.text(), /open https:\/\/github\.com\/acme\/widgets\/settings/);
+});
+
+// #747: an existing repository gets CODEOWNERS and the npm scripts before setup-repo, and a copied lanes config stops init.
+const FRESH_FILES = { "package.json": JSON.stringify({ name: "widgets", scripts: { test: "x" } }), "lanes.config.json": '{"requiredChecks":["verify"]}' };
+const freshStates = () => [
+  itemsMissing("secret", "labels", "main-ruleset", "identity", "app-key", "app-installed", "codeowners", "code-owner-ruleset", "workflows-environment"),
+  itemsMissing("labels", "main-ruleset", "identity", "app-key", "app-installed", "codeowners", "code-owner-ruleset", "workflows-environment"),
+  itemsMissing("identity", "app-key", "app-installed", "codeowners", "code-owner-ruleset", "workflows-environment"),
+  itemsMissing("codeowners", "code-owner-ruleset", "workflows-environment"),
+  itemsMissing("codeowners", "code-owner-ruleset"),
+];
+
+test("#747: a repository with no CODEOWNERS and no npm scripts gets both before setup-repo, and the checklist says to commit them", async () => {
+  const w = world({ states: freshStates(), fs: FRESH_FILES, login: "octo" });
+  assert.equal(await initMain(["../widgets"], w.deps), 1);
+  assert.deepEqual(w.files.writes, [".github/CODEOWNERS", "package.json"]);
+  const owners = targetFile(w, ".github/CODEOWNERS");
+  assert.doesNotThrow(() => parseOwnerPatterns(owners));
+  const patterns = parseOwnerPatterns(owners).map((p) => p.pattern);
+  for (const p of ["/.github/", "/.claude/", "/scripts/lanes/", "/lanes.config.json", "/lanes.lock.json", "/CLAUDE.md", "/package.json", "/package-lock.json"]) assert.ok(patterns.includes(p), p);
+  assert.ok(owners.split("\n").filter((l) => l && !l.startsWith("#")).every((l) => l.endsWith(" @octo")));
+  const pkg = JSON.parse(targetFile(w, "package.json"));
+  assert.equal(pkg.scripts.setup, "git config core.hooksPath .githooks");
+  assert.equal(pkg.scripts.preflight, "node scripts/preflight.mjs");
+  assert.equal(pkg.scripts.test, "x");
+  assert.match(w.text(), /CODEOWNERS.*owner should review and commit it/i);
+  assert.match(w.text(), /commit these files:[\s\S]*\.github\/CODEOWNERS[\s\S]*package\.json/);
+});
+
+test("#747: CODEOWNERS and package.json are written before setup-repo runs", async () => {
+  const w = world({ states: freshStates(), fs: FRESH_FILES });
+  let writesAtSetupRepo;
+  const run = w.deps.run;
+  w.deps.run = (cmd, args, o) => {
+    if (args[0].endsWith("setup-repo.mjs")) writesAtSetupRepo = [...w.files.writes];
+    return run(cmd, args, o);
+  };
+  await initMain(["../widgets"], w.deps);
+  assert.deepEqual(writesAtSetupRepo, [".github/CODEOWNERS", "package.json"]);
+});
+
+test("#747: an existing CODEOWNERS and existing npm scripts are never replaced, and nothing is listed to commit", async () => {
+  const w = world({ states: freshStates() });
+  await initMain(["../widgets"], w.deps);
+  assert.deepEqual(w.files.writes, []);
+  assert.equal(targetFile(w, "package.json"), SET_UP_PACKAGE);
+  assert.doesNotMatch(w.text(), /commit these files/);
+});
+
+test("edge: only the missing npm script is added, and the package.json indent is kept", async () => {
+  const pkg = `${JSON.stringify({ name: "w", scripts: { setup: "mine" } }, null, 4)}\n`;
+  const w = world({ states: freshStates(), fs: { ...SET_UP_FILES, "package.json": pkg } });
+  await initMain(["../widgets"], w.deps);
+  const out = targetFile(w, "package.json");
+  assert.equal(JSON.parse(out).scripts.setup, "mine");
+  assert.equal(JSON.parse(out).scripts.preflight, "node scripts/preflight.mjs");
+  assert.match(out, /\n {4}"name"/);
+});
+
+test("edge: a target with no package.json, or an unreadable one, is left alone and says so", async () => {
+  for (const bad of [undefined, "{nope"]) {
+    const fs = { ".github/CODEOWNERS": "/CLAUDE.md @acme\n", "lanes.config.json": '{"requiredChecks":["verify"]}' };
+    if (bad !== undefined) fs["package.json"] = bad;
+    const w = world({ states: freshStates(), fs });
+    await initMain(["../widgets"], w.deps);
+    assert.deepEqual(w.files.writes, []);
+    assert.match(w.text(), /package\.json/);
+  }
+});
+
+test("edge: when the gh user cannot be read, init stops before writing or running anything", async () => {
+  for (const login of [null, "", "bad login;rm"]) {
+    const w = world({ states: freshStates(), fs: FRESH_FILES, login });
+    assert.equal(await initMain(["../widgets"], w.deps), 1);
+    assert.deepEqual(w.files.writes, []);
+    assert.deepEqual(w.calls.filter((c) => c.script !== "install.mjs"), []);
+    assert.match(w.text(), /gh auth login/);
+  }
+});
+
+test("#747: a target holding lanes' own config stops init before any GitHub step and changes nothing", async () => {
+  const copied = JSON.stringify({ identity: { profile: "team", app: { id: SOURCE_APP_ID } }, modules: {} });
+  const w = world({ states: freshStates(), fs: { ...FRESH_FILES, "lanes.config.json": copied } });
+  assert.equal(await initMain(["../widgets"], w.deps), 1);
+  assert.equal(w.repoReads(), 0);
+  assert.equal(w.calls.length, 0);
+  assert.equal(w.asked.length, 0);
+  assert.deepEqual(w.files.writes, []);
+  assert.match(w.text(), /lanes\.config\.json/);
+  assert.match(w.text(), /delete it/i);
+  assert.match(w.text(), /starter/i);
+});
+
+test("edge: a config with another App id, no identity or unparseable JSON does not trigger the copied-config stop", async () => {
+  for (const cfg of [JSON.stringify({ identity: { app: { id: 1 } } }), "{}", "{nope"]) {
+    const w = world({ states: freshStates(), fs: { ...SET_UP_FILES, "lanes.config.json": cfg } });
+    await initMain(["../widgets"], w.deps);
+    assert.ok(w.calls.length > 0, cfg);
+  }
 });
 
 test("a fully set-up repository runs no step and prints the all-done checklist", async () => {
@@ -215,4 +346,23 @@ test("--dry-run prints every step and calls no runner, state, repo lookup or pro
   assert.match(w.text(), /7\. a final setup-state checklist/);
   assert.equal(await initMain(["--new", "widgets", "--private", "--dry-run"], w.deps), 0);
   assert.match(w.text(), /new-project\.mjs widgets --private/);
+});
+
+test("edge #747: withNpmScripts keeps an existing empty script, tolerates null scripts, and adds nothing when both exist", () => {
+  assert.deepEqual(JSON.parse(withNpmScripts('{"scripts":{"setup":""}}')).scripts, { setup: "", preflight: "node scripts/preflight.mjs" });
+  assert.deepEqual(Object.keys(JSON.parse(withNpmScripts('{"scripts":null}')).scripts), ["setup", "preflight"]);
+  assert.equal(withNpmScripts('{"scripts":{"setup":"a","preflight":"b"}}'), undefined);
+  assert.equal(withNpmScripts("[]"), undefined);
+  assert.equal(withNpmScripts("{nope"), undefined);
+  assert.match(withNpmScripts('{\n\t"name":"x"\n}'), /^\{\n\t"name"/);
+});
+
+test("edge #747: copiedLanesConfig is false for unparseable text, a different App id or no id; starterCodeowners stays in the strict subset", () => {
+  const cfg = (id) => JSON.stringify({ identity: { app: { id } } });
+  assert.equal(copiedLanesConfig("{nope", cfg(1)), false);
+  assert.equal(copiedLanesConfig(cfg(2), cfg(1)), false);
+  assert.equal(copiedLanesConfig("{}", "{}"), false);
+  assert.equal(copiedLanesConfig(cfg(1), cfg(1)), true);
+  const patterns = parseOwnerPatterns(starterCodeowners("acme"));
+  assert.ok(patterns.length >= 10);
 });

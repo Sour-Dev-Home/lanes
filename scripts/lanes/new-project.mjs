@@ -11,7 +11,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
-import { install } from "./install.mjs";
+import { install, starterConfig } from "./install.mjs";
 
 export const SECRET_NAME = "PII_PATTERNS";
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
@@ -80,13 +80,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 `;
-}
-
-/** The new project's lanes.config.json: this repo's checks and path rules, with no metrics fragments. */
-export function starterConfig(lanesConfig) {
-  const c = structuredClone(lanesConfig);
-  c.metrics = { ...c.metrics, mainWorkflow: "verify.yml", fragmentsDir: null };
-  return c;
 }
 
 export function starterPackageJson(name) {

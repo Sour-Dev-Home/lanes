@@ -109,6 +109,16 @@ export const MANIFEST = [
 // GitHub Pages sites are public even for a private repository (ADR 0012), so this workflow is only live in a public one.
 const DASHBOARD_WORKFLOW = ".github/workflows/dashboard.yml";
 const LOCK = "lanes.lock.json";
+const CONFIG = "lanes.config.json";
+
+/**
+ * A target's lanes.config.json: this repo's required checks and generic path rules, and nothing about lanes itself (no
+ * modules, identity, metrics or thresholds), so the scripts' defaults apply until the adopter sets their own.
+ */
+export function starterConfig(lanesConfig) {
+  const { requiredChecks, paths } = structuredClone(lanesConfig);
+  return { requiredChecks, paths };
+}
 
 /**
  * Copies MANIFEST into `target`. Unless `isPublic`, the dashboard workflow is copied as `dashboard.yml.disabled`, which
@@ -120,6 +130,18 @@ export function install(source, target, { force = false, isPublic = false } = {}
   const skipped = [];
   const disabled = [];
   for (const rel of MANIFEST) {
+    if (rel === CONFIG) {
+      // #747: never lanes' own config, and never overwritten, --force included.
+      const to = path.join(target, rel);
+      if (existsSync(to)) {
+        skipped.push(rel);
+        continue;
+      }
+      mkdirSync(path.dirname(to), { recursive: true });
+      writeFileSync(to, `${JSON.stringify(starterConfig(JSON.parse(readFileSync(path.join(source, rel), "utf8"))), null, 2)}\n`);
+      copied.push(rel);
+      continue;
+    }
     const off = rel === DASHBOARD_WORKFLOW && !isPublic;
     if (off && existsSync(path.join(target, rel))) {
       skipped.push(rel);
@@ -175,5 +197,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const r = install(".", target, { force: process.argv.includes("--force"), isPublic: publicFromArgs([target, ...process.argv.slice(3)]) });
   console.log(`copied ${r.copied.length}, kept ${r.skipped.length} existing${r.skipped.length ? `: ${r.skipped.join(", ")}` : ""}`);
   if (r.disabled.length) console.log("The dashboard workflow is disabled (the repository is private or unknown); rename dashboard.yml.disabled to enable it. Pages sites are public.");
-  console.log("Next: edit lanes.config.json, add `setup` and `preflight` npm scripts, then run setup-repo.mjs (owner).");
+  console.log("Next: edit lanes.config.json paths for your layout, add `setup` and `preflight` npm scripts, then run setup-repo.mjs (owner).");
 }
