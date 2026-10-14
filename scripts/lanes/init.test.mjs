@@ -37,13 +37,14 @@ function memoryFiles(initial) {
 const targetFile = (w, rel) => w.files.map.get(join(TARGET, rel));
 const SET_UP_FILES = { ".github/CODEOWNERS": "/CLAUDE.md @acme\n", "package.json": SET_UP_PACKAGE, "lanes.config.json": '{"requiredChecks":["verify"]}' };
 
-function world({ states, runResults = {}, answers = ["done"], owner = "acme", repo = "acme/widgets", exists = () => true, fs = SET_UP_FILES, login = "acme" } = {}) {
+function world({ states, runResults = {}, answers = ["done"], owner = "acme", repo = "acme/widgets", exists = () => true, fs = SET_UP_FILES, login = "acme", ownerType = "User" } = {}) {
   const calls = [];
   const out = [];
   let n = 0;
   const asked = [];
   const files = memoryFiles(fs);
   let repoReads = 0;
+  const typeReads = [];
   const deps = {
     lanesRoot: "root",
     exists,
@@ -56,6 +57,10 @@ function world({ states, runResults = {}, answers = ["done"], owner = "acme", re
       return repo;
     },
     ownerOf: () => owner,
+    ownerTypeOf: (who) => {
+      typeReads.push(who);
+      return ownerType;
+    },
     state: () => states[Math.min(n++, states.length - 1)],
     run: (cmd, args, { cwd }) => {
       calls.push({ cmd, script: args[0] && args[0].split(/[\\/]/).pop(), args, cwd });
@@ -67,7 +72,7 @@ function world({ states, runResults = {}, answers = ["done"], owner = "acme", re
       return answers.shift() ?? "";
     },
   };
-  return { deps, calls, out, asked, files, repoReads: () => repoReads, text: () => out.join("\n") };
+  return { deps, calls, out, asked, files, typeReads, repoReads: () => repoReads, text: () => out.join("\n") };
 }
 
 const scripts = (w) => w.calls.map((c) => c.script + (c.args.includes("--workflows") ? " --workflows" : ""));
@@ -252,6 +257,57 @@ test("--new runs new-project with its flags, then continues from the state", asy
   assert.deepEqual(scripts(w), ["new-project.mjs", "app-setup.mjs", "app-setup.mjs --workflows"]);
   assert.deepEqual(w.calls[0].args, [join("scripts", "lanes", "new-project.mjs"), "widgets", "--private", "--license", "mit"]);
   assert.equal(w.calls[0].cwd, "root");
+});
+
+const appArgs = (w) => w.calls.filter((c) => c.script === "app-setup.mjs").map((c) => c.args.slice(1));
+const appStates = () => [itemsMissing("identity", "app-key", "app-installed", "codeowners", "code-owner-ruleset", "workflows-environment"), itemsMissing("codeowners", "code-owner-ruleset", "workflows-environment"), itemsMissing("codeowners", "code-owner-ruleset")];
+
+test("#756: an organisation-owned target runs both app-setup steps with --org <owner>", async () => {
+  const w = world({ states: appStates(), ownerType: "Organization", repo: "acme/widgets" });
+  await initMain(["../widgets"], w.deps);
+  assert.deepEqual(appArgs(w), [["--org", "acme"], ["--workflows", "--org", "acme"]]);
+  assert.deepEqual(w.typeReads, ["acme"]);
+});
+
+test("#756: a personal target runs both app-setup steps with no --org", async () => {
+  const w = world({ states: appStates(), ownerType: "User" });
+  await initMain(["../widgets"], w.deps);
+  assert.deepEqual(appArgs(w), [[], ["--workflows"]]);
+});
+
+test("#756: --new --org passes --org <org> to both app-setup runs", async () => {
+  const w = world({ states: appStates(), exists: () => false });
+  await initMain(["--new", "widgets", "--org", "acme"], w.deps);
+  assert.deepEqual(appArgs(w), [["--org", "acme"], ["--workflows", "--org", "acme"]]);
+});
+
+test("#756: --new without --org follows the type of the lanes owner", async () => {
+  const w = world({ states: appStates(), exists: () => false, ownerType: "Organization" });
+  await initMain(["--new", "widgets"], w.deps);
+  assert.deepEqual(appArgs(w), [["--org", "acme"], ["--workflows", "--org", "acme"]]);
+});
+
+test("#756 edge: an unreadable owner type stops before any step, naming the repository and the fix", async () => {
+  for (const argv of [["../widgets"], ["--new", "widgets"]]) {
+    const w = world({ states: appStates(), exists: () => argv[0] !== "--new", ownerType: null });
+    assert.equal(await initMain(argv, w.deps), 1);
+    assert.equal(w.calls.length, 0);
+    assert.equal(w.out.length, 1);
+    assert.match(w.text(), /acme\/widgets/);
+    assert.match(w.text(), /node scripts\/lanes\/app-setup\.mjs --org acme/);
+  }
+});
+
+test("#756 edge: an owner type that is neither User nor Organization stops the same way", async () => {
+  const w = world({ states: appStates(), ownerType: "Bot" });
+  assert.equal(await initMain(["../widgets"], w.deps), 1);
+  assert.equal(w.calls.length, 0);
+});
+
+test("#756 edge: a repository with its App and environment in place never reads the owner type", async () => {
+  const w = world({ states: [itemsMissing()], ownerType: null });
+  assert.equal(await initMain(["../widgets"], w.deps), 0);
+  assert.deepEqual(w.typeReads, []);
 });
 
 test("--new skips new-project when the project is already installed", async () => {

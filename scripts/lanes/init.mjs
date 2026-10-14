@@ -102,7 +102,7 @@ const fixLines = (i) => [i.fix?.link && `  open ${i.fix.link}`, i.fix?.command &
  * @returns {Promise<number>} the exit code
  */
 export async function initMain(argv, deps = {}) {
-  const { lanesRoot = defaults.lanesRoot, run = defaults.run, state = defaults.state, repoOf = defaults.repoOf, ownerOf = defaults.ownerOf, loginOf = defaults.loginOf, ask = defaults.ask, exists = existsSync, readFile = defaults.readFile, writeFile = defaults.writeFile, print = console.log } = deps;
+  const { lanesRoot = defaults.lanesRoot, run = defaults.run, state = defaults.state, repoOf = defaults.repoOf, ownerOf = defaults.ownerOf, ownerTypeOf = defaults.ownerTypeOf, loginOf = defaults.loginOf, ask = defaults.ask, exists = existsSync, readFile = defaults.readFile, writeFile = defaults.writeFile, print = console.log } = deps;
   let opts;
   try {
     opts = parseArgs(argv);
@@ -163,6 +163,19 @@ export async function initMain(argv, deps = {}) {
   };
 
   let items = isNew && !exists(path.join(target, "lanes.lock.json")) ? undefined : read();
+
+  // #756: an App must be created under the organisation that owns the repository, or it cannot be installed there.
+  // Read the owner type before any step when an App step may run, so an unreadable type creates nothing.
+  let orgArgs = [];
+  if (!items || !items.identity.done || !items["workflows-environment"].done) {
+    const repoOwner = repo.split("/")[0];
+    const type = opts.org ? "Organization" : ownerTypeOf(repoOwner, isNew ? lanesRoot : target);
+    if (type !== "Organization" && type !== "User") {
+      print(`init stopped: the owner type of ${repo} could not be read (gh api users/${repoOwner}), so init cannot tell where to create the App. Run gh auth login and run init again, or run: node scripts/lanes/app-setup.mjs --org ${repoOwner} (add --workflows for the second App) in the target. Nothing was created.`);
+      return 1;
+    }
+    if (type === "Organization") orgArgs = ["--org", repoOwner];
+  }
 
   // 1. install, or new-project
   if (isNew ? !items : !items.installed.done) {
@@ -232,7 +245,7 @@ export async function initMain(argv, deps = {}) {
       return 1;
     }
   } else {
-    const code = exec("app-setup.mjs", "node", [path.join("scripts", "lanes", "app-setup.mjs")], target);
+    const code = exec("app-setup.mjs", "node", [path.join("scripts", "lanes", "app-setup.mjs"), ...orgArgs], target);
     if (code !== undefined) return code;
     items = read();
     if (!items.identity.done) {
@@ -247,7 +260,7 @@ export async function initMain(argv, deps = {}) {
 
   // 6. the workflow-apply environment
   if (!items["workflows-environment"].done) {
-    const code = exec("app-setup.mjs --workflows", "node", [path.join("scripts", "lanes", "app-setup.mjs"), "--workflows"], target);
+    const code = exec("app-setup.mjs --workflows", "node", [path.join("scripts", "lanes", "app-setup.mjs"), "--workflows", ...orgArgs], target);
     if (code !== undefined) return code;
   }
 
@@ -287,6 +300,14 @@ const defaults = {
   state: (target, repo) => setupState({ run: gitRun, exists: existsSync, home: homedir(), target, repo }),
   repoOf: (target) => ghView(target, { json: "nameWithOwner", expr: ".nameWithOwner" }),
   ownerOf: (cwd) => ghView(cwd, { json: "owner", expr: ".owner.login" }),
+  ownerTypeOf: (owner, cwd) => {
+    try {
+      const r = gitRun("gh", ["api", `users/${owner}`, "--jq", ".type"], { cwd });
+      return r.status === 0 ? r.stdout.trim() : undefined;
+    } catch {
+      return undefined;
+    }
+  },
   loginOf: (cwd) => {
     try {
       const r = gitRun("gh", ["api", "user", "--jq", ".login"], { cwd });
