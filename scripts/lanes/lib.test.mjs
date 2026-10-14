@@ -2052,3 +2052,11 @@ test("edge: stripHtmlComments fence closers must match char and length, and 4-sp
   // deeper nesting needs more than two passes
   assert.equal(stripHtmlComments("<!<!<!-- -->-- -->-- x -->y"), "y");
 });
+
+test("stripHtmlComments: an escaped backslash does not escape the backtick after it", async () => {
+  const { stripHtmlComments } = await import("./lib.mjs");
+  // two backslashes are a literal backslash, so the backtick opens a real code span that shields the marker
+  assert.equal(stripHtmlComments("\\\\`a <!-- x --> b` end"), "\\\\`a <!-- x --> b` end");
+  // a single backslash escapes the backtick, so the comment is real
+  assert.equal(stripHtmlComments("\\`a <!-- x --> b` end"), "\\`a  b` end");
+});
