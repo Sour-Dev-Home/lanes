@@ -1967,3 +1967,119 @@ test("edge: #645 readControlState strips control characters from a read error sh
   assert.doesNotMatch(s.reason, /\u001b/);
   assert.ok(s.reason.length < 160);
 });
+
+test("stripHtmlComments: nested, unclosed and multi-line comments leave nothing hidden", async () => {
+  const { stripHtmlComments } = await import("./lib.mjs");
+  const nested = stripHtmlComments("a <!<!-- -->-- x --> b");
+  assert.doesNotMatch(nested, /x/);
+  assert.doesNotMatch(nested, /<!--/);
+  assert.equal(stripHtmlComments("keep\n<!-- never closed\nhidden"), "keep\n");
+  assert.equal(stripHtmlComments("a<!-- one\ntwo\nthree -->b"), "ab");
+  assert.equal(stripHtmlComments("plain text"), "plain text");
+  // edge: a leftover opener produced by the final pass is dropped with the rest of the body
+  assert.equal(stripHtmlComments("<!<!<!-- -->-- -->-- hidden"), "");
+  // edge: empty and nullish input
+  assert.equal(stripHtmlComments(""), "");
+  assert.equal(stripHtmlComments(undefined), "");
+});
+
+test("stripHtmlComments leaves comment markers in code spans and fences as text", async () => {
+  const { stripHtmlComments, parsePrBody } = await import("./lib.mjs");
+  assert.equal(stripHtmlComments("a `<!--` b\nc `-->` d"), "a `<!--` b\nc `-->` d");
+  assert.equal(stripHtmlComments("x\n\n```\n<!-- kept\n```\ny"), "x\n\n```\n<!-- kept\n```\ny");
+  assert.equal(stripHtmlComments("x\n\n~~~md\n<!-- kept\n~~~\ny"), "x\n\n~~~md\n<!-- kept\n~~~\ny");
+  // a real comment next to a code span is still removed
+  assert.equal(stripHtmlComments("`code` <!-- gone --> after"), "`code`  after");
+  assert.equal(stripHtmlComments("``a ` <!--`` <!-- gone -->z"), "``a ` <!--`` z");
+  // edge: a fence or backtick inside a comment belongs to the comment and cannot shield a later one
+  assert.equal(stripHtmlComments("<!--\n```\n-->\nkeep\n<!-- gone -->\nend"), "\nkeep\n\nend");
+  assert.equal(stripHtmlComments("<!-- ` -->a <!-- gone --> b ` c"), "a  b ` c");
+  // edge: an unclosed fence runs to the end and keeps its text; an unmatched backtick is plain text
+  // edge: an unclosed fence masks nothing (fails closed): a renderer may not see a fence there, so comments are stripped
+  assert.equal(stripHtmlComments("```\n<!-- hid -->\nend"), "```\n\nend");
+  // edge: a fence in a list item or an HTML block is not a top-level fence, so a later comment is still removed
+  assert.equal(stripHtmlComments("1. a\n   ```\n<!--\nCloses #9\n-->\n"), "1. a\n   ```\n\n");
+  assert.equal(stripHtmlComments("<div>\n```\n<!-- Closes #9 -->\n```\n"), "<div>\n```\n\n```\n");
+  assert.equal(stripHtmlComments("x\n ```\n<!-- hid -->\n ```"), "x\n ```\n\n ```");
+  assert.equal(stripHtmlComments("text\n```\n<!-- hid -->\n```"), "text\n```\n\n```");
+  // edge: a code span inside a possible HTML block is not masked; a blank line ends that block
+  assert.equal(stripHtmlComments("<div>\n`<!-- hid -->`\n"), "<div>\n``\n");
+  assert.equal(stripHtmlComments("<div>\n\n`<!-- kept -->`"), "<div>\n\n`<!-- kept -->`");
+  // edge: a leading comment is not an HTML block, so code spans after it stay masked (the PR template shape)
+  assert.equal(stripHtmlComments("<!-- c -->\n1. `<!--` x\n2. `-->` y"), "\n1. `<!--` x\n2. `-->` y");
+  // edge: a closed fence directly after another closed fence is still masked
+  assert.equal(stripHtmlComments("```\n<!-- k1\n```\n```\n<!-- k2\n```"), "```\n<!-- k1\n```\n```\n<!-- k2\n```");
+  assert.equal(stripHtmlComments("a ` <!-- gone -->b"), "a ` b");
+  // edge: a comment inside a code span is text, and a real comment after it is still removed
+  assert.equal(stripHtmlComments("`<!-- x -->` <!-- gone -->"), "`<!-- x -->` ");
+  // edge: an escaped backtick is a literal and opens no span, so the comment between two of them is removed
+  assert.equal(stripHtmlComments("\\`<!-- hid -->\\` end"), "\\`\\` end");
+  // edge: an escaped backslash does not escape the backtick after it, so that backtick still opens a span
+  assert.equal(stripHtmlComments("\\\\`<!-- kept -->` end"), "\\\\`<!-- kept -->` end");
+  // edge: a backtick fence opener with a backtick in its info string is no fence and shields nothing
+  assert.equal(stripHtmlComments("```x`y\n<!-- hid -->\nend"), "```x`y\n\nend");
+  assert.equal(stripHtmlComments("~~~x`y\n<!-- kept -->\n~~~"), "~~~x`y\n<!-- kept -->\n~~~");
+  // edge: placeholder characters in the input are dropped, never interpreted
+  assert.equal(stripHtmlComments("a0b `c`"), "a0b `c`");
+  // the PR body shape from #765: `<!--` in backticks, then `-->` lines later
+  const body = "Closes #1\n\n## What changed\n1. quotes `<!--` here\n2. and `-->` there\n\n## Contract changes\nnone\n\n## Tests added\n- t\n";
+  const pr = parsePrBody(body);
+  assert.equal(pr.contractChange, "none");
+  assert.equal(pr.sections["tests added"], "- t");
+  assert.ok(!pr.missing.includes("contract changes") && !pr.missing.includes("tests added"));
+});
+
+test("body parsers ignore a section hidden by a nested or unclosed comment", async () => {
+  const { duplicateHeadings, parseSections, parsePrBody, parseAdr } = await import("./lib.mjs");
+  const nested = "### Goal\nx\n<!<!-- -->-- \n### Tier\nskip\n-->\n";
+  assert.equal(parseSections(nested, "###").tier, undefined);
+  assert.equal(parseSections("### Goal\nx\n<!-- \n### Tier\nskip\n", "###").tier, undefined);
+  assert.deepEqual(duplicateHeadings("### Goal\na\n<!<!-- -->-- \n### Goal\nb\n-->\n", "###"), []);
+  assert.deepEqual(duplicateHeadings("### Goal\na\n<!-- \n### Goal\nb\n", "###"), []);
+  for (const hidden of ["<!<!-- -->-- \n## Not done\nsecret\n-->\n", "<!-- \n## Not done\nsecret\n"]) {
+    const pr = parsePrBody(`## What changed\nok\n${hidden}`);
+    assert.doesNotMatch(JSON.stringify(pr), /secret/);
+  }
+  // edge: the Closes line is read from the stripped text itself, not only through parseSections
+  for (const hidden of ["<!<!-- -->-- Closes #99 -->\n", "<!-- Closes #99\n"]) {
+    assert.equal(parsePrBody(`## What changed\nok\n${hidden}`).closes, null);
+  }
+  const adr = (hidden) => `# 0001: T\n\nStatus: accepted\n${hidden}`;
+  for (const hidden of ["<!<!-- -->-- \nGoverns: `evil/`\n-->\n", "<!-- \nGoverns: `evil/`\n"]) {
+    assert.doesNotMatch(JSON.stringify(parseAdr(adr(hidden))), /evil/);
+  }
+});
+
+test("edge: stripHtmlComments fence closers must match char and length, and 4-space indent is not a fence", async () => {
+  const { stripHtmlComments } = await import("./lib.mjs");
+  // a shorter run does not close a longer fence
+  assert.equal(stripHtmlComments("````\n```\n<!-- kept\n````\nz"), "````\n```\n<!-- kept\n````\nz");
+  // a different fence character does not close it
+  assert.equal(stripHtmlComments("```\n~~~\n<!-- kept\n```\nz"), "```\n~~~\n<!-- kept\n```\nz");
+  // a longer closer does close it
+  assert.equal(stripHtmlComments("```\na\n`````\n<!-- gone -->z"), "```\na\n`````\nz");
+  // four spaces of indent is an indented code line, not a fence opener
+  assert.equal(stripHtmlComments("    ```\n<!-- gone -->x"), "    ```\nx");
+  // CRLF fences still close
+  assert.equal(stripHtmlComments("```\r\n<!-- kept\r\n```\r\n<!-- gone -->z"), "```\r\n<!-- kept\r\n```\r\nz");
+  // deeper nesting needs more than two passes
+  assert.equal(stripHtmlComments("<!<!<!-- -->-- -->-- x -->y"), "y");
+});
+
+test("stripHtmlComments: an escaped backslash does not escape the backtick after it", async () => {
+  const { stripHtmlComments } = await import("./lib.mjs");
+  // two backslashes are a literal backslash, so the backtick opens a real code span that shields the marker
+  assert.equal(stripHtmlComments("\\\\`a <!-- x --> b` end"), "\\\\`a <!-- x --> b` end");
+  // a single backslash escapes the backtick, so the comment is real
+  assert.equal(stripHtmlComments("\\`a <!-- x --> b` end"), "\\`a  b` end");
+});
+
+test("edge: a leading comment exempts the line from HTML-block detection only when no markup follows it", async () => {
+  const { stripHtmlComments } = await import("./lib.mjs");
+  // a comment opened on one line and closed on a later one does not start an HTML block, so the span after it stays code
+  assert.equal(stripHtmlComments("<!-- a\nb -->\n`<!-- kept -->`"), "\n`<!-- kept -->`");
+  // markup after a leading comment does start an HTML block, so the span after it is not masked and its comment goes
+  assert.equal(stripHtmlComments("<!-- c --><div>\n`<!-- gone -->`\n"), "<div>\n``\n");
+  // plain text after a leading comment starts no HTML block
+  assert.equal(stripHtmlComments("<!-- c --> text\n`<!-- kept -->`"), " text\n`<!-- kept -->`");
+});
