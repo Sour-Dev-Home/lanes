@@ -81,7 +81,13 @@ nothing on GitHub (the identity may be wrong there).
     resolves the conflicts within Scope, runs the full `npm test`, re-runs the reviewers whose files changed (step 6),
     and pushes normally. If a conflict needs a file outside Scope, it stops with the
     stop rule: comment `Lane stopped: conflict needs <paths>`, then `needs-owner`.
-4. Read the issue's Interface contract and Scope. Touch nothing out of scope. If the contract is wrong or missing,
+4. Read the issue's Interface contract and Scope. Touch nothing out of scope except the two kinds in ADR 0033
+   (`docs/adr/0033-bounded-scope-extensions.md`): a pinned test: a `*.test.mjs` whose failing assertion reads text or a
+   file that the issue's Scope changes, which is updated to pin the new value and never weakened (no deleted or skipped
+   test, no loosened matcher, no removed case); and a registration line: one new entry for the lane's own new file in
+   an existing registry, which edits no other entry, sets or lowers no `risk`, touches no `paths.sensitive` list, and
+   uses no glob or prefix that matches any file other than the lane's new one. Every other out-of-Scope file, code included, stops the lane with
+   `Lane stopped: Scope needs <paths>`. If the contract is wrong or missing,
    stop and file a new task issue for the contract instead of inventing one. After filing it, the lane comments on its
    own issue before it stops: one line starting `Lane stopped: contract`, the cause in one or two sentences, the filed
    issue as `#N`, and the owner's steps (remove `lane-filed` from `#N`; add `#N` to this issue's "Blocked by"; then
@@ -105,8 +111,9 @@ nothing on GitHub (the identity may be wrong there).
    A `validate:` criterion is not a test: loop on `node scripts/lanes/validate.mjs --issue $ARGUMENTS --criterion <index>`
    (the 1-based criterion), making a fix and then a run, until it exits 0 or 2, and put the attempt table under that
    criterion in "What changed". Exit 0 means met, and exit 2 reports the best value and stops.
-   When `npm test` needs a file outside Scope only because of a file this lane adds (registering it in a manifest, an
-   index or a module map), the lane does not file a separate issue for it, which could never pass on its own. It stops
+   When `npm test` needs a registration line for a file this lane adds (an entry in a manifest, an index or a module
+   map), that line is an allowed extension (step 4, ADR 0033), and the lane does not file a separate issue for it, which
+   could never pass on its own. When it needs anything else outside Scope only because of a file this lane adds, it stops
    and comments `Lane stopped: Scope needs <paths>`, naming each path and the check that needs it, so the owner extends
    this issue's Scope.
 6. Commit your work first, so the reviewers listed match what the gate will see; then
@@ -142,7 +149,7 @@ nothing on GitHub (the identity may be wrong there).
 7. `npm run preflight`, push, then `gh pr create` with the PR template filled in completely: "Closes #$ARGUMENTS",
    every acceptance criterion mapped under "What changed", "Contract changes" starting with none, additive or
    breaking, "Needs the owner" saying exactly what he must decide, or "nothing", and "Outside Scope" with one line per
-   changed file outside the issue's Scope "In" saying why, or "nothing" (the gate notes the count). Open it with every template section
+   changed file outside the issue's Scope "In" saying why, or "nothing" (the gate notes the count); for a pinned test or registration extension (ADR 0033) the line names the kind (`pinned test` or `registration`) and the Scope file or new file it follows. Open it with every template section
    present: when the reviewers' verdicts are not posted yet, `## Reviewer results` says `pending: posting verdicts` and is
    filled in after posting (`gh pr edit`). A PR body is never published with a section missing. Then `gh pr merge <N> --auto`.
    Wait until the CI checks settle, and only those: `lanes/gate` can wait on the owner indefinitely, so never watch it
