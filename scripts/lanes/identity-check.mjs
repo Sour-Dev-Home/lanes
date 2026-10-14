@@ -192,17 +192,23 @@ export function repoChecks({ run, exists, repo, slug, appId, installationId, hom
   if (!Array.isArray(list)) ruleset = { pass: false, reason: "rulesets could not be checked" };
   else {
     let found = false;
+    let disabledId; // #762: a code-owner ruleset that exists but is not enforced yet is never "done"
     for (const rs of list) {
       const detail = ghJson(run, `repos/${repo}/rulesets/${rs?.id}`);
       const rules = Array.isArray(detail?.rules) ? detail.rules : [];
-      if (detail?.enforcement === "active" && rules.some((r) => r?.type === "pull_request" && r.parameters?.require_code_owner_review === true)) {
+      if (!rules.some((r) => r?.type === "pull_request" && r.parameters?.require_code_owner_review === true)) continue;
+      if (detail?.enforcement === "active") {
         found = true;
         break;
       }
+      if (detail?.enforcement === "disabled" && disabledId === undefined && rs?.id !== undefined) disabledId = rs.id;
     }
-    ruleset = { pass: found, reason: found ? "code-owner ruleset present" : "no active ruleset requires a code-owner review" };
+    if (found) ruleset = { pass: true, reason: "code-owner ruleset present" };
+    else if (disabledId !== undefined) ruleset = { pass: false, reason: "the code-owner ruleset is disabled; set it to Active", link: `${base}/settings/rules/${disabledId}` };
+    else ruleset = { pass: false, reason: "no active ruleset requires a code-owner review" };
   }
-  results.push({ name: "ruleset", ...ruleset, ...(ruleset.pass ? {} : { fix: { link: `${base}/settings/rules/new?target=branch` } }) });
+  const { link: ruleLink, ...rulesetOut } = ruleset;
+  results.push({ name: "ruleset", ...rulesetOut, ...(ruleset.pass ? {} : { fix: { link: ruleLink ?? `${base}/settings/rules/new?target=branch` } }) });
 
   // #757: `user/installations` answers 403 to the gh CLI's OAuth token, so the installation is looked up as the App
   // (`GET /repos/{repo}/installation`, signed with the key app-setup saved).

@@ -319,7 +319,6 @@ test("repoChecks: a missing CODEOWNERS prints the file link and the line to add"
 for (const [name, opts] of [
   ["no rulesets", { rulesets: [] }],
   ["a ruleset without the code-owner rule", { detail: { enforcement: "active", rules: [{ type: "pull_request", parameters: { require_code_owner_review: false } }] } }],
-  ["an inactive ruleset", { detail: { ...RULE, enforcement: "disabled" } }],
 ]) {
   test(`repoChecks: ${name} fails the ruleset check with the settings link`, () => {
     const c = byName(checks(ghFake(opts)), "ruleset");
@@ -327,6 +326,14 @@ for (const [name, opts] of [
     assert.equal(c.fix.link, `https://github.com/${REPO}/settings/rules/new?target=branch`);
   });
 }
+
+// #762: a disabled code-owner ruleset is missing, and the fix is the link that enables it
+test("repoChecks: a disabled code-owner ruleset is not done and links to enable it", () => {
+  const c = byName(checks(ghFake({ detail: { ...RULE, enforcement: "disabled" } })), "ruleset");
+  assert.equal(c.pass, false);
+  assert.match(c.reason, /disabled/);
+  assert.equal(c.fix.link, `https://github.com/${REPO}/settings/rules/7`);
+});
 
 test("edge: repoChecks never passes a check it could not read", () => {
   const rs = checks(ghFake({ fail: ["repos/me/proj/rulesets"] }), () => true, () => ({ error: "the lookup gave no answer" }));

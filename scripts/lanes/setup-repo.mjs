@@ -35,11 +35,11 @@ export const LABELS = [
 /** The GitHub Actions app's fixed integration id (I3): pins a required check so only a status it posted can satisfy it. */
 const GITHUB_ACTIONS_APP_ID = 15368;
 
-export function buildRuleset(requiredChecks) {
+export function buildRuleset(requiredChecks, enforcement = "active") {
   return {
     name: "main (lanes)",
     target: "branch",
-    enforcement: "active",
+    enforcement,
     conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
     bypass_actors: [],
     rules: [
@@ -91,17 +91,43 @@ export function findRulesetId(rulesets, name) {
   return match ? match.id : null;
 }
 
+/** The enforcement of an existing ruleset with this name, or undefined. An existing ruleset's enforcement is never changed (#762). */
+export function existingEnforcement(rulesets, name) {
+  return (Array.isArray(rulesets) ? rulesets : []).find((r) => r?.name === name)?.enforcement;
+}
+
+/**
+ * Whether the default branch already holds lanes-gate.yml. `lanes-gate.yml` runs on `pull_request_target` and `merge_group`, which GitHub
+ * runs only from the default branch, so before it lands an active ruleset requiring `lanes/gate` blocks the adoption PR (#762).
+ * Only a 404 (no file) or 409 (empty repository) means absent; any other failure throws rather than guess.
+ */
+export function gateOnDefaultBranch(ghFn, repo) {
+  try {
+    ghFn(["api", `repos/${repo}/contents/.github/workflows/lanes-gate.yml`]);
+    return true;
+  } catch (err) {
+    const text = `${err?.stderr ?? ""}${err?.message ?? ""}`;
+    if (/HTTP (404|409)|Not Found|repository is empty/i.test(text)) return false;
+    throw err;
+  }
+}
+
+/** The enforcement a new lanes ruleset starts with: disabled until lanes-gate is on the default branch. */
+export const startingEnforcement = (ghFn, repo) => (gateOnDefaultBranch(ghFn, repo) ? "active" : "disabled");
+
 function main(repo = process.argv[2]) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo ?? "")) throw new Error("usage: setup-repo.mjs <owner/repo>");
   gh(["repo", "edit", repo, "--enable-auto-merge", "--delete-branch-on-merge", "--enable-squash-merge", "--enable-merge-commit=false", "--enable-rebase-merge=false"]);
   for (const l of LABELS) gh(["label", "create", l.name, "-R", repo, "--color", l.color, "--description", l.description, "--force"]);
   gh(["api", `repos/${repo}/code-scanning/default-setup`, "-X", "PATCH", "-f", "state=configured"]);
-  const ruleset = buildRuleset(readRequiredChecks());
+  const checks = readRequiredChecks();
   const existing = JSON.parse(gh(["api", `repos/${repo}/rulesets`]));
-  const id = findRulesetId(existing, ruleset.name);
+  const id = findRulesetId(existing, buildRuleset(checks).name);
+  const enforcement = id ? (existingEnforcement(existing, buildRuleset(checks).name) ?? "active") : startingEnforcement(gh, repo);
+  const ruleset = buildRuleset(checks, enforcement);
   if (id) gh(["api", `repos/${repo}/rulesets/${id}`, "-X", "PUT", "--input", "-"], JSON.stringify(ruleset));
   else gh(["api", `repos/${repo}/rulesets`, "-X", "POST", "--input", "-"], JSON.stringify(ruleset));
-  console.log(`configured ${repo}: settings, ${LABELS.length} labels, CodeQL, ruleset ${id ? "updated" : "created"}`);
+  console.log(`configured ${repo}: settings, ${LABELS.length} labels, CodeQL, ruleset ${id ? "updated" : "created"} (${enforcement})`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main();

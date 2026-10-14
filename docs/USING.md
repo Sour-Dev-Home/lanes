@@ -402,6 +402,12 @@ What it asks you to do:
 - Run `gh secret set PII_PATTERNS -R <owner/repo>` (one fixed string per line) and type `done`.
 - Press the two GitHub buttons of the App setup (create the App, install it).
 - Commit CODEOWNERS and add the code-owner ruleset from the settings links it prints.
+- Commit the lanes files it wrote on a branch and open the **adoption PR**, merge it, then enable the lanes ruleset:
+  `init` creates `main (lanes)` **disabled** while the default branch has no `.github/workflows/lanes-gate.yml`,
+  because `lanes/gate` runs only from the default branch's copy of the workflow and so can never be posted on the
+  adoption PR itself. Once that PR has merged, open the link `init` prints (`settings/rules/<id>`) and set Enforcement
+  to Active. `init` reports the ruleset as missing, and exits non-zero, until you do; re-running `setup-repo.mjs`
+  never changes an existing ruleset's enforcement.
 
 ### What init runs
 

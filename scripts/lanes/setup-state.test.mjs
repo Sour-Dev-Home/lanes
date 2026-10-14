@@ -95,7 +95,11 @@ test("main-ruleset: absent, inactive and an API error are not done", () => {
   assert.equal(byName(setupState(world({ routes: { [key]: ok([]) } }).deps))["main-ruleset"].done, false);
   const inactive = byName(setupState(world({ routes: { [key]: ok([{ id: 7, name: "main (lanes)", enforcement: "disabled" }]) } }).deps))["main-ruleset"];
   assert.equal(inactive.done, false);
-  assert.match(inactive.fix.command, /setup-repo\.mjs/);
+  // #762: setup-repo never changes an existing ruleset's enforcement, so the fix is the enable link, not a command
+  assert.equal(inactive.fix.link, "https://github.com/acme/widgets/settings/rules/7");
+  assert.equal(inactive.fix.command, undefined);
+  assert.equal(inactive.disabled, true);
+  assert.match(inactive.reason, /disabled/);
   const err = byName(setupState(world({ routes: { [key]: bad } }).deps))["main-ruleset"];
   assert.equal(err.done, false);
   assert.match(err.reason, /could not be read/);
