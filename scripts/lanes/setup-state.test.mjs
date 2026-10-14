@@ -29,8 +29,6 @@ function world(over = {}) {
     "label list -R acme/widgets --json name --limit 200": ok(LABELS.map((l) => ({ name: l.name }))),
     "api repos/acme/widgets/rulesets": ok([{ id: 7, name: "main (lanes)", enforcement: "active" }]),
     "api repos/acme/widgets/rulesets/7": ok({ id: 7, enforcement: "active", rules: [{ type: "pull_request", parameters: { require_code_owner_review: true } }] }),
-    "api user/installations": ok({ installations: [{ id: 42 }] }),
-    "api user/installations/42/repositories?per_page=100": ok({ repositories: [{ full_name: REPO }] }),
     [`api ${env}`]: ok({ protection_rules: [{ type: "required_reviewers", reviewers: [{ type: "User" }] }], deployment_branch_policy: { protected_branches: false, custom_branch_policies: true } }),
     [`api ${env}/deployment-branch-policies`]: ok({ branch_policies: [{ name: "main", type: "branch" }] }),
     [`api ${env}/secrets`]: ok({ secrets: [{ name: "LANES_WORKFLOWS_KEY" }] }),
@@ -51,7 +49,8 @@ function world(over = {}) {
     return files[rel];
   };
   const list = (dir) => Object.keys(files).filter((f) => f.startsWith(`${dir.slice(TARGET.length + 1).replaceAll("\\", "/")}/`)).map((f) => f.split("/").pop());
-  return { calls, deps: { run, exists, read, list, home: HOME, target: TARGET, repo: REPO } };
+  const lookup = () => over.lookup ?? { id: 42 };
+  return { calls, deps: { run, exists, read, list, lookup, home: HOME, target: TARGET, repo: REPO } };
 }
 
 const byName = (items) => Object.fromEntries(items.map((i) => [i.name, i]));
@@ -126,12 +125,12 @@ test("app-key: ~/.lanes/<slug>.pem missing is not done and its contents are neve
 });
 
 test("app-installed, codeowners and code-owner-ruleset reuse repoChecks: missing and API error", () => {
-  const missing = byName(setupState(world({ routes: { "api user/installations/42/repositories?per_page=100": ok({ repositories: [] }) }, gone: [".github/CODEOWNERS"], files: {} }).deps));
+  const missing = byName(setupState(world({ lookup: { notInstalled: true }, gone: [".github/CODEOWNERS"], files: {} }).deps));
   assert.equal(missing["app-installed"].done, false);
   assert.match(missing["app-installed"].fix.link, /apps\/widgets-lanes\/installations\/new/);
   assert.equal(missing.codeowners.done, false);
   assert.match(missing.codeowners.fix.link, /acme\/widgets\/new\/main/);
-  const err = byName(setupState(world({ routes: { "api user/installations": bad, "api repos/acme/widgets/rulesets": bad } }).deps));
+  const err = byName(setupState(world({ lookup: { error: "the lookup gave no answer" }, routes: { "api repos/acme/widgets/rulesets": bad } }).deps));
   assert.equal(err["app-installed"].done, false);
   assert.match(err["app-installed"].reason, /could not be checked/);
   assert.equal(err["code-owner-ruleset"].done, false);
@@ -176,7 +175,7 @@ test("verify-job: a workflow job named verify is done; none, an unreadable folde
 
 test("edge: a thrown run is not done and carries no error text", () => {
   const w = world();
-  const items = setupState({ ...w.deps, run: () => { throw new Error("TOKEN-ghp_x"); } });
+  const items = setupState({ ...w.deps, run: () => { throw new Error("TOKEN-ghp_x"); }, lookup: () => { throw new Error("TOKEN-ghp_x"); } });
   for (const name of ["secret", "labels", "main-ruleset", "app-installed", "workflows-environment"]) {
     const i = byName(items)[name];
     assert.equal(i.done, false, name);
@@ -185,7 +184,7 @@ test("edge: a thrown run is not done and carries no error text", () => {
 });
 
 test("no write: every gh call is a GET api call or a list, with no -X, -f, -F or --input", () => {
-  const scenarios = [world(), world({ routes: { "api user/installations": bad } }), world({ files: { "lanes.config.json": "{}" }, gone: ["lanes.lock.json"] })];
+  const scenarios = [world(), world({ lookup: { error: "x" } }), world({ files: { "lanes.config.json": "{}" }, gone: ["lanes.lock.json"] })];
   for (const w of scenarios) {
     setupState(w.deps);
     assert.ok(w.calls.length > 0);

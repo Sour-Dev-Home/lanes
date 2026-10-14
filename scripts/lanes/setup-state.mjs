@@ -72,7 +72,7 @@ function jobNames(text) {
  *   `run`, `exists`, `read` and `list` are injected so tests touch no network or disk.
  * @returns {{ name: string, done: boolean, reason: string, fix?: { link?: string, command?: string } }[]}
  */
-export function setupState({ run, exists, home, target, repo, read = (p) => readFileSync(p, "utf8"), list = (d) => readdirSync(d) }) {
+export function setupState({ run, exists, home, target, repo, read = (p) => readFileSync(p, "utf8"), list = (d) => readdirSync(d), lookup }) {
   const base = `https://github.com/${repo}`;
   const results = {};
   const gh = (args) => ghJson(run, target, args);
@@ -118,7 +118,7 @@ export function setupState({ run, exists, home, target, repo, read = (p) => read
   else results["app-key"] = exists(join(home, ".lanes", `${slug}.pem`)) ? done("App key present") : missing(`the App key ~/.lanes/${slug}.pem is missing`, appFix);
 
   const checks = Object.fromEntries(
-    repoChecks({ run: (cmd, args) => run(cmd, args, { cwd: target }), exists: (p) => exists(join(target, p)), repo, slug: slug || "", installationId: app?.installationId }).map((c) => [c.name, c]),
+    repoChecks({ run: (cmd, args) => run(cmd, args, { cwd: target }), exists: (p) => exists(join(target, p)), repo, slug: slug || "", appId: app?.id, installationId: app?.installationId, ...(lookup ? { lookup } : {}) }).map((c) => [c.name, c]),
   );
   const fromCheck = (c) => (c.pass ? done(c.reason) : missing(c.reason, { link: c.fix.link }));
   results["app-installed"] = app && SLUG.test(slug) ? fromCheck(checks.installed) : missing(noApp, appFix);
