@@ -1994,6 +1994,10 @@ test("body parsers ignore a section hidden by a nested or unclosed comment", asy
     const pr = parsePrBody(`## What changed\nok\n${hidden}`);
     assert.doesNotMatch(JSON.stringify(pr), /secret/);
   }
+  // edge: the Closes line is read from the stripped text itself, not only through parseSections
+  for (const hidden of ["<!<!-- -->-- Closes #99 -->\n", "<!-- Closes #99\n"]) {
+    assert.equal(parsePrBody(`## What changed\nok\n${hidden}`).closes, null);
+  }
   const adr = (hidden) => `# 0001: T\n\nStatus: accepted\n${hidden}`;
   for (const hidden of ["<!<!-- -->-- \nGoverns: `evil/`\n-->\n", "<!-- \nGoverns: `evil/`\n"]) {
     assert.doesNotMatch(JSON.stringify(parseAdr(adr(hidden))), /evil/);
