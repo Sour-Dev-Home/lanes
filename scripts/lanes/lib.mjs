@@ -427,15 +427,25 @@ function maskCodeAndStripFirstPass(src) {
   };
   let out = "";
   let i = 0;
+  // Where this scan cannot tell code from the renderer's reading, it does not mask: the text is stripped, which can
+  // only hide more, never expose a comment GitHub hides. So a fence is masked only when it is a top-level fence that
+  // closes, and nothing is masked inside what may be an HTML block (a line starting with `<`, until a blank line).
+  let htmlBlock = false;
+  let prevBlank = true;
+  let afterFence = false;
   while (i < src.length) {
     if (i === 0 || src[i - 1] === "\n") {
       const lineEnd = src.indexOf("\n", i) === -1 ? src.length : src.indexOf("\n", i);
-      const opener = src.slice(i, lineEnd).match(/^ {0,3}(`{3,}|~{3,})/);
+      const line = src.slice(i, lineEnd);
+      if (line.trim() === "") htmlBlock = false;
+      // A leading comment does not start an HTML block (its markup, if any, follows it on the line).
+      else if (/^ {0,3}<(?!!--)[A-Za-z/!?]/.test(line.replace(/^( {0,3})(?:<!--.*?-->[ \t]*)+/, "$1"))) htmlBlock = true;
+      const opener = line.match(/^(`{3,}|~{3,})/);
       // CommonMark: a backtick fence's info string holds no backtick, so such a line is text with a code span in it.
-      if (opener && !(opener[1][0] === "`" && src.slice(i + opener[0].length, lineEnd).includes("`"))) {
+      if (opener && !htmlBlock && (prevBlank || afterFence) && !(opener[1][0] === "`" && line.slice(opener[0].length).includes("`"))) {
         const char = opener[1][0];
         const len = opener[1].length;
-        let end = src.length;
+        let end = -1;
         for (let pos = lineEnd + 1; pos <= src.length; ) {
           const e = src.indexOf("\n", pos) === -1 ? src.length : src.indexOf("\n", pos);
           const rest = src.slice(pos, e).match(/^ {0,3}(`{3,}|~{3,})\s*$/);
@@ -445,10 +455,16 @@ function maskCodeAndStripFirstPass(src) {
           }
           pos = e + 1;
         }
-        out += mask(src.slice(i, end));
-        i = end;
-        continue;
+        if (end !== -1) {
+          out += mask(src.slice(i, end));
+          i = end;
+          prevBlank = false;
+          afterFence = true;
+          continue;
+        }
       }
+      prevBlank = line.trim() === "";
+      afterFence = false;
     }
     if (src.startsWith("<!--", i)) {
       const close = src.indexOf("-->", i + 4);
@@ -462,7 +478,7 @@ function maskCodeAndStripFirstPass(src) {
       i += 2;
       continue;
     }
-    if (src[i] === "`") {
+    if (src[i] === "`" && !htmlBlock) {
       let k = 1;
       while (src[i + k] === "`") k++;
       const lineEnd = src.indexOf("\n", i) === -1 ? src.length : src.indexOf("\n", i);
