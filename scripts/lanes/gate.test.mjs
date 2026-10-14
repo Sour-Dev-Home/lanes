@@ -996,6 +996,62 @@ test("edge: an issues event skips a PR whose issue's Blocked by field is malform
   assert.ok(!calls.includes("repos/o/r/pulls/5"), "the PR itself must never be fetched for a skipped entry");
 });
 
+// #767: an issue labelled `ready` again re-evaluates the open PR that closes it, and no other PR.
+const labeledEnv = (label, issue = "7") => ({ REPO: "o/r", EVENT_NAME: "issues", ISSUE_ACTION: "labeled", ISSUE_NUMBER: issue, LABEL_NAME: label });
+const labeledRoutes = () => {
+  const sha = (c) => c.repeat(40);
+  const prRoute = (closes, c) => ({ state: "open", body: okBody.replace("#7", `#${closes}`), head: { sha: sha(c), ref: `issue-${closes}-x` } });
+  return {
+    sha,
+    routes: {
+      [OPEN_PRS]: [prLine(5, 7), prLine(6, 8), JSON.stringify({ number: 12, body: "no closes line" })].join("\n") + "\n",
+      "repos/o/r/pulls/5": prRoute(7, "d"),
+      "repos/o/r/pulls/5/files": "docs/a.md\n",
+      [`repos/o/r/commits/${sha("d")}/statuses?per_page=100`]: [],
+    },
+  };
+};
+
+test("main on a ready label re-evaluates the PR that closes the issue, and only that one", () => {
+  const { routes, sha } = labeledRoutes();
+  const { api, posted } = fakeApi(routes);
+  main(labeledEnv("ready"), api);
+  assert.deepEqual(posted.map((p) => p.sha), [sha("d")]);
+});
+
+test("main on a label other than ready does nothing and reads no PRs", () => {
+  for (const label of ["needs-owner", "lane:running", "Ready", "ready ", undefined]) {
+    main(labeledEnv(label), () => assert.fail(`api called for ${label}`));
+  }
+});
+
+test("main on a ready label for an issue no open PR closes posts nothing", () => {
+  const { routes } = labeledRoutes();
+  const { api, posted } = fakeApi(routes);
+  main(labeledEnv("ready", "9"), api);
+  assert.equal(posted.length, 0);
+});
+
+test("main on a ready label lists open PRs with pagination", () => {
+  const calls = [];
+  main(labeledEnv("ready"), (args) => (calls.push(args), ""));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], OPEN_PRS);
+  assert.ok(calls[0].includes("--paginate"));
+});
+
+test("edge: a labeled event with a malformed issue number is rejected without calling the API", () => {
+  for (const n of [undefined, "", "0", "7; rm"]) {
+    assert.throws(() => main({ ...labeledEnv("ready"), ISSUE_NUMBER: n }, () => assert.fail("api called")), /ISSUE_NUMBER/, String(n));
+  }
+});
+
+test("edge: any other issues action than labeled keeps the closed path", () => {
+  const calls = [];
+  main({ REPO: "o/r", EVENT_NAME: "issues", ISSUE_ACTION: "closed", ISSUE_NUMBER: "3", LABEL_NAME: "ready" }, (args) => (calls.push(args[0]), ""));
+  assert.deepEqual(calls, [OPEN_PRS]);
+});
+
 // ADR 0025: a review/owner status event is no approval and is no longer announced by a PR comment.
 const OWNER = "review/owner";
 const STATUS_PULLS = `repos/o/r/commits/${SHA}/pulls`;
