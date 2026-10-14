@@ -61,8 +61,54 @@ test("edge: an unmapped path (affectedTests says ALL) prints nothing for it", ()
   assert.deepEqual(run("--paths", "elsewhere/x.mjs"), { code: 0, message: "" });
 });
 
+const mapped = { modules: { entries: [{ id: "lanes", paths: ["scripts/lanes/"], imports: [] }] } };
+const newIo = { ...io, readConfig: () => mapped };
+const runNew = (...argv) => main(argv, newIo);
+const CHECK = "(check for the planner)";
+
+test("--new: a scripts path inside a module prefix gets only the two check lines", () => {
+  const r = runNew("--new", "scripts/lanes/foo.mjs");
+  assert.equal(r.code, 0);
+  assert.equal(
+    r.message,
+    `new scripts/lanes/foo.mjs: vendor/owasp-cheatsheets/INDEX.md if it imports node:child_process ${CHECK}\n` +
+      `new scripts/lanes/foo.mjs: .github/CODEOWNERS if queue.mjs will load it ${CHECK}`,
+  );
+});
+
+test("--new: a scripts path outside every module prefix also names lanes.config.json", () => {
+  const r = runNew("--new", "scripts/other/foo.mjs");
+  assert.equal(r.message.split("\n")[0], "new scripts/other/foo.mjs: lanes.config.json");
+  assert.equal(r.message.split("\n").length, 3);
+});
+
+test("edge: --new with no module map in the config skips the lanes.config.json line", () => {
+  const r = main(["--new", "scripts/x.mjs"], { ...io, readConfig: () => ({}) });
+  assert.doesNotMatch(r.message, /lanes\.config\.json/);
+});
+
+test("edge: --new ignores a path that is not a scripts .mjs file", () => {
+  assert.deepEqual(runNew("--new", "docs/new.md", "src/x.mjs"), { code: 0, message: "" });
+});
+
+test("--paths on a doc lists the tests that read it, by full path and by file name", () => {
+  const docFiles = [...files, "scripts/lanes/a.test.mjs", "scripts/lanes/b.test.mjs", "scripts/lanes/c.test.mjs"];
+  const docContents = { ...contents, "scripts/lanes/a.test.mjs": "read('docs/USING.md')", "scripts/lanes/b.test.mjs": "join(dir, 'USING.md')", "scripts/lanes/c.test.mjs": "none" };
+  const r = main(["--paths", "docs/USING.md"], { ...io, tracked: () => docFiles, readFile: (f) => docContents[f] ?? "" });
+  assert.equal(r.message, "scripts/lanes/a.test.mjs: reads docs/USING.md\nscripts/lanes/b.test.mjs: reads docs/USING.md");
+});
+
+test("a doc read by no test prints nothing", () => {
+  assert.deepEqual(run("--paths", "docs/NOBODY.md"), { code: 0, message: "" });
+});
+
+test("edge: a doc search covers tests only, not other files that mention the doc", () => {
+  const r = main(["--paths", "README.md"], { ...io, readFile: () => "README.md" });
+  assert.doesNotMatch(r.message, /^README\.md:/m);
+});
+
 test("bad arguments exit 2: none, unknown flag, value before a flag, flag without value, empty value", () => {
-  for (const argv of [[], ["--bogus", "x"], ["src/a.mjs"], ["--paths"], ["--strings"], ["--paths", ""], ["--paths", "--strings", "x"]]) {
+  for (const argv of [[], ["--bogus", "x"], ["src/a.mjs"], ["--paths"], ["--strings"], ["--new"], ["--new", ""], ["--paths", ""], ["--paths", "--strings", "x"]]) {
     assert.equal(run(...argv).code, 2, JSON.stringify(argv));
   }
   assert.equal(parseArgs(["--strings", "x", "--paths", "p"]).paths[0], "p");
