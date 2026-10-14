@@ -2073,3 +2073,13 @@ test("stripHtmlComments: an escaped backslash does not escape the backtick after
   // a single backslash escapes the backtick, so the comment is real
   assert.equal(stripHtmlComments("\\`a <!-- x --> b` end"), "\\`a  b` end");
 });
+
+test("edge: a leading comment exempts the line from HTML-block detection only when no markup follows it", async () => {
+  const { stripHtmlComments } = await import("./lib.mjs");
+  // a comment opened on one line and closed on a later one does not start an HTML block, so the span after it stays code
+  assert.equal(stripHtmlComments("<!-- a\nb -->\n`<!-- kept -->`"), "\n`<!-- kept -->`");
+  // markup after a leading comment does start an HTML block, so the span after it is not masked and its comment goes
+  assert.equal(stripHtmlComments("<!-- c --><div>\n`<!-- gone -->`\n"), "<div>\n``\n");
+  // plain text after a leading comment starts no HTML block
+  assert.equal(stripHtmlComments("<!-- c --> text\n`<!-- kept -->`"), " text\n`<!-- kept -->`");
+});
