@@ -139,6 +139,14 @@ test("app-installed, codeowners and code-owner-ruleset reuse repoChecks: missing
   assert.match(noOwnerReview["code-owner-ruleset"].fix.link, /settings\/rules/);
 });
 
+test("app-installed passes the injected home to the installation lookup, so the key is read from there (#757)", () => {
+  const seen = [];
+  const w = world();
+  const items = byName(setupState({ ...w.deps, lookup: (o) => (seen.push(o), { id: 42 }) }));
+  assert.equal(items["app-installed"].done, true);
+  assert.equal(seen[0].home, HOME);
+});
+
 test("workflows-environment: each of reviewer, main-only policy and the secret is required", () => {
   const env = "api repos/acme/widgets/environments/lanes-workflow-apply";
   const cases = {

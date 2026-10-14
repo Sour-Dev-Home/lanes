@@ -361,6 +361,13 @@ test("edge: a lookup that could not run never passes and names what was missing 
   assert.match(c.reason, /could not be checked: the App key ~\/\.lanes\/x\.pem is missing/);
 });
 
+test("edge: an empty lookup answer never passes, even when the configured installation id is also missing (#757)", () => {
+  for (const lookup of [() => ({}), () => null, () => { throw new Error("boom"); }]) {
+    const c = byName(repoChecks({ run: ghFake().run, exists: () => true, repo: REPO, slug: "x", appId: 1, installationId: undefined, lookup }), "installed");
+    assert.equal(c.pass, false);
+  }
+});
+
 // #757: the real lookup reads the key only from ~/.lanes/<slug>.pem and keeps key and token out of its answer.
 import { lookupInstallation } from "./identity-check.mjs";
 const PEM = "-----BEGIN PRIVATE KEY-----\nSECRETKEYBODY\n-----END PRIVATE KEY-----\n";

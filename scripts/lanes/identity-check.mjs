@@ -174,7 +174,7 @@ export function lookupInstallation({ appId, slug, repo, home = homedir(), readFi
  * @param {{ run: Function, exists: (path: string) => boolean, repo: string, slug: string, installationId: number }} o
  *   `repo` is `owner/name`; `run` and `exists` are injected so tests touch no network or disk.
  */
-export function repoChecks({ run, exists, repo, slug, appId, installationId, lookup = lookupInstallation }) {
+export function repoChecks({ run, exists, repo, slug, appId, installationId, home, lookup = lookupInstallation }) {
   const owner = repo.split("/")[0];
   const base = `https://github.com/${repo}`;
   const results = [];
@@ -208,13 +208,14 @@ export function repoChecks({ run, exists, repo, slug, appId, installationId, loo
   // (`GET /repos/{repo}/installation`, signed with the key app-setup saved).
   let found;
   try {
-    found = lookup({ appId, slug, repo }) ?? {};
+    found = lookup({ appId, slug, repo, ...(home ? { home } : {}) }) ?? {};
   } catch {
     found = { error: "the lookup failed" };
   }
   let installed;
   if (found.notInstalled) installed = { pass: false, reason: "the App is not installed on this repository" };
   else if (found.error) installed = { pass: false, reason: `installed could not be checked: ${found.error}` };
+  else if (found.id === undefined || found.id === null) installed = { pass: false, reason: "installed could not be checked: the lookup gave no installation id" };
   else if (String(found.id) !== String(installationId)) installed = { pass: false, reason: "installed under a different installation id" };
   else installed = { pass: true, reason: "the App is installed on the repository" };
   results.push({ name: "installed", ...installed, ...(installed.pass ? {} : { fix: { link: `https://github.com/apps/${slug}/installations/new` } }) });

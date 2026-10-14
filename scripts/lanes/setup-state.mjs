@@ -118,7 +118,7 @@ export function setupState({ run, exists, home, target, repo, read = (p) => read
   else results["app-key"] = exists(join(home, ".lanes", `${slug}.pem`)) ? done("App key present") : missing(`the App key ~/.lanes/${slug}.pem is missing`, appFix);
 
   const checks = Object.fromEntries(
-    repoChecks({ run: (cmd, args) => run(cmd, args, { cwd: target }), exists: (p) => exists(join(target, p)), repo, slug: slug || "", appId: app?.id, installationId: app?.installationId, ...(lookup ? { lookup } : {}) }).map((c) => [c.name, c]),
+    repoChecks({ run: (cmd, args) => run(cmd, args, { cwd: target }), exists: (p) => exists(join(target, p)), repo, slug: slug || "", appId: app?.id, installationId: app?.installationId, home, ...(lookup ? { lookup } : {}) }).map((c) => [c.name, c]),
   );
   const fromCheck = (c) => (c.pass ? done(c.reason) : missing(c.reason, { link: c.fix.link }));
   results["app-installed"] = app && SLUG.test(slug) ? fromCheck(checks.installed) : missing(noApp, appFix);
