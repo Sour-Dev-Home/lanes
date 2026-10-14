@@ -410,19 +410,95 @@ function scanFences(text) {
   return result;
 }
 
+const CODE_OPEN = "";
+const CODE_CLOSE = "";
+
 /**
- * Removes HTML comments completely. One pass is not enough: `<!<!-- -->-- x -->` becomes `<!-- x -->` after it, which
- * GitHub renders hidden. So it repeats until the text stops changing, then drops everything from any leftover `<!--`
- * (an unclosed comment hides the rest of the body on GitHub).
+ * One left-to-right pass over `src`: fenced blocks and inline code spans are swapped for placeholders (GitHub renders
+ * their `<!--` and `-->` as text), a comment is dropped at the first `<!--` outside code, and an unclosed comment drops
+ * the rest. Reading in order means a fence opener or backtick inside a comment belongs to the comment, so it cannot
+ * shield a later real comment.
+ */
+function maskCodeAndStripFirstPass(src) {
+  const codes = [];
+  const mask = (segment) => {
+    codes.push(segment);
+    return `${CODE_OPEN}${codes.length - 1}${CODE_CLOSE}`;
+  };
+  let out = "";
+  let i = 0;
+  while (i < src.length) {
+    if (i === 0 || src[i - 1] === "\n") {
+      const lineEnd = src.indexOf("\n", i) === -1 ? src.length : src.indexOf("\n", i);
+      const opener = src.slice(i, lineEnd).match(/^ {0,3}(`{3,}|~{3,})/);
+      if (opener) {
+        const char = opener[1][0];
+        const len = opener[1].length;
+        let end = src.length;
+        for (let pos = lineEnd + 1; pos <= src.length; ) {
+          const e = src.indexOf("\n", pos) === -1 ? src.length : src.indexOf("\n", pos);
+          const rest = src.slice(pos, e).match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+          if (rest && rest[1][0] === char && rest[1].length >= len) {
+            end = e;
+            break;
+          }
+          pos = e + 1;
+        }
+        out += mask(src.slice(i, end));
+        i = end;
+        continue;
+      }
+    }
+    if (src.startsWith("<!--", i)) {
+      const close = src.indexOf("-->", i + 4);
+      if (close === -1) break;
+      i = close + 3;
+      continue;
+    }
+    if (src[i] === "`") {
+      let k = 1;
+      while (src[i + k] === "`") k++;
+      const lineEnd = src.indexOf("\n", i) === -1 ? src.length : src.indexOf("\n", i);
+      let closeAt = -1;
+      for (const run of src.slice(i + k, lineEnd).matchAll(/`+/g)) {
+        if (run[0].length === k) {
+          closeAt = i + k + run.index + k;
+          break;
+        }
+      }
+      if (closeAt !== -1) {
+        out += mask(src.slice(i, closeAt));
+        i = closeAt;
+      } else {
+        out += src.slice(i, i + k);
+        i += k;
+      }
+      continue;
+    }
+    out += src[i];
+    i++;
+  }
+  return { out, codes };
+}
+
+/**
+ * Removes HTML comments completely, as GitHub renders them: outside fenced blocks and inline code spans (a `<!--` or
+ * `-->` in code is text). One pass is not enough: `<!<!-- -->-- x -->` becomes `<!-- x -->` after it, which GitHub
+ * renders hidden. So it repeats until the text stops changing, then drops everything from any leftover `<!--` (an
+ * unclosed comment hides the rest of the body on GitHub). Code is found once, on the original text; the later passes
+ * only reassemble comments, so removing a comment can never create code that shields another one.
  */
 export function stripHtmlComments(text) {
-  let body = String(text ?? "");
+  const src = String(text ?? "").replaceAll(CODE_OPEN, "").replaceAll(CODE_CLOSE, "");
+  const { out, codes } = maskCodeAndStripFirstPass(src);
+  let body = out;
   for (let prev = null; prev !== body; ) {
     prev = body;
     body = body.replace(/<!--[\s\S]*?-->/g, "");
   }
   const open = body.indexOf("<!--");
-  return open === -1 ? body : body.slice(0, open);
+  if (open !== -1) body = body.slice(0, open);
+  return body.replace(/(\d+)/g, (_, n) => codes[Number(n)]);
 }
 
 /** Returns the lower-cased heading keys that appear more than once (fence-aware, comments stripped). */

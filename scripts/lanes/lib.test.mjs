@@ -1983,6 +1983,32 @@ test("stripHtmlComments: nested, unclosed and multi-line comments leave nothing 
   assert.equal(stripHtmlComments(undefined), "");
 });
 
+test("stripHtmlComments leaves comment markers in code spans and fences as text", async () => {
+  const { stripHtmlComments, parsePrBody } = await import("./lib.mjs");
+  assert.equal(stripHtmlComments("a `<!--` b\nc `-->` d"), "a `<!--` b\nc `-->` d");
+  assert.equal(stripHtmlComments("x\n```\n<!-- kept\n```\ny"), "x\n```\n<!-- kept\n```\ny");
+  assert.equal(stripHtmlComments("x\n~~~md\n<!-- kept\n~~~\ny"), "x\n~~~md\n<!-- kept\n~~~\ny");
+  // a real comment next to a code span is still removed
+  assert.equal(stripHtmlComments("`code` <!-- gone --> after"), "`code`  after");
+  assert.equal(stripHtmlComments("``a ` <!--`` <!-- gone -->z"), "``a ` <!--`` z");
+  // edge: a fence or backtick inside a comment belongs to the comment and cannot shield a later one
+  assert.equal(stripHtmlComments("<!--\n```\n-->\nkeep\n<!-- gone -->\nend"), "\nkeep\n\nend");
+  assert.equal(stripHtmlComments("<!-- ` -->a <!-- gone --> b ` c"), "a  b ` c");
+  // edge: an unclosed fence runs to the end and keeps its text; an unmatched backtick is plain text
+  assert.equal(stripHtmlComments("```\n<!-- kept"), "```\n<!-- kept");
+  assert.equal(stripHtmlComments("a ` <!-- gone -->b"), "a ` b");
+  // edge: a comment inside a code span is text, and a real comment after it is still removed
+  assert.equal(stripHtmlComments("`<!-- x -->` <!-- gone -->"), "`<!-- x -->` ");
+  // edge: placeholder characters in the input are dropped, never interpreted
+  assert.equal(stripHtmlComments("a0b `c`"), "a0b `c`");
+  // the PR body shape from #765: `<!--` in backticks, then `-->` lines later
+  const body = "Closes #1\n\n## What changed\n1. quotes `<!--` here\n2. and `-->` there\n\n## Contract changes\nnone\n\n## Tests added\n- t\n";
+  const pr = parsePrBody(body);
+  assert.equal(pr.contractChange, "none");
+  assert.equal(pr.sections["tests added"], "- t");
+  assert.ok(!pr.missing.includes("contract changes") && !pr.missing.includes("tests added"));
+});
+
 test("body parsers ignore a section hidden by a nested or unclosed comment", async () => {
   const { duplicateHeadings, parseSections, parsePrBody, parseAdr } = await import("./lib.mjs");
   const nested = "### Goal\nx\n<!<!-- -->-- \n### Tier\nskip\n-->\n";
