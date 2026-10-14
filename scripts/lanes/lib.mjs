@@ -431,7 +431,8 @@ function maskCodeAndStripFirstPass(src) {
     if (i === 0 || src[i - 1] === "\n") {
       const lineEnd = src.indexOf("\n", i) === -1 ? src.length : src.indexOf("\n", i);
       const opener = src.slice(i, lineEnd).match(/^ {0,3}(`{3,}|~{3,})/);
-      if (opener) {
+      // CommonMark: a backtick fence's info string holds no backtick, so such a line is text with a code span in it.
+      if (opener && !(opener[1][0] === "`" && src.slice(i + opener[0].length, lineEnd).includes("`"))) {
         const char = opener[1][0];
         const len = opener[1].length;
         let end = src.length;
@@ -453,6 +454,12 @@ function maskCodeAndStripFirstPass(src) {
       const close = src.indexOf("-->", i + 4);
       if (close === -1) break;
       i = close + 3;
+      continue;
+    }
+    if (src[i] === "\\" && (src[i + 1] === "`" || src[i + 1] === "\\")) {
+      // A backslash-escaped backtick is a literal, never a code span opener (backslashes are literal inside spans).
+      out += src.slice(i, i + 2);
+      i += 2;
       continue;
     }
     if (src[i] === "`") {

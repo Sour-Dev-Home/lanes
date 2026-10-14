@@ -1999,6 +1999,13 @@ test("stripHtmlComments leaves comment markers in code spans and fences as text"
   assert.equal(stripHtmlComments("a ` <!-- gone -->b"), "a ` b");
   // edge: a comment inside a code span is text, and a real comment after it is still removed
   assert.equal(stripHtmlComments("`<!-- x -->` <!-- gone -->"), "`<!-- x -->` ");
+  // edge: an escaped backtick is a literal and opens no span, so the comment between two of them is removed
+  assert.equal(stripHtmlComments("\\`<!-- hid -->\\` end"), "\\`\\` end");
+  // edge: an escaped backslash does not escape the backtick after it, so that backtick still opens a span
+  assert.equal(stripHtmlComments("\\\\`<!-- kept -->` end"), "\\\\`<!-- kept -->` end");
+  // edge: a backtick fence opener with a backtick in its info string is no fence and shields nothing
+  assert.equal(stripHtmlComments("```x`y\n<!-- hid -->\nend"), "```x`y\n\nend");
+  assert.equal(stripHtmlComments("~~~x`y\n<!-- kept -->\n~~~"), "~~~x`y\n<!-- kept -->\n~~~");
   // edge: placeholder characters in the input are dropped, never interpreted
   assert.equal(stripHtmlComments("a0b `c`"), "a0b `c`");
   // the PR body shape from #765: `<!--` in backticks, then `-->` lines later
