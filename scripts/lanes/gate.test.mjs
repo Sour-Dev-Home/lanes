@@ -1046,6 +1046,22 @@ test("edge: a labeled event with a malformed issue number is rejected without ca
   }
 });
 
+test("edge: a ready label skips a malformed PR line and a PR with a non-integer number, and still evaluates the rest", () => {
+  const { routes, sha } = labeledRoutes();
+  routes[OPEN_PRS] = ["{not json", JSON.stringify({ number: "5", body: "Closes #7" }), prLine(5, 7)].join("\n") + "\n";
+  const { api, posted } = fakeApi(routes);
+  main(labeledEnv("ready"), api);
+  assert.deepEqual(posted.map((p) => p.sha), [sha("d")]);
+});
+
+test("edge: a ready label does not match a longer issue number sharing the prefix", () => {
+  const { routes } = labeledRoutes();
+  routes[OPEN_PRS] = JSON.stringify({ number: 5, body: "Closes #70" }) + "\n";
+  const { api, posted } = fakeApi(routes);
+  main(labeledEnv("ready"), api);
+  assert.equal(posted.length, 0);
+});
+
 test("edge: any other issues action than labeled keeps the closed path", () => {
   const calls = [];
   main({ REPO: "o/r", EVENT_NAME: "issues", ISSUE_ACTION: "closed", ISSUE_NUMBER: "3", LABEL_NAME: "ready" }, (args) => (calls.push(args[0]), ""));
