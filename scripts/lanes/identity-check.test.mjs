@@ -335,6 +335,13 @@ test("repoChecks: a disabled code-owner ruleset is not done and links to enable 
   assert.equal(c.fix.link, `https://github.com/${REPO}/settings/rules/7`);
 });
 
+test("edge: a disabled ruleset without the code-owner rule keeps the generic new-ruleset link", () => {
+  const detail = { enforcement: "disabled", rules: [{ type: "pull_request", parameters: { require_code_owner_review: false } }] };
+  const c = byName(checks(ghFake({ detail })), "ruleset");
+  assert.equal(c.pass, false);
+  assert.equal(c.fix.link, `https://github.com/${REPO}/settings/rules/new?target=branch`);
+});
+
 test("edge: repoChecks never passes a check it could not read", () => {
   const rs = checks(ghFake({ fail: ["repos/me/proj/rulesets"] }), () => true, () => ({ error: "the lookup gave no answer" }));
   assert.match(byName(rs, "ruleset").reason, /could not be checked/);
