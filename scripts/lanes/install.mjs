@@ -16,6 +16,7 @@ export const MANIFEST = [
   ".github/workflows/security.yml",
   ".github/workflows/lanes-workflow-apply.yml",
   ".github/workflows/lanes-control.yml",
+  ".github/workflows/lanes-review-ping.yml",
   ".githooks/pre-push",
   ".claude/settings.json",
   ".claude/agents/test-hunter.md",
