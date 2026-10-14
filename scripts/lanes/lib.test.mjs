@@ -1967,3 +1967,35 @@ test("edge: #645 readControlState strips control characters from a read error sh
   assert.doesNotMatch(s.reason, /\u001b/);
   assert.ok(s.reason.length < 160);
 });
+
+test("stripHtmlComments: nested, unclosed and multi-line comments leave nothing hidden", async () => {
+  const { stripHtmlComments } = await import("./lib.mjs");
+  const nested = stripHtmlComments("a <!<!-- -->-- x --> b");
+  assert.doesNotMatch(nested, /x/);
+  assert.doesNotMatch(nested, /<!--/);
+  assert.equal(stripHtmlComments("keep\n<!-- never closed\nhidden"), "keep\n");
+  assert.equal(stripHtmlComments("a<!-- one\ntwo\nthree -->b"), "ab");
+  assert.equal(stripHtmlComments("plain text"), "plain text");
+  // edge: a leftover opener produced by the final pass is dropped with the rest of the body
+  assert.equal(stripHtmlComments("<!<!<!-- -->-- -->-- hidden"), "");
+  // edge: empty and nullish input
+  assert.equal(stripHtmlComments(""), "");
+  assert.equal(stripHtmlComments(undefined), "");
+});
+
+test("body parsers ignore a section hidden by a nested or unclosed comment", async () => {
+  const { duplicateHeadings, parseSections, parsePrBody, parseAdr } = await import("./lib.mjs");
+  const nested = "### Goal\nx\n<!<!-- -->-- \n### Tier\nskip\n-->\n";
+  assert.equal(parseSections(nested, "###").tier, undefined);
+  assert.equal(parseSections("### Goal\nx\n<!-- \n### Tier\nskip\n", "###").tier, undefined);
+  assert.deepEqual(duplicateHeadings("### Goal\na\n<!<!-- -->-- \n### Goal\nb\n-->\n", "###"), []);
+  assert.deepEqual(duplicateHeadings("### Goal\na\n<!-- \n### Goal\nb\n", "###"), []);
+  for (const hidden of ["<!<!-- -->-- \n## Not done\nsecret\n-->\n", "<!-- \n## Not done\nsecret\n"]) {
+    const pr = parsePrBody(`## What changed\nok\n${hidden}`);
+    assert.doesNotMatch(JSON.stringify(pr), /secret/);
+  }
+  const adr = (hidden) => `# 0001: T\n\nStatus: accepted\n${hidden}`;
+  for (const hidden of ["<!<!-- -->-- \nGoverns: `evil/`\n-->\n", "<!-- \nGoverns: `evil/`\n"]) {
+    assert.doesNotMatch(JSON.stringify(parseAdr(adr(hidden))), /evil/);
+  }
+});

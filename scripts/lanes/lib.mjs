@@ -410,9 +410,24 @@ function scanFences(text) {
   return result;
 }
 
+/**
+ * Removes HTML comments completely. One pass is not enough: `<!<!-- -->-- x -->` becomes `<!-- x -->` after it, which
+ * GitHub renders hidden. So it repeats until the text stops changing, then drops everything from any leftover `<!--`
+ * (an unclosed comment hides the rest of the body on GitHub).
+ */
+export function stripHtmlComments(text) {
+  let body = String(text ?? "");
+  for (let prev = null; prev !== body; ) {
+    prev = body;
+    body = body.replace(/<!--[\s\S]*?-->/g, "");
+  }
+  const open = body.indexOf("<!--");
+  return open === -1 ? body : body.slice(0, open);
+}
+
 /** Returns the lower-cased heading keys that appear more than once (fence-aware, comments stripped). */
 export function duplicateHeadings(body, marker) {
-  const text = String(body ?? "").replace(/\r\n/g, "\n").replace(/<!--[\s\S]*?-->/g, "");
+  const text = stripHtmlComments(String(body ?? "").replace(/\r\n/g, "\n"));
   const scanned = scanFences(text);
   const headings = [];
   for (const { line, inFence } of scanned) {
@@ -428,7 +443,7 @@ export function duplicateHeadings(body, marker) {
 
 /** Splits a markdown body into sections by headings of exactly `marker` ("##" or "###"). Keeps first occurrence of each heading. */
 export function parseSections(body, marker) {
-  const text = String(body ?? "").replace(/\r\n/g, "\n").replace(/<!--[\s\S]*?-->/g, "");
+  const text = stripHtmlComments(String(body ?? "").replace(/\r\n/g, "\n"));
   const scanned = scanFences(text);
   const raw = {};
   let current = null;
@@ -578,7 +593,7 @@ export const PR_SECTIONS = ["what changed", "contract changes", "tests added", "
 const CONTRACT_CHANGES = ["none", "additive", "breaking"];
 
 export function parsePrBody(body) {
-  const text = String(body ?? "").replace(/<!--[\s\S]*?-->/g, "");
+  const text = stripHtmlComments(body);
   const scanned = scanFences(text);
   const textWithoutFences = scanned.filter(({ inFence }) => !inFence).map(({ line }) => line).join("\n");
   const closes = textWithoutFences.match(/\b(?:closes|fixes|resolves)\s+#(\d+)\b/i);
@@ -644,12 +659,7 @@ function governsPathError(p) {
  * @returns {{ number: number, title: string, status: "proposed" | "accepted" | "superseded", supersededBy?: number, governs: string[] } | { error: string }}
  */
 export function parseAdr(text) {
-  // Strip HTML comments until none remain, so a nested `<!-<!-- -->-` can't reassemble one after a single pass.
-  let body = String(text ?? "").replace(/\r\n/g, "\n");
-  for (let prev = null; prev !== body; ) {
-    prev = body;
-    body = body.replace(/<!--[\s\S]*?-->/g, "");
-  }
+  const body = stripHtmlComments(String(text ?? "").replace(/\r\n/g, "\n"));
   const lines = scanFences(body).filter((l) => !l.inFence).map((l) => l.line);
   const titleLine = lines.find((l) => l.startsWith("# "));
   if (!titleLine) return { error: "missing title line `# NNNN: <title>`" };
