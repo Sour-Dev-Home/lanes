@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildRuleset, findRulesetId, LABELS, readRequiredChecks } from "./setup-repo.mjs";
+import { buildRuleset, existingEnforcement, findRulesetId, gateOnDefaultBranch, LABELS, readRequiredChecks, startingEnforcement } from "./setup-repo.mjs";
 
 // #747: setup-repo runs before CODEOWNERS exists, so it reads requiredChecks without loadConfig's owner-path check.
 function withConfig(text, fn) {
@@ -78,4 +78,36 @@ test("findRulesetId finds an existing ruleset by name, or null", () => {
   assert.equal(findRulesetId([{ id: 1, name: "other" }], "main (lanes)"), null);
   assert.equal(findRulesetId([], "main (lanes)"), null);
   assert.equal(findRulesetId(undefined, "main (lanes)"), null);
+});
+
+// #762: the lanes ruleset starts disabled until lanes-gate.yml is on the default branch
+const failWith = (stderr) => Object.assign(new Error("Command failed"), { stderr });
+const fakeGh = (outcome) => (args) => {
+  assert.deepEqual(args, ["api", "repos/acme/widgets/contents/.github/workflows/lanes-gate.yml"]);
+  if (outcome) throw outcome;
+  return "{}";
+};
+
+test("buildRuleset is active by default and takes an enforcement", () => {
+  assert.equal(buildRuleset(DEFAULT_CHECKS).enforcement, "active");
+  assert.equal(buildRuleset(DEFAULT_CHECKS, "disabled").enforcement, "disabled");
+});
+
+test("a new ruleset starts disabled without lanes-gate.yml on the default branch, active with it", () => {
+  assert.equal(startingEnforcement(fakeGh(failWith("gh: Not Found (HTTP 404)")), "acme/widgets"), "disabled");
+  assert.equal(startingEnforcement(fakeGh(), "acme/widgets"), "active");
+});
+
+test("edge: an empty repository (409) counts as no workflow, any other failure throws", () => {
+  assert.equal(gateOnDefaultBranch(fakeGh(failWith("gh: Git Repository is empty. (HTTP 409)")), "acme/widgets"), false);
+  assert.throws(() => gateOnDefaultBranch(fakeGh(failWith("gh: Bad credentials (HTTP 401)")), "acme/widgets"), /Command failed/);
+  assert.throws(() => gateOnDefaultBranch(fakeGh(failWith("gh: Server Error (HTTP 500)")), "acme/widgets"), /Command failed/);
+});
+
+test("an existing ruleset's enforcement is read, never overridden", () => {
+  const list = [{ id: 1, name: "other", enforcement: "active" }, { id: 7, name: "main (lanes)", enforcement: "disabled" }];
+  assert.equal(existingEnforcement(list, "main (lanes)"), "disabled");
+  assert.equal(existingEnforcement([{ id: 7, name: "main (lanes)", enforcement: "evaluate" }], "main (lanes)"), "evaluate");
+  assert.equal(existingEnforcement([], "main (lanes)"), undefined);
+  assert.equal(existingEnforcement(undefined, "main (lanes)"), undefined);
 });

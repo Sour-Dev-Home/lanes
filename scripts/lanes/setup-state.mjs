@@ -99,7 +99,14 @@ export function setupState({ run, exists, home, target, repo, read = (p) => read
   const mainFix = { link: `${base}/settings/rules`, command: `node scripts/lanes/setup-repo.mjs ${repo}` };
   if (!Array.isArray(rulesets)) results["main-ruleset"] = missing("the rulesets could not be read", mainFix);
   else if (rulesets.some((r) => r?.name === RULESET && r.enforcement === "active")) results["main-ruleset"] = done(`ruleset ${RULESET} active`);
-  else results["main-ruleset"] = missing(`no active ruleset named ${RULESET}`, mainFix);
+  else {
+    // #762: setup-repo creates it disabled until lanes-gate is on the default branch and never changes an existing one's enforcement,
+    // so a disabled one is enabled by the owner on GitHub, not by running setup-repo again.
+    const off = rulesets.find((r) => r?.name === RULESET && r.enforcement === "disabled" && r.id !== undefined);
+    results["main-ruleset"] = off
+      ? { ...missing(`ruleset ${RULESET} is disabled; set it to Active once the adoption PR has merged`, { link: `${base}/settings/rules/${off.id}` }), disabled: true }
+      : missing(`no active ruleset named ${RULESET}`, mainFix);
+  }
 
   let app;
   const appFix = { command: "node scripts/lanes/app-setup.mjs" };

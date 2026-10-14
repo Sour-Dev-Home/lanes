@@ -231,7 +231,8 @@ export async function initMain(argv, deps = {}) {
   }
 
   // 3. setup-repo
-  if (!items.labels.done || !items["main-ruleset"].done) {
+  // A disabled ruleset is the owner's to enable (#762): setup-repo never changes an existing one's enforcement.
+  if (!items.labels.done || (!items["main-ruleset"].done && !items["main-ruleset"].disabled)) {
     const code = exec("setup-repo.mjs", "node", [path.join("scripts", "lanes", "setup-repo.mjs"), repo], target);
     if (code !== undefined) return code;
     items = read();
@@ -257,6 +258,12 @@ export async function initMain(argv, deps = {}) {
   // 5. CODEOWNERS and the code-owner ruleset are GitHub settings the owner clicks
   const clicks = [items.codeowners, items["code-owner-ruleset"]].filter((i) => !i.done);
   if (clicks.length) print(["\nYour turn on GitHub (init cannot click these):", ...clicks.flatMap((i) => [`${i.name}: ${i.reason}`, ...fixLines(i)])].join("\n"));
+
+  // The lanes ruleset starts disabled until lanes-gate is on the default branch, so the adoption PR can merge (#762)
+  const off = items["main-ruleset"];
+  if (off.disabled && off.fix?.link) {
+    print(["\nThe lanes ruleset was created disabled, so your first PR can merge:", "  1. commit the lanes files init wrote on a branch and open a PR", "  2. merge that PR", `  3. enable the ruleset: set Enforcement to Active at ${off.fix.link}`].join("\n"));
+  }
 
   // 6. the workflow-apply environment
   if (!items["workflows-environment"].done) {

@@ -250,6 +250,25 @@ test("edge: one missing label alone still runs setup-repo, and a lone missing ru
   }
 });
 
+// #762: a ruleset created disabled is the owner's to enable once the adoption PR has merged
+const RULES_LINK = "https://github.com/acme/widgets/settings/rules/7";
+const withDisabledRuleset = (items) => items.map((i) => (i.name === "main-ruleset" ? { name: i.name, done: false, reason: "ruleset main (lanes) is disabled", fix: { link: RULES_LINK }, disabled: true } : i));
+
+test("a disabled lanes ruleset prints commit, merge, then the enable link, and does not re-run setup-repo", async () => {
+  const w = world({ states: [withDisabledRuleset(itemsMissing()), withDisabledRuleset(itemsMissing())] });
+  assert.equal(await initMain(["../widgets"], w.deps), 1);
+  assert.deepEqual(scripts(w), []);
+  const text = w.text();
+  assert.match(text, /commit the lanes files.*\n.*merge that PR\n.*Active at https:\/\/github\.com\/acme\/widgets\/settings\/rules\/7/);
+  assert.match(text, /main-ruleset: missing: .*disabled.*open https:\/\/github\.com\/acme\/widgets\/settings\/rules\/7/);
+});
+
+test("edge: an active ruleset prints no enable steps", async () => {
+  const w = world({ states: [itemsMissing()] });
+  assert.equal(await initMain(["../widgets"], w.deps), 0);
+  assert.doesNotMatch(w.text(), /merge that PR/);
+});
+
 test("--new runs new-project with its flags, then continues from the state", async () => {
   const w = world({ states: [itemsMissing("identity", "app-key", "app-installed", "codeowners", "code-owner-ruleset", "workflows-environment"), itemsMissing("codeowners", "code-owner-ruleset", "workflows-environment"), itemsMissing("codeowners", "code-owner-ruleset")], exists: () => false });
   const code = await initMain(["--new", "widgets", "--private", "--license", "mit"], w.deps);
