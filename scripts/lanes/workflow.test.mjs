@@ -876,6 +876,15 @@ test("plan-issues.md step 5 runs scope-tests.mjs per issue, adds each listed tes
   assert.doesNotMatch(step, /Always grep the existing tests/);
 });
 
+// #752: new files get their registration files and doc-reading tests named at planning time.
+test("plan-issues.md step 5 passes --new for created files and adds each listed registration file or answers each check", () => {
+  const step = draftStep().replace(/\s+/g, " ");
+  assert.match(step, /pass `--new <path>\.\.\.` for every file the issue creates/);
+  assert.match(step, /add each registration file it lists to Scope "In"/);
+  assert.match(step, /a `reads <path>` test for a doc in Scope is listed the same way/);
+  assert.match(step, /answer each `check for the planner` line/);
+});
+
 // edge: the helper run is unconditional, so it must not sit inside the module-map-only skip clause.
 test("plan-issues.md step 5 scope-tests run is unconditional, not gated on a module map", () => {
   const step = draftStep();

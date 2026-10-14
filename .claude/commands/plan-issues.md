@@ -42,7 +42,9 @@ You are the planner. The idea: $ARGUMENTS
    Scope "In"; there is no separate issue for it. Always run `node scripts/lanes/scope-tests.mjs --paths <path>... --strings <text>...`
    for each drafted issue, with the issue's Scope "In" paths and every string, command, path or permission the criteria
    change (workflow lines included, such as a `verify.yml` step); add each listed test to Scope "In", and show the
-   added tests in the draft.
+   added tests in the draft. Also pass `--new <path>...` for every file the issue creates: add each registration file
+   it lists to Scope "In" (a `reads <path>` test for a doc in Scope is listed the same way), and answer each `check for
+   the planner` line (a new file cannot be inspected yet) in the draft, in Scope or with a one-line reason.
    For each new issue, propose blockers among the open issues and PRs from step 2 whose Scope, Interface contract or
    goal overlaps it (for a PR, its changed files against the new issue's Scope). Put them in a separate table, one
    line each, `Blocked by existing: #N, because <one-line reason>`, so the owner confirms or removes each. Below it,
