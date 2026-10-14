@@ -11,6 +11,32 @@ test("every manifest file exists in this repo", () => {
   for (const f of MANIFEST) assert.ok(existsSync(f), f);
 });
 
+test("#761: MANIFEST ships lanes-review-ping.yml and install copies it byte for byte", () => {
+  const f = ".github/workflows/lanes-review-ping.yml";
+  assert.ok(MANIFEST.includes(f));
+  const target = mkdtempSync(path.join(tmpdir(), "lanes-ping-"));
+  try {
+    const r = install(".", target);
+    assert.ok(r.copied.includes(f));
+    assert.equal(readFileSync(path.join(target, f), "utf8"), readFileSync(f, "utf8"));
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test("edge: #761 every workflow lanes-gate.yml waits on under workflow_run is shipped by a MANIFEST file", () => {
+  const gate = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
+  const m = gate.match(/^ {2}workflow_run:\s*\n\s+workflows:\s*\[([^\]]*)\]/m);
+  assert.ok(m, "lanes-gate.yml has no workflow_run: workflows: [...] list");
+  const named = m[1].split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+  assert.ok(named.length > 0);
+  const shipped = MANIFEST.filter((f) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f)).map((f) => {
+    const n = readFileSync(f, "utf8").match(/^name:\s*["']?([^"'\r\n]+?)["']?\s*$/m);
+    return n && n[1];
+  });
+  for (const w of named) assert.ok(shipped.includes(w), `lanes-gate.yml waits on workflow ${w}, which no MANIFEST file ships`);
+});
+
 // The scripts that .claude/settings.json runs as hook commands, as repo-relative paths.
 function hookScripts(settings) {
   const scripts = new Set();
