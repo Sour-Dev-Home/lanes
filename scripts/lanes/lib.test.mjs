@@ -2029,3 +2029,19 @@ test("body parsers ignore a section hidden by a nested or unclosed comment", asy
     assert.doesNotMatch(JSON.stringify(parseAdr(adr(hidden))), /evil/);
   }
 });
+
+test("edge: stripHtmlComments fence closers must match char and length, and 4-space indent is not a fence", async () => {
+  const { stripHtmlComments } = await import("./lib.mjs");
+  // a shorter run does not close a longer fence
+  assert.equal(stripHtmlComments("````\n```\n<!-- kept\n````\nz"), "````\n```\n<!-- kept\n````\nz");
+  // a different fence character does not close it
+  assert.equal(stripHtmlComments("```\n~~~\n<!-- kept\n```\nz"), "```\n~~~\n<!-- kept\n```\nz");
+  // a longer closer does close it
+  assert.equal(stripHtmlComments("```\na\n`````\n<!-- gone -->z"), "```\na\n`````\nz");
+  // four spaces of indent is an indented code line, not a fence opener
+  assert.equal(stripHtmlComments("    ```\n<!-- gone -->x"), "    ```\nx");
+  // CRLF fences still close
+  assert.equal(stripHtmlComments("```\r\n<!-- kept\r\n```\r\n<!-- gone -->z"), "```\r\n<!-- kept\r\n```\r\nz");
+  // deeper nesting needs more than two passes
+  assert.equal(stripHtmlComments("<!<!<!-- -->-- -->-- x -->y"), "y");
+});
