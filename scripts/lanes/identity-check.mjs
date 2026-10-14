@@ -4,6 +4,8 @@
 // Usage: node scripts/lanes/identity-check.mjs (no arguments). Exit 0: every team check passed. 1: otherwise.
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TEAM_REQUIRED_MESSAGE, parseIdentity } from "./lib.mjs";
 
@@ -118,6 +120,53 @@ const ghJson = (run, path) => {
   }
 };
 
+const SLUG = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
+const LOOKUP_SCRIPT = `
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const [, tokenModule, appId, repo] = process.argv.slice(1); // argv[1] must not be app-token.mjs itself, or it runs its CLI
+try {
+  const { findInstallationId } = await import(pathToFileURL(tokenModule).href);
+  console.log(JSON.stringify({ id: await findInstallationId({ appId, repo, keyPem: readFileSync(0, "utf8") }) }));
+} catch (err) {
+  console.log(JSON.stringify({ error: String(err?.message ?? "failed").slice(0, 120) }));
+}
+`;
+
+/**
+ * #757: the App's installation id for `repo`, asked as the App (`findInstallationId` in app-token.mjs). The key is read
+ * only from `~/.lanes/<slug>.pem`, where app-setup saved it, and goes to the child process on stdin; neither it nor a
+ * token is printed. Synchronous (a child process) so `repoChecks` and its callers stay synchronous. Returns `{ id }`,
+ * `{ notInstalled: true }` (GitHub answered 404) or `{ error }` naming what could not be done.
+ * @param {{ appId: number|string, slug: string, repo: string, home?: string, readFile?: Function, spawn?: Function }} o
+ */
+export function lookupInstallation({ appId, slug, repo, home = homedir(), readFile = readFileSync, spawn = spawnSync }) {
+  if (!SLUG.test(String(slug ?? ""))) return { error: "the App's name is not set in lanes.config.json" };
+  const keyPath = join(home, ".lanes", `${slug}.pem`);
+  let keyPem;
+  try {
+    keyPem = readFile(keyPath, "utf8");
+  } catch {
+    return { error: `the App key ~/.lanes/${slug}.pem is missing` };
+  }
+  const tokenModule = fileURLToPath(new URL("./app-token.mjs", import.meta.url));
+  let r;
+  try {
+    r = spawn(process.execPath, ["--input-type=module", "-e", LOOKUP_SCRIPT, "lookup", tokenModule, String(appId), String(repo)], { input: keyPem, encoding: "utf8", timeout: 20000, windowsHide: true });
+  } catch {
+    return { error: "the lookup could not start" };
+  }
+  let out;
+  try {
+    out = JSON.parse(String(r?.stdout ?? "").trim().split("\n").pop());
+  } catch {
+    return { error: "the lookup gave no answer" };
+  }
+  if (out?.id !== undefined) return { id: out.id };
+  if (/status 404\b/.test(String(out?.error))) return { notInstalled: true };
+  return { error: "GitHub or the key refused the lookup" };
+}
+
 /**
  * #612 (ADR 0025 part 8): the owner-side, read-only checks after App setup. Each result is `{ name, pass, reason, fix }`;
  * `fix` (only when not passing) holds the GitHub settings `link` and, for CODEOWNERS, the `line` to add. Makes no write
@@ -125,7 +174,7 @@ const ghJson = (run, path) => {
  * @param {{ run: Function, exists: (path: string) => boolean, repo: string, slug: string, installationId: number }} o
  *   `repo` is `owner/name`; `run` and `exists` are injected so tests touch no network or disk.
  */
-export function repoChecks({ run, exists, repo, slug, installationId }) {
+export function repoChecks({ run, exists, repo, slug, appId, installationId, home, lookup = lookupInstallation }) {
   const owner = repo.split("/")[0];
   const base = `https://github.com/${repo}`;
   const results = [];
@@ -155,16 +204,20 @@ export function repoChecks({ run, exists, repo, slug, installationId }) {
   }
   results.push({ name: "ruleset", ...ruleset, ...(ruleset.pass ? {} : { fix: { link: `${base}/settings/rules/new?target=branch` } }) });
 
-  const installs = ghJson(run, "user/installations");
-  let installed;
-  if (!Array.isArray(installs?.installations)) installed = { pass: false, reason: "installations could not be checked" };
-  else if (!installs.installations.some((i) => i?.id === installationId)) installed = { pass: false, reason: "the App is not installed for this account" };
-  else {
-    const repos = ghJson(run, `user/installations/${installationId}/repositories?per_page=100`);
-    if (!Array.isArray(repos?.repositories)) installed = { pass: false, reason: "the App's repositories could not be checked" };
-    else if (repos.repositories.some((r) => r?.full_name === repo)) installed = { pass: true, reason: "the App is installed on the repository" };
-    else installed = { pass: false, reason: "the App is not installed on this repository" };
+  // #757: `user/installations` answers 403 to the gh CLI's OAuth token, so the installation is looked up as the App
+  // (`GET /repos/{repo}/installation`, signed with the key app-setup saved).
+  let found;
+  try {
+    found = lookup({ appId, slug, repo, ...(home ? { home } : {}) }) ?? {};
+  } catch {
+    found = { error: "the lookup failed" };
   }
+  let installed;
+  if (found.notInstalled) installed = { pass: false, reason: "the App is not installed on this repository" };
+  else if (found.error) installed = { pass: false, reason: `installed could not be checked: ${found.error}` };
+  else if (found.id === undefined || found.id === null) installed = { pass: false, reason: "installed could not be checked: the lookup gave no installation id" };
+  else if (String(found.id) !== String(installationId)) installed = { pass: false, reason: "installed under a different installation id" };
+  else installed = { pass: true, reason: "the App is installed on the repository" };
   results.push({ name: "installed", ...installed, ...(installed.pass ? {} : { fix: { link: `https://github.com/apps/${slug}/installations/new` } }) });
   return results;
 }
@@ -181,7 +234,7 @@ const realRun = (cmd, args, { input, env } = {}) => {
 };
 
 /** Runs repoChecks for the repository in the current directory, as the owner (`--setup-checks`). Returns the exit code. */
-export function setupChecksMain({ run = realRun, exists = existsSync, config = () => JSON.parse(readFileSync("lanes.config.json", "utf8")), print = console.log } = {}) {
+export function setupChecksMain({ run = realRun, exists = existsSync, config = () => JSON.parse(readFileSync("lanes.config.json", "utf8")), print = console.log, lookup } = {}) {
   let app;
   let repo;
   try {
@@ -195,7 +248,7 @@ export function setupChecksMain({ run = realRun, exists = existsSync, config = (
     print("setup checks need a team identity in lanes.config.json and a repository gh can read");
     return 1;
   }
-  const results = repoChecks({ run, exists, repo, slug: app.botLogin.replace(/\[bot\]$/, ""), installationId: app.installationId });
+  const results = repoChecks({ run, exists, repo, slug: app.botLogin.replace(/\[bot\]$/, ""), appId: app.id, installationId: app.installationId, ...(lookup ? { lookup } : {}) });
   print(formatRepoChecks(results));
   return results.every((c) => c.pass) ? 0 : 1;
 }

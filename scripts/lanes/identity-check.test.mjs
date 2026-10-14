@@ -288,18 +288,18 @@ import { formatRepoChecks, repoChecks, setupChecksMain } from "./identity-check.
 
 const REPO = "me/proj";
 const RULE = { enforcement: "active", rules: [{ type: "pull_request", parameters: { require_code_owner_review: true } }] };
-function ghFake({ rulesets = [{ id: 7 }], detail = RULE, installs = { installations: [{ id: 2 }] }, repos = { repositories: [{ full_name: REPO }] }, fail = [] } = {}) {
+function ghFake({ rulesets = [{ id: 7 }], detail = RULE, fail = [] } = {}) {
   const calls = [];
   const run = (cmd, args) => {
     calls.push([cmd, ...args].join(" "));
     const path = args[1];
     if (cmd !== "gh" || args[0] !== "api" || fail.includes(path)) return { status: 1, stdout: "" };
-    const body = path === `repos/${REPO}/rulesets` ? rulesets : path === `repos/${REPO}/rulesets/7` ? detail : path === "user/installations" ? installs : path.startsWith("user/installations/2/repositories") ? repos : undefined;
+    const body = path === `repos/${REPO}/rulesets` ? rulesets : path === `repos/${REPO}/rulesets/7` ? detail : undefined;
     return body === undefined ? { status: 1, stdout: "" } : { status: 0, stdout: JSON.stringify(body) };
   };
   return { run, calls };
 }
-const checks = (g, exists = () => true) => repoChecks({ run: g.run, exists, repo: REPO, slug: "x", installationId: 2 });
+const checks = (g, exists = () => true, lookup = () => ({ id: 2 })) => repoChecks({ run: g.run, exists, repo: REPO, slug: "x", appId: 1, installationId: 2, lookup });
 const byName = (rs, n) => rs.find((c) => c.name === n);
 
 test("repoChecks: everything present passes all three and makes only GET api calls", () => {
@@ -329,27 +329,87 @@ for (const [name, opts] of [
 }
 
 test("edge: repoChecks never passes a check it could not read", () => {
-  const rs = checks(ghFake({ fail: ["repos/me/proj/rulesets", "user/installations"] }));
+  const rs = checks(ghFake({ fail: ["repos/me/proj/rulesets"] }), () => true, () => ({ error: "the lookup gave no answer" }));
   assert.match(byName(rs, "ruleset").reason, /could not be checked/);
   assert.match(byName(rs, "installed").reason, /could not be checked/);
   assert.equal(byName(rs, "ruleset").pass, false);
   assert.equal(byName(rs, "installed").pass, false);
 });
 
-test("repoChecks: the App not installed (account or repository) fails with the install link", () => {
-  for (const opts of [{ installs: { installations: [{ id: 9 }] } }, { repos: { repositories: [{ full_name: "me/other" }] } }]) {
-    const c = byName(checks(ghFake(opts)), "installed");
+test("repoChecks: installed with a matching id passes, and nothing asks user/installations (#757)", () => {
+  const g = ghFake();
+  const seen = [];
+  const rs = checks(g, () => true, (o) => (seen.push(o), { id: "2" }));
+  assert.equal(byName(rs, "installed").pass, true);
+  assert.deepEqual(seen, [{ appId: 1, slug: "x", repo: REPO }]);
+  assert.ok(!g.calls.some((c) => c.includes("user/installations")));
+});
+
+test("repoChecks: not installed (404) and a different installation id fail with the install link (#757)", () => {
+  const none = byName(checks(ghFake(), () => true, () => ({ notInstalled: true })), "installed");
+  assert.equal(none.pass, false);
+  assert.equal(none.reason, "the App is not installed on this repository");
+  assert.equal(none.fix.link, "https://github.com/apps/x/installations/new");
+  const other = byName(checks(ghFake(), () => true, () => ({ id: "9" })), "installed");
+  assert.equal(other.pass, false);
+  assert.equal(other.reason, "installed under a different installation id");
+});
+
+test("edge: a lookup that could not run never passes and names what was missing (#757)", () => {
+  const c = byName(checks(ghFake(), () => true, () => ({ error: "the App key ~/.lanes/x.pem is missing" })), "installed");
+  assert.equal(c.pass, false);
+  assert.match(c.reason, /could not be checked: the App key ~\/\.lanes\/x\.pem is missing/);
+});
+
+test("edge: an empty lookup answer never passes, even when the configured installation id is also missing (#757)", () => {
+  for (const lookup of [() => ({}), () => null, () => { throw new Error("boom"); }]) {
+    const c = byName(repoChecks({ run: ghFake().run, exists: () => true, repo: REPO, slug: "x", appId: 1, installationId: undefined, lookup }), "installed");
     assert.equal(c.pass, false);
-    assert.equal(c.fix.link, "https://github.com/apps/x/installations/new");
   }
 });
 
-test("edge: repoChecks reads past a non-matching ruleset and fails when the App's repositories cannot be read", () => {
+// #757: the real lookup reads the key only from ~/.lanes/<slug>.pem and keeps key and token out of its answer.
+import { lookupInstallation } from "./identity-check.mjs";
+const PEM = "-----BEGIN PRIVATE KEY-----\nSECRETKEYBODY\n-----END PRIVATE KEY-----\n";
+const spawnOut = (obj) => (cmd, args, opts) => ({ stdout: `${JSON.stringify(obj)}\n`, status: 0, seen: { args, opts } });
+
+test("lookupInstallation: reads only ~/.lanes/<slug>.pem, sends the key on stdin and returns the id", () => {
+  const paths = [];
+  let opts;
+  const out = lookupInstallation({
+    appId: 1, slug: "x", repo: REPO, home: "/h",
+    readFile: (p) => (paths.push(p), PEM),
+    spawn: (cmd, args, o) => ((opts = { args, o }), { stdout: '{"id":"171316917"}\n' }),
+  });
+  assert.deepEqual(out, { id: "171316917" });
+  assert.equal(paths.length, 1);
+  assert.match(paths[0].replaceAll("\\", "/"), /\/h\/\.lanes\/x\.pem$/);
+  assert.equal(opts.o.input, PEM);
+  assert.ok(!opts.args.some((a) => a.includes("SECRETKEYBODY")));
+});
+
+test("edge: the real child process answers with an error for an unusable key, without the key or a network call", () => {
+  const out = lookupInstallation({ appId: 1, slug: "x", repo: REPO, home: "/h", readFile: () => PEM });
+  assert.ok(out.error, JSON.stringify(out));
+  assert.doesNotMatch(JSON.stringify(out), /SECRETKEYBODY/);
+});
+
+test("lookupInstallation: a 404 is not installed; a missing key file, other failures and bad slugs never pass", () => {
+  const base = { appId: 1, slug: "x", repo: REPO, home: "/h", readFile: () => PEM };
+  assert.deepEqual(lookupInstallation({ ...base, spawn: spawnOut({ error: "app-token: installation lookup failed with status 404" }) }), { notInstalled: true });
+  const denied = lookupInstallation({ ...base, spawn: spawnOut({ error: "app-token: installation lookup failed with status 401" }) });
+  assert.equal(denied.notInstalled, undefined);
+  assert.ok(denied.error);
+  const noKey = lookupInstallation({ ...base, readFile: () => { throw new Error("ENOENT /h/.lanes/x.pem"); }, spawn: () => assert.fail("must not spawn") });
+  assert.deepEqual(noKey, { error: "the App key ~/.lanes/x.pem is missing" });
+  assert.ok(lookupInstallation({ ...base, spawn: () => ({ stdout: "garbage" }) }).error);
+  assert.ok(lookupInstallation({ ...base, spawn: () => { throw new Error("boom"); } }).error);
+  for (const slug of ["../x", "", undefined, "a/b"]) assert.ok(lookupInstallation({ ...base, slug, readFile: () => assert.fail("must not read") }).error);
+});
+
+test("edge: repoChecks reads past a non-matching ruleset", () => {
   const g = ghFake({ rulesets: [{ id: 3 }, { id: 7 }] });
   assert.equal(byName(checks(g), "ruleset").pass, true);
-  const r = byName(checks(ghFake({ repos: {} })), "installed");
-  assert.equal(r.pass, false);
-  assert.match(r.reason, /repositories could not be checked/);
 });
 
 test("formatRepoChecks lists each missing item with its link and the CODEOWNERS line", () => {
@@ -365,8 +425,8 @@ test("setupChecksMain exits 0 when all pass, 1 when one is missing, and 1 withou
   const wrap = (g) => (cmd, args, o) => (cmd === "gh" && args[0] === "repo" ? { status: 0, stdout: `${REPO}\n` } : g.run(cmd, args, o));
   const out = [];
   const print = (l) => out.push(l);
-  assert.equal(setupChecksMain({ run: wrap(ghFake()), exists: () => true, config: cfg, print }), 0);
-  assert.equal(setupChecksMain({ run: wrap(ghFake()), exists: () => false, config: cfg, print }), 1);
-  assert.equal(setupChecksMain({ run: wrap(ghFake()), exists: () => true, config: () => ({}), print }), 1);
-  assert.equal(setupChecksMain({ run: wrap(ghFake()), exists: () => true, config: () => { throw new Error("x"); }, print }), 1);
+  assert.equal(setupChecksMain({ run: wrap(ghFake()), exists: () => true, config: cfg, print, lookup: () => ({ id: 2 }) }), 0);
+  assert.equal(setupChecksMain({ run: wrap(ghFake()), exists: () => false, config: cfg, print, lookup: () => ({ id: 2 }) }), 1);
+  assert.equal(setupChecksMain({ run: wrap(ghFake()), exists: () => true, config: () => ({}), print, lookup: () => ({ id: 2 }) }), 1);
+  assert.equal(setupChecksMain({ run: wrap(ghFake()), exists: () => true, config: () => { throw new Error("x"); }, print, lookup: () => ({ id: 2 }) }), 1);
 });
