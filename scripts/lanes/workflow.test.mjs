@@ -69,7 +69,9 @@ test("lanes-gate concurrency group is keyed by head commit, not PR number, so pu
 // #36: closing an issue re-evaluates the PRs it was blocking, under the workflow's existing rules.
 test("lanes-gate also runs on issues closed, passing the issue number to the gate", () => {
   const yml = readFileSync(".github/workflows/lanes-gate.yml", "utf8");
-  assert.match(yml, /\n  issues:\n    types: \[closed\]\n/);
+  assert.match(yml, /\n  issues:\n    types: \[closed, labeled\]\n/);
+  assert.match(yml, /ISSUE_ACTION: \$\{\{ github\.event\.action \}\}/);
+  assert.match(yml, /LABEL_NAME: \$\{\{ github\.event\.label\.name \}\}/);
   assert.match(yml, /ISSUE_NUMBER: \$\{\{ github\.event\.issue\.number \}\}/);
 });
 
@@ -99,7 +101,7 @@ test("lanes-gate also runs on workflow_run of lanes-review-ping, still on the de
   assert.match(yml, /pull_request_target:/);
   assert.match(yml, /\n {2}merge_group:/);
   assert.match(yml, /\n {2}workflow_dispatch:/);
-  assert.match(yml, /\n {2}issues:\n {4}types: \[closed\]/);
+  assert.match(yml, /\n {2}issues:\n {4}types: \[closed, labeled\]/);
   assert.match(yml, /\n {2}status:\n/);
   assert.match(yml, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
 });
