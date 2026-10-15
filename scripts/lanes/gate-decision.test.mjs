@@ -956,6 +956,14 @@ test("non-lane PR: the key off or absent decides as today (no Closes #N)", () =>
   }
 });
 
+test("edge: non-lane PR: only the boolean true enables it (a missing gate block or a truthy non-boolean does not)", () => {
+  const on = nonLaneConfig(true);
+  for (const gate of [undefined, {}, { nonLanePrs: "true" }, { nonLanePrs: 1 }, { nonLanePrs: null }]) {
+    const config = { ...on, gate };
+    assert.deepEqual(nonLane({ config, prAuthor: "code-owner", nativeApproval: NL_APPROVED }), NL_NO_CLOSES);
+  }
+});
+
 test("non-lane PR: the lane bot's PR without Closes #N fails as today", () => {
   assert.deepEqual(nonLane({ prAuthor: NL_BOT, nativeApproval: NL_APPROVED }), NL_NO_CLOSES);
   assert.deepEqual(nonLane({ prAuthor: NL_BOT, codeOwners: [NL_BOT] }), NL_NO_CLOSES);
