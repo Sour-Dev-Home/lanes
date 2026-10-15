@@ -217,3 +217,9 @@ test("readNonLanePrs is true only for a literal true; a missing file, bad JSON o
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("edge: key on with a non-array rulesets reply is treated as none and creates both", () => {
+  const g = rulesetGh({ rulesets: { message: "unexpected" } });
+  configureRulesets(g.fn, "me/proj", CHECKS, true, () => {});
+  assert.deepEqual(g.writes().map((c) => c.body.name), ["main (lanes)", "main (lanes owner review)"]);
+});

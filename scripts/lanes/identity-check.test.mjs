@@ -344,6 +344,17 @@ test("repoChecks: a code-owner ruleset with a bypass actor in always mode never 
   assert.equal(c.fix.link, `https://github.com/${REPO}/settings/rules/new?target=branch`);
 });
 
+for (const [name, bypass_actors] of [
+  ["exempt mode", [{ actor_id: 5, bypass_mode: "exempt" }]],
+  ["a missing mode", [{ actor_id: 5 }]],
+  ["an unknown mode", [{ actor_id: 5, bypass_mode: "sometimes" }]],
+  ["a bypass list that is not an array", "always"],
+]) {
+  test(`edge: a code-owner ruleset with ${name} never counts (allowlist, fail closed)`, () => {
+    assert.equal(byName(checks(ghFake({ detail: { ...RULE, bypass_actors } })), "ruleset").pass, false);
+  });
+}
+
 test("edge: an always-mode bypass among several actors disqualifies the ruleset, and a later valid ruleset still passes", () => {
   const bad = { ...RULE, bypass_actors: [{ bypass_mode: "pull_request" }, { bypass_mode: "always" }] };
   assert.equal(byName(checks(ghFake({ detail: bad })), "ruleset").pass, false);
