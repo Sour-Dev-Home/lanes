@@ -274,6 +274,40 @@ test("workflows mode masks the token before exporting it and names only the step
   await assert.rejects(runWorkflows({ ...env, GITHUB_ENV: "" }, { fetch, log() {}, appendFile() {} }), /no GITHUB_ENV/);
 });
 
+const SETUP = "run node scripts/lanes/app-setup.mjs --workflows (add --org <org> for an organisation repository)";
+const missing = (name, kind) => `app-token: the lanes-workflow-apply environment has no ${name} ${kind}; ${SETUP}`;
+
+test("workflows mode names the missing App id or key before minting, and prints no value", async () => {
+  const calls = [];
+  const fetch = okFetch(calls);
+  const env = { APP_ID: "1", APP_KEY: keyPem, LANES_REPO: "o/lanes", GITHUB_ENV: "env-file" };
+  const run = (over) => runWorkflows({ ...env, ...over }, { fetch, log() {}, appendFile() {} });
+  await assert.rejects(run({ APP_ID: "" }), (e) => e.message === missing("LANES_WORKFLOWS_APP_ID", "variable"));
+  await assert.rejects(run({ APP_KEY: "" }), (e) => e.message === missing("LANES_WORKFLOWS_KEY", "secret"));
+  await assert.rejects(run({ APP_ID: "", APP_KEY: "" }), (e) => e.message === missing("LANES_WORKFLOWS_APP_ID", "variable"));
+  assert.deepEqual(calls, []);
+});
+
+test("edge: an unset or whitespace-only App id or key counts as missing, a non-numeric id keeps the numeric error", async () => {
+  const fetch = okFetch([]);
+  const env = { APP_ID: "1", APP_KEY: keyPem, LANES_REPO: "o/lanes", GITHUB_ENV: "env-file" };
+  const run = (over) => runWorkflows({ ...env, ...over }, { fetch, log() {}, appendFile() {} });
+  await assert.rejects(run({ APP_ID: undefined }), /no LANES_WORKFLOWS_APP_ID variable/);
+  await assert.rejects(run({ APP_KEY: "  \n" }), /no LANES_WORKFLOWS_KEY secret/);
+  await assert.rejects(run({ APP_ID: "abc" }), /appId must be numeric/);
+});
+
+test("workflows mode with a valid pair reaches the mint step", async () => {
+  const urls = [];
+  const fetch = async (url) => {
+    urls.push(url);
+    return new Response(JSON.stringify(url.endsWith("/installation") ? { id: 9 } : { token: "ghs_abc", expires_at: "2026-10-01T10:00:00Z" }), { status: 200 });
+  };
+  const env = { APP_ID: "1", APP_KEY: keyPem, LANES_REPO: "o/lanes", GITHUB_ENV: "env-file" };
+  await runWorkflows(env, { fetch, log() {}, appendFile() {} });
+  assert.equal(urls.length, 2);
+});
+
 test("edge: workflows mode refuses a token that could inject another env line, and an installation id of 0", async () => {
   const env = { APP_ID: "1", APP_KEY: keyPem, LANES_REPO: "o/lanes", GITHUB_ENV: "env-file" };
   const evil = async (url) =>
