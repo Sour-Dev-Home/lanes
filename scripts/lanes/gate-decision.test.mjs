@@ -918,3 +918,81 @@ test("dependabot bump: an unusable module map never reaches the narrow path", ()
   assert.equal(d.state, "failure");
   assert.match(d.description, /module map unusable|Closes #N/);
 });
+
+// ---- ADR 0034 part 1 (#780): non-lane PRs pass on a code-owner review or a code owner's authorship ----
+const NL_BOT = "lanes-bot[bot]";
+const nonLaneConfig = (nonLanePrs, extra = {}) =>
+  compileConfig({ requiredChecks: ["verify"], paths: { skip: [], contract: [], sensitive: [], ui: [] }, gate: { nonLanePrs }, identity: { profile: "team", app: { id: 1, installationId: 2, botLogin: NL_BOT } }, ...extra });
+const nonLane = (over) => gateDecision({ prBody: "Fix a typo", headRef: "fix-typo", prAuthor: "collab", codeOwners: ["code-owner"], files: ["README.md"], statuses: [], config: nonLaneConfig(true), ...over });
+const NL_WAIT = { state: "pending", description: "waiting for a code-owner review in GitHub (non-lane PR)", stage: "owner" };
+const NL_NO_CLOSES = { state: "failure", description: "PR body must say 'Closes #N' for its task issue", stage: "contract" };
+const NL_APPROVED = { approved: true, by: "code-owner" };
+
+test("non-lane PR: a collaborator's PR waits, then passes on a code owner's approval", () => {
+  assert.deepEqual(nonLane({}), NL_WAIT);
+  for (const nativeApproval of [{ approved: false, by: null }, null, undefined, { approved: "true" }]) {
+    assert.deepEqual(nonLane({ nativeApproval }), NL_WAIT, JSON.stringify(nativeApproval));
+  }
+  assert.deepEqual(nonLane({ nativeApproval: NL_APPROVED }), { state: "success", description: "approved by code owner @code-owner (non-lane PR)", stage: "ready" });
+});
+
+test("non-lane PR: a code owner's own PR passes on authorship", () => {
+  assert.deepEqual(nonLane({ prAuthor: "code-owner" }), { state: "success", description: "authored by code owner @code-owner (non-lane PR)", stage: "ready" });
+});
+
+test("non-lane PR: an author who is no code owner waits even when the approval input is unset (the author's own approval never counts)", () => {
+  assert.deepEqual(nonLane({ prAuthor: "collab", nativeApproval: { approved: false, by: null } }), NL_WAIT);
+});
+
+test("non-lane PR: a Dependabot npm PR waits, then passes on approval", () => {
+  const base = { prAuthor: "dependabot[bot]", headRef: "dependabot/npm_and_yarn/x", files: ["package.json", "package-lock.json"] };
+  assert.deepEqual(nonLane(base), NL_WAIT);
+  assert.equal(nonLane({ ...base, nativeApproval: NL_APPROVED }).state, "success");
+});
+
+test("non-lane PR: the key off or absent decides as today (no Closes #N)", () => {
+  for (const nonLanePrs of [false, undefined]) {
+    assert.deepEqual(nonLane({ config: nonLaneConfig(nonLanePrs), prAuthor: "code-owner", nativeApproval: NL_APPROVED }), NL_NO_CLOSES);
+  }
+});
+
+test("non-lane PR: the lane bot's PR without Closes #N fails as today", () => {
+  assert.deepEqual(nonLane({ prAuthor: NL_BOT, nativeApproval: NL_APPROVED }), NL_NO_CLOSES);
+  assert.deepEqual(nonLane({ prAuthor: NL_BOT, codeOwners: [NL_BOT] }), NL_NO_CLOSES);
+});
+
+test("non-lane PR: an issue-N- branch by a human without Closes #N fails as today", () => {
+  assert.deepEqual(nonLane({ headRef: "issue-12-x", nativeApproval: NL_APPROVED }), NL_NO_CLOSES);
+  assert.deepEqual(nonLane({ headRef: "issue-12-x", prAuthor: "code-owner" }), NL_NO_CLOSES);
+});
+
+test("edge: non-lane PR: a body with Closes #N is a lane PR; issue-x and my-issue-1-y are not issue branches", () => {
+  assert.notEqual(nonLane({ prBody: "Closes #4", nativeApproval: NL_APPROVED }).description, "approved by code owner @code-owner (non-lane PR)");
+  assert.equal(nonLane({ headRef: "issue-x" }).description, NL_WAIT.description);
+  assert.equal(nonLane({ headRef: "my-issue-1-y" }).description, NL_WAIT.description);
+});
+
+test("edge: non-lane PR: a missing or malformed author or owner list never passes on authorship", () => {
+  for (const over of [{ prAuthor: undefined }, { prAuthor: "" }, { prAuthor: 7 }, { codeOwners: [] }, { codeOwners: undefined }, { codeOwners: "code-owner" }]) {
+    assert.deepEqual(nonLane({ ...over }), NL_WAIT, JSON.stringify(over));
+  }
+});
+
+test("edge: non-lane PR: logins match exactly, so a case difference is not authorship", () => {
+  assert.deepEqual(nonLane({ prAuthor: "Code-Owner" }), NL_WAIT);
+});
+
+test("non-lane PR: no reviewer status, tier, issue or template section is read", () => {
+  const failing = [{ context: "review/test-hunter", state: "failure", description: "x", creator: { login: "x", type: "Bot" } }];
+  assert.deepEqual(nonLane({ statuses: failing, issueLabels: [], issueState: "closed", prBody: "x" }), NL_WAIT);
+});
+
+test("non-lane PR: the same inputs decide the same on every re-decision (merge_group)", () => {
+  assert.deepEqual(nonLane({ nativeApproval: NL_APPROVED }), nonLane({ nativeApproval: NL_APPROVED }));
+});
+
+test("non-lane PR: the Dependabot action-bump path still wins when both switches are on", () => {
+  const config = nonLaneConfig(true, { dependabot: { actionBumps: true } });
+  const d = nonLane({ config, prBody: "Bumps actions", headRef: "dependabot/github_actions/x", prAuthor: "dependabot[bot]", files: [".github/workflows/ci.yml"], dependabotFiles: bumpFiles() });
+  assert.equal(d.description, "waiting for a code-owner review in GitHub (dependabot action bump)");
+});

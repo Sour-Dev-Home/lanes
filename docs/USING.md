@@ -446,6 +446,17 @@ The queue runs from the adopter's own repository: `install.mjs` copies `queue.mj
 `node scripts/lanes/queue.mjs` launches lanes for that repository. It finds its repository from the folder it runs in;
 run it from your project's terminal, not from the lanes clone.
 
+### Non-lane PRs (`gate.nonLanePrs`, ADR 0034)
+
+A **non-lane PR** is one that is not a lane's: its body has no `Closes #N`, its author is not the lane bot, and its head
+branch is not `issue-<N>-*`. With `gate.nonLanePrs` set to `true` in `lanes.config.json` (absent or `false` is the old
+behaviour, where such a PR fails `lanes/gate` for the missing `Closes #N`), `lanes/gate` decides it without an issue,
+template section, tier or reviewer status. It passes on exactly one of: an approval on the PR head by a code owner who
+is not the author ("approved by code owner"), or an author who is a user listed in `.github/CODEOWNERS` ("authored by
+code owner"). Otherwise it waits: "waiting for a code-owner review in GitHub (non-lane PR)". The merge queue re-decides
+it the same way. A PR by the lane bot, or on an `issue-<N>-*` branch, without `Closes #N` still fails as before, and the
+Dependabot action-bump path (ADR 0032) is unchanged. The lanes repository keeps this setting off.
+
 ### The dashboard workflow and private repositories
 
 A GitHub Pages site is public even when its repository is private, and the dashboard publishes the PR and issue
