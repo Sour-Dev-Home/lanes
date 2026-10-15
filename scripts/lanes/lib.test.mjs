@@ -2083,3 +2083,33 @@ test("edge: a leading comment exempts the line from HTML-block detection only wh
   // plain text after a leading comment starts no HTML block
   assert.equal(stripHtmlComments("<!-- c --> text\n`<!-- kept -->`"), " text\n`<!-- kept -->`");
 });
+
+test("stripHtmlComments: a fence after a blank line inside a pre, script or style block is not masked", async () => {
+  const { stripHtmlComments } = await import("./lib.mjs");
+  // these blocks end at their closing tag, not at a blank line, so the fence is raw HTML and the comment is real
+  assert.equal(stripHtmlComments("<pre>\n\n```\n<!-- gone -->\n```\n</pre>\nend"), "<pre>\n\n```\n\n```\n</pre>\nend");
+  assert.equal(stripHtmlComments("<script>\n\n~~~\n<!-- gone -->\n~~~\n</script>"), "<script>\n\n~~~\n\n~~~\n</script>");
+  assert.equal(stripHtmlComments("<STYLE>\n\n```\n<!-- gone -->\n```\n</STYLE>"), "<STYLE>\n\n```\n\n```\n</STYLE>");
+  // edge: once the block has closed, a blank line then a fence is code again
+  assert.equal(stripHtmlComments("<pre>x</pre>\n\n```\n<!-- kept -->\n```\n"), "<pre>x</pre>\n\n```\n<!-- kept -->\n```\n");
+  // edge: an unclosed block runs to the end of the body
+  assert.equal(stripHtmlComments("<pre>\n\n```\n<!-- gone -->\n```\n"), "<pre>\n\n```\n\n```\n");
+  // edge: a block that opens and closes on one line ends there
+  assert.equal(stripHtmlComments("<pre>a</pre>\n\n```\n<!-- kept -->\n```"), "<pre>a</pre>\n\n```\n<!-- kept -->\n```");
+  // edge: a div block still ends at the blank line, so the fence after it stays masked
+  assert.equal(stripHtmlComments("<div>\n\n```\n<!-- kept -->\n```"), "<div>\n\n```\n<!-- kept -->\n```");
+});
+
+test("stripHtmlComments: a backtick inside an inline tag attribute does not open a code span", async () => {
+  const { stripHtmlComments } = await import("./lib.mjs");
+  assert.equal(stripHtmlComments('a <span title="`">x</span> <!-- gone --> b ` c'), 'a <span title="`">x</span>  b ` c');
+  assert.equal(stripHtmlComments("a <span title='`'>x</span> <!-- gone --> b ` c"), "a <span title='`'>x</span>  b ` c");
+  // edge: a tag split over lines is still one tag
+  assert.equal(stripHtmlComments('a <span\n title="`">x</span> <!-- gone --> b ` c'), 'a <span\n title="`">x</span>  b ` c');
+  // edge: an escaped < is text, so the backtick after it opens a real span that shields the marker
+  assert.equal(stripHtmlComments('\\<b title="`"> <!-- kept --> `'), '\\<b title="`"> <!-- kept --> `');
+  // edge: text that is not a complete tag leaves the backtick a span opener
+  assert.equal(stripHtmlComments("a <b title=`x <!-- kept --> `"), "a <b title=`x <!-- kept --> `");
+  // edge: a real span elsewhere still shields its marker
+  assert.equal(stripHtmlComments('a <i title="`">x</i> `<!-- kept -->` <!-- gone -->'), 'a <i title="`">x</i> `<!-- kept -->` ');
+});
