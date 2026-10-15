@@ -112,6 +112,22 @@ export function parseOwnerPatterns(text) {
   return out;
 }
 
+export const DEFAULT_ADR_DIR = "docs/adr";
+
+/**
+ * ADR 0034 part 3: the ADR folder (`adr.dir`), a repository-relative directory with no trailing slash. Absent is the
+ * default; a non-string, an empty, absolute, backslash, drive-letter or `.`/`..`/empty-segment path is a typo and throws.
+ */
+function adrDirOf(value) {
+  if (value === undefined) return DEFAULT_ADR_DIR;
+  const fail = () => new Error(`lanes.config.json: adr.dir must be a repository-relative directory such as ${DEFAULT_ADR_DIR}`);
+  if (typeof value !== "string") throw fail();
+  const dir = value.endsWith("/") ? value.slice(0, -1) : value;
+  if (dir === "" || /^([/]|[A-Za-z]:)/.test(dir) || dir.includes("\\")) throw fail();
+  if (dir.split("/").some((s) => s === "" || s === "." || s === "..")) throw fail();
+  return dir;
+}
+
 export function compileConfig(raw, codeownersText = undefined) {
   const paths = {};
   for (const key of PATH_KEYS) {
@@ -157,7 +173,7 @@ export function compileConfig(raw, codeownersText = undefined) {
   // ADR 0034 part 1: the opt-in switch for non-lane PRs. Absent is false; any non-boolean is a typo.
   const nonLanePrs = raw.gate?.nonLanePrs === undefined ? false : raw.gate.nonLanePrs;
   if (typeof nonLanePrs !== "boolean") throw new Error("lanes.config.json: gate.nonLanePrs must be a boolean");
-  const withDependabot = { ...config, dependabot: { actionBumps }, gate: { nonLanePrs } };
+  const withDependabot = { ...config, dependabot: { actionBumps }, gate: { nonLanePrs }, adr: { dir: adrDirOf(raw.adr?.dir) } };
   return identity === undefined ? withDependabot : { ...withDependabot, identity };
 }
 
@@ -267,7 +283,7 @@ const matchesAny = (patterns, file) => patterns.some((re) => re.test(file));
  * (which governs nothing); a missing directory is `[]`. Callers read the working tree they run in, so the gate, which
  * runs from the default branch, never sees a PR's own ADR edits.
  */
-export function loadAdrs(dir = "docs/adr") {
+export function loadAdrs(dir = DEFAULT_ADR_DIR) {
   let names;
   try {
     names = readdirSync(dir);
@@ -283,7 +299,7 @@ export function loadAdrs(dir = "docs/adr") {
 
 const normPath = (f) => posix.normalize(String(f).replace(/\\/g, "/"));
 // #241: the ADRs themselves and the module map (the `modules` key of lanes.config.json) are architecture changes.
-const isArchitectureFile = (f) => f.startsWith("docs/adr/") || f === "lanes.config.json";
+const isArchitectureFile = (f, adrDir = DEFAULT_ADR_DIR) => f.startsWith(`${adrDir}/`) || f === "lanes.config.json";
 
 /**
  * The repo-relative paths a task issue's Interface contract names (#241): backticked or bare tokens with a `/` or a
@@ -326,7 +342,7 @@ export function classifyFiles(files, config, adrs = [], interfaceContract = "") 
     ui: files.some((f) => matchesAny(paths.ui, f)),
     owner: files.some((f) => matchesAny(paths.owner, f) || matchesAny(paths.codeowners ?? [], f)),
     adr: [...new Set(files.flatMap((f) => adrGoverns(adrs, f)))].sort((a, b) => a - b),
-    architecture: files.map(normPath).some((f) => isArchitectureFile(f) || inContract(f)),
+    architecture: files.map(normPath).some((f) => isArchitectureFile(f, config.adr?.dir) || inContract(f)),
   };
 }
 

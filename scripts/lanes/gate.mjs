@@ -521,7 +521,7 @@ function decide(env, api) {
   const repo = env.REPO ?? "";
   if (!REPO.test(repo)) throw new Error("REPO is missing or malformed");
   // #45: the ADRs in this checkout (the default branch), so a PR's own ADR edits never change its required reviewers.
-  const adrs = loadAdrs();
+  const adrs = loadAdrs(config.adr.dir);
   switch (env.EVENT_NAME) {
     // pull_request_target (I3): the workflow trigger changed from pull_request so a PR cannot rewrite its own gate;
     // GitHub sets this exact event name on the resulting run, so both must be accepted here.

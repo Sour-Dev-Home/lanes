@@ -779,6 +779,42 @@ test("loadAdrs defaults to this repo's docs/adr", () => {
   assert.ok(loadAdrs().some((a) => a.number === 1 && a.status === "accepted"));
 });
 
+// #770 (ADR 0034 part 3): adr.dir names the ADR folder.
+const withAdr = (adr) => compileConfig({ requiredChecks: ["verify"], paths: { skip: [], contract: [], sensitive: [], ui: [] }, ...(adr === undefined ? {} : { adr }) });
+
+test("adr.dir defaults to docs/adr, and a custom folder is kept without a trailing slash", () => {
+  assert.equal(withAdr().adr.dir, "docs/adr");
+  assert.equal(withAdr({}).adr.dir, "docs/adr");
+  assert.equal(withAdr({ dir: "decisions" }).adr.dir, "decisions");
+  assert.equal(withAdr({ dir: "docs/decisions/" }).adr.dir, "docs/decisions");
+});
+
+test("edge: an invalid adr.dir throws a lanes.config.json error", () => {
+  for (const dir of ["", "/abs", "../up", "a/../b", "a\\b", "C:/x", ".", "./a", "a//b", "/", null, 3, ["a"]]) {
+    assert.throws(() => withAdr({ dir }), /lanes\.config\.json: adr\.dir/, JSON.stringify(dir));
+  }
+});
+
+test("a custom adr.dir makes an edit there an architecture change, and docs/adr/ no longer one", () => {
+  const custom = withAdr({ dir: "decisions" });
+  assert.equal(classifyFiles(["decisions/0001-x.md"], custom).architecture, true);
+  assert.equal(classifyFiles(["decisions/img/diagram.png"], custom).architecture, true);
+  assert.equal(classifyFiles(["docs/adr/0001-x.md"], custom).architecture, false);
+  assert.equal(classifyFiles(["decisionsx/0001-x.md"], custom).architecture, false);
+  assert.equal(classifyFiles(["docs/adr/0001-x.md"], withAdr()).architecture, true);
+});
+
+test("a custom adr.dir is found by loadAdrs, and a folder of ADRs without Governs governs nothing", () => {
+  const { root, dir } = adrDir({ "0001-plain.md": "# 0001: Plain\n\nStatus: accepted\n\nProse only.\n", "0002-bad.md": "no title" });
+  try {
+    const adrs = loadAdrs(dir);
+    assert.equal(adrs.length, 2);
+    assert.deepEqual(classifyFiles(["src/a.ts"], config, adrs).adr, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("reviewersReport lists the reviewers, then the governing ADRs zero-padded", () => {
   const adrs = [governing(3, "- src/a.ts"), governing(7, "- src/a.ts")];
   assert.equal(reviewersReport("full", ["src/a.ts"], config, adrs), "test-hunter\nADRs: 0003, 0007");

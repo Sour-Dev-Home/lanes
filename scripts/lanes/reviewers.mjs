@@ -35,6 +35,7 @@ if (files.length === 0) {
   console.error("reviewers.mjs: no diff to review over origin/main (commit or make changes first)");
   process.exit(1);
 }
+const config = loadConfig();
 const interfaceContract =
   issue === undefined ? "" : interfaceContractOf(execFileSync("gh", ["issue", "view", issue, "--json", "body", "--jq", ".body"], { encoding: "utf8", windowsHide: true }));
-console.log(reviewersReport(tier, [...new Set(files)], loadConfig(), loadAdrs(), interfaceContract));
+console.log(reviewersReport(tier, [...new Set(files)], config, loadAdrs(config.adr.dir), interfaceContract));
