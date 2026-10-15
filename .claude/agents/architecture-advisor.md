@@ -15,7 +15,7 @@ description claims about itself.
    files by range, not whole.
 2. Read `vendor/agent-skills/references/definition-of-done.md` for what a complete interface change looks like, and
    read the actual contract file the diff touches (a type, schema or endpoint), not just its PR description.
-2b. If you were given ADR paths (`docs/adr/NNNN-*.md`), the diff touches files those accepted ADRs govern. Read
+2b. If you were given ADR paths (`NNNN-*.md` files in the ADR folder), the diff touches files those accepted ADRs govern. Read
     each one's Decision in full, on the default branch (`git show origin/main:<path>`), since the PR's copy may
     differ, and check the diff against it.
 3. Check: does the change match what any downstream issue expects under "Blocked by"; is it additive or breaking as

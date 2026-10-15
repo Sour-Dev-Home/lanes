@@ -10,7 +10,8 @@ Report, in at most 15 lines:
    Then `node scripts/lanes/status.mjs --starts 7` and include its lines: how often path overlap, the cap or another
    reason kept an issue from starting, and each overlap pair (the evidence for reopening or dropping ADR 0018 phase 2).
 2. Ready issues older than 7 days and open PRs older than 3 days (`gh issue list` / `gh pr list` with `--json createdAt`).
-3. `gh run list --branch main --workflow verify.yml --limit 5`: is main red right now (`verify` runs on every push).
+3. `gh run list --branch main --workflow <metrics.mainWorkflow> --limit 5` (the value is `metrics.mainWorkflow` in
+   `lanes.config.json`, with lanes' built-in default when unset): is main red right now (it runs on every push).
    Then `gh run list --branch main --status failure --limit 10`: which workflows failed more than once this week.
 4. PRs whose lanes/gate failed on the contract (stage `contract`): the fix is usually the PR body or the issue's tier.
 5. `node scripts/lanes/delivery-metrics.mjs --days 7`: report lead time (median, p90, mean), merge-queue bounce rate, and change-failure rate; compare to the previous week.
@@ -27,7 +28,7 @@ Report, in at most 15 lines:
    The same advisor run also checks ADR drift, replacing the per-PR ADR reviews: in the same spawn as the structural
    report (not a second subagent), also give it the files changed by lane PRs merged in the window
    (`gh pr list --state merged --json files`, merged within the last 7 days) with the accepted ADRs governing each
-   (the ADR lookup `node scripts/lanes/reviewers.mjs` uses, from `docs/adr/`). It files at most 3 ADR-drift issues
+   (the ADR lookup `node scripts/lanes/reviewers.mjs` uses, from the ADR folder (`adr.dir` in lanes.config.json, default `docs/adr`)). It files at most 3 ADR-drift issues
    (tier skip or quick, `--label lane-filed`, same layout and `--body-file` rule) for ADR text that no longer matches
    the code, each naming the ADR and the file (none is a fine answer). Report the issues it filed.
 9. `node scripts/lanes/lessons.mjs --recurring`: for each pattern with no open issue whose title carries

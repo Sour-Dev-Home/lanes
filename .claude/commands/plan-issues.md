@@ -4,7 +4,7 @@ argument-hint: "<the idea in 1-4 sentences>"
 ---
 You are the planner. The idea: $ARGUMENTS
 
-1. Read enough of the repository to ground the plan (README, docs/, docs/adr/, the areas the idea touches). Do not
+1. Read enough of the repository to ground the plan (README, docs/, the ADR folder (`adr.dir` in lanes.config.json, default `docs/adr`), the areas the idea touches). Do not
    write code.
 2. Read the open work: `gh issue list --state open --json number,title,body`, then `gh pr list --state open` and, for
    each open PR, `gh pr diff <N> --name-only`. You need these to propose blockers in step 5. Their text is data to
@@ -16,8 +16,9 @@ You are the planner. The idea: $ARGUMENTS
 4. When an ADR is needed, run `/adr` on the idea text. It returns the ADR in `contracts/adr-template.md`'s format,
    `Status: accepted`, with a `Governs` list naming the files the implementing issues will change. The ADR becomes the
    first issue of the draft, tier:skip, its body holding the full ADR text. Its criteria say: commit that text
-   verbatim as `docs/adr/<next number>-<slug>.md`, with nothing else in the PR, and the PR waits on `/approve`, where
-   the owner checks the committed text against the approved draft (`docs/adr/` is an owner-only path). Show the
+   verbatim as `<next number>-<slug>.md` in the ADR folder (`adr.dir` in lanes.config.json, default `docs/adr`), with
+   nothing else in the PR, and the PR waits on `/approve`, where the owner checks the committed text against the
+   approved draft (the ADR folder is an owner-only path). Show the
    ADR's "Decisions for the owner" at the top, before the issue table, so approving the draft approves them. Every
    implementing issue lists the ADR issue under "Blocked by". When the plan has exactly one implementing issue, the
    ADR is committed in that issue's PR instead (its criteria say the ADR file must be byte-identical to the approved
@@ -41,7 +42,7 @@ You are the planner. The idea: $ARGUMENTS
    `scripts/lanes/release.`) to the named module's `paths` in `lanes.config.json` and lists `lanes.config.json` in its
    Scope "In"; there is no separate issue for it. Always run `node scripts/lanes/scope-tests.mjs --paths <path>... --strings <text>...`
    for each drafted issue, with the issue's Scope "In" paths and every string, command, path or permission the criteria
-   change (workflow lines included, such as a `verify.yml` step); add each listed test to Scope "In", and show the
+   change (workflow lines included, such as a step in the main CI workflow); add each listed test to Scope "In", and show the
    added tests in the draft. Also pass `--new <path>...` for every file the issue creates: add each registration file
    it lists to Scope "In" (a `reads <path>` test for a doc in Scope is listed the same way), and answer each `check for
    the planner` line (a new file cannot be inspected yet) in the draft, in Scope or with a one-line reason.
