@@ -129,6 +129,10 @@ export function writeGhHosts(dir, token) {
 export async function runWorkflows(env = process.env, { fetch, now, log = console.log, appendFile = appendFileSync } = {}) {
   const { APP_ID: appId, APP_KEY: keyPem, LANES_REPO: repo, GITHUB_ENV: envFile } = env;
   if (!envFile) throw new Error("app-token: no GITHUB_ENV to export the token to");
+  const setup = "run node scripts/lanes/app-setup.mjs --workflows (add --org <org> for an organisation repository)";
+  for (const [value, name, kind] of [[appId, "LANES_WORKFLOWS_APP_ID", "variable"], [keyPem, "LANES_WORKFLOWS_KEY", "secret"]]) {
+    if (!String(value ?? "").trim()) throw new Error(`app-token: the lanes-workflow-apply environment has no ${name} ${kind}; ${setup}`);
+  }
   const { token } = await mintInstallationToken({ appId, keyPem, repo, ownPermissions: true, fetch, now });
   if (!/^[A-Za-z0-9_.-]+$/.test(token)) throw new Error("app-token: invalid token");
   log(`::add-mask::${token}`);
