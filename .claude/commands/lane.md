@@ -82,7 +82,7 @@ nothing on GitHub (the identity may be wrong there).
     and pushes normally. If a conflict needs a file outside Scope, it stops with the
     stop rule: comment `Lane stopped: conflict needs <paths>`, then `needs-owner`.
 4. Read the issue's Interface contract and Scope. Touch nothing out of scope except the two kinds in ADR 0033
-   (`docs/adr/0033-bounded-scope-extensions.md`): a pinned test: a `*.test.mjs` whose failing assertion reads text or a
+   (lanes ADR 0033, bounded scope extensions): a pinned test: a `*.test.mjs` whose failing assertion reads text or a
    file that the issue's Scope changes, which is updated to pin the new value and never weakened (no deleted or skipped
    test, no loosened matcher, no removed case); and a registration line: one new entry for the lane's own new file in
    an existing registry, which edits no other entry, sets or lowers no `risk`, touches no `paths.sensitive` list, and
@@ -126,7 +126,7 @@ nothing on GitHub (the identity may be wrong there).
    [{ "index", "result": "pass"|"fail"|"not-applicable", "evidence" }], "findings": [{ "severity":
    "critical"|"important"|"minor", "file", "line", "summary", "fixed" }] }`. The test-hunter and ui-reviewer assess
    every criterion by its 1-based index. When `reviewers.mjs` also prints `ADRs: NNNN, ...`, the diff touches files
-   those accepted ADRs govern: give the architecture-advisor each one's path (`docs/adr/NNNN-*.md`) to review
+   those accepted ADRs govern: give the architecture-advisor each one's path (`NNNN-*.md` in the ADR folder, `adr.dir` in lanes.config.json, default `docs/adr`) to review
    against. A name `reviewers.mjs` prints that is not one of the four is a configured reviewer (ADR 0018): spawn it
    by that agent name (`.claude/agents/<name>.md`) with the issue's criteria and no vendored checklist, and require
    the same JSON verdict. Run each reviewer in the foreground, so its result carries its figures. When a reviewer's verdict

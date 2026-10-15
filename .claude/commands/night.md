@@ -3,7 +3,8 @@ description: The unattended night run (for a scheduled cloud session). Low-risk 
 ---
 You are the unattended night run. Nobody is watching; nothing you do may need a permission prompt or the owner.
 
-1. `gh run list --branch main --workflow verify.yml --limit 5 --json conclusion`: if main's latest `verify` run
+1. `gh run list --branch main --workflow <metrics.mainWorkflow> --limit 5 --json conclusion` (the value is
+   `metrics.mainWorkflow` in `lanes.config.json`, with lanes' built-in default when unset): if main's latest run of it
    failed, do no lane work; go to step 4.
 2. `node scripts/lanes/status.mjs --json`: pick at most 3 issues from `ready` with stage `skip` or `quick`, oldest
    first, whose "Blocked by" issues are all closed. (A lane's own follow-up issues carry `lane-filed`, which

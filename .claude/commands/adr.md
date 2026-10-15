@@ -6,7 +6,8 @@ The argument is either an issue or PR number, or the idea text from `/plan-issue
 
 **An issue or PR number.** Spawn the architecture-advisor agent as a fresh subagent on #$ARGUMENTS (`gh issue view`
 or `gh pr view`, and the files they link). It decides with evidence. Record the decision as
-`docs/adr/NNNN-<slug>.md` (next number) in `contracts/adr-template.md`'s format, in its own tier:skip task issue and
+`NNNN-<slug>.md` in the ADR folder (`adr.dir` in lanes.config.json, default `docs/adr`), numbered with the next free
+number in that folder, in `contracts/adr-template.md`'s format, in its own tier:skip task issue and
 PR, and link it from #$ARGUMENTS. If the decision changes an interface, the ADR names the contract file, and the
 implementing issues list the contract issue under "Blocked by".
 

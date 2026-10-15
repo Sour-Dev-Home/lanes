@@ -203,12 +203,12 @@ test("lane.md step 6 tells a lane to record rounds in each verdict's metrics, fa
 test("lane.md step 6 hands the architecture-advisor the governing ADRs' paths when reviewers.mjs prints ADRs:", () => {
   const step6 = readFileSync(".claude/commands/lane.md", "utf8").replace(/\r\n/g, "\n").match(/^6\. [\s\S]*?(?=^7\. )/m)[0].replace(/\s+/g, " ");
   assert.match(step6, /When `reviewers\.mjs` also prints `ADRs: NNNN, \.\.\.`/);
-  assert.match(step6, /give the architecture-advisor each one's path \(`docs\/adr\/NNNN-\*\.md`\)/);
+  assert.match(step6, /give the architecture-advisor each one's path \(`NNNN-\*\.md` in the ADR folder, `adr\.dir` in lanes\.config\.json, default `docs\/adr`\)/);
 });
 
 test("architecture-advisor.md reads the given ADRs and fails the verdict when the diff contradicts an accepted ADR's Decision", () => {
   const text = readFileSync(".claude/agents/architecture-advisor.md", "utf8").replace(/\s+/g, " ");
-  assert.match(text, /If you were given ADR paths \(`docs\/adr\/NNNN-\*\.md`\)[^.]*\. Read each one's Decision in full/);
+  assert.match(text, /If you were given ADR paths \(`NNNN-\*\.md` files in the ADR folder\)[^.]*\. Read each one's Decision in full/);
   assert.match(text, /`verdict` must be `"failure"` if [^.]*, or if the diff contradicts the Decision of an accepted ADR you were given/);
 });
 
@@ -235,7 +235,7 @@ test("each reviewer agent has Claude Code subagent frontmatter, runs on sonnet a
 // ADR 0004: a new way to reach the owner approval is a minor follow-up; a regression stays critical
 function acceptedRiskRule(name) {
   const text = readFileSync(`.claude/agents/${name}.md`, "utf8").replace(/\r\n/g, "\n");
-  const match = text.match(/^Accepted risk \(ADR 0004\b[^)]*\):[\s\S]*?(?=\n\n|(?![\s\S]))/m);
+  const match = text.match(/^Accepted risk \(lanes ADR 0004\b[^)]*\):[\s\S]*?(?=\n\n|(?![\s\S]))/m);
   assert.ok(match, `${name}: no "Accepted risk (ADR 0004 ...):" paragraph`);
   return match[0].replace(/\s+/g, " ");
 }
@@ -243,7 +243,8 @@ function acceptedRiskRule(name) {
 for (const name of ["security-reviewer", "test-hunter"]) {
   test(`${name} states ADR 0004's accepted-risk rule: new bypasses minor with a lane-filed follow-up, regressions critical`, () => {
     const rule = acceptedRiskRule(name);
-    assert.match(rule, /docs\/adr\/0004-approve-guard-accepted-risk\.md/);
+    assert.match(rule, /^Accepted risk \(lanes ADR 0004: the approve guard is an accepted risk\)/);
+    assert.doesNotMatch(rule, /docs\/adr\//);
     assert.match(rule, /`post-review\.mjs owner`/);
     assert.match(rule, /`review\/owner`/);
     // within one sentence: a dot only counts as a sentence end when whitespace follows it (post-review.mjs has one)
@@ -263,7 +264,7 @@ test("the ADR 0004 rule is the same in both briefs", () => {
 function startGuardRule(name) {
   const text = readFileSync(`.claude/agents/${name}.md`, "utf8").replace(/\r\n/g, "\n");
   assert.doesNotMatch(text, /ADR 0007/, `${name}: the ADR 0007 paragraph is replaced`);
-  const match = text.match(/^Accepted risk \(ADR 0030\b[^)]*\):[\s\S]*?(?=\n\n|(?![\s\S]))/m);
+  const match = text.match(/^Accepted risk \(lanes ADR 0030\b[^)]*\):[\s\S]*?(?=\n\n|(?![\s\S]))/m);
   assert.ok(match, `${name}: no "Accepted risk (ADR 0030 ...):" paragraph`);
   return match[0].replace(/\s+/g, " ");
 }
@@ -271,7 +272,8 @@ function startGuardRule(name) {
 for (const name of ["security-reviewer", "test-hunter"]) {
   test(`${name} states ADR 0030's accepted-risk rule for the deny rules: new bypasses minor with a lane-filed follow-up, regressions critical`, () => {
     const rule = startGuardRule(name);
-    assert.match(rule, /docs\/adr\/0030-retire-start-guard-and-start\.md/);
+    assert.match(rule, /^Accepted risk \(lanes ADR 0030: the start guard and `\/start` are retired, the deny rules are best effort\)/);
+    assert.doesNotMatch(rule, /docs\/adr\//);
     assert.match(rule, /`start\.mjs`/);
     assert.match(rule, /`queue\.mjs`/);
     assert.match(rule, /`claude --bg`/);
@@ -290,8 +292,8 @@ test("the ADR 0007 rule is the same in both briefs", () => {
 test("the ADR 0030 paragraph sits right after ADR 0004's in both briefs", () => {
   for (const name of ["security-reviewer", "test-hunter"]) {
     const text = readFileSync(`.claude/agents/${name}.md`, "utf8").replace(/\r\n/g, "\n");
-    const first = text.indexOf("Accepted risk (ADR 0004");
-    const second = text.indexOf("Accepted risk (ADR 0030");
+    const first = text.indexOf("Accepted risk (lanes ADR 0004");
+    const second = text.indexOf("Accepted risk (lanes ADR 0030");
     assert.ok(first >= 0 && second > first, `${name}: ADR 0030 paragraph must follow ADR 0004's`);
     assert.match(text.slice(first, second), /^[^\n]+(?:\n[^\n]+)*\n\n$/, `${name}: one paragraph between them`);
   }
@@ -654,7 +656,7 @@ test("lane.md step 5: a registration line for the lane's own new file is allowed
 test("lane.md step 4: only pinned tests and registration lines may change outside Scope, with ADR 0033's limits", () => {
   const step = laneNumbered("4", "4b");
   assert.doesNotMatch(step, /Touch nothing out of scope\. If the contract/);
-  assert.match(step, /Touch nothing out of scope except the two kinds in ADR 0033 \(`docs\/adr\/0033-bounded-scope-extensions\.md`\)/);
+  assert.match(step, /Touch nothing out of scope except the two kinds in ADR 0033 \(lanes ADR 0033, bounded scope extensions\)/);
   assert.match(step, /a pinned test: a `\*\.test\.mjs` whose failing assertion reads text or a file that the issue's Scope changes/);
   assert.match(step, /updated to pin the new value and never weakened \(no deleted or skipped test, no loosened matcher, no removed case\)/);
   assert.match(step, /a registration line: one new entry for the lane's own new file in an existing registry/);
@@ -755,7 +757,7 @@ test("plan-issues.md puts the ADR first as tier:skip, committed verbatim alone, 
   assert.match(md, /run `\/adr` on the idea text/);
   assert.match(md, /first issue of the draft/);
   assert.match(md, /tier:skip/);
-  assert.match(md, /verbatim as `docs\/adr\/<next number>-<slug>\.md`/);
+  assert.match(md, /verbatim as `<next number>-<slug>\.md` in the ADR folder/);
   assert.match(md, /nothing else in the PR/);
   assert.match(md, /`\/approve`/);
   assert.match(md, /"Decisions for the owner" at the top, before the issue table/);
@@ -876,7 +878,7 @@ test("plan-issues.md step 5 runs scope-tests.mjs per issue, adds each listed tes
   const step = draftStep().replace(/\s+/g, " ");
   assert.match(step, /run `node scripts\/lanes\/scope-tests\.mjs --paths <path>\.\.\. --strings <text>\.\.\.`/);
   assert.match(step, /the issue's Scope "In" paths/);
-  assert.match(step, /every string, command, path or permission the criteria change \(workflow lines included, such as a `verify\.yml` step\)/);
+  assert.match(step, /every string, command, path or permission the criteria change \(workflow lines included, such as a step in the main CI workflow\)/);
   assert.match(step, /add each listed test to Scope "In"/);
   assert.match(step, /show the added tests in the draft/);
   assert.doesNotMatch(step, /Always grep the existing tests/);
@@ -1584,4 +1586,30 @@ test("#645 lanes-control passes the action, reason and actor through env, never 
   assert.match(yml, /LANES_ACTOR: \$\{\{ github\.triggering_actor \}\}/);
   // every expression in the file sits on an `env:`, `with:` or `if:`/group line, none after `run:`
   for (const line of yml.split("\n")) if (/^\s+(- )?run:/.test(line)) assert.doesNotMatch(line, /\$\{\{/);
+});
+
+test("#771 night and health read metrics.mainWorkflow; no shipped command or agent names verify.yml or a docs/adr/NNNN path", () => {
+  for (const f of ["night", "health"]) {
+    const md = readFileSync(`.claude/commands/${f}.md`, "utf8").replace(/\s+/g, " ");
+    assert.match(md, /--workflow <metrics\.mainWorkflow>/, f);
+  }
+  const files = [
+    ...readdirSync(".claude/commands").map((n) => `.claude/commands/${n}`),
+    ...readdirSync(".claude/agents").map((n) => `.claude/agents/${n}`),
+  ].filter((p) => p.endsWith(".md"));
+  for (const p of files) {
+    const md = readFileSync(p, "utf8");
+    assert.doesNotMatch(md, /verify\.yml/, `${p} names verify.yml`);
+    assert.doesNotMatch(md, /docs\/adr\/(\d{4}|NNNN|<)/, `${p} names a docs/adr/NNNN path`);
+  }
+  for (const f of ["adr", "health", "lane", "plan-issues"]) {
+    const md = readFileSync(`.claude/commands/${f}.md`, "utf8").replace(/\s+/g, " ");
+    assert.match(md, /`adr\.dir` in lanes\.config\.json, default `docs\/adr`/, f);
+  }
+  for (const f of ["security-reviewer", "test-hunter"]) {
+    const md = readFileSync(`.claude/agents/${f}.md`, "utf8");
+    assert.match(md, /lanes ADR 0004/, f);
+    assert.match(md, /lanes ADR 0030/, f);
+  }
+  assert.match(readFileSync(".claude/agents/security-reviewer.md", "utf8"), /lanes ADR 0009/);
 });
