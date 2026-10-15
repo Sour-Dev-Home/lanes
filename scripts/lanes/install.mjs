@@ -185,7 +185,7 @@ export function install(source, target, { force = false, isPublic = false } = {}
     copied.push(dest);
     if (off) disabled.push(rel);
   }
-  // After the copy, so the lock's hash of a copied .gitignore is the file as lanes wrote it; a kept file is not in the lock.
+  // After the lock: a .gitignore lanes copied already holds every GITIGNORE_LINES entry (a test pins it), so its hash stays valid.
   const lockPath = path.join(target, LOCK);
   if (force || !existsSync(lockPath)) writeLock(source, target, copied, lockPath);
   const gitignore = ensureGitignoreLines(target);
