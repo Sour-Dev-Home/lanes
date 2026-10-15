@@ -281,6 +281,19 @@ export function readNativeApproval(api, repo, pr, config, codeOwnersPath = ".git
 }
 
 /**
+ * ADR 0034 part 1: the user owners of `.github/CODEOWNERS` in this checkout (the default branch's), for the
+ * non-lane "authored by a code owner" pass. Read only when the switch is on; fails closed to `[]` on any read error.
+ */
+export function readCodeOwners(config, codeOwnersPath = ".github/CODEOWNERS") {
+  if (config.gate?.nonLanePrs !== true) return [];
+  try {
+    return parseCodeOwnerUsers(readFileSync(codeOwnersPath, "utf8"));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * ADR 0032 part 4: the extra `pulls/{n}/files` call, made only when the switch is on (read from the default-branch
  * config) and the PR author is `dependabot[bot]`. Returns `dependabotActionBump`'s input, or `null` ("not a bump")
  * when no call is due or on any API or parse error.
@@ -356,6 +369,8 @@ export function decideForPr(api, repo, number, config, adrs = []) {
     pendingHeadHashes: pendingHeadHashes(api, repo, verdicts, pr.head.sha, reused),
     nativeApproval: readNativeApproval(api, repo, { number, user: pr.user, head: pr.head }, config),
     dependabotFiles: readDependabotFiles(api, repo, { number, user: pr.user }, config),
+    prAuthor: pr.user?.login,
+    codeOwners: readCodeOwners(config),
     prBody: pr.body,
     issueLabels,
     issueState,

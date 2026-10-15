@@ -2003,3 +2003,77 @@ test("dependabot merge_group: carry re-decides a bump the same as evaluatePr", (
     assert.equal(queued.description, direct.description);
   }
 });
+
+// ---- ADR 0034 part 1 (#780): non-lane PRs ----
+const nonLaneCfg = (nonLanePrs) => compileConfig({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] }, gate: { nonLanePrs }, identity: teamIdentity });
+const nonLaneRoutes = ({ author = { login: "collab", type: "User" }, ref = "fix-typo", prBody = "Fix a typo", reviews = [] } = {}) => ({
+  "repos/o/r/pulls/5": { state: "open", body: prBody, user: author, head: { sha: SHA, ref } },
+  "repos/o/r/pulls/5/files": "README.md\n",
+  [`repos/o/r/commits/${SHA}/statuses?per_page=100`]: [],
+  "repos/o/r/pulls/5/reviews": commentsOut(reviews),
+});
+const NL_QUEUE_REF = `gh-readonly-queue/main/pr-5-${"c".repeat(40)}`;
+const evalNonLane = (routes, cfg = nonLaneCfg(true)) => teamCheckout(OWNERS, () => evaluatePr(fakeApi(routes).api, "o/r", 5, cfg));
+const NL_FAIL = "PR body must say 'Closes #N' for its task issue";
+
+test("non-lane: a collaborator's PR waits, then passes on a code owner's approval, with no issue read", () => {
+  const waiting = evalNonLane(nonLaneRoutes());
+  assert.deepEqual([waiting.state, waiting.description], ["pending", "waiting for a code-owner review in GitHub (non-lane PR)"]);
+  const ok = evalNonLane(nonLaneRoutes({ reviews: [review("code-owner")] }));
+  assert.deepEqual([ok.state, ok.description], ["success", "approved by code owner @code-owner (non-lane PR)"]);
+});
+
+test("non-lane: the author's own approval never counts, nor a stale or non-owner one", () => {
+  const owner = { login: "code-owner", type: "User" };
+  assert.equal(evalNonLane(nonLaneRoutes({ author: owner, ref: "x", reviews: [] })).description, "authored by code owner @code-owner (non-lane PR)");
+  for (const reviews of [[review("collab")], [review("code-owner", "APPROVED", OLD_SHA)], [review("someone-else")]]) {
+    assert.equal(evalNonLane(nonLaneRoutes({ reviews })).state, "pending");
+  }
+});
+
+test("non-lane: a code owner's own PR passes on authorship", () => {
+  const d = evalNonLane(nonLaneRoutes({ author: { login: "code-owner", type: "User" } }));
+  assert.deepEqual([d.state, d.description], ["success", "authored by code owner @code-owner (non-lane PR)"]);
+});
+
+test("non-lane: a Dependabot npm PR waits, then passes on approval", () => {
+  const author = { login: "dependabot[bot]", type: "Bot" };
+  assert.equal(evalNonLane(nonLaneRoutes({ author, ref: "dependabot/npm_and_yarn/x" })).state, "pending");
+  assert.equal(evalNonLane(nonLaneRoutes({ author, ref: "dependabot/npm_and_yarn/x", reviews: [review("code-owner")] })).state, "success");
+});
+
+test("non-lane: the key off or absent fails as today", () => {
+  for (const cfg of [nonLaneCfg(false), nonLaneCfg(undefined)]) {
+    assert.equal(evalNonLane(nonLaneRoutes({ reviews: [review("code-owner")] }), cfg).description, NL_FAIL);
+  }
+});
+
+test("non-lane: a lane-bot PR without Closes #N fails as today", () => {
+  const d = evalNonLane(nonLaneRoutes({ author: { login: BOT, type: "Bot" }, reviews: [review("code-owner")] }));
+  assert.deepEqual([d.state, d.description], ["failure", NL_FAIL]);
+});
+
+test("non-lane: an issue-12-x branch by a human without Closes #N fails as today", () => {
+  const d = evalNonLane(nonLaneRoutes({ ref: "issue-12-x", reviews: [review("code-owner")] }));
+  assert.deepEqual([d.state, d.description], ["failure", NL_FAIL]);
+});
+
+test("edge: non-lane: an unreadable CODEOWNERS or reviews call waits, never passes", () => {
+  const routes = nonLaneRoutes({ author: { login: "code-owner", type: "User" } });
+  const noOwners = teamCheckout(null, () => evaluatePr(fakeApi(routes).api, "o/r", 5, nonLaneCfg(true)));
+  assert.equal(noOwners.state, "pending");
+  delete routes["repos/o/r/pulls/5/reviews"];
+  assert.equal(evalNonLane({ ...routes, "repos/o/r/pulls/5": { ...JSON.parse(JSON.stringify(routes["repos/o/r/pulls/5"])), user: { login: "collab", type: "User" } } }).state, "pending");
+});
+
+test("non-lane merge_group: carry re-decides the same as evaluatePr", () => {
+  const cfg = nonLaneCfg(true);
+  for (const reviews of [[], [review("code-owner")]]) {
+    const direct = evalNonLane(nonLaneRoutes({ reviews }));
+    const queued = teamCheckout(OWNERS, () => carry(fakeApi(nonLaneRoutes({ reviews })).api, "o/r", NL_QUEUE_REF, "b".repeat(40), cfg));
+    assert.equal(queued.state, direct.state === "success" ? "success" : "failure");
+    assert.equal(queued.description, direct.description);
+  }
+  const own = nonLaneRoutes({ author: { login: "code-owner", type: "User" } });
+  assert.equal(teamCheckout(OWNERS, () => carry(fakeApi(own).api, "o/r", NL_QUEUE_REF, "b".repeat(40), cfg)).state, "success");
+});

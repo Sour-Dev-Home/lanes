@@ -1575,6 +1575,17 @@ test("compileConfig reads dependabot.actionBumps: false when absent, a boolean o
   }
 });
 
+test("compileConfig reads gate.nonLanePrs: false when absent, a boolean only (ADR 0034)", () => {
+  const base = { requiredChecks: ["verify"], paths: { skip: [], contract: [], sensitive: [], ui: [] } };
+  assert.equal(compileConfig(base).gate.nonLanePrs, false);
+  assert.equal(compileConfig({ ...base, gate: {} }).gate.nonLanePrs, false);
+  assert.equal(compileConfig({ ...base, gate: { nonLanePrs: true } }).gate.nonLanePrs, true);
+  assert.equal(compileConfig({ ...base, gate: { nonLanePrs: false } }).gate.nonLanePrs, false);
+  for (const bad of ["true", 1, 0, null, [], {}]) {
+    assert.throws(() => compileConfig({ ...base, gate: { nonLanePrs: bad } }), /lanes\.config\.json: gate\.nonLanePrs/, String(bad));
+  }
+});
+
 const DSHA_A = "a".repeat(40);
 const DSHA_B = "b".repeat(40);
 const DSHA_C = "c".repeat(40);

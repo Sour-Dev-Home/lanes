@@ -154,7 +154,10 @@ export function compileConfig(raw, codeownersText = undefined) {
   // ADR 0032 part 1: the opt-in switch for the Dependabot action-bump path. Absent is false; any non-boolean is a typo.
   const actionBumps = raw.dependabot?.actionBumps === undefined ? false : raw.dependabot.actionBumps;
   if (typeof actionBumps !== "boolean") throw new Error("lanes.config.json: dependabot.actionBumps must be a boolean");
-  const withDependabot = { ...config, dependabot: { actionBumps } };
+  // ADR 0034 part 1: the opt-in switch for non-lane PRs. Absent is false; any non-boolean is a typo.
+  const nonLanePrs = raw.gate?.nonLanePrs === undefined ? false : raw.gate.nonLanePrs;
+  if (typeof nonLanePrs !== "boolean") throw new Error("lanes.config.json: gate.nonLanePrs must be a boolean");
+  const withDependabot = { ...config, dependabot: { actionBumps }, gate: { nonLanePrs } };
   return identity === undefined ? withDependabot : { ...withDependabot, identity };
 }
 
@@ -1386,7 +1389,7 @@ export function gateDecision(inputs) {
 }
 
 // `outsideScope` (#635) is the PR's changed files its issue's Scope "In" and Interface contract do not cover.
-function decideGate({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, nativeApproval = null, pendingHeadHashes = undefined, dependabotFiles = null }) {
+function decideGate({ prBody, issueLabels, issueState, issueAuthorCanWrite, issueIsPr, headRef, headSha, files, statuses, verdicts, config, adrs = [], interfaceContract = "", reused = null, blockers = NO_BLOCKERS, nativeApproval = null, pendingHeadHashes = undefined, dependabotFiles = null, prAuthor = undefined, codeOwners = undefined }) {
   const fail = (description, stage = "contract") => ({ state: "failure", description, stage });
   // ADR 0032 part 3: a Dependabot action re-pin skips the issue, template and reviewer checks but never the owner.
   // After the module-map check and before "Closes #N"; the map check is repeated here so every other order is today's.
@@ -1398,6 +1401,17 @@ function decideGate({ prBody, issueLabels, issueState, issueAuthorCanWrite, issu
   }
   const labels = Array.isArray(issueLabels) ? issueLabels : [];
   const pr = parsePrBody(prBody);
+  // ADR 0034 part 1: a non-lane PR (no "Closes #N", not the lane bot's, not on an issue-N- branch) skips the issue,
+  // template, tier and reviewer checks and passes on a code owner's review or a code owner's authorship.
+  if (config.gate?.nonLanePrs === true && pr.closes === null && !isLaneBot(config.identity, { login: prAuthor }) && !/^issue-\d+-/.test(headRef ?? "")) {
+    if (nativeApproval?.approved === true) {
+      return { state: "success", description: `approved by code owner${typeof nativeApproval.by === "string" ? ` @${nativeApproval.by}` : ""} (non-lane PR)`, stage: "ready" };
+    }
+    if (typeof prAuthor === "string" && prAuthor !== "" && Array.isArray(codeOwners) && codeOwners.includes(prAuthor)) {
+      return { state: "success", description: `authored by code owner @${prAuthor} (non-lane PR)`, stage: "ready" };
+    }
+    return { state: "pending", description: "waiting for a code-owner review in GitHub (non-lane PR)", stage: "owner" };
+  }
   if (pr.closes === null) return fail("PR body must say 'Closes #N' for its task issue");
   if (pr.duplicates.length > 0) return fail(`PR template sections repeated: ${pr.duplicates.join(", ")}`);
   const mapProblem = moduleMapProblem(config);
