@@ -83,6 +83,61 @@ test("an unknown flag exits 2 naming it with the usage, and writes nothing", () 
   assert.deepEqual([get(target, "a.txt"), get(target, "lanes.lock.json")], before);
 });
 
+// #772: upgrade appends the lines lanes needs to an existing .gitignore.
+const upgradeWith = (ignore, args = []) => {
+  const { source, target, manifest } = fixture();
+  if (ignore !== undefined) put(target, ".gitignore", ignore);
+  const o = out();
+  const code = main([target, ...args], {}, { source, manifest, print: o.print });
+  return { code, source, target, manifest, lines: o.lines };
+};
+
+test("#772: the dry run lists the gitignore line it would add and writes nothing", () => {
+  const { code, target, lines } = upgradeWith("dist/\n");
+  assert.equal(code, 0);
+  assert.ok(lines.includes("gitignore add .lanes/"));
+  assert.equal(get(target, ".gitignore"), "dist/\n");
+});
+
+test("#772: --apply appends the line once under a lanes comment and a re-run is idempotent", () => {
+  const first = upgradeWith("dist/\n", ["--apply"]);
+  assert.equal(first.code, 0);
+  assert.ok(first.lines.includes("gitignore .lanes/"));
+  assert.equal(get(first.target, ".gitignore"), "dist/\n# lanes\n.lanes/\n");
+  const again = out();
+  assert.equal(main([first.target, "--apply"], {}, { source: first.source, manifest: first.manifest, print: again.print }), 0);
+  assert.equal(get(first.target, ".gitignore"), "dist/\n# lanes\n.lanes/\n");
+  assert.ok(!again.lines.some((l) => l.startsWith("gitignore")));
+});
+
+test("#772: a .gitignore with the line, or with /.lanes/, is byte-identical after --apply and lists nothing", () => {
+  for (const text of ["dist/\n.lanes/\n", "dist/\n/.lanes/", ".lanes\r\n"]) {
+    const { code, target, lines } = upgradeWith(text, ["--apply"]);
+    assert.equal(code, 0);
+    assert.equal(get(target, ".gitignore"), text);
+    assert.ok(!lines.some((l) => l.startsWith("gitignore")));
+  }
+});
+
+test("#772: a target without .gitignore gets none created when the manifest does not ship one", () => {
+  const { code, target } = upgradeWith(undefined, ["--apply"]);
+  assert.equal(code, 0);
+  assert.equal(existsSync(path.join(target, ".gitignore")), false);
+});
+
+test("edge: #772 a .gitignore that is a link to a file outside the target is never written through", (t) => {
+  const { source, target, manifest } = fixture();
+  const outside = tmp();
+  put(outside, "ig", "x\n");
+  try {
+    symlinkSync(path.join(outside, "ig"), path.join(target, ".gitignore"));
+  } catch {
+    return t.skip("symlinks not permitted here");
+  }
+  assert.equal(main([target, "--apply"], {}, { source, manifest, print: out().print }), 2);
+  assert.equal(get(outside, "ig"), "x\n");
+});
+
 test("main without --apply prints the plan and writes nothing", () => {
   const { source, target } = fixture();
   const before = [get(target, "a.txt"), get(target, "lanes.lock.json"), get(target, "lanes.config.json")];

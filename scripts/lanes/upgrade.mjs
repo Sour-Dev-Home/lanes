@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { MANIFEST, starterConfig } from "./install.mjs";
+import { ensureGitignoreLines, MANIFEST, missingGitignoreLines, starterConfig } from "./install.mjs";
 
 const LOCK = "lanes.lock.json";
 const CONFIG = "lanes.config.json";
@@ -142,6 +142,12 @@ function keepsGuardHook(target, plan) {
   }
 }
 
+/** `target`, after checking its .gitignore does not resolve outside it (a link there is never written through). */
+function safeGitignoreTarget(target) {
+  safePath(target, ".gitignore");
+  return target;
+}
+
 const USAGE = "usage: upgrade.mjs <target-dir> [--apply]: the target must be an existing directory";
 
 export function main(argv, env = process.env, { source = path.join(HERE, "..", ".."), manifest = MANIFEST, print = console.log } = {}) {
@@ -167,12 +173,14 @@ export function main(argv, env = process.env, { source = path.join(HERE, "..", "
   try {
     const plan = planUpgrade(source, target, manifest);
     for (const { file, action } of plan) print(`${action} ${file}`);
+    for (const line of missingGitignoreLines(safeGitignoreTarget(target))) print(`gitignore add ${line}`);
     if (keepsGuardHook(target, plan)) print(GUARD_NOTICE);
     if (!flags.includes("--apply")) {
       print("Nothing written. Run again with --apply to perform this plan.");
       return 0;
     }
     for (const key of applyUpgrade(source, target, plan)) print(`config ${key}`);
+    for (const line of ensureGitignoreLines(safeGitignoreTarget(target))) print(`gitignore ${line}`);
     print(`Upgraded: ${LOCK} rewritten.`);
     return 0;
   } catch (e) {

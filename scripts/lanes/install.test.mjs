@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { install, MANIFEST, publicFromArgs, repoIsPublic, starterConfig } from "./install.mjs";
+import { ensureGitignoreLines, GITIGNORE_LINES, install, MANIFEST, missingGitignoreLines, publicFromArgs, repoIsPublic, starterConfig } from "./install.mjs";
 
 test("every manifest file exists in this repo", () => {
   for (const f of MANIFEST) assert.ok(existsSync(f), f);
@@ -307,6 +307,81 @@ test("install copies the manifest and never overwrites without force", () => {
   assert.equal(readFileSync(path.join(target, "lanes.config.json"), "utf8"), "{}");
   assert.ok(existsSync(path.join(target, "scripts/lanes/gate.mjs")));
   assert.deepEqual(install(".", target, { force: true }).skipped, ["lanes.config.json"]); // #747: never overwritten, --force included
+});
+
+// #772: install makes sure the target's .gitignore holds the lines lanes needs.
+const gitignoreTarget = (text) => {
+  const target = mkdtempSync(path.join(tmpdir(), "lanes-772-"));
+  if (text !== undefined) writeFileSync(path.join(target, ".gitignore"), text);
+  return target;
+};
+const readIgnore = (target) => readFileSync(path.join(target, ".gitignore"), "utf8");
+function ensureAfter(text) {
+  const target = gitignoreTarget(text);
+  ensureGitignoreLines(target);
+  return readIgnore(target);
+}
+
+test("#772: GITIGNORE_LINES is the one list of required lines and holds .lanes/", () => {
+  assert.deepEqual(GITIGNORE_LINES, [".lanes/"]);
+});
+
+test("#772: a target without .gitignore gets lanes' file, which holds every required line", () => {
+  const target = gitignoreTarget();
+  const r = install(".", target, {});
+  assert.ok(r.copied.includes(".gitignore"));
+  assert.deepEqual(r.gitignore, []);
+  assert.equal(readIgnore(target), readFileSync(".gitignore", "utf8"));
+  for (const l of GITIGNORE_LINES) assert.ok(readIgnore(target).split("\n").includes(l));
+});
+
+test("#772: a .gitignore lacking the line gets it once, under a lanes comment, and nothing else changes", () => {
+  const target = gitignoreTarget("node_modules/\ndist/\n");
+  const r = install(".", target, {});
+  assert.deepEqual(r.gitignore, [".lanes/"]);
+  assert.ok(r.skipped.includes(".gitignore"));
+  assert.equal(readIgnore(target), "node_modules/\ndist/\n# lanes\n.lanes/\n");
+});
+
+test("#772: a .gitignore holding the line is byte-identical after install", () => {
+  const text = "dist/\n.lanes/\r\n# mine";
+  const target = gitignoreTarget(text);
+  assert.deepEqual(install(".", target, {}).gitignore, []);
+  assert.equal(readIgnore(target), text);
+});
+
+test("#772: /.lanes/, .lanes and /.lanes count as present and are not duplicated", () => {
+  for (const line of ["/.lanes/", ".lanes", "/.lanes"]) {
+    const text = `a\n${line}\n`;
+    const target = gitignoreTarget(text);
+    assert.deepEqual(install(".", target, {}).gitignore, [], line);
+    assert.equal(readIgnore(target), text);
+  }
+});
+
+test("#772: a second install changes nothing (idempotent)", () => {
+  const target = gitignoreTarget("dist/\n");
+  install(".", target, {});
+  const once = readIgnore(target);
+  assert.deepEqual(install(".", target, {}).gitignore, []);
+  assert.equal(readIgnore(target), once);
+});
+
+test("edge: #772 a file without a final newline gets one before the comment, and CRLF is kept", () => {
+  assert.equal(ensureAfter("dist/"), "dist/\n# lanes\n.lanes/\n");
+  assert.equal(ensureAfter("dist/\r\nbuild/\r\n"), "dist/\r\nbuild/\r\n# lanes\r\n.lanes/\r\n");
+});
+
+test("edge: #772 an empty .gitignore gets the comment and line; a commented-out .lanes/ does not count", () => {
+  assert.equal(ensureAfter(""), "# lanes\n.lanes/\n");
+  assert.equal(ensureAfter("# .lanes/\n"), "# .lanes/\n# lanes\n.lanes/\n");
+});
+
+test("edge: #772 no .gitignore means nothing missing and nothing written", () => {
+  const target = gitignoreTarget();
+  assert.deepEqual(missingGitignoreLines(target), []);
+  assert.deepEqual(ensureGitignoreLines(target), []);
+  assert.equal(existsSync(path.join(target, ".gitignore")), false);
 });
 
 // #747: install writes a starter config for the target, never lanes' own.
