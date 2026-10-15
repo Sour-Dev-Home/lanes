@@ -121,6 +121,32 @@ export function starterConfig(lanesConfig) {
   return { requiredChecks, paths };
 }
 
+/** The lines lanes needs in an adopter's .gitignore (#772): the queue's own files must never make the checkout look dirty. */
+export const GITIGNORE_LINES = [".lanes/"];
+const GITIGNORE_COMMENT = "# lanes";
+
+const ignoreKey = (line) => line.trim().replace(/^\//, "").replace(/\/$/, "");
+
+/** The GITIGNORE_LINES an existing target .gitignore lacks (`/.lanes/` and `.lanes` count as `.lanes/`); none when it has no .gitignore. */
+export function missingGitignoreLines(target) {
+  const file = path.join(target, ".gitignore");
+  if (!existsSync(file)) return [];
+  const have = new Set(readFileSync(file, "utf8").split(/\r?\n/).map(ignoreKey));
+  return GITIGNORE_LINES.filter((l) => !have.has(ignoreKey(l)));
+}
+
+/** Appends the missing lines under one comment line and changes nothing else in the file. @returns {string[]} the lines added */
+export function ensureGitignoreLines(target) {
+  const missing = missingGitignoreLines(target);
+  if (!missing.length) return missing;
+  const file = path.join(target, ".gitignore");
+  const text = readFileSync(file, "utf8");
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const lead = text === "" || text.endsWith("\n") ? "" : eol;
+  writeFileSync(file, `${text}${lead}${[GITIGNORE_COMMENT, ...missing].join(eol)}${eol}`);
+  return missing;
+}
+
 /**
  * Copies MANIFEST into `target`. Unless `isPublic`, the dashboard workflow is copied as `dashboard.yml.disabled`, which
  * GitHub ignores; renaming it turns the dashboard on. An existing `dashboard.yml` is never replaced by a disabled copy.
@@ -159,9 +185,11 @@ export function install(source, target, { force = false, isPublic = false } = {}
     copied.push(dest);
     if (off) disabled.push(rel);
   }
+  // After the copy, so the lock's hash of a copied .gitignore is the file as lanes wrote it; a kept file is not in the lock.
   const lockPath = path.join(target, LOCK);
   if (force || !existsSync(lockPath)) writeLock(source, target, copied, lockPath);
-  return { copied, skipped, disabled };
+  const gitignore = ensureGitignoreLines(target);
+  return { copied, skipped, disabled, gitignore };
 }
 
 /** lanes.lock.json (contracts/lanes-lock.schema.json): the version and the sha256 of each file written, never the lock or the config. */
@@ -197,6 +225,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (!target) throw new Error("usage: install.mjs <target-dir> [--force] [--public|--private]");
   const r = install(".", target, { force: process.argv.includes("--force"), isPublic: publicFromArgs([target, ...process.argv.slice(3)]) });
   console.log(`copied ${r.copied.length}, kept ${r.skipped.length} existing${r.skipped.length ? `: ${r.skipped.join(", ")}` : ""}`);
+  if (r.gitignore.length) console.log(`added to .gitignore: ${r.gitignore.join(", ")}`);
   if (r.disabled.length) console.log("The dashboard workflow is disabled (the repository is private or unknown); rename dashboard.yml.disabled to enable it. Pages sites are public.");
   console.log("Next: edit lanes.config.json paths for your layout, add `setup` and `preflight` npm scripts, then run setup-repo.mjs (owner).");
 }
