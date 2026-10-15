@@ -413,6 +413,12 @@ function scanFences(text) {
 const CODE_OPEN = "";
 const CODE_CLOSE = "";
 
+// CommonMark HTML blocks of the kind that end at a closing tag, not at a blank line.
+const RAW_BLOCK_OPEN = /^ {0,3}<(?:pre|script|style|textarea)(?:[ \t>]|$)/i;
+const RAW_BLOCK_CLOSE = /<\/(?:pre|script|style|textarea)>/i;
+// CommonMark's open tag: a name, attributes (unquoted, single- or double-quoted values), then `>` or `/>`.
+const INLINE_OPEN_TAG = /<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>/y;
+
 /**
  * One left-to-right pass over `src`: fenced blocks and inline code spans are swapped for placeholders (GitHub renders
  * their `<!--` and `-->` as text), a comment is dropped at the first `<!--` outside code, and an unclosed comment drops
@@ -431,15 +437,24 @@ function maskCodeAndStripFirstPass(src) {
   // only hide more, never expose a comment GitHub hides. So a fence is masked only when it is a top-level fence that
   // closes, and nothing is masked inside what may be an HTML block (a line starting with `<`, until a blank line).
   let htmlBlock = false;
+  let rawBlock = false;
   let prevBlank = true;
   let afterFence = false;
   while (i < src.length) {
     if (i === 0 || src[i - 1] === "\n") {
       const lineEnd = src.indexOf("\n", i) === -1 ? src.length : src.indexOf("\n", i);
       const line = src.slice(i, lineEnd);
-      if (line.trim() === "") htmlBlock = false;
       // A leading comment does not start an HTML block (its markup, if any, follows it on the line).
-      else if (/^ {0,3}<(?!!--)[A-Za-z/!?]/.test(line.replace(/^( {0,3})(?:<!--.*?-->[ \t]*)+/, "$1"))) htmlBlock = true;
+      const lead = line.replace(/^( {0,3})(?:<!--.*?-->[ \t]*)+/, "$1");
+      if (rawBlock) {
+        // pre, script, style and textarea blocks end at their closing tag, never at a blank line.
+        htmlBlock = true;
+        if (RAW_BLOCK_CLOSE.test(line)) rawBlock = false;
+      } else if (line.trim() === "") htmlBlock = false;
+      else if (/^ {0,3}<(?!!--)[A-Za-z/!?]/.test(lead)) {
+        htmlBlock = true;
+        rawBlock = RAW_BLOCK_OPEN.test(lead) && !RAW_BLOCK_CLOSE.test(lead);
+      }
       const opener = line.match(/^(`{3,}|~{3,})/);
       // CommonMark: a backtick fence's info string holds no backtick, so such a line is text with a code span in it.
       if (opener && !htmlBlock && (prevBlank || afterFence) && !(opener[1][0] === "`" && line.slice(opener[0].length).includes("`"))) {
@@ -477,6 +492,23 @@ function maskCodeAndStripFirstPass(src) {
       out += src.slice(i, i + 2);
       i += 2;
       continue;
+    }
+    if (src[i] === "\\" && src[i + 1] === "<" && /[A-Za-z]/.test(src[i + 2] ?? "")) {
+      // An escaped `<` starts no tag, so a backtick later in it is still a span opener.
+      out += src.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (src[i] === "<") {
+      // CommonMark binds an inline tag and a code span equally tightly and the one that starts first wins, so a backtick
+      // inside a complete tag (an attribute value) is part of the tag, not a span opener.
+      INLINE_OPEN_TAG.lastIndex = i;
+      const tag = INLINE_OPEN_TAG.exec(src);
+      if (tag && tag[0].includes("`")) {
+        out += tag[0];
+        i += tag[0].length;
+        continue;
+      }
     }
     if (src[i] === "`" && !htmlBlock) {
       let k = 1;
