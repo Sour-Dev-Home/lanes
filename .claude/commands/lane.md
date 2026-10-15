@@ -100,7 +100,8 @@ nothing on GitHub (the identity may be wrong there).
     `accessibility-checklist.md`. Run `node scripts/lanes/lessons.mjs --paths <the issue's Scope paths>` and give its
     output to the test-hunter and security reviewer with their checklists, as known patterns to look for.
 4c. Already built: when every acceptance criterion is already met on `origin/main`, the lane comments the evidence
-    (each criterion with the file, test or commit that meets it), then removes the `ready` label and adds
+    (each criterion with the file, test or commit that meets it), the comment's first line starting `Already met:`
+    (which `/status` reads), then removes the `ready` label and adds
     `needs-owner`, and stops without a worktree change or PR. It never closes the issue: the owner closes or rewrites
     it. It runs `gh label create needs-owner` (description "A lane stopped and needs the owner; see its last comment")
     only if it is missing. Notify `lanes #$ARGUMENTS: already met: close or rewrite it`.
