@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ensureGitignoreLines, GITIGNORE_LINES, install, MANIFEST, missingGitignoreLines, publicFromArgs, repoIsPublic, starterConfig } from "./install.mjs";
+import { ensureGitignoreLines, GITIGNORE_LINES, install, MANIFEST, missingGitignoreLines, OPTIONAL, publicFromArgs, readInstallSkip, repoIsPublic, starterConfig } from "./install.mjs";
 
 test("every manifest file exists in this repo", () => {
   for (const f of MANIFEST) assert.ok(existsSync(f), f);
@@ -607,4 +607,79 @@ test("edge: #645 install copies the control workflow byte for byte, live even fo
   } finally {
     rmSync(target, { recursive: true, force: true });
   }
+});
+
+test("#782: OPTIONAL names the two workflows an adopter may leave out", () => {
+  assert.deepEqual(OPTIONAL, [".github/workflows/security.yml", ".github/workflows/dashboard.yml"]);
+  for (const f of OPTIONAL) assert.ok(MANIFEST.includes(f), f);
+});
+
+const withSkip = (skip) => {
+  const target = mkdtempSync(path.join(tmpdir(), "lanes-skip-"));
+  writeFileSync(path.join(target, "lanes.config.json"), JSON.stringify({ install: { skip } }));
+  return target;
+};
+
+test("#782: install does not copy a file listed in install.skip, and copies the rest", () => {
+  const target = withSkip([".github/workflows/security.yml"]);
+  try {
+    const r = install(".", target);
+    assert.ok(!existsSync(path.join(target, ".github/workflows/security.yml")));
+    assert.deepEqual(r.optedOut, [".github/workflows/security.yml"]);
+    assert.ok(existsSync(path.join(target, ".github/workflows/lanes-gate.yml")));
+    assert.ok(!(".github/workflows/security.yml" in JSON.parse(readFileSync(path.join(target, "lanes.lock.json"), "utf8")).files));
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test("#782: skipping dashboard.yml leaves out its .disabled copy too", () => {
+  const target = withSkip([".github/workflows/dashboard.yml"]);
+  try {
+    install(".", target);
+    assert.ok(!existsSync(path.join(target, ".github/workflows/dashboard.yml.disabled")));
+    assert.ok(!existsSync(path.join(target, ".github/workflows/dashboard.yml")));
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test("#782: a non-optional entry or a non-list value stops install naming it and copies nothing", () => {
+  for (const skip of [["README.md"], [".github/workflows/lanes-gate.yml"], "security.yml", [7], { a: 1 }]) {
+    const target = withSkip(skip);
+    try {
+      assert.throws(() => install(".", target), /install\.skip/);
+      assert.deepEqual(readdirSync(target), ["lanes.config.json"], JSON.stringify(skip));
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  }
+  const target = withSkip(["nope.yml"]);
+  try {
+    assert.throws(() => install(".", target), /nope\.yml/);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test("edge: no config, bad JSON, no install key or an empty list skips nothing", () => {
+  const bare = mkdtempSync(path.join(tmpdir(), "lanes-skip-"));
+  try {
+    assert.deepEqual(readInstallSkip(bare), []);
+    writeFileSync(path.join(bare, "lanes.config.json"), "{ not json");
+    assert.deepEqual(readInstallSkip(bare), []);
+    writeFileSync(path.join(bare, "lanes.config.json"), "{}");
+    assert.deepEqual(readInstallSkip(bare), []);
+    writeFileSync(path.join(bare, "lanes.config.json"), JSON.stringify({ install: { skip: [] } }));
+    assert.deepEqual(readInstallSkip(bare), []);
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+test("#782: starterConfig turns on gate.nonLanePrs, and this repo's own config is unchanged", () => {
+  const own = JSON.parse(readFileSync("lanes.config.json", "utf8"));
+  assert.deepEqual(starterConfig(own).gate, { nonLanePrs: true });
+  assert.notDeepEqual(own.gate, { nonLanePrs: true });
+  assert.deepEqual(Object.keys(starterConfig(own)), ["requiredChecks", "paths", "gate"]);
 });

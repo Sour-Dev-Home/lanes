@@ -170,7 +170,7 @@ test("--apply adds only the starter's missing top-level keys, each reported, non
   const { source, target } = fixture();
   const o = out();
   main([target, "--apply"], {}, { source, manifest: ["lanes.config.json"], print: o.print });
-  assert.deepEqual(JSON.parse(get(target, "lanes.config.json")), { keep: "mine", requiredChecks: ["ci"], paths: { sensitive: ["a"] } });
+  assert.deepEqual(JSON.parse(get(target, "lanes.config.json")), { keep: "mine", requiredChecks: ["ci"], paths: { sensitive: ["a"] }, gate: { nonLanePrs: true } });
   assert.ok(o.lines.includes("config requiredChecks"));
   assert.ok(o.lines.includes("config paths"));
   assert.ok(!o.lines.includes("config keep"));
@@ -180,21 +180,21 @@ test("--apply on a starter config adds no identity, modules, metrics, health, bu
   const { source, target } = fixture();
   put(target, "lanes.config.json", JSON.stringify({ requiredChecks: ["mine"], paths: {} }));
   main([target, "--apply"], {}, { source, manifest: [], print: () => {} });
-  assert.deepEqual(JSON.parse(get(target, "lanes.config.json")), { requiredChecks: ["mine"], paths: {} });
+  assert.deepEqual(JSON.parse(get(target, "lanes.config.json")), { requiredChecks: ["mine"], paths: {}, gate: { nonLanePrs: true } });
 });
 
 test("--apply keeps a target's own identity and never adds the source's other keys", () => {
   const { source, target } = fixture();
   put(target, "lanes.config.json", JSON.stringify({ identity: { app: { id: 99 } } }));
   main([target, "--apply"], {}, { source, manifest: [], print: () => {} });
-  assert.deepEqual(JSON.parse(get(target, "lanes.config.json")), { identity: { app: { id: 99 } }, requiredChecks: ["ci"], paths: { sensitive: ["a"] } });
+  assert.deepEqual(JSON.parse(get(target, "lanes.config.json")), { identity: { app: { id: 99 } }, requiredChecks: ["ci"], paths: { sensitive: ["a"] }, gate: { nonLanePrs: true } });
 });
 
 test("--apply with no missing config key leaves lanes.config.json byte for byte", () => {
   const { source, target } = fixture();
-  put(target, "lanes.config.json", '{"keep":1,  "requiredChecks":1,"paths":2}');
+  put(target, "lanes.config.json", '{"keep":1,  "requiredChecks":1,"paths":2,"gate":{"nonLanePrs":false}}');
   main([target, "--apply"], {}, { source, manifest: [], print: () => {} });
-  assert.equal(get(target, "lanes.config.json"), '{"keep":1,  "requiredChecks":1,"paths":2}');
+  assert.equal(get(target, "lanes.config.json"), '{"keep":1,  "requiredChecks":1,"paths":2,"gate":{"nonLanePrs":false}}');
 });
 
 test("edge: --apply with a target without lanes.config.json creates nothing and does not crash", () => {
@@ -310,9 +310,80 @@ test("a managed file that is itself a link to a file outside the target is never
 
 test("edge: a config key the source has and the target has as null is not re-added", () => {
   const { source, target } = fixture();
-  put(target, "lanes.config.json", '{"keep":null,"requiredChecks":null,"paths":null}');
+  put(target, "lanes.config.json", '{"keep":null,"requiredChecks":null,"paths":null,"gate":null}');
   main([target, "--apply"], {}, { source, manifest: [], print: () => {} });
-  assert.equal(get(target, "lanes.config.json"), '{"keep":null,"requiredChecks":null,"paths":null}');
+  assert.equal(get(target, "lanes.config.json"), '{"keep":null,"requiredChecks":null,"paths":null,"gate":null}');
+});
+
+test("#782: --apply adds gate.nonLanePrs once and a re-run, or an adopter's own gate, is never overwritten", () => {
+  const { source, target } = fixture();
+  const run = () => main([target, "--apply"], {}, { source, manifest: [], print: () => {} });
+  run();
+  assert.deepEqual(JSON.parse(get(target, "lanes.config.json")).gate, { nonLanePrs: true });
+  const once = get(target, "lanes.config.json");
+  run();
+  assert.equal(get(target, "lanes.config.json"), once);
+  put(target, "lanes.config.json", JSON.stringify({ gate: { nonLanePrs: false, other: 1 } }));
+  run();
+  assert.deepEqual(JSON.parse(get(target, "lanes.config.json")).gate, { nonLanePrs: false, other: 1 });
+});
+
+const SEC = ".github/workflows/security.yml";
+const skipFixture = (skip, { installed = true } = {}) => {
+  const f = fixture({ manifest: [SEC, "a.txt", "lanes.config.json"], lockFiles: installed ? { [SEC]: sha("old sec"), "a.txt": sha("old a") } : { "a.txt": sha("old a") } });
+  put(f.target, "lanes.config.json", JSON.stringify({ install: { skip } }));
+  if (installed) put(f.target, SEC, "old sec");
+  return f;
+};
+
+test("#782: a file in install.skip is planned as skipped, never add or overwrite, and --apply leaves it absent", () => {
+  const { source, target, manifest } = skipFixture([SEC], { installed: false });
+  const plan = planUpgrade(source, target, manifest);
+  assert.equal(plan.find((p) => p.file === SEC).action, "skipped by install.skip");
+  const o = out();
+  assert.equal(main([target, "--apply"], {}, { source, manifest, print: o.print }), 0);
+  assert.ok(!existsSync(path.join(target, SEC)));
+  assert.ok(o.lines.includes(`skipped by install.skip ${SEC}`));
+  assert.ok(!(SEC in JSON.parse(get(target, "lanes.lock.json")).files));
+  assert.equal(get(target, "a.txt"), "source a.txt");
+});
+
+test("#782: skipping a file the adopter already has leaves their copy untouched", () => {
+  const { source, target, manifest } = skipFixture([SEC]);
+  main([target, "--apply"], {}, { source, manifest, print: () => {} });
+  assert.equal(get(target, SEC), "old sec");
+});
+
+test("#782: skipping security.yml says the adopter's own job must be named security; skipping nothing says nothing", () => {
+  const a = skipFixture([SEC], { installed: false });
+  const o = out();
+  main([a.target], {}, { source: a.source, manifest: a.manifest, print: o.print });
+  assert.ok(o.lines.some((l) => l.includes("named `security`") && l.includes("requiredChecks")));
+  const b = skipFixture([], { installed: false });
+  const p = out();
+  main([b.target], {}, { source: b.source, manifest: b.manifest, print: p.print });
+  assert.ok(!p.lines.some((l) => l.includes("named `security`")));
+});
+
+test("#782: an invalid install.skip entry stops before any write, in a dry run and with --apply", () => {
+  for (const skip of [["README.md"], "security.yml", [1], {}]) {
+    const { source, target, manifest } = skipFixture(skip, { installed: false });
+    const lockBefore = get(target, "lanes.lock.json");
+    for (const argv of [[target], [target, "--apply"]]) {
+      const o = out();
+      assert.equal(main(argv, {}, { source, manifest, print: o.print }), 2, JSON.stringify(skip));
+      assert.ok(o.lines.join("\n").includes("install.skip"));
+    }
+    assert.equal(get(target, "lanes.lock.json"), lockBefore);
+    assert.ok(!existsSync(path.join(target, SEC)));
+    assert.equal(get(target, "a.txt"), "old a");
+  }
+});
+
+test("edge: an unreadable target config is no skip list", () => {
+  const { source, target, manifest } = skipFixture([SEC], { installed: false });
+  put(target, "lanes.config.json", "{ not json");
+  assert.equal(planUpgrade(source, target, manifest).find((p) => p.file === SEC).action, "add");
 });
 
 test("readLock returns the parsed lock for a valid file", () => {
