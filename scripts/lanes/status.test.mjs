@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { TEAM_REQUIRED_MESSAGE } from "./lib.mjs";
 import { cleanableCount, planCleanup } from "./cleanup.mjs";
-import { sessionPhase, prStage, formatAge, gateDescriptions, gateSince, idleLaneSession, laneBranches, laneSessions, laneWorktree, worktreeUnsaved, liveLanes, loadLaneBranches, loadSessions, mergeGroupFailures, mergeQueueEntries, queueRemovals, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, trustedRollups, waitingApprovals } from "./status.mjs";
+import { sessionPhase, prStage, formatAge, gateDescriptions, gateSince, idleLaneSession, laneBranches, laneSessions, laneWorktree, worktreeUnsaved, liveLanes, loadLaneBranches, loadOwnerComments, loadSessions, ownerWait, mergeGroupFailures, mergeQueueEntries, queueRemovals, idleLanes, readBudget, render, renderWaiting, stalledItems, startsReport, stalledLanes, summarize, trustedRollups, waitingApprovals } from "./status.mjs";
 
 const body = (needs = "nothing") => `Closes #1\n## What changed\nx\n## Contract changes\nnone\n## Tests added\nx\n## Reviewer results\nx\n## Needs the owner\n${needs}\n## Not done\nnothing`;
 const gate = (state, description) => ({ __typename: "StatusContext", context: "lanes/gate", state, description });
@@ -658,8 +658,66 @@ test("#571: edge: worktreeUnsaved reads nothing for a session whose cwd is not a
 const ALREADY_MET = "close it or rewrite it";
 const needsOwner = (n, ...more) => ({ ...issue(n), labels: [{ name: "needs-owner" }, ...more.map((name) => ({ name }))] });
 
+// #775: the newest comment says why. Only the configured lane bot's `Already met:` / `Lane stopped:` count.
+const BOT = { profile: "team", app: { id: 1, installationId: 2, botLogin: "lanes[bot]" } };
+const botSays = (body) => [{ author: { login: "lanes[bot]", type: "Bot" }, body }];
+const metComments = new Map([[60, botSays("Already met: every criterion is on main.\n- 1: a.mjs")]]);
+const wait = (n, ownerComments) => summarize({ prs: [], issues: [needsOwner(n)], merged: [], sessions: new Map(), team: { owners: [], identity: BOT }, ownerComments }).waitingOnOwner.map((i) => [i.stage, i.note]);
+
+test("#775: a lane bot comment starting Already met: shows [already met]", () => {
+  assert.deepEqual(wait(60, metComments), [["already met", ALREADY_MET]]);
+});
+
+test("#775: a lane bot comment starting Lane stopped: shows [lane stopped] with the rest of its first line", () => {
+  assert.deepEqual(wait(60, new Map([[60, botSays("Lane stopped: Scope needs a.mjs\nthe cause, then the next step")]])), [["lane stopped", "Scope needs a.mjs"]]);
+});
+
+test("#775: any other newest comment, or none, shows [needs owner] see the issue", () => {
+  const generic = [["needs owner", "see the issue"]];
+  assert.deepEqual(wait(60, new Map([[60, botSays("hello")]])), generic);
+  assert.deepEqual(wait(60, new Map([[60, []]])), generic);
+  assert.deepEqual(wait(60, new Map()), generic);
+});
+
+test("#775: only the newest comment counts", () => {
+  assert.deepEqual(wait(60, new Map([[60, [...botSays("Already met: x"), ...botSays("Lane stopped: later")]]])), [["lane stopped", "later"]]);
+  assert.deepEqual(wait(60, new Map([[60, [...botSays("Already met: x"), { author: { login: "boss" }, body: "thinking" }]]])), [["needs owner", "see the issue"]]);
+});
+
+test("#775: edge: a non-bot comment starting Already met: or Lane stopped: is the generic stage", () => {
+  for (const body of ["Already met: yes", "Lane stopped: no"]) {
+    assert.deepEqual(wait(60, new Map([[60, [{ author: { login: "boss", type: "User" }, body }]]])), [["needs owner", "see the issue"]]);
+    assert.deepEqual(wait(60, new Map([[60, [{ author: { login: "other[bot]", type: "Bot" }, body }]]])), [["needs owner", "see the issue"]]);
+  }
+});
+
+test("#775: edge: with no team identity no comment counts, and control characters are dropped from the reason", () => {
+  assert.deepEqual(ownerWait(metComments.get(60), undefined), { stage: "needs owner", note: "see the issue" });
+  assert.deepEqual(ownerWait(botSays("Lane stopped: a\u001b[31mb"), BOT), { stage: "lane stopped", note: "a[31mb" });
+});
+
+test("#775: an unreadable comment list gives [needs owner], never already met", () => {
+  const run = () => {
+    throw new Error("boom");
+  };
+  const loaded = loadOwnerComments([needsOwner(60), issue(61)], run);
+  assert.deepEqual([...loaded], [[60, null]]);
+  assert.deepEqual(wait(60, loaded), [["needs owner", "see the issue"]]);
+  const garbled = loadOwnerComments([needsOwner(60)], () => "not json\n");
+  assert.equal(garbled.get(60), null);
+});
+
+test("#775: loadOwnerComments parses one JSON object per line for needs-owner issues only", () => {
+  const calls = [];
+  const run = (args) => (calls.push(args), '{"author":{"login":"lanes[bot]","type":"Bot"},"body":"Already met: x"}\n');
+  const loaded = loadOwnerComments([needsOwner(60), issue(61)], run);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].join(" "), /issues\/60\/comments/);
+  assert.deepEqual(wait(60, loaded), [["already met", ALREADY_MET]]);
+});
+
 test("an open issue labelled needs-owner is WAITING ON YOU as [already met]", () => {
-  const s = summarize({ prs: [], issues: [needsOwner(60), issue(61)], merged: [], sessions: new Map() });
+  const s = summarize({ prs: [], issues: [needsOwner(60), issue(61)], merged: [], sessions: new Map(), team: { owners: [], identity: BOT }, ownerComments: metComments });
   assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage, i.note]), [[60, "already met", ALREADY_MET]]);
   assert.match(render(s, "24h"), /WAITING ON YOU \(1\)\n  #60 \[already met\] issue 60 — close it or rewrite it\n/);
 });
@@ -675,7 +733,7 @@ test("edge: an issue without needs-owner, ready or not, is never listed as alrea
 });
 
 test("edge: a needs-owner issue that still has a lane branch is listed once as already met, not also as stopped", () => {
-  const s = summarize({ prs: [], issues: [needsOwner(60, "ready")], merged: [], sessions: new Map(), laneBranches: branches(60) });
+  const s = summarize({ prs: [], issues: [needsOwner(60, "ready")], merged: [], sessions: new Map(), laneBranches: branches(60), team: { owners: [], identity: BOT }, ownerComments: metComments });
   assert.deepEqual(s.waitingOnOwner.map((i) => [i.number, i.stage]), [[60, "already met"]]);
   assert.deepEqual(s.inFlight, []);
 });

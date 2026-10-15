@@ -583,6 +583,10 @@ test("lane.md step 4c: criteria all met on origin/main are commented with eviden
   assert.match(step, /stops without a worktree change or PR/);
 });
 
+test("lane.md step 4c: the evidence comment starts with `Already met:` (#775)", () => {
+  assert.match(laneAlreadyMet(), /the comment's first line starting `Already met:`/);
+});
+
 test("edge: lane.md step 4c creates needs-owner with gh label create only when it is missing, and never closes the issue", () => {
   const step = laneAlreadyMet();
   assert.match(step, /`gh label create needs-owner`[^.]*only if it is missing/);
