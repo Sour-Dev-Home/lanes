@@ -327,6 +327,36 @@ for (const [name, opts] of [
   });
 }
 
+// ADR 0034 (#781): the code-owner rule alone or split into the owner-review ruleset; an `always` bypass never counts
+const OWNER_REVIEW = { ...RULE, bypass_actors: [{ actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "pull_request" }] };
+test("repoChecks: the split owner-review ruleset (admin bypass in pull_request mode) passes", () => {
+  assert.equal(byName(checks(ghFake({ detail: OWNER_REVIEW })), "ruleset").pass, true);
+});
+
+test("repoChecks: the single ruleset with the code-owner rule and an empty bypass list passes", () => {
+  assert.equal(byName(checks(ghFake({ detail: { ...RULE, bypass_actors: [] } })), "ruleset").pass, true);
+});
+
+test("repoChecks: a code-owner ruleset with a bypass actor in always mode never counts", () => {
+  const detail = { ...RULE, bypass_actors: [{ actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" }] };
+  const c = byName(checks(ghFake({ detail })), "ruleset");
+  assert.equal(c.pass, false);
+  assert.equal(c.fix.link, `https://github.com/${REPO}/settings/rules/new?target=branch`);
+});
+
+test("edge: an always-mode bypass among several actors disqualifies the ruleset, and a later valid ruleset still passes", () => {
+  const bad = { ...RULE, bypass_actors: [{ bypass_mode: "pull_request" }, { bypass_mode: "always" }] };
+  assert.equal(byName(checks(ghFake({ detail: bad })), "ruleset").pass, false);
+  const run = (cmd, args) => {
+    const p = args[1];
+    if (p === `repos/${REPO}/rulesets`) return { status: 0, stdout: JSON.stringify([{ id: 7 }, { id: 8 }]) };
+    if (p === `repos/${REPO}/rulesets/7`) return { status: 0, stdout: JSON.stringify(bad) };
+    if (p === `repos/${REPO}/rulesets/8`) return { status: 0, stdout: JSON.stringify(OWNER_REVIEW) };
+    return { status: 1, stdout: "" };
+  };
+  assert.equal(byName(checks({ run }), "ruleset").pass, true);
+});
+
 // #762: a disabled code-owner ruleset is missing, and the fix is the link that enables it
 test("repoChecks: a disabled code-owner ruleset is not done and links to enable it", () => {
   const c = byName(checks(ghFake({ detail: { ...RULE, enforcement: "disabled" } })), "ruleset");

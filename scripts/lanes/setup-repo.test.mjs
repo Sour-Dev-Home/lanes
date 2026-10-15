@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildRuleset, existingEnforcement, findRulesetId, gateOnDefaultBranch, LABELS, readRequiredChecks, startingEnforcement } from "./setup-repo.mjs";
+import { buildOwnerReviewRuleset, buildRuleset, configureRulesets, existingEnforcement, findRulesetId, gateOnDefaultBranch, LABELS, readNonLanePrs, readRequiredChecks, startingEnforcement } from "./setup-repo.mjs";
 
 // #747: setup-repo runs before CODEOWNERS exists, so it reads requiredChecks without loadConfig's owner-path check.
 function withConfig(text, fn) {
@@ -110,4 +110,110 @@ test("an existing ruleset's enforcement is read, never overridden", () => {
   assert.equal(existingEnforcement([{ id: 7, name: "main (lanes)", enforcement: "evaluate" }], "main (lanes)"), "evaluate");
   assert.equal(existingEnforcement([], "main (lanes)"), undefined);
   assert.equal(existingEnforcement(undefined, "main (lanes)"), undefined);
+});
+
+// ADR 0034 part 2 (#781): the split rulesets
+const CHECKS = ["verify", "security", "lanes/gate"];
+function rulesetGh({ rulesets = [], gateFile = true } = {}) {
+  const calls = [];
+  const fn = (args, input) => {
+    calls.push({ args, body: input ? JSON.parse(input) : undefined });
+    if (args.length === 2 && args[1] === "repos/me/proj/rulesets") return JSON.stringify(rulesets);
+    if (String(args[1]).includes("contents/.github/workflows/lanes-gate.yml")) {
+      if (gateFile) return "{}";
+      throw Object.assign(new Error("HTTP 404 Not Found"), { stderr: "HTTP 404" });
+    }
+    return "{}";
+  };
+  return { fn, writes: () => calls.filter((c) => c.body) };
+}
+
+test("the owner-review ruleset holds only the code-owner pull_request rule and an admin bypass in pull_request mode", () => {
+  const r = buildOwnerReviewRuleset();
+  assert.equal(r.name, "main (lanes owner review)");
+  assert.equal(r.rules.length, 1);
+  assert.equal(r.rules[0].type, "pull_request");
+  assert.equal(r.rules[0].parameters.require_code_owner_review, true);
+  assert.equal(r.rules[0].parameters.required_approving_review_count, 0);
+  assert.deepEqual(r.bypass_actors, [{ actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "pull_request" }]);
+  assert.equal(buildOwnerReviewRuleset("disabled").enforcement, "disabled");
+});
+
+test("key on and no lanes ruleset: both rulesets are created, main (lanes) with no bypass and no code-owner rule", () => {
+  const g = rulesetGh();
+  const lines = [];
+  configureRulesets(g.fn, "me/proj", CHECKS, true, (l) => lines.push(l));
+  const w = g.writes();
+  assert.deepEqual(w.map((c) => c.body.name), ["main (lanes)", "main (lanes owner review)"]);
+  assert.ok(w.every((c) => c.args.includes("POST")));
+  assert.deepEqual(w[0].body.bypass_actors, []);
+  assert.equal(w[0].body.rules.find((r) => r.type === "pull_request").parameters.require_code_owner_review, false);
+  assert.ok(w[0].body.rules.some((r) => r.type === "merge_queue") && w[0].body.rules.some((r) => r.type === "code_scanning"));
+  assert.equal(w[0].body.enforcement, "active");
+  assert.equal(w[1].body.enforcement, "active");
+  assert.match(lines.join("\n"), /created \(active\)/);
+});
+
+test("key on follows #762: both start disabled until lanes-gate.yml is on the default branch", () => {
+  const g = rulesetGh({ gateFile: false });
+  configureRulesets(g.fn, "me/proj", CHECKS, true, () => {});
+  assert.deepEqual(g.writes().map((c) => c.body.enforcement), ["disabled", "disabled"]);
+});
+
+test("key off: today's single ruleset is created, unchanged", () => {
+  const g = rulesetGh();
+  configureRulesets(g.fn, "me/proj", CHECKS, false, () => {});
+  assert.deepEqual(g.writes().map((c) => c.body), [buildRuleset(CHECKS, "active")]);
+});
+
+test("key off: an existing single ruleset is updated by id, keeping its enforcement", () => {
+  const g = rulesetGh({ rulesets: [{ id: 9, name: "main (lanes)", enforcement: "disabled" }] });
+  configureRulesets(g.fn, "me/proj", CHECKS, false, () => {});
+  const w = g.writes();
+  assert.equal(w.length, 1);
+  assert.ok(w[0].args.includes("PUT") && w[0].args.includes("repos/me/proj/rulesets/9"));
+  assert.equal(w[0].body.enforcement, "disabled");
+});
+
+test("key on and only the single ruleset exists: nothing is written, the two manual steps print with links, no throw", () => {
+  const g = rulesetGh({ rulesets: [{ id: 9, name: "main (lanes)", enforcement: "active" }] });
+  const lines = [];
+  configureRulesets(g.fn, "me/proj", CHECKS, true, (l) => lines.push(l));
+  assert.equal(g.writes().length, 0);
+  const out = lines.join("\n");
+  assert.match(out, /1\. open https:\/\/github\.com\/me\/proj\/settings\/rules\/9 and remove the code-owner rule/);
+  assert.match(out, /2\. create "main \(lanes owner review\)" at https:\/\/github\.com\/me\/proj\/settings\/rules\/new\?target=branch/);
+});
+
+test("edge: key on with both rulesets present changes nothing and prints no steps", () => {
+  const g = rulesetGh({ rulesets: [{ id: 9, name: "main (lanes)" }, { id: 10, name: "main (lanes owner review)" }] });
+  const lines = [];
+  configureRulesets(g.fn, "me/proj", CHECKS, true, (l) => lines.push(l));
+  assert.equal(g.writes().length, 0);
+  assert.doesNotMatch(lines.join("\n"), /manual steps/);
+});
+
+test("edge: key on with only the owner-review ruleset creates nothing and says to create main (lanes)", () => {
+  const g = rulesetGh({ rulesets: [{ id: 10, name: "main (lanes owner review)" }] });
+  const lines = [];
+  configureRulesets(g.fn, "me/proj", CHECKS, true, (l) => lines.push(l));
+  assert.equal(g.writes().length, 0);
+  assert.match(lines.join("\n"), /"main \(lanes\)" does not/);
+  assert.doesNotMatch(lines.join("\n"), /remove the code-owner rule/);
+});
+
+test("readNonLanePrs is true only for a literal true; a missing file, bad JSON or other value is false", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "nlp-"));
+  try {
+    const f = path.join(dir, "c.json");
+    writeFileSync(f, JSON.stringify({ gate: { nonLanePrs: true } }));
+    assert.equal(readNonLanePrs(f), true);
+    writeFileSync(f, JSON.stringify({ gate: { nonLanePrs: "true" } }));
+    assert.equal(readNonLanePrs(f), false);
+    writeFileSync(f, "{");
+    assert.equal(readNonLanePrs(f), false);
+    assert.equal(readNonLanePrs(path.join(dir, "none.json")), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

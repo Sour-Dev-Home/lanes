@@ -143,6 +143,15 @@ test("app-installed, codeowners and code-owner-ruleset reuse repoChecks: missing
   assert.match(noOwnerReview["code-owner-ruleset"].fix.link, /settings\/rules/);
 });
 
+test("code-owner-ruleset (ADR 0034, #781): the split owner-review ruleset passes and an always-mode bypass fails", () => {
+  const key = "api repos/acme/widgets/rulesets/7";
+  const rules = [{ type: "pull_request", parameters: { require_code_owner_review: true } }];
+  const split = byName(setupState(world({ routes: { [key]: ok({ enforcement: "active", rules, bypass_actors: [{ actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "pull_request" }] }) } }).deps));
+  assert.equal(split["code-owner-ruleset"].done, true);
+  const always = byName(setupState(world({ routes: { [key]: ok({ enforcement: "active", rules, bypass_actors: [{ actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" }] }) } }).deps));
+  assert.equal(always["code-owner-ruleset"].done, false);
+});
+
 test("app-installed passes the injected home to the installation lookup, so the key is read from there (#757)", () => {
   const seen = [];
   const w = world();

@@ -115,19 +115,87 @@ export function gateOnDefaultBranch(ghFn, repo) {
 /** The enforcement a new lanes ruleset starts with: disabled until lanes-gate is on the default branch. */
 export const startingEnforcement = (ghFn, repo) => (gateOnDefaultBranch(ghFn, repo) ? "active" : "disabled");
 
+export const OWNER_REVIEW_RULESET = "main (lanes owner review)";
+
+/** GitHub's built-in repository role "Admin" (role id 5). */
+const ADMIN_ROLE_ID = 5;
+
+/**
+ * ADR 0034 part 2: the code-owner rule alone, with repository admins able to bypass it in `pull_request` mode (the owner's
+ * bypass box on an own PR). Never `always`: a bypass of this ruleset leaves `main (lanes)`'s checks and merge queue in force.
+ */
+export function buildOwnerReviewRuleset(enforcement = "active") {
+  return {
+    name: OWNER_REVIEW_RULESET,
+    target: "branch",
+    enforcement,
+    conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
+    bypass_actors: [{ actor_id: ADMIN_ROLE_ID, actor_type: "RepositoryRole", bypass_mode: "pull_request" }],
+    rules: [
+      {
+        type: "pull_request",
+        parameters: {
+          required_approving_review_count: 0,
+          dismiss_stale_reviews_on_push: false,
+          require_code_owner_review: true,
+          require_last_push_approval: false,
+          required_review_thread_resolution: false,
+          allowed_merge_methods: ["squash"],
+        },
+      },
+    ],
+  };
+}
+
+/** A raw read of `gate.nonLanePrs` (true only for a literal true), like readRequiredChecks: init runs this before the config is validated. */
+export function readNonLanePrs(file = "lanes.config.json") {
+  try {
+    return JSON.parse(readFileSync(file, "utf8"))?.gate?.nonLanePrs === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Creates or updates the lanes rulesets and returns the log lines. Key off: today's single ruleset, updated by id. Key on: with
+ * neither ruleset present, both are created; an existing lanes ruleset is never changed, and the manual steps are printed (ADR 0034).
+ */
+export function configureRulesets(ghFn, repo, checks, nonLanePrs, log = console.log) {
+  const existing = JSON.parse(ghFn(["api", `repos/${repo}/rulesets`]));
+  const name = buildRuleset(checks).name;
+  const id = findRulesetId(existing, name);
+  const post = (body) => ghFn(["api", `repos/${repo}/rulesets`, "-X", "POST", "--input", "-"], JSON.stringify(body));
+  if (!nonLanePrs) {
+    const enforcement = id ? (existingEnforcement(existing, name) ?? "active") : startingEnforcement(ghFn, repo);
+    const body = buildRuleset(checks, enforcement);
+    if (id) ghFn(["api", `repos/${repo}/rulesets/${id}`, "-X", "PUT", "--input", "-"], JSON.stringify(body));
+    else post(body);
+    log(`configured ${repo}: settings, ${LABELS.length} labels, CodeQL, ruleset ${id ? "updated" : "created"} (${enforcement})`);
+    return;
+  }
+  const ownerId = findRulesetId(existing, OWNER_REVIEW_RULESET);
+  const base = `https://github.com/${repo}/settings/rules`;
+  if (id === null && ownerId === null) {
+    const enforcement = startingEnforcement(ghFn, repo);
+    post(buildRuleset(checks, enforcement));
+    post(buildOwnerReviewRuleset(enforcement));
+    log(`configured ${repo}: settings, ${LABELS.length} labels, CodeQL, rulesets "${name}" and "${OWNER_REVIEW_RULESET}" created (${enforcement})`);
+    return;
+  }
+  log(`configured ${repo}: settings, ${LABELS.length} labels, CodeQL; an existing lanes ruleset is never changed`);
+  if (id !== null && ownerId !== null) return;
+  log(`gate.nonLanePrs is on, so the code-owner rule belongs in its own ruleset (ADR 0034). Two manual steps:`);
+  if (id !== null) log(`  1. open ${base}/${id} and remove the code-owner rule ("Require review from Code Owners") from "${name}"`);
+  if (ownerId === null) log(`  2. create "${OWNER_REVIEW_RULESET}" at ${base}/new?target=branch: default branch, only "Require a pull request" with "Require review from Code Owners" and 0 approvals, bypass list: the Repository admin role, mode "For pull requests only"`);
+  if (id === null) log(`  "${OWNER_REVIEW_RULESET}" exists but "${name}" does not: create it at ${base}/new?target=branch (docs/USING.md lists its rules)`);
+}
+
 function main(repo = process.argv[2]) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo ?? "")) throw new Error("usage: setup-repo.mjs <owner/repo>");
   gh(["repo", "edit", repo, "--enable-auto-merge", "--delete-branch-on-merge", "--enable-squash-merge", "--enable-merge-commit=false", "--enable-rebase-merge=false"]);
   for (const l of LABELS) gh(["label", "create", l.name, "-R", repo, "--color", l.color, "--description", l.description, "--force"]);
   gh(["api", `repos/${repo}/code-scanning/default-setup`, "-X", "PATCH", "-f", "state=configured"]);
-  const checks = readRequiredChecks();
-  const existing = JSON.parse(gh(["api", `repos/${repo}/rulesets`]));
-  const id = findRulesetId(existing, buildRuleset(checks).name);
-  const enforcement = id ? (existingEnforcement(existing, buildRuleset(checks).name) ?? "active") : startingEnforcement(gh, repo);
-  const ruleset = buildRuleset(checks, enforcement);
-  if (id) gh(["api", `repos/${repo}/rulesets/${id}`, "-X", "PUT", "--input", "-"], JSON.stringify(ruleset));
-  else gh(["api", `repos/${repo}/rulesets`, "-X", "POST", "--input", "-"], JSON.stringify(ruleset));
-  console.log(`configured ${repo}: settings, ${LABELS.length} labels, CodeQL, ruleset ${id ? "updated" : "created"} (${enforcement})`);
+  configureRulesets(gh, repo, readRequiredChecks(), readNonLanePrs());
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main();

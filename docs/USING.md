@@ -409,6 +409,24 @@ What it asks you to do:
   to Active. `init` reports the ruleset as missing, and exits non-zero, until you do; re-running `setup-repo.mjs`
   never changes an existing ruleset's enforcement.
 
+### Your own PRs with `gate.nonLanePrs` (ADR 0034)
+
+With `gate.nonLanePrs` true in `lanes.config.json`, `setup-repo.mjs` creates two rulesets instead of one:
+`main (lanes)` (required checks, merge queue and code scanning, no bypass actor and no code-owner rule) and
+`main (lanes owner review)` (only the pull-request rule with **Require review from Code Owners**, 0 approvals, and the
+repository **Admin** role as a bypass actor in **For pull requests only** mode). Both start disabled until
+`lanes-gate.yml` is on the default branch. A repository that already has `main (lanes)` is never changed: `setup-repo`
+prints two steps with their settings links, which you do in GitHub: remove the code-owner rule from `main (lanes)`, then
+create `main (lanes owner review)` with the settings above. `identity-check` accepts either shape, and never counts a
+ruleset whose bypass actor is in `always` mode.
+
+To merge your own non-lane PR, tick GitHub's **bypass** box for the owner-review ruleset only. `lanes/gate`, the required
+checks and the merge queue still apply. Never give a bypass actor `always` mode.
+
+Verify it once on an adopter before relying on it (ADR 0034 part 2): open a PR as the owner, tick the bypass box for
+`main (lanes owner review)` only, and confirm GitHub still holds the merge until `main (lanes)`'s checks pass and
+the merge queue takes it. If the bypass lifts the other ruleset's checks, remove the bypass actor and report it.
+
 ### What init runs
 
 The steps, by hand, are below; each is what `init.mjs` runs when its item is missing. A new project:
