@@ -1341,6 +1341,13 @@ test("#774: edge: watchdogLine skips a run still in progress and judges the newe
   assert.equal(watchdogLine(() => [running]), "");
 });
 
+test("#774: edge: watchdogLine prints no run url that is not a plain github.com link", async () => {
+  const { watchdogLine } = await import("./status.mjs");
+  for (const url of ["http://github.com/o/r/actions/runs/1", "https://evil.example/o/r", "https://github.com/o/r/\u001b[31m", "https://github.com/o\\r", "https://github.com/o/../x", "https://github.com/o/r/%5c", "https://github.com/" + "a".repeat(201), undefined]) {
+    assert.equal(watchdogLine(() => [run("failure", "2026-10-14T06:00:00Z", { url })]), "", String(url).slice(0, 30));
+  }
+});
+
 test("#774: render prints the watchdog line, and nothing when there is none", () => {
   const empty = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
   assert.match(render({ ...empty, watchdog: "health watchdog: failing since 2026-10-13T06:00 (u)" }, "24h"), /\n\nhealth watchdog: failing since 2026-10-13T06:00 \(u\)$/);

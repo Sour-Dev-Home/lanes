@@ -474,7 +474,7 @@ export function render(summary, sinceLabel) {
     block("BLOCKED", summary.blocked ?? []),
     block(`MERGED, last ${sinceLabel}`, summary.merged, false),
     ...(summary.watchdog ? [summary.watchdog] : []),
-    ...(summary.sessionsUnavailable ?[`(background sessions unavailable: ${summary.sessionsUnavailable})`] : []),
+    ...(summary.sessionsUnavailable ? [`(background sessions unavailable: ${summary.sessionsUnavailable})`] : []),
     ...(summary.branchesUnavailable ? [`(stopped lanes may be missing: ${summary.branchesUnavailable})`] : []),
     // Merged lanes, closed-issue lanes and empty orphan folders all count, so the line names none of them alone.
     ...(summary.toCleanUp > 0 ? [`${summary.toCleanUp} ${summary.toCleanUp === 1 ? "lane or folder" : "lanes or folders"} to clean up: node scripts/lanes/cleanup.mjs`] : []),
@@ -566,7 +566,9 @@ export function watchdogLine(run = gh) {
       streak.push(r);
     }
     const since = Date.parse(streak[streak.length - 1].createdAt);
-    if (!Number.isFinite(since) || typeof done[0].url !== "string") return "";
+    // The url is printed to a terminal: only a plain github.com link, no control character, backslash or dot segment.
+    const url = done[0].url;
+    if (!Number.isFinite(since) || typeof url !== "string" || !/^https:\/\/github\.com\/[A-Za-z0-9._\/-]{1,200}$/.test(url) || /(^|\/)\.\.?(\/|$)/.test(url)) return "";
     return `health watchdog: failing since ${new Date(since).toISOString().slice(0, 16)} (${done[0].url})`;
   } catch {
     return "";
