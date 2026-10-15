@@ -349,9 +349,10 @@ function inCheckout(adrFiles, fn, options = {}) {
   const root = mkdtempSync(join(tmpdir(), "lanes-gate-"));
   const prev = process.cwd();
   try {
-    writeFileSync(join(root, "lanes.config.json"), JSON.stringify({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] }, ...(identity === undefined ? {} : { identity }) }));
-    mkdirSync(join(root, "docs", "adr"), { recursive: true });
-    for (const [name, text] of Object.entries(adrFiles)) writeFileSync(join(root, "docs", "adr", name), text);
+    writeFileSync(join(root, "lanes.config.json"), JSON.stringify({ requiredChecks: ["verify"], paths: { skip: ["^docs/"], contract: [], sensitive: [], ui: [] }, ...(identity === undefined ? {} : { identity }), ...(options.adr === undefined ? {} : { adr: options.adr }) }));
+    const adrDir = join(root, ...(options.adr?.dir ?? "docs/adr").split("/"));
+    mkdirSync(adrDir, { recursive: true });
+    for (const [name, text] of Object.entries(adrFiles)) writeFileSync(join(adrDir, name), text);
     // ADR 0031: under team a checkout with no owner paths is an error, so it holds a CODEOWNERS unless a test sets one.
     const codeowners = "codeowners" in options ? options.codeowners : "/owner-only/ @SourE-dev\n";
     if (codeowners !== undefined) {
@@ -408,6 +409,32 @@ test("main requires the advisor for an ADR the PR itself adds, though it is not 
   const { api, posted } = fakeApi(routes);
   inCheckout({}, () => main({ REPO: "o/r", EVENT_NAME: "pull_request_target", PR_NUMBER: "5" }, api));
   assert.equal(descriptionOf(posted[0]), WAIT_ADVISOR);
+});
+
+// #770 (ADR 0034 part 3): the ADR folder comes from adr.dir.
+test("main with adr.dir: an edit under the custom folder requires the architecture-advisor, docs/adr/ no longer does", () => {
+  const adr = { dir: "decisions" };
+  const routes = fullRoutes([verdictComment("maintainer", "test-hunter")]);
+  routes["repos/o/r/pulls/5/files"] = "decisions/0003-src.md\nsrc/a.ts\n";
+  const { api, posted } = fakeApi(routes);
+  inCheckout({ "0003-src.md": adrMd(3, "src/") }, () => main(PR_EVENT, api), { adr });
+  assert.equal(descriptionOf(posted[0]), WAIT_ADVISOR);
+  const other = fullRoutes([verdictComment("maintainer", "test-hunter")]);
+  other["repos/o/r/pulls/5/files"] = "docs/adr/0003-src.md\nsrc/a.ts\n";
+  const second = fakeApi(other);
+  inCheckout({}, () => main(PR_EVENT, second.api), { adr });
+  assert.equal(descriptionOf(second.posted[0]), "unattended-eligible (tier:full), reviews in");
+});
+
+test("edge: main with an adr.dir of ADRs without Governs raises no error and governs nothing", () => {
+  const { api, posted } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
+  inCheckout({ "0001-plain.md": "# 0001: Plain\n\nStatus: accepted\n\nJust prose.\n", "notes.md": "no title" }, () => main(PR_EVENT, api), { adr: { dir: "decisions" } });
+  assert.equal(descriptionOf(posted[0]), "unattended-eligible (tier:full), reviews in");
+});
+
+test("edge: main with an invalid adr.dir throws a lanes.config.json error", () => {
+  const { api } = fakeApi(fullRoutes([verdictComment("maintainer", "test-hunter")]));
+  assert.throws(() => inCheckout({}, () => main(PR_EVENT, api), { adr: { dir: "../adr" } }), /lanes\.config\.json: adr\.dir/);
 });
 
 // #613 (ADR 0025): a config whose identity is not team fails the gate closed, with the one message as the reason.
