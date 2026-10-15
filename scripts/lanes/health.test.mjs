@@ -176,6 +176,12 @@ test("stuck-pr: none when the issue is in live, the commit is recent, or the hea
   assert.deepEqual(keys(base({ prs: [lanePr()] })), [], "no heartbeat");
 });
 
+test("#774: edge: stuck-pr fires at exactly the threshold and not a minute before", () => {
+  const at = (m) => keys(stuck([lanePr({ commits: [{ committedDate: new Date(NOW - m * MIN).toISOString() }] })]));
+  assert.deepEqual(at(30), ["stuck-pr:PR 738"]);
+  assert.deepEqual(at(29), []);
+});
+
 test("stuck-pr: none for a PR in the merge queue, waiting on the owner, or not on an issue branch", () => {
   assert.deepEqual(keys(stuck([lanePr()], { reply: replyOf([], [738]) })), [], "in the merge queue");
   assert.deepEqual(keys(stuck([lanePr({ mergeable: "MERGEABLE" })])), [], "waiting on the owner");
@@ -438,17 +444,17 @@ test("an unparseable heartbeat time is absent, and a spoofed writer type is not 
 
 test("gatherInputs shapes the gh replies into evaluate's inputs", async () => {
   const { gatherInputs } = await import("./health.mjs");
-  const node = { number: 5, commits: { nodes: [{ commit: { status: { context: { createdAt: "2026-10-02T10:00:00Z" }, contexts: [{ context: "lanes/gate", state: "SUCCESS" }] } } }] } };
+  const node = { number: 5, commits: { nodes: [{ commit: { committedDate: "2026-10-02T09:00:00Z", status: { context: { createdAt: "2026-10-02T10:00:00Z" }, contexts: [{ context: "lanes/gate", state: "SUCCESS" }] } } }] } };
   const reply = { data: { repository: { pullRequests: { nodes: [node, { number: 6 }] } } } };
   const gh = (args) => {
     if (args[0] === "api") return reply;
-    if (args[0] === "pr") return [{ number: 5, url: "https://github.com/o/r/pull/5", headRefOid: "new", headRefName: "issue-5-x", mergeable: "CONFLICTING", statusCheckRollup: [], autoMergeRequest: null, commits: [{ committedDate: "2026-10-02T09:00:00Z" }], latestReviews: [{ state: "APPROVED", commit: { oid: "old" } }] }];
+    if (args[0] === "pr") return [{ number: 5, url: "https://github.com/o/r/pull/5", headRefOid: "new", headRefName: "issue-5-x", mergeable: "CONFLICTING", statusCheckRollup: [], autoMergeRequest: null, latestReviews: [{ state: "APPROVED", commit: { oid: "old" } }] }];
     if (args[0] === "repo") return { url: "https://github.com/o/r" };
     if (args[0] === "issue") return [{ number: 1, labels: [{ name: "ready" }] }, { number: 2, labels: [{ name: "ready" }, { name: "lane:running" }] }, { number: 3, labels: [{ name: "lane:running" }] }];
     return args.includes("merge_group") ? [] : [{ name: "verify", headSha: "ab", conclusion: "success", updatedAt: "t" }];
   };
   const r = gatherInputs(gh, { identity });
-  assert.deepEqual(r.prs, [{ number: 5, gateState: "SUCCESS", gateSince: Date.parse("2026-10-02T10:00:00Z"), gateDescription: undefined, url: "https://github.com/o/r/pull/5", headRefName: "issue-5-x", mergeable: "CONFLICTING", statusCheckRollup: [], autoMergeRequest: null, commits: [{ committedDate: "2026-10-02T09:00:00Z" }], approved: true, approvalStale: true }, { number: 6, gateState: null, gateSince: undefined, gateDescription: undefined }]);
+  assert.deepEqual(r.prs, [{ number: 5, gateState: "SUCCESS", gateSince: Date.parse("2026-10-02T10:00:00Z"), gateDescription: undefined, url: "https://github.com/o/r/pull/5", headRefName: "issue-5-x", mergeable: "CONFLICTING", statusCheckRollup: [], autoMergeRequest: null, commits: [{ committedDate: "2026-10-02T09:00:00Z" }], approved: true, approvalStale: true }, { number: 6, gateState: null, gateSince: undefined, gateDescription: undefined, commits: [] }]);
   assert.equal(r.repoUrl, "https://github.com/o/r");
   assert.equal(r.readyCount, 1);
   assert.equal(r.inFlightCount, 4);
@@ -456,6 +462,29 @@ test("gatherInputs shapes the gh replies into evaluate's inputs", async () => {
   assert.deepEqual(r.flakyAnnotations, []);
   assert.equal(r.identity, identity);
   assert.equal(typeof r.readLog, "function");
+});
+
+test("#774: no `gh pr list --json` field list in health.mjs names a connection field (GitHub's 500,000 node limit)", () => {
+  const source = readFileSync(new URL("./health.mjs", import.meta.url), "utf8");
+  const lists = [...source.matchAll(/"pr",\s*"list"[^\]]*?"--json",\s*"([^"]*)"/g)].map((m) => m[1].split(","));
+  assert.ok(lists.length >= 1, "the check found no gh pr list --json call to inspect");
+  for (const fields of lists) {
+    for (const connection of ["commits", "reviews", "comments", "files"]) assert.ok(!fields.includes(connection), `gh pr list requests ${connection}`);
+  }
+});
+
+test("#774: gatherInputs takes each PR's newest commit time from the per-PR GraphQL node", async () => {
+  const { gatherInputs } = await import("./health.mjs");
+  const node = { number: 5, commits: { nodes: [{ commit: { committedDate: "2026-10-02T09:00:00Z" } }] } };
+  const gh = (args) => {
+    if (args[0] === "api") return { data: { repository: { pullRequests: { nodes: [node, { number: 6, commits: { nodes: [{ commit: {} }] } }] } } } };
+    if (args[0] === "pr") return [{ number: 5, headRefName: "issue-5-x" }];
+    if (args[0] === "repo") return { url: "u" };
+    return [];
+  };
+  const prs = gatherInputs(gh, { identity }).prs;
+  assert.deepEqual(prs[0].commits, [{ committedDate: "2026-10-02T09:00:00Z" }]);
+  assert.deepEqual(prs[1].commits, [{ committedDate: undefined }]);
 });
 
 test("gatherInputs reads lanes-flaky annotations from the jobs of successful verify runs (#637)", async () => {

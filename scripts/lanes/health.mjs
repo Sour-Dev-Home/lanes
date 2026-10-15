@@ -386,13 +386,15 @@ export function gatherInputs(gh = ghJson, config = loadConfig()) {
   const descriptions = gateDescriptions(reply);
   // An approval is stale when one exists but none is on the PR's current head.
   const details = new Map();
-  for (const d of gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,url,headRefOid,latestReviews,headRefName,mergeable,statusCheckRollup,autoMergeRequest,commits"]) ?? []) {
+  for (const d of gh(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,url,headRefOid,latestReviews,headRefName,mergeable,statusCheckRollup,autoMergeRequest"]) ?? []) {
     const approved = (d.latestReviews ?? []).filter((r) => r?.state === "APPROVED").map((r) => r?.commit?.oid);
-    details.set(d.number, { url: d.url, headRefName: d.headRefName, mergeable: d.mergeable, statusCheckRollup: d.statusCheckRollup, autoMergeRequest: d.autoMergeRequest, commits: d.commits, approved: approved.length > 0, approvalStale: approved.length > 0 && !approved.includes(d.headRefOid) });
+    details.set(d.number, { url: d.url, headRefName: d.headRefName, mergeable: d.mergeable, statusCheckRollup: d.statusCheckRollup, autoMergeRequest: d.autoMergeRequest, approved: approved.length > 0, approvalStale: approved.length > 0 && !approved.includes(d.headRefOid) });
   }
   const prs = (reply?.data?.repository?.pullRequests?.nodes ?? []).map((node) => {
     const status = node.commits?.nodes?.[0]?.commit?.status;
-    return { number: node.number, gateState: status?.contexts?.find((c) => c.context === "lanes/gate")?.state ?? null, gateSince: since.get(node.number), gateDescription: descriptions.get(node.number), ...details.get(node.number) };
+    // #774: the newest commit time rides the per-PR query (`commits(last: 1)`); `gh pr list --json commits` exceeded GitHub's node limit.
+    const commits = (node.commits?.nodes ?? []).map((n) => ({ committedDate: n?.commit?.committedDate }));
+    return { number: node.number, gateState: status?.contexts?.find((c) => c.context === "lanes/gate")?.state ?? null, gateSince: since.get(node.number), gateDescription: descriptions.get(node.number), ...details.get(node.number), commits };
   });
   const issues = gh(["issue", "list", "--state", "open", "--limit", "1000", "--json", "number,labels,url"]);
   const has = (i, name) => i.labels.some((l) => l.name === name);

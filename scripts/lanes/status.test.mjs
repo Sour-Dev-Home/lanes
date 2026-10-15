@@ -1315,3 +1315,41 @@ test("#730: edge: an unknown or missing value is running, so it is never removed
     assert.equal(sessionPhase(s), "running", JSON.stringify(s));
   }
 });
+
+const run = (conclusion, createdAt, extra = {}) => ({ status: "completed", conclusion, createdAt, url: `https://github.com/o/r/actions/runs/${Date.parse(createdAt) % 1000}`, ...extra });
+
+test("#774: watchdogLine names the failing watchdog, since its first failure in the latest streak", async () => {
+  const { watchdogLine } = await import("./status.mjs");
+  const runs = [run("failure", "2026-10-14T06:00:00Z"), run("failure", "2026-10-13T06:00:00Z"), run("success", "2026-10-12T06:00:00Z"), run("failure", "2026-10-11T06:00:00Z")];
+  assert.equal(watchdogLine(() => runs), `health watchdog: failing since 2026-10-13T06:00 (${runs[0].url})`);
+});
+
+test("#774: watchdogLine is silent when the newest completed run succeeded, or the runs cannot be read", async () => {
+  const { watchdogLine } = await import("./status.mjs");
+  assert.equal(watchdogLine(() => [run("success", "2026-10-14T06:00:00Z"), run("failure", "2026-10-13T06:00:00Z")]), "");
+  assert.equal(watchdogLine(() => { throw new Error("gh failed"); }), "");
+  assert.equal(watchdogLine(() => "not json"), "");
+  assert.equal(watchdogLine(() => []), "");
+  assert.equal(watchdogLine(() => [{ status: "completed", conclusion: "failure" }]), "");
+});
+
+test("#774: edge: watchdogLine skips a run still in progress and judges the newest completed one", async () => {
+  const { watchdogLine } = await import("./status.mjs");
+  const running = { status: "in_progress", conclusion: "", createdAt: "2026-10-14T07:00:00Z", url: "https://github.com/o/r/actions/runs/9" };
+  assert.match(watchdogLine(() => [running, run("failure", "2026-10-14T06:00:00Z")]), /^health watchdog: failing since 2026-10-14T06:00 \(/);
+  assert.equal(watchdogLine(() => [running, run("success", "2026-10-14T06:00:00Z")]), "");
+  assert.equal(watchdogLine(() => [running]), "");
+});
+
+test("#774: edge: watchdogLine prints no run url that is not a plain github.com link", async () => {
+  const { watchdogLine } = await import("./status.mjs");
+  for (const url of ["http://github.com/o/r/actions/runs/1", "https://evil.example/o/r", "https://github.com/o/r/\u001b[31m", "https://github.com/o\\r", "https://github.com/o/../x", "https://github.com/o/r/%5c", "https://github.com/" + "a".repeat(201), undefined]) {
+    assert.equal(watchdogLine(() => [run("failure", "2026-10-14T06:00:00Z", { url })]), "", String(url).slice(0, 30));
+  }
+});
+
+test("#774: render prints the watchdog line, and nothing when there is none", () => {
+  const empty = { waitingOnOwner: [], inFlight: [], ready: [], blocked: [], merged: [] };
+  assert.match(render({ ...empty, watchdog: "health watchdog: failing since 2026-10-13T06:00 (u)" }, "24h"), /\n\nhealth watchdog: failing since 2026-10-13T06:00 \(u\)$/);
+  assert.doesNotMatch(render({ ...empty, watchdog: "" }, "24h"), /watchdog/);
+});

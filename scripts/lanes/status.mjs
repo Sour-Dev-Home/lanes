@@ -473,6 +473,7 @@ export function render(summary, sinceLabel) {
     block("READY TO START", summary.ready, true, "(parallel is a heuristic read from each issue's Scope and Interface contract, not a guarantee)"),
     block("BLOCKED", summary.blocked ?? []),
     block(`MERGED, last ${sinceLabel}`, summary.merged, false),
+    ...(summary.watchdog ? [summary.watchdog] : []),
     ...(summary.sessionsUnavailable ? [`(background sessions unavailable: ${summary.sessionsUnavailable})`] : []),
     ...(summary.branchesUnavailable ? [`(stopped lanes may be missing: ${summary.branchesUnavailable})`] : []),
     // Merged lanes, closed-issue lanes and empty orphan folders all count, so the line names none of them alone.
@@ -551,13 +552,36 @@ export function startsReport(text, days, now = Date.now()) {
 
 const gh = (args) => JSON.parse(execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
 
+// #774: the health watchdog (the dashboard workflow) reports nowhere when it fails, so /status does. One line when the
+// newest completed run failed, naming the first failure of that unbroken streak and the newest run; "" when it
+// succeeded or the runs cannot be read (a nicety, never an error). `run` is the injected gh.
+export function watchdogLine(run = gh) {
+  try {
+    const runs = run(["run", "list", "--workflow", "dashboard.yml", "--limit", "30", "--json", "status,conclusion,createdAt,url"]);
+    const done = (Array.isArray(runs) ? runs : []).filter((r) => r?.status === "completed");
+    if (done[0]?.conclusion !== "failure") return "";
+    const streak = [];
+    for (const r of done) {
+      if (r?.conclusion !== "failure") break;
+      streak.push(r);
+    }
+    const since = Date.parse(streak[streak.length - 1].createdAt);
+    // The url is printed to a terminal: only a plain github.com link, no control character, backslash or dot segment.
+    const url = done[0].url;
+    if (!Number.isFinite(since) || typeof url !== "string" || !/^https:\/\/github\.com\/[A-Za-z0-9._\/-]{1,200}$/.test(url) || /(^|\/)\.\.?(\/|$)/.test(url)) return "";
+    return `health watchdog: failing since ${new Date(since).toISOString().slice(0, 16)} (${done[0].url})`;
+  } catch {
+    return "";
+  }
+}
+
 // `gh pr --json` has no merge queue field and drops status descriptions, so one GraphQL call fetches both.
 // `mergeQueue` without `branch` is the default branch's queue; null when it has none. `pullRequests` matches the
 // `gh pr list` limit below. `{owner}` and `{repo}` are filled in by gh.
 export const STATUS_QUERY =
   "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ " +
   "mergeQueue { entries(first:100){ nodes { state position pullRequest { number } } } } " +
-  `pullRequests(states:OPEN,first:100){ nodes { number ${QUEUE_EVENTS} commits(last:1){ nodes { commit { status { context(name:"${GATE_CONTEXT}"){ description createdAt } contexts { context state creator { login __typename } } } } } } } } } }`;
+  `pullRequests(states:OPEN,first:100){ nodes { number ${QUEUE_EVENTS} commits(last:1){ nodes { commit { committedDate status { context(name:"${GATE_CONTEXT}"){ description createdAt } contexts { context state creator { login __typename } } } } } } } } } }`;
 
 // #390: the token budget for `--json`. A bad or unreadable lanes.config.json gives the defaults and says so in `note`;
 // unreadable agents or costs count as 0 (loadBudget notes the latter). Never throws.
@@ -656,6 +680,8 @@ async function main(argv = process.argv.slice(2)) {
     const { cleanableCount, loadCleanupInputs, planCleanup } = await import("./cleanup.mjs");
     summary.toCleanUp = cleanableCount(planCleanup(loadCleanupInputs()));
   } catch {}
+  const watchdog = watchdogLine();
+  if (watchdog) summary.watchdog = watchdog;
   console.log(argv.includes("--json") ? JSON.stringify({ version: 0, generatedAt: new Date().toISOString(), since: sinceLabel, ...summary, budget }, null, 2) : render(summary, sinceLabel));
 }
 
