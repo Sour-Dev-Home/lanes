@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureGitignoreLines, MANIFEST, missingGitignoreLines, starterConfig } from "./install.mjs";
+import { ensureGitignoreLines, MANIFEST, missingGitignoreLines, readInstallSkip, starterConfig } from "./install.mjs";
 
 const LOCK = "lanes.lock.json";
 const CONFIG = "lanes.config.json";
@@ -17,6 +17,10 @@ const SHA256 = new RegExp(schema.$defs.sha256.pattern);
 const REPO_PATH = new RegExp(schema.$defs.repoPath.pattern);
 
 class Refusal extends Error {}
+
+const SKIPPED = "skipped by install.skip";
+const SECURITY_WORKFLOW = ".github/workflows/security.yml";
+const SECURITY_NOTICE = "install.skip leaves out security.yml: your own CI job must be named `security` while requiredChecks lists it";
 
 const hashOf = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
 
@@ -67,11 +71,21 @@ function isLink(p) {
  */
 export function planUpgrade(source, target, manifest = MANIFEST) {
   const lock = readLock(target);
+  let optedOut;
+  try {
+    optedOut = readInstallSkip(target);
+  } catch (e) {
+    throw new Refusal(e.message);
+  }
   const plan = [];
   const seen = new Set();
   for (const from of manifest.filter((f) => f !== CONFIG)) {
     const file = `${from}.disabled` in lock.files && !(from in lock.files) ? `${from}.disabled` : from;
     seen.add(file);
+    if (optedOut.includes(from)) {
+      plan.push({ file, from, action: SKIPPED });
+      continue;
+    }
     const dest = safePath(target, file);
     const present = existsSync(dest);
     let action;
@@ -175,6 +189,7 @@ export function main(argv, env = process.env, { source = path.join(HERE, "..", "
     for (const { file, action } of plan) print(`${action} ${file}`);
     for (const line of missingGitignoreLines(safeGitignoreTarget(target))) print(`gitignore add ${line}`);
     if (keepsGuardHook(target, plan)) print(GUARD_NOTICE);
+    if (plan.some(({ from, action }) => from === SECURITY_WORKFLOW && action === SKIPPED)) print(SECURITY_NOTICE);
     if (!flags.includes("--apply")) {
       print("Nothing written. Run again with --apply to perform this plan.");
       return 0;

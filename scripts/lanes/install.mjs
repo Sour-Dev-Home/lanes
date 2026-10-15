@@ -118,7 +118,30 @@ const CONFIG = "lanes.config.json";
  */
 export function starterConfig(lanesConfig) {
   const { requiredChecks, paths } = structuredClone(lanesConfig);
-  return { requiredChecks, paths };
+  // ADR 0034 part 5: an adopter's PRs are not all lane PRs, so the gate passes the others on a code-owner review.
+  return { requiredChecks, paths, gate: { nonLanePrs: true } };
+}
+
+/** The shipped files an adopter may leave out with `install.skip` in lanes.config.json (ADR 0034 part 1). */
+export const OPTIONAL = [".github/workflows/security.yml", ".github/workflows/dashboard.yml"];
+
+/**
+ * The `install.skip` list of the target's lanes.config.json; empty when the file, the key or readable JSON is missing.
+ * @throws {Error} when it is not a list of strings, or names a file outside OPTIONAL: nothing is written then.
+ */
+export function readInstallSkip(target) {
+  let config;
+  try {
+    config = JSON.parse(readFileSync(path.join(target, CONFIG), "utf8"));
+  } catch {
+    return [];
+  }
+  const skip = config?.install?.skip;
+  if (skip === undefined) return [];
+  if (!Array.isArray(skip) || skip.some((s) => typeof s !== "string")) throw new Error(`${CONFIG}: install.skip must be a list of strings`);
+  const bad = skip.find((s) => !OPTIONAL.includes(s));
+  if (bad !== undefined) throw new Error(`${CONFIG}: install.skip names ${JSON.stringify(bad)}, which is not optional (optional: ${OPTIONAL.join(", ")})`);
+  return skip;
 }
 
 /** The lines lanes needs in an adopter's .gitignore (#772): the queue's own files must never make the checkout look dirty. */
@@ -156,7 +179,9 @@ export function install(source, target, { force = false, isPublic = false } = {}
   const copied = [];
   const skipped = [];
   const disabled = [];
+  const optedOut = readInstallSkip(target); // before any write: an invalid entry copies nothing
   for (const rel of MANIFEST) {
+    if (optedOut.includes(rel)) continue;
     if (rel === CONFIG) {
       // #747: never lanes' own config, and never overwritten, --force included.
       const to = path.join(target, rel);
@@ -189,7 +214,7 @@ export function install(source, target, { force = false, isPublic = false } = {}
   const lockPath = path.join(target, LOCK);
   if (force || !existsSync(lockPath)) writeLock(source, target, copied, lockPath);
   const gitignore = ensureGitignoreLines(target);
-  return { copied, skipped, disabled, gitignore };
+  return { copied, skipped, disabled, gitignore, optedOut };
 }
 
 /** lanes.lock.json (contracts/lanes-lock.schema.json): the version and the sha256 of each file written, never the lock or the config. */
@@ -223,7 +248,14 @@ export function publicFromArgs(argv, run = ghRepoView) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const target = process.argv[2];
   if (!target) throw new Error("usage: install.mjs <target-dir> [--force] [--public|--private]");
-  const r = install(".", target, { force: process.argv.includes("--force"), isPublic: publicFromArgs([target, ...process.argv.slice(3)]) });
+  let r;
+  try {
+    r = install(".", target, { force: process.argv.includes("--force"), isPublic: publicFromArgs([target, ...process.argv.slice(3)]) });
+  } catch (e) {
+    console.error(e.message);
+    process.exit(2);
+  }
+  if (r.optedOut.length) console.log(`left out by install.skip: ${r.optedOut.join(", ")}`);
   console.log(`copied ${r.copied.length}, kept ${r.skipped.length} existing${r.skipped.length ? `: ${r.skipped.join(", ")}` : ""}`);
   if (r.gitignore.length) console.log(`added to .gitignore: ${r.gitignore.join(", ")}`);
   if (r.disabled.length) console.log("The dashboard workflow is disabled (the repository is private or unknown); rename dashboard.yml.disabled to enable it. Pages sites are public.");
