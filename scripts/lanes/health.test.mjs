@@ -176,6 +176,12 @@ test("stuck-pr: none when the issue is in live, the commit is recent, or the hea
   assert.deepEqual(keys(base({ prs: [lanePr()] })), [], "no heartbeat");
 });
 
+test("#774: edge: stuck-pr fires at exactly the threshold and not a minute before", () => {
+  const at = (m) => keys(stuck([lanePr({ commits: [{ committedDate: new Date(NOW - m * MIN).toISOString() }] })]));
+  assert.deepEqual(at(30), ["stuck-pr:PR 738"]);
+  assert.deepEqual(at(29), []);
+});
+
 test("stuck-pr: none for a PR in the merge queue, waiting on the owner, or not on an issue branch", () => {
   assert.deepEqual(keys(stuck([lanePr()], { reply: replyOf([], [738]) })), [], "in the merge queue");
   assert.deepEqual(keys(stuck([lanePr({ mergeable: "MERGEABLE" })])), [], "waiting on the owner");
