@@ -197,6 +197,10 @@ export function repoChecks({ run, exists, repo, slug, appId, installationId, hom
       const detail = ghJson(run, `repos/${repo}/rulesets/${rs?.id}`);
       const rules = Array.isArray(detail?.rules) ? detail.rules : [];
       if (!rules.some((r) => r?.type === "pull_request" && r.parameters?.require_code_owner_review === true)) continue;
+      // ADR 0034: the owner-review ruleset may be bypassed per pull request; a bypass in `always` mode lets anyone push past it
+      // allowlist, fail closed: only the `pull_request` mode is accepted, and a malformed list never counts
+      const bypass = detail?.bypass_actors;
+      if (bypass !== undefined && bypass !== null && (!Array.isArray(bypass) || bypass.some((a) => a?.bypass_mode !== "pull_request"))) continue;
       if (detail?.enforcement === "active") {
         found = true;
         break;
