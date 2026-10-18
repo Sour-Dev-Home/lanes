@@ -10,9 +10,11 @@ on:
     types: [created]
 permissions: {}
 concurrency:
-  # Only bot comments (the lane's hand-overs) share a group per PR; any other commenter gets a run of its own, so a
-  # stranger's comment can never cancel the owner's pending approval.
-  group: lanes-workflow-apply-${{ github.event.issue.number }}-${{ endsWith(github.event.comment.user.login, '[bot]') && 'bot' || github.run_id }}
+  # Two rules. Only a bot comment that is a hand-over (its body starts with the hand-over heading) shares a group per PR,
+  # so a newer hand-over cancels the older pending one. Every other comment, bot or not, gets a group of its own
+  # (a run of its own), so a stranger's comment or the lane's later reviewer verdicts and notes can never cancel the
+  # owner's pending approval.
+  group: lanes-workflow-apply-${{ github.event.issue.number }}-${{ startsWith(github.event.comment.body, '### Workflow change to approve and deploy') && endsWith(github.event.comment.user.login, '[bot]') && 'bot' || github.run_id }}
   cancel-in-progress: true
 jobs:
   filter:

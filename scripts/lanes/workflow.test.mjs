@@ -1379,9 +1379,33 @@ test("lanes-workflow-apply serialises per PR and cancels an older waiting run", 
   assert.match(yml, /\n  cancel-in-progress: true/);
 });
 
-test("edge: lanes-workflow-apply gives a non-bot commenter its own group so it cannot cancel a pending approval", () => {
-  const group = /\n  group: (.*)/.exec(applyYml())[1];
-  assert.match(group, /endsWith\(github\.event\.comment\.user\.login, '\[bot\]'\) && 'bot' \|\| github\.run_id/);
+// Evaluates the workflow's group expression with the Actions functions (case-insensitive, like GitHub's) and a fake context.
+function applyGroup(login, body) {
+  const expr = /\n  group: (.*)/.exec(applyYml())[1].replace(/^\S+\$\{\{ github\.event\.issue\.number \}\}-\$\{\{ (.*) \}\}$/, "$1");
+  const startsWith = (s, p) => String(s).toLowerCase().startsWith(String(p).toLowerCase());
+  const endsWith = (s, p) => String(s).toLowerCase().endsWith(String(p).toLowerCase());
+  const github = { run_id: "RUN", event: { comment: { user: { login }, body } } };
+  return new Function("github", "startsWith", "endsWith", `return (${expr});`)(github, startsWith, endsWith);
+}
+
+test("lanes-workflow-apply shares a group per PR only between bot hand-over comments (#784)", () => {
+  const handover = "### Workflow change to approve and deploy\n\nfiles...";
+  assert.equal(applyGroup("lanes-app[bot]", handover), "bot");
+  assert.equal(applyGroup("lanes-app[bot]", "### Review: test-hunter\nverdict"), "RUN");
+  assert.equal(applyGroup("someone", "### Review: test-hunter"), "RUN");
+});
+
+test("edge: lanes-workflow-apply gives a human or a stranger posting the hand-over heading its own group (#784)", () => {
+  const handover = "### Workflow change to approve and deploy";
+  assert.equal(applyGroup("owner", handover), "RUN");
+  assert.equal(applyGroup("lanes-app[bot]", `intro\n${handover}`), "RUN");
+  assert.equal(applyGroup("lanes-app[bot]", ""), "RUN");
+});
+
+test("lanes-workflow-apply's comment above the group explains both rules (#784)", () => {
+  const block = /concurrency:\n((?:  #.*\n)+)  group:/.exec(applyYml())[1];
+  assert.match(block, /hand-over/i);
+  assert.match(block, /own group|run of its own/i);
 });
 
 test("lanes-workflow-apply pins every action to a full commit SHA, as the other workflows do", () => {
