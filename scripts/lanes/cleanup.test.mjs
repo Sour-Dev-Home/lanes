@@ -1830,6 +1830,72 @@ test("edge: a lane branch checked out in the main worktree is skipped as such, n
   assert.equal(entry.steps, undefined);
 });
 
+// #796: a lane branch whose head is already on the default branch has no commits of its own.
+test("a bare lane branch at a main commit is removed, not a leftover, when another PR is on its issue (#796)", () => {
+  const bare = { ...wt("issue-7-old"), path: null, onDefault: true };
+  for (const state of ["OPEN", "MERGED"]) {
+    const [entry] = planCleanup({ worktrees: [bare], prs: [merged("issue-7-new", { state, number: 91 })] });
+    assert.equal(entry.leftover, undefined, state);
+    assert.deepEqual(cmds(entry), ["git branch -D issue-7-old"], state);
+  }
+  const [alone] = planCleanup({ worktrees: [bare], prs: [] });
+  assert.deepEqual(cmds(alone), ["git branch -D issue-7-old"]);
+});
+
+test("a clean worktree on a branch at a main commit is removed with the other PR on its issue (#796)", () => {
+  const [entry] = planCleanup({ worktrees: [{ ...wt("issue-7-old"), onDefault: true }], prs: [merged("issue-7-new", { state: "OPEN", number: 91 })] });
+  assert.deepEqual(cmds(entry), [`git worktree remove ${ROOT}/.claude/worktrees/issue-7-old`, "git branch -D issue-7-old"]);
+});
+
+test("edge: a worktree at a main commit that is dirty, locked by a running pid or in main is kept (#796)", () => {
+  const prs = [merged("issue-7-new", { state: "OPEN", number: 91 })];
+  const dirty = planCleanup({ worktrees: [{ ...wt("issue-7-old"), onDefault: true, dirty: true }], prs })[0];
+  assert.equal(dirty.skip, "dirty worktree");
+  const unreadable = planCleanup({ worktrees: [{ ...wt("issue-7-old"), onDefault: true, dirty: null }], prs })[0];
+  assert.equal(unreadable.skip, "cannot read worktree status");
+  const locked = planCleanup({ worktrees: [{ ...wt("issue-7-old"), onDefault: true, ...lockedBy(4242, true) }], prs })[0];
+  assert.match(locked.skip, /locked by running pid 4242/);
+  const main = planCleanup({ worktrees: [{ ...wt("issue-7-old"), onDefault: true, main: true }], prs })[0];
+  assert.equal(main.skip, "checked out in the main worktree");
+  for (const e of [dirty, unreadable, locked, main]) assert.equal(e.steps, undefined);
+});
+
+test("edge: a branch with commits of its own stays a leftover with today's wording, and a working session blocks removal (#796)", () => {
+  const prs = [merged("issue-7-new", { state: "OPEN", number: 91 })];
+  for (const onDefault of [false, undefined]) {
+    const [entry] = planCleanup({ worktrees: [{ ...wt("issue-7-old"), onDefault }], prs });
+    assert.equal(entry.skip, "leftover");
+    assert.equal(render(runCleanup([entry], { run() { throw new Error("must not run"); }, stillThere: () => true })), "leftover: issue-7-old (issue #7 has PR #91 on issue-7-new); its commits are not in any PR");
+  }
+  const [working] = planCleanup({ worktrees: [{ ...wt("issue-7-old"), onDefault: true }], sessions: [session("s7", "issue-7-old", { state: "working" })], prs });
+  assert.equal(working.skip, "session still working");
+});
+
+test("edge: a lane branch with its own open PR is not removed for being at a main commit (#796)", () => {
+  const [entry] = planCleanup({ worktrees: [{ ...wt("issue-7-x"), onDefault: true }], prs: [merged("issue-7-x", { state: "OPEN" })] });
+  assert.equal(entry.skip, "not merged");
+});
+
+test("loadCleanupInputs marks a lane branch whose head is an ancestor of origin/main as onDefault (#796)", () => {
+  const run = (cmd, args) => {
+    if (cmd === "gh") return "[]";
+    if (cmd === "claude") return "[]";
+    if (args[0] === "worktree") return `worktree ${ROOT}\nHEAD ${HEAD}\nbranch refs/heads/main\n`;
+    if (args[0] === "for-each-ref") return `issue-7-a ${HEAD}\nissue-8-b ${TIP}\nissue-9-c ${"c".repeat(40)}`;
+    if (args[0] === "merge-base") {
+      assert.deepEqual(args.slice(0, 2), ["merge-base", "--is-ancestor"]);
+      assert.equal(args[3], "origin/main");
+      if (args[2] === HEAD) return "";
+      throw Object.assign(new Error(args[2] === TIP ? "not ancestor" : "bad ref"), { status: args[2] === TIP ? 1 : 128 });
+    }
+    return "";
+  };
+  const byBranch = Object.fromEntries(loadCleanupInputs(ROOT, run).worktrees.map((w) => [w.branch, w.onDefault]));
+  assert.equal(byBranch["issue-7-a"], true);
+  assert.equal(byBranch["issue-8-b"], false);
+  assert.equal(byBranch["issue-9-c"], undefined, "an unreadable answer is not a yes");
+});
+
 // #717: hand-over lanes and orphan sessions.
 const TIP = "b".repeat(40);
 const MERGED_HEAD = "c".repeat(40);

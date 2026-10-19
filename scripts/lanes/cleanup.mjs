@@ -99,6 +99,7 @@ const stillWorking = (s) => sessionPhase(s) === "running";
 //              Claude session lock is running (unknown counts as running). Non-lane worktrees are passed too, to
 //              place sessions.
 //              unpushed: how many of the branch's commits are on no remote (null when unreadable).
+//              onDefault: true when the branch head is an ancestor of the default branch (no commits of its own, #796).
 //   sessions:  background sessions in this repo, `{ id, cwd, issue, status, state, pid?, alive? }` (issue from an
 //              `issue-<N>` or `issue-<N>-…` folder; alive whether its pid is running).
 //   prs:       `{ number, state, headRefName, headRefOid }`.
@@ -148,8 +149,11 @@ export function planCleanup({ worktrees = [], sessions = [], prs = [], issues = 
     // A running lock held by one of this worktree's own idle sessions is released by stopping that session.
     const holder = lockAlive ? sessionsHere.find((s) => s.pid === pid) : undefined;
     const own = prs.filter((p) => p.headRefName === w.branch);
-    const done = laneDone(own, w.head, closedIssues.has(issue), w.treeDiffs);
-    const other = own.length === 0 && !w.main && !sessionsHere.some(stillWorking) ? otherLanePr(prs, issue, w.branch) : undefined;
+    // #796: a branch whose head is already on the default branch has no commits of its own, so another lane's PR on
+    // its issue loses nothing by removing it; it is cleaned as merged, under the same guards below.
+    const empty = own.length === 0 && w.onDefault === true;
+    const done = empty ? {} : laneDone(own, w.head, closedIssues.has(issue), w.treeDiffs);
+    const other = own.length === 0 && !empty && !w.main && !sessionsHere.some(stillWorking) ? otherLanePr(prs, issue, w.branch) : undefined;
     if (other) plan.push({ ...entry, leftover: { folder: folderOf(w), pr: other.number, branch: other.headRefName }, skip: "leftover" });
     else if (done.skip) plan.push({ ...entry, skip: done.skip });
     else if (w.main) plan.push({ ...entry, skip: "checked out in the main worktree" });
@@ -402,6 +406,17 @@ function unpushedCount(branch, sh) {
   }
 }
 
+// #796: whether `head` is already on the default branch (an ancestor of origin/main, so the branch holds no commit of
+// its own); undefined when git could not answer, which counts as no.
+function onDefaultBranch(head, sh) {
+  try {
+    sh("git", ["merge-base", "--is-ancestor", head, "origin/main"]);
+    return true;
+  } catch (err) {
+    return err.status === 1 ? false : undefined;
+  }
+}
+
 // #717: `{ [merged head]: { files } | { error } }` for each merged PR on `branch` whose head is not the branch tip:
 // `files` is how many files differ between that head and the tip (0 for the same tree), `error` the first line of
 // what git said when it could not compare. A head not in the local repository is fetched once (`pull/<N>/head`).
@@ -477,6 +492,8 @@ export function loadCleanupInputs(rootArg, run = sh) {
   const prs = JSON.parse(sh("gh", ["pr", "list", "--state", "all", "--limit", String(PR_LIMIT), "--json", "number,state,headRefName,headRefOid"]));
   for (const w of worktrees) {
     if (!LANE_BRANCH.test(w.branch ?? "") || w.main) continue;
+    const onDefault = onDefaultBranch(w.head, sh);
+    if (onDefault !== undefined) w.onDefault = onDefault;
     const treeDiffs = treeDiffsFor(w.branch, w.head, prs, sh);
     if (treeDiffs) w.treeDiffs = treeDiffs;
   }
