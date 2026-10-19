@@ -2210,6 +2210,45 @@ test("main: a failed write is said again after a write that worked, and without 
   assert.ok(plain.out.every((l) => !/heartbeat/.test(l)));
 });
 
+// #794: a 401 or 404 from the mint names the App and the key file, for the heartbeat and the owner-side steps.
+const HB_APP = { id: 5313898, installationId: 1, botLogin: "lanes-97a036[bot]" };
+test("mintExplained (#794): a 401 with the variable set names the variable", async () => {
+  const { mintExplained } = await import("./queue.mjs");
+  const mint = async () => { throw new Error("app-token: request to GitHub failed with status 401"); };
+  await assert.rejects(
+    mintExplained(mint, { app: HB_APP, keyPem: "PEM-SECRET", repo: "r", keyFile: "/k/lanes.pem", origin: "LANES_APP_KEY_FILE" }),
+    (err) => /the key at \/k\/lanes\.pem is not App lanes-97a036 \(id 5313898\)'s key: unset LANES_APP_KEY_FILE so lanes uses ~\/\.lanes\/lanes-97a036\.pem, or point it at that App's key/.test(err.message) && /came from LANES_APP_KEY_FILE/.test(err.message) && !/PEM-SECRET/.test(err.message),
+  );
+});
+test("mintExplained (#794): a 401 with the default path names the default", async () => {
+  const { mintExplained } = await import("./queue.mjs");
+  const mint = async () => { throw new Error("app-token: request to GitHub failed with status 404"); };
+  await assert.rejects(mintExplained(mint, { app: HB_APP, keyPem: "p", repo: "r", keyFile: "/h/.lanes/lanes-97a036.pem", origin: "default" }), /is not App lanes-97a036 \(id 5313898\)'s key.*the path is the default/);
+});
+test("mintExplained (#794): a success passes the mint through, another failure keeps its text", async () => {
+  const { mintExplained } = await import("./queue.mjs");
+  const seen = [];
+  const ok = await mintExplained(async (a) => (seen.push(a), { token: "t", expiresAt: "x" }), { app: HB_APP, keyPem: "p", repo: "r", keyFile: "/k", origin: "default" });
+  assert.deepEqual(ok, { token: "t", expiresAt: "x" });
+  assert.deepEqual(seen, [{ appId: 5313898, installationId: 1, keyPem: "p", repo: "r" }]);
+  await assert.rejects(mintExplained(async () => { throw new Error("app-token: request to GitHub failed with status 500"); }, { app: HB_APP, keyPem: "p", repo: "r", keyFile: "/k", origin: "default" }), /^Error: app-token: request to GitHub failed with status 500$/);
+});
+
+test("main: the key-override warning is printed once at start, and a throwing check never stops the queue (#794)", async () => {
+  const { main } = await import("./queue.mjs");
+  const run = fakeRun({ issues: [], prs: [], sessions: [] });
+  run.deps.keyWarning = () => "warning: LANES_APP_KEY_FILE overrides this repository's own key";
+  assert.equal(await main([], run.deps), 0);
+  assert.equal(run.out.filter((l) => l.includes("LANES_APP_KEY_FILE overrides")).length, 1);
+  const quiet = fakeRun({ issues: [], prs: [], sessions: [] });
+  quiet.deps.keyWarning = () => undefined;
+  assert.equal(await main([], quiet.deps), 0);
+  assert.ok(quiet.out.every((l) => !/overrides/.test(l)));
+  const broken = fakeRun({ issues: [], prs: [], sessions: [] });
+  broken.deps.keyWarning = () => { throw new Error("boom"); };
+  assert.equal(await main([], broken.deps), 0);
+});
+
 test("main: the heartbeat touches no other issue: the queue's own gh calls are unchanged", async () => {
   const { main } = await import("./queue.mjs");
   const withBeat = heartbeatRun({ issues: [], prs: [], sessions: [] });

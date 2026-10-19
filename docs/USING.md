@@ -380,8 +380,11 @@ To run this step alone, from the repository's root:
    - **The install**: if the App is not on this repository, use the printed install link.
 
 The queue finds the key at `~/.lanes/<slug>.pem` (the slug is `botLogin` without `[bot]`), so no environment
-variable is needed. Setting `LANES_APP_KEY_FILE` still overrides it. A missing key file stops the launch with a message
-naming the path.
+variable is needed. `app-setup.mjs` saves each App's key there as `~/.lanes/<slug>.pem`. Setting `LANES_APP_KEY_FILE`
+still overrides it, so leave it unset when you run lanes in more than one repository: one machine-wide value makes every
+other repository use the wrong App's key. The queue warns once at start when the variable is set and the repository's own
+key also exists. A missing key file stops the launch with a message naming the path; a key that GitHub refuses (401 or
+404) is reported as `the key at <path> is not App <slug> (id <id>)'s key`, with where the path came from.
 
 ## Adopting it in another repository
 
