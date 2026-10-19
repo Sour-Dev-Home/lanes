@@ -285,7 +285,7 @@ function prepareTeam(n, identity, deps, baseEnv) {
       team.mintInto({ issue: n, appId: identity.app.id, installationId: identity.app.installationId, repo, dir: lane.dir });
     } catch (err) {
       removeQuietly(team, lane.dir);
-      return { failed: `token mint failed: ${reason(err)}` };
+      return { failed: `token mint failed: ${mintFailureHint(reason(err), { keyFile, origin: team.keyOrigin?.(), app: identity.app })}` };
     }
     // #553: the bot's commit identity needs its user id, read with the lane's own fresh token; no id, no launch, and
     // never the owner's identity in its place.
@@ -333,6 +333,41 @@ export function resolveKeyFile({ env, identity, home }) {
   if (typeof login !== "string") return undefined;
   const slug = login.replace(/\[bot\]$/, "");
   return /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(slug) ? join(home, ".lanes", `${slug}.pem`) : undefined;
+}
+
+/**
+ * #794: where `resolveKeyFile`'s path came from: "LANES_APP_KEY_FILE" when the variable is set, else "default".
+ * @param {{ env: Record<string, string|undefined> }} o
+ */
+export function keyFileOrigin({ env }) {
+  return env.LANES_APP_KEY_FILE ? "LANES_APP_KEY_FILE" : "default";
+}
+
+/**
+ * #794: a mint that the JWT step answered with 401 or 404 means the key is not the configured App's. Returns the one
+ * line naming the App, the key path and where the path came from, or `cause` unchanged for any other failure. It
+ * prints the path only, never key content or a token.
+ * @param {string} cause the mint error's first line
+ * @param {{ keyFile?: string, origin?: string, app?: { id?: number|string, botLogin?: string } }} o
+ */
+export function mintFailureHint(cause, { keyFile, origin, app }) {
+  if (!/app-token: .*failed with status (401|404)\b/.test(String(cause))) return cause;
+  const slug = typeof app?.botLogin === "string" ? app.botLogin.replace(/\[bot\]$/, "") : "?";
+  const path = keyFile ?? `~/.lanes/${slug}.pem`;
+  const from = origin === "LANES_APP_KEY_FILE" ? "the path came from LANES_APP_KEY_FILE" : "the path is the default ~/.lanes/<slug>.pem";
+  return `the key at ${path} is not App ${slug} (id ${app?.id ?? "?"})'s key: unset LANES_APP_KEY_FILE so lanes uses ~/.lanes/${slug}.pem, or point it at that App's key (${from}; ${cause})`;
+}
+
+/**
+ * #794: a one-line warning when LANES_APP_KEY_FILE is set and the configured App's own `~/.lanes/<slug>.pem` also
+ * exists, since the variable then overrides the per-repository key. Returns undefined when there is nothing to warn about.
+ * @param {{ env: Record<string, string|undefined>, identity?: { app?: { botLogin?: string } }, home: string, exists: (p: string) => boolean }} o
+ */
+export function keyOverrideWarning({ env, identity, home, exists }) {
+  if (!env.LANES_APP_KEY_FILE) return undefined;
+  const own = resolveKeyFile({ env: { ...env, LANES_APP_KEY_FILE: "" }, identity, home });
+  if (!own || !exists(own)) return undefined;
+  return `warning: LANES_APP_KEY_FILE overrides this repository's own key at ${own}; unset it when you run lanes in more than one repository`;
 }
 
 /** How often the refresher re-mints: installation tokens last an hour (ADR 0019 part 4). */
@@ -609,6 +644,7 @@ const selfPath = fileURLToPath(import.meta.url);
 const defaultKeyFile = () => resolveKeyFile({ env: process.env, identity: readConfig()?.identity, home: homedir() });
 const team = {
   keyFile: defaultKeyFile,
+  keyOrigin: () => keyFileOrigin({ env: process.env }),
   readable: (file) => accessSync(file, fsConstants.R_OK),
   repo: () => gh(["repo", "view", "--json", "name", "--jq", ".name"]).trim(),
   // A fresh directory under the OS temp folder: outside the repository and every worktree, owner-only where modes exist.

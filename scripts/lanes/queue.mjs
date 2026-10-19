@@ -9,7 +9,7 @@
 // 10: only between the child and the supervisor, meaning "scripts changed, pulled, start the next child".
 // Exit 1 is retired: a failed GitHub read backs off and retries.
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +21,7 @@ import { GATE_CONTEXT, TEAM_REQUIRED_MESSAGE, isLaneBot, laneIssueOf, parseIssue
 import { issuePaths } from "./paths.mjs";
 import { claimedPaths, pickStartable } from "./pick.mjs";
 import { loadBudget } from "./lane-cost.mjs";
-import { appendStarts, budgetConfig, inFlightIssues, isEntryScript, startDecisions, deadLaneSession, launchLane, localLaunchEnv, launchRefusal, reaperLog, resolveKeyFile, START_DEFAULTS, startConfig, teamSteps } from "./start.mjs";
+import { appendStarts, budgetConfig, inFlightIssues, isEntryScript, startDecisions, deadLaneSession, launchLane, localLaunchEnv, keyFileOrigin, keyOverrideWarning, launchRefusal, mintFailureHint, reaperLog, resolveKeyFile, START_DEFAULTS, startConfig, teamSteps } from "./start.mjs";
 import { QUEUE_EVENTS, formatAge, gateDescriptions, gateSince, idleLanes, liveLanes, mergeGroupFailures, prStage, queueFailedNote, queueRemovals, stalledLanes } from "./status.mjs";
 
 // The status.mjs stages a lane PR waits on the owner in: a failing check or review, a failing lanes/gate, or a gate
@@ -588,6 +588,15 @@ export async function main(argv, deps = DEFAULT_DEPS) {
     return 2;
   }
   const { maxLanes, softPaths, models, identity } = settings;
+  // #794: one warning at start when the variable overrides this repository's own key.
+  if (deps.keyWarning) {
+    try {
+      const warning = deps.keyWarning({ identity });
+      if (warning) print(warning);
+    } catch {
+      // A failed look for the warning never stops the queue.
+    }
+  }
   // #535: Node loads the lanes scripts once, so the commit they came from is recorded now and compared every tick.
   let startedAt = null;
   if (deps.git) {
@@ -843,6 +852,18 @@ const DEFAULT_RECOVERY = {
   },
 };
 
+/**
+ * #794: mints with `mint`; a 401 or 404 from the JWT step is rethrown as the line naming the App and the key file
+ * (start.mjs's mintFailureHint), any other failure as it was.
+ */
+export async function mintExplained(mint, { app, keyPem, repo, keyFile, origin }) {
+  try {
+    return await mint({ appId: app.id, installationId: app.installationId, keyPem, repo });
+  } catch (err) {
+    throw new Error(mintFailureHint(reason(err), { keyFile, origin, app }));
+  }
+}
+
 // #630: the heartbeat acts as the lane App (ADR 0027 part 2), so the watchdog's trust check (isLaneBot) accepts it. The
 // installation token is minted from the owner's key file and reused until five minutes before it expires; it goes to
 // `gh` only through that one call's environment.
@@ -859,7 +880,7 @@ function appHeartbeat({ identity }) {
       throw new Error("key file unreadable");
     }
     const repo = run("gh")(["repo", "view", "--json", "name", "--jq", ".name"], { cwd: repoRoot() }).trim();
-    session = await mintInstallationToken({ appId: identity.app.id, installationId: identity.app.installationId, keyPem, repo });
+    session = await mintExplained(mintInstallationToken, { app: identity.app, keyPem, repo, keyFile: file, origin: keyFileOrigin({ env: process.env }) });
     return session.token;
   };
   return heartbeatWriter(async () => {
@@ -899,6 +920,7 @@ const DEFAULT_DEPS = {
   env: process.env,
   control: pauseState,
   heartbeat: appHeartbeat,
+  keyWarning: ({ identity }) => keyOverrideWarning({ env: process.env, identity, home: homedir(), exists: existsSync }),
   idle: (agents, root) => idleLanes(agents, root),
   file: import.meta.url,
   launchEnv: localLaunchEnv,

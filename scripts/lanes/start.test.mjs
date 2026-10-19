@@ -991,7 +991,7 @@ test("teamLaneEnv removes the credentials and points gh and git at the lane's ow
 });
 
 // A team launch with every side effect faked: what was minted, where, what claude got, what the refresher was given.
-function teamRun({ env = {}, key = "/keys/app.pem", unreadable = false, mintFail = null, dirFail = false, noRepo = false, settingsFail = false, botId = "336249257", botIdFail = false, identity = TEAM, launchFail = [], spawnChild } = {}) {
+function teamRun({ env = {}, origin, key = "/keys/app.pem", unreadable = false, mintFail = null, dirFail = false, noRepo = false, settingsFail = false, botId = "336249257", botIdFail = false, identity = TEAM, launchFail = [], spawnChild } = {}) {
   const f = fakes({ issues: { 1: {}, 2: { body: form({ scope: "In: `b.mjs`." }) } }, launchFail, config: { identity }, spawnChild, keepRefresher: true });
   const made = [];
   const removed = [];
@@ -1002,6 +1002,7 @@ function teamRun({ env = {}, key = "/keys/app.pem", unreadable = false, mintFail
   const botLookups = [];
   const team = {
     keyFile: () => key,
+    keyOrigin: () => origin,
     readable: () => {
       if (unreadable) throw new Error("EACCES: /keys/app.pem");
     },
@@ -1182,7 +1183,7 @@ for (const [name, opts, step] of [
   ["an unknown repository", { noRepo: true }, "repository name unknown"],
   ["a config directory that cannot be made", { dirFail: true }, "could not create the lane's config directory"],
   ["settings that cannot be delivered", { settingsFail: true }, "could not deliver the team settings to the lane"],
-  ["a failed mint", { mintFail: "app-token: request to GitHub failed with status 401" }, "token mint failed: app-token: request to GitHub failed with status 401"],
+  ["a failed mint", { mintFail: "app-token: request to GitHub failed with status 500" }, "token mint failed: app-token: request to GitHub failed with status 500"],
 ]) {
   test(`team fails closed on ${name}: nothing launches and the owner's environment is never used`, () => {
     const t = teamRun({ ...opts, env: { GH_TOKEN: "owner" } });
@@ -1195,6 +1196,57 @@ for (const [name, opts, step] of [
     assert.equal(t.labeled.length, 0);
   });
 }
+
+// #794: a 401 or 404 from the JWT step names the App, the key path and where the path came from.
+const MINT_401 = "app-token: request to GitHub failed with status 401";
+test("team (#794): a 401 with LANES_APP_KEY_FILE set names the App, the path and the variable", () => {
+  const t = teamRun({ mintFail: MINT_401, origin: "LANES_APP_KEY_FILE", key: "/keys/other.pem" });
+  const { lines } = main([1], t.deps);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /the key at \/keys\/other\.pem is not App sour-dev-lanes \(id 11\)'s key: unset LANES_APP_KEY_FILE so lanes uses ~\/\.lanes\/sour-dev-lanes\.pem, or point it at that App's key/);
+  assert.match(lines[0], /the path came from LANES_APP_KEY_FILE/);
+});
+test("team (#794): a 401 with the default path names the default", () => {
+  const t = teamRun({ mintFail: MINT_401, origin: "default" });
+  const { lines } = main([1], t.deps);
+  assert.match(lines[0], /the key at \/keys\/app\.pem is not App sour-dev-lanes \(id 11\)'s key/);
+  assert.match(lines[0], /the path is the default ~\/\.lanes\/<slug>\.pem/);
+  assert.doesNotMatch(lines[0], /the path came from LANES_APP_KEY_FILE/);
+});
+test("team (#794): a 404 is explained too, a success prints no message", () => {
+  const t = teamRun({ mintFail: "app-token: request to GitHub failed with status 404", origin: "default" });
+  assert.match(main([1], t.deps).lines[0], /is not App sour-dev-lanes/);
+  const ok = teamRun();
+  assert.deepEqual(main([1], ok.deps).lines, ["#1 → id1"]);
+});
+test("edge: mintFailureHint leaves other causes as they were and prints no key content", () => {
+  const { mintFailureHint } = startModule;
+  const app = TEAM.app;
+  assert.equal(mintFailureHint("app-token: request to GitHub failed with status 500", { keyFile: "/k", origin: "default", app }), "app-token: request to GitHub failed with status 500");
+  assert.equal(mintFailureHint("app-token: could not sign the JWT with the given key", { keyFile: "/k", origin: "default", app }), "app-token: could not sign the JWT with the given key");
+  assert.match(mintFailureHint("app-token: installation lookup failed with status 401", { origin: "default", app }), /key at ~\/\.lanes\/sour-dev-lanes\.pem is not App/);
+});
+
+test("keyOverrideWarning (#794): warns once the variable overrides an existing per-repository key", () => {
+  const { keyOverrideWarning } = startModule;
+  const own = join("/h", ".lanes", "my-lanes.pem");
+  const seen = [];
+  const w = keyOverrideWarning({ env: { LANES_APP_KEY_FILE: "/k.pem" }, identity: BOT, home: "/h", exists: (p) => (seen.push(p), true) });
+  assert.match(w, /LANES_APP_KEY_FILE overrides/);
+  assert.ok(w.includes(own));
+  assert.deepEqual(seen, [own]);
+});
+test("edge: keyOverrideWarning is silent without the variable, without the own key or without an identity", () => {
+  const { keyOverrideWarning } = startModule;
+  assert.equal(keyOverrideWarning({ env: {}, identity: BOT, home: "/h", exists: () => true }), undefined);
+  assert.equal(keyOverrideWarning({ env: { LANES_APP_KEY_FILE: "" }, identity: BOT, home: "/h", exists: () => true }), undefined);
+  assert.equal(keyOverrideWarning({ env: { LANES_APP_KEY_FILE: "/k" }, identity: BOT, home: "/h", exists: () => false }), undefined);
+  assert.equal(keyOverrideWarning({ env: { LANES_APP_KEY_FILE: "/k" }, identity: undefined, home: "/h", exists: () => true }), undefined);
+});
+test("keyFileOrigin (#794) says where the key path comes from", () => {
+  assert.equal(startModule.keyFileOrigin({ env: { LANES_APP_KEY_FILE: "/k" } }), "LANES_APP_KEY_FILE");
+  assert.equal(startModule.keyFileOrigin({ env: {} }), "default");
+});
 
 test("edge: a failed mint removes the lane's directory, and a failing lane does not stop the next", () => {
   const t = teamRun();
@@ -1463,7 +1515,7 @@ test("launchLane (#556): edge: a failed launch under team removes the lane's dir
 });
 
 test("teamSteps (#556): the real team steps are exported for the queue", () => {
-  assert.deepEqual(Object.keys(teamSteps).sort(), ["botUserId", "keyFile", "makeDir", "mintInto", "readable", "removeDir", "repo", "writeSettings"]);
+  assert.deepEqual(Object.keys(teamSteps).sort(), ["botUserId", "keyFile", "keyOrigin", "makeDir", "mintInto", "readable", "removeDir", "repo", "writeSettings"]);
 });
 
 // #595 (ADR 0023 part 5): under team, a Scope naming .github/workflows/ prints one informational note and still launches.
